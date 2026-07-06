@@ -249,6 +249,62 @@ Possible distribution models:
 In this model, the skill is available only because the rendering client chose to
 provide it.
 
+### Web Shell Host Integration
+
+A Web Shell host that wants chart output should opt in to both halves of the
+contract:
+
+1. Register an `echarts-fulldata` Markdown code block renderer.
+2. Provide the matching chart skill from
+   `packages/web-shell/docs/examples/qwencode-viz/SKILL.md`.
+
+For example:
+
+```tsx
+import * as echarts from 'echarts';
+import {
+  WebShellWithProviders,
+  createEchartsFullDataRenderer,
+} from '@qwen-code/web-shell';
+
+<WebShellWithProviders
+  baseUrl="http://127.0.0.1:4170"
+  token={token}
+  sessionId={sessionId}
+  markdown={{
+    renderCodeBlock: createEchartsFullDataRenderer({
+      loadEcharts: () => echarts,
+      resolveDataRef: async (ref, meta) =>
+        loadControlledChartDataset(ref, meta),
+    }),
+  }}
+/>;
+```
+
+The skill file should be installed or injected only by hosts that perform this
+registration. A simple file-based integration can copy:
+
+```text
+packages/web-shell/docs/examples/qwencode-viz/SKILL.md
+```
+
+to the workspace or user skill directory, for example:
+
+```text
+.qwen/skills/qwencode-viz/SKILL.md
+```
+
+An integration with its own skill distribution layer can instead load the same
+file as the canonical source content and expose it through that layer. In both
+cases, core does not auto-load the skill; the host owns enabling it because the
+host owns the renderer.
+
+For `data.kind="ref"` envelopes, the renderer must use a host-controlled
+`resolveDataRef(ref, meta)` implementation. The renderer should not fetch
+arbitrary URLs or evaluate model-provided JavaScript; it should parse the block
+as JSON, resolve only trusted `artifact://` or `session-file://` references, and
+inject the resolved dataset into the ECharts option before rendering.
+
 ### Pros
 
 - Minimal core change.
