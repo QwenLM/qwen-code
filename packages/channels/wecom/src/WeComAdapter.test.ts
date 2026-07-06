@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -2569,6 +2570,42 @@ describe('WeComChannel', () => {
     }
   });
 
+  it('removes file attachment dirs created during disconnect', async () => {
+    let finishWrite: (() => void) | undefined;
+    mocks.writeFile.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishWrite = resolve;
+        }),
+    );
+    const bridge = makeBridge();
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-disconnect-during-download',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(mocks.writeFile).toHaveBeenCalledTimes(1));
+    const filePath = mocks.writeFile.mock.calls[0]?.[0] as string;
+    const dir = dirname(filePath);
+    expect(existsSync(dir)).toBe(true);
+
+    channel.disconnect();
+    finishWrite?.();
+
+    await vi.waitFor(() => expect(existsSync(dir)).toBe(false));
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
   it('rejects media URLs that resolve to IPv6 link-local addresses', async () => {
     mocks.lookup.mockResolvedValue([{ address: 'fe90::1', family: 6 }]);
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
@@ -2843,6 +2880,45 @@ describe('WeComChannel', () => {
     const filePath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
     expect(filePath).toBeDefined();
     await vi.waitFor(() => expect(existsSync(dirname(filePath!))).toBe(false));
+  });
+
+  it('continues attachment cleanup when one dir removal fails', async () => {
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const blockedParent = mkdtempSync(join(parent, 'wecom-blocked-'));
+    const firstDir = join(blockedParent, 'first');
+    mkdirSync(firstDir);
+    chmodSync(blockedParent, 0o500);
+    const secondDir = mkdtempSync(join(parent, 'wecom-test-'));
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    const harness = channel as unknown as {
+      rememberAttachmentDir(
+        dir: string,
+        messageId?: string,
+        routeKey?: string,
+      ): void;
+      cleanupAllAttachmentDirs(): void;
+    };
+    harness.rememberAttachmentDir(firstDir, 'msg-first');
+    harness.rememberAttachmentDir(secondDir, 'msg-second');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      harness.cleanupAllAttachmentDirs();
+
+      expect(existsSync(firstDir)).toBe(true);
+      expect(existsSync(secondDir)).toBe(false);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('failed to remove attachment dir'),
+      );
+    } finally {
+      stderr.mockRestore();
+      chmodSync(blockedParent, 0o700);
+      rmSync(blockedParent, { recursive: true, force: true });
+      rmSync(secondDir, { recursive: true, force: true });
+    }
   });
 
   it('removes session attachment dirs when prompt end has no message id', async () => {

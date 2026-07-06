@@ -158,7 +158,7 @@ export class WeComChannel extends ChannelBase {
         return;
       }
       this.clearDisconnectReconnectFallback();
-      this.onMessage(payload).catch((err: unknown) => {
+      this.onMessage(payload, connectionGeneration).catch((err: unknown) => {
         process.stderr.write(
           `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
             formatSdkError(err),
@@ -335,7 +335,10 @@ export class WeComChannel extends ChannelBase {
     }
   }
 
-  private async onMessage(payload: unknown): Promise<void> {
+  private async onMessage(
+    payload: unknown,
+    connectionGeneration: number,
+  ): Promise<void> {
     const body = extractBody(payload);
     if (!body) {
       process.stderr.write(
@@ -413,7 +416,14 @@ export class WeComChannel extends ChannelBase {
         attachments,
         messageId,
         attachmentRouteKey,
+        connectionGeneration,
       );
+      if (this.disconnectGeneration !== connectionGeneration) {
+        process.stderr.write(
+          `[WeCom:${this.name}] dropping message ${logMessageId}: connection changed during attachment download.\n`,
+        );
+        return;
+      }
       if (messageId) this.seenMessages.set(messageId, Date.now());
       if (attachments.length) {
         envelope.attachments = attachments;
@@ -454,9 +464,12 @@ export class WeComChannel extends ChannelBase {
     attachments: Attachment[] = [],
     messageId?: string,
     routeKey?: string,
+    connectionGeneration = this.disconnectGeneration,
   ): Promise<Attachment[]> {
     const refs = collectInboundMediaRefs(body);
     for (const ref of refs) {
+      if (this.disconnectGeneration !== connectionGeneration)
+        return attachments;
       let downloaded: { buffer: Buffer; filename?: string };
       try {
         downloaded = await downloadInboundMedia(ref);
@@ -469,6 +482,8 @@ export class WeComChannel extends ChannelBase {
         );
         continue;
       }
+      if (this.disconnectGeneration !== connectionGeneration)
+        return attachments;
       const data = downloaded.buffer;
       const fileName = sanitizeFileName(ref.fileName || downloaded.filename);
       if (ref.type === 'image') {
@@ -485,6 +500,10 @@ export class WeComChannel extends ChannelBase {
         try {
           mkdirSync(dir, { recursive: true, mode: 0o700 });
           await writeFile(filePath, data, { mode: 0o600 });
+          if (this.disconnectGeneration !== connectionGeneration) {
+            cleanupAttachmentDirs([dir]);
+            return attachments;
+          }
           this.rememberAttachmentDir(dir, messageId, routeKey);
         } catch (err) {
           cleanupAttachmentDirs([dir]);
@@ -894,7 +913,12 @@ export class WeComChannel extends ChannelBase {
   ): void {
     this.kickReconnectRetry = setTimeout(() => {
       this.kickReconnectRetry = undefined;
-      if (this.disconnectGeneration !== disconnectGeneration) return;
+      if (this.disconnectGeneration !== disconnectGeneration) {
+        process.stderr.write(
+          `[WeCom:${this.name}] scheduled kick-reconnect cancelled; connection generation changed.\n`,
+        );
+        return;
+      }
       this.kickReconnectAttempts = 0;
       this.startKickReconnect(reason, reconnectReason);
     }, delayMs);
@@ -1012,7 +1036,16 @@ function delay(ms: number): Promise<void> {
 
 function cleanupAttachmentDirs(dirs: string[]): void {
   for (const dir of dirs) {
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      process.stderr.write(
+        `[WeCom] failed to remove attachment dir ${sanitizeLogText(
+          dir,
+          200,
+        )}: ${sanitizeLogText(formatSdkError(err), 200)}.\n`,
+      );
+    }
   }
 }
 
