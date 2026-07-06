@@ -432,6 +432,37 @@ describe('StreamingToolCallParser', () => {
       ]);
     });
 
+    it('should route ID-less argument fragments to a call whose opener streamed empty arguments', () => {
+      // Canonical OpenAI-compatible streaming shape: the opener carries
+      // id + name + `arguments: ""`, then argument fragments follow at the
+      // same index without an ID. Mid-stream, an empty buffer with name
+      // metadata must therefore stay continuable at its own index — it is
+      // indistinguishable from a completed no-argument call until stream end.
+      parser.addChunk(0, '', 'call_1', 'function1');
+      parser.addChunk(0, '{"x":');
+      parser.addChunk(0, '1}');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'function1', args: { x: 1 }, index: 0 },
+      ]);
+    });
+
+    it('should emit empty args for a no-argument call polluted by a stray fragment at its index', () => {
+      // If a misbehaving provider reuses a completed no-argument call's
+      // index for another call's ID-less fragment, the fragment cannot be
+      // re-routed (see canonical-shape test above). The damage must stay
+      // bounded: the polluted buffer repairs to a non-object value, which
+      // collapses to {} at emit time.
+      parser.addChunk(0, '{"key":', 'call_1', 'function1');
+      parser.addChunk(1, '', 'call_2', 'no_arg_function');
+      parser.addChunk(1, '"value"}');
+
+      const completed = parser.getCompletedToolCalls();
+      const noArg = completed.find((c) => c.id === 'call_2');
+      expect(noArg?.args).toEqual({});
+    });
+
     it('should not route continuation chunks to a completed no-argument tool call', () => {
       // Incomplete tool call accumulating arguments at index 0
       parser.addChunk(0, '{"key":', 'call_1', 'function1');

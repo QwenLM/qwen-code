@@ -307,6 +307,16 @@ export class StreamingToolCallParser {
               args = safeJsonParse(buffer, {});
             }
           }
+          // Tool arguments are always JSON objects; a corrupted buffer can
+          // parse or repair to a non-object value (e.g. a bare string), so
+          // collapse anything else to {}.
+          if (
+            typeof args !== 'object' ||
+            args === null ||
+            Array.isArray(args)
+          ) {
+            args = {};
+          }
         }
 
         completed.push({
