@@ -521,6 +521,14 @@
   display: none;
 }
 
+.chatSubtree {
+  display: contents;
+}
+
+.chatSubtreeHidden {
+  display: none;
+}
+
 /* Empty (new-chat) state centers the welcome header + composer vertically via
    `.appChatEmpty .chatPane { justify-content: center }`. For that to take effect
    the wrapper must shrink to its content instead of filling the pane — the same

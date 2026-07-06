@@ -512,7 +512,8 @@ describe('App session callbacks', () => {
       await flush();
 
       expect(container.textContent).toContain('Current session does not exist');
-      expect(container.querySelector('[data-testid="submit"]')).toBeNull();
+      const submit = container.querySelector('[data-testid="submit"]');
+      expect(submit?.closest('[class*="chatSubtreeHidden"]')).not.toBeNull();
       expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
 
       await act(async () => {

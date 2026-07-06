@@ -2203,7 +2203,8 @@ export function App({
     }
     lastGoalSessionIdRef.current = connection.sessionId;
     if (!connection.sessionId && connection.missingSession) {
-      // Keep the missing-session route visible until the user chooses a new chat.
+      // Keep the dead-session route visible until the user explicitly starts a
+      // new chat; clearing it here would immediately hide the recovery state.
       lastNotifiedSessionIdRef.current = connection.sessionId;
       return;
     }
@@ -3939,6 +3940,8 @@ export function App({
     connection.status !== 'connecting' &&
     !connection.sessionId &&
     connection.missingSession === true;
+  const showMissingSessionState =
+    missingSession && !activePanel && mainView === 'chat';
   const effectiveChatWidthMode: ChatWidthMode = isChatEmptyState
     ? getDefaultChatWidthMode()
     : chatWidthMode;
@@ -4467,7 +4470,7 @@ export function App({
                 // chat / hidden composer while a panel is shown.
                 aria-hidden={activePanel ? true : undefined}
               >
-                {missingSession && !activePanel && mainView === 'chat' ? (
+                {showMissingSessionState && (
                   <div className={styles.missingSessionState}>
                     <div className={styles.missingSessionMessage}>
                       {t('session.missing')}
@@ -4481,7 +4484,14 @@ export function App({
                       {t('session.new')}
                     </button>
                   </div>
-                ) : (
+                )}
+                <div
+                  className={
+                    showMissingSessionState
+                      ? styles.chatSubtreeHidden
+                      : styles.chatSubtree
+                  }
+                >
                   <WebShellCustomizationProvider value={customization}>
                     <CompactModeContext.Provider value={compactMode}>
                       <TodoContextsProvider
@@ -4719,7 +4729,7 @@ export function App({
                       )}
                     </div>
                   </WebShellCustomizationProvider>
-                )}
+                </div>
               </div>
             </div>
           </div>

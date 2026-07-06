@@ -5075,6 +5075,56 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBeUndefined();
   });
 
+  it('preserves missing-session heartbeat status across later HTTP failures', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('session gone'), { status: 410 }),
+      )
+      .mockRejectedValue(
+        Object.assign(new Error('server error'), { status: 500 }),
+      );
+    sdkMocks.sessions.push(
+      createMockSession({
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 2,
+    });
+
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      missingSession: true,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
   it('clears prompt state on terminal HTTP heartbeat errors', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
@@ -5960,6 +6010,51 @@ describe('DaemonSessionProvider', () => {
       expect(connection?.sessionId).toBeUndefined();
     },
   );
+
+  it('clears missing-session state when starting a new session', async () => {
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      Object.assign(new Error('session gone'), { status: 410 }),
+    );
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'new-session' }));
+
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+      sessionId: 'missing-session',
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      missingSession: true,
+    });
+
+    await act(async () => {
+      await actions?.newSession();
+      await wait(5);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'new-session',
+    });
+    expect(connection?.error).toBeUndefined();
+    expect(connection?.errorStatus).toBeUndefined();
+    expect(connection?.missingSession).not.toBe(true);
+  });
 
   it.each([401, 403])(
     'preserves transcript and clears prompt state on %d auth failures from the SSE stream',

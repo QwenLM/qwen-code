@@ -169,6 +169,13 @@ const TERMINAL_SESSION_HTTP_STATUSES = new Set([
   ...AUTH_FAILURE_HTTP_STATUSES,
   ...MISSING_SESSION_HTTP_STATUSES,
 ]);
+
+interface HeartbeatFailureState {
+  sessionId?: string;
+  consecutiveFailures: number;
+  lastHttpError?: { status: number; message: string };
+}
+
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
 // normalization still rebuilds from retained blocks today, so this high default
@@ -250,6 +257,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
+    consecutiveFailures: 0,
+  });
   const manualSessionClearRef = useRef(false);
   const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
     undefined,
@@ -1324,7 +1334,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
                 current.errorStatus,
               ),
-              missingSession: missingLoadedSession,
+              // SSE errors should not create the missing-session empty state,
+              // but they also must not clear one confirmed by load/heartbeat.
+              missingSession:
+                missingLoadedSession || current.missingSession === true,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -1464,9 +1477,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return undefined;
     }
+    if (heartbeatFailureStateRef.current.sessionId !== connection.sessionId) {
+      heartbeatFailureStateRef.current = {
+        sessionId: connection.sessionId,
+        consecutiveFailures: 0,
+      };
+    }
+    const heartbeatFailureState = heartbeatFailureStateRef.current;
     let disposed = false;
-    let consecutiveFailures = 0;
-    let lastHttpError: { status: number; message: string } | undefined;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
@@ -1474,7 +1492,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         .heartbeat()
         .then(() => {
           if (disposed) return;
-          if (consecutiveFailures >= heartbeatFailureThreshold) {
+          if (
+            heartbeatFailureState.consecutiveFailures >=
+            heartbeatFailureThreshold
+          ) {
             setConnection((current) =>
               current.sessionId === session.sessionId
                 ? {
@@ -1486,24 +1507,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : current,
             );
           }
-          consecutiveFailures = 0;
-          lastHttpError = undefined;
+          heartbeatFailureState.consecutiveFailures = 0;
+          heartbeatFailureState.lastHttpError = undefined;
         })
         .catch((error: unknown) => {
           if (disposed) return;
-          consecutiveFailures += 1;
+          heartbeatFailureState.consecutiveFailures += 1;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
           const thisErrorStatus = extractHttpStatus(error);
           if (thisErrorStatus !== undefined) {
-            lastHttpError = { status: thisErrorStatus, message };
+            const lastStatus = heartbeatFailureState.lastHttpError?.status;
+            heartbeatFailureState.lastHttpError = {
+              status:
+                resolveConnectionErrorStatus(thisErrorStatus, lastStatus) ??
+                thisErrorStatus,
+              message: isMissingSessionHttpStatus(lastStatus)
+                ? (heartbeatFailureState.lastHttpError?.message ?? message)
+                : message,
+            };
           }
-          if (consecutiveFailures < heartbeatFailureThreshold) return;
-          const errorStatus = thisErrorStatus ?? lastHttpError?.status;
+          if (
+            heartbeatFailureState.consecutiveFailures <
+            heartbeatFailureThreshold
+          ) {
+            return;
+          }
+          const errorStatus = heartbeatFailureState.lastHttpError?.status;
           const effectiveMessage =
-            thisErrorStatus !== undefined
-              ? message
-              : (lastHttpError?.message ?? message);
+            heartbeatFailureState.lastHttpError?.message ?? message;
           const authFailure =
             errorStatus !== undefined &&
             AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
@@ -1529,6 +1561,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
             if (sessionRef.current?.sessionId === deadSessionId) {
+              if (missingSession) {
+                manualSessionClearRef.current = true;
+              }
               sessionRef.current = undefined;
             }
           }
