@@ -32,11 +32,18 @@ export interface SessionGroup {
 
 export interface SessionOrganization {
   groupId: string | null;
+  /**
+   * Quick color grouping tag. Independent of `groupId`: the UI treats the two
+   * as mutually exclusive (a color is a lightweight, name-free bucket), but the
+   * store only records whatever fields callers provide. Absent/unknown → null.
+   */
+  color?: SessionGroupColor | null;
   pinnedAt?: string;
   updatedAt: string;
 }
 
 export interface SessionOrganizationView extends SessionOrganization {
+  color: SessionGroupColor | null;
   isPinned: boolean;
 }
 
@@ -64,6 +71,7 @@ export interface UpdateSessionGroupInput {
 export interface UpdateSessionOrganizationInput {
   isPinned?: boolean;
   groupId?: string | null;
+  color?: SessionGroupColor | null;
 }
 
 interface SessionOrganizationStoreV1 {
@@ -182,6 +190,11 @@ function viewOrganization(
 ): SessionOrganizationView {
   const groupId =
     typeof organization?.groupId === 'string' ? organization.groupId : null;
+  const color =
+    typeof organization?.color === 'string' &&
+    isSupportedGroupColor(organization.color)
+      ? organization.color
+      : null;
   const pinnedAt =
     typeof organization?.pinnedAt === 'string'
       ? organization.pinnedAt
@@ -192,6 +205,7 @@ function viewOrganization(
       : new Date(0).toISOString();
   return {
     groupId,
+    color,
     ...(pinnedAt !== undefined ? { pinnedAt } : {}),
     updatedAt,
     isPinned: pinnedAt !== undefined,
@@ -203,6 +217,7 @@ function serializeOrganization(
 ): SessionOrganization {
   return {
     groupId: organization.groupId,
+    ...(organization.color != null ? { color: organization.color } : {}),
     ...(organization.pinnedAt !== undefined
       ? { pinnedAt: organization.pinnedAt }
       : {}),
@@ -338,7 +353,9 @@ export class SessionOrganizationService {
     input: UpdateSessionOrganizationInput,
   ): Promise<SessionOrganizationView> {
     const hasUpdate =
-      input.groupId !== undefined || input.isPinned !== undefined;
+      input.groupId !== undefined ||
+      input.isPinned !== undefined ||
+      input.color !== undefined;
     return this.withStoreLock(async () => {
       const store = await this.readStore();
       const current = viewOrganization(store.sessions[sessionId]);
@@ -346,6 +363,12 @@ export class SessionOrganizationService {
         return current;
       }
       const now = new Date().toISOString();
+      if (input.color !== undefined) {
+        if (input.color !== null) {
+          assertGroupColor(input.color);
+        }
+        current.color = input.color;
+      }
       if (input.groupId !== undefined) {
         if (
           input.groupId !== null &&
@@ -454,6 +477,10 @@ export class SessionOrganizationService {
               typeof organization['groupId'] === 'string'
                 ? organization['groupId']
                 : null,
+            ...(typeof organization['color'] === 'string' &&
+            isSupportedGroupColor(organization['color'])
+              ? { color: organization['color'] }
+              : {}),
             ...(typeof organization['pinnedAt'] === 'string'
               ? { pinnedAt: organization['pinnedAt'] }
               : {}),

@@ -359,6 +359,77 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('assigns and clears a quick color grouping tag', async () => {
+    const assigned = await service.updateSessionOrganization(sessionIdA, {
+      color: 'green',
+    });
+    expect(assigned).toEqual(
+      expect.objectContaining({ color: 'green', groupId: null }),
+    );
+
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+      expect.objectContaining({ color: 'green' }),
+    );
+
+    const cleared = await service.updateSessionOrganization(sessionIdA, {
+      color: null,
+    });
+    expect(cleared.color).toBeNull();
+    const afterClear = await service.readSnapshot();
+    expect(afterClear.sessions.get(sessionIdA)?.color).toBeNull();
+  });
+
+  it('rejects unsupported session colors', async () => {
+    await expect(
+      service.updateSessionOrganization(sessionIdA, {
+        color: 'pink' as never,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
+  });
+
+  it('keeps color, group, and pin independent in the store', async () => {
+    const group = await service.createGroup({ name: 'Docs', color: 'blue' });
+    // Core records exactly the fields provided; it never auto-clears the other
+    // grouping dimension (the UI enforces the single-choice rule explicitly).
+    await service.updateSessionOrganization(sessionIdA, { groupId: group.id });
+    const withColor = await service.updateSessionOrganization(sessionIdA, {
+      color: 'red',
+      isPinned: true,
+    });
+    expect(withColor).toEqual(
+      expect.objectContaining({
+        color: 'red',
+        groupId: group.id,
+        isPinned: true,
+      }),
+    );
+  });
+
+  it('normalizes unknown stored session colors to null', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        groups: [],
+        sessions: {
+          [sessionIdA]: {
+            groupId: null,
+            color: 'teal',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+      expect.objectContaining({ color: null }),
+    );
+  });
+
   it('warns once when reading orphaned group references', async () => {
     await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
     await fs.writeFile(
