@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 
 export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
+const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
+const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 
 export type SessionArtifactRetention = 'ephemeral' | 'restorable' | 'pinned';
 
@@ -540,7 +542,7 @@ function normalizeMetadata(
     }
   }
   if (Object.keys(normalized).length === 0) return undefined;
-  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 4096) {
+  if (metadataBudgetBytes(normalized) > 4096) {
     warnings.push(`skipped oversized metadata for artifact ${artifactId}`);
     return undefined;
   }
@@ -549,6 +551,30 @@ function normalizeMetadata(
 
 function isPrototypeMetadataKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+function metadataBudgetBytes(
+  metadata: Record<string, string | number | boolean | null>,
+): number {
+  const userMetadata = Object.fromEntries(
+    Object.entries(metadata).filter(
+      ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
+    ),
+  );
+  return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
+}
+
+function isWorkspaceContentMetadataEntry(
+  key: string,
+  value: string | number | boolean | null,
+): boolean {
+  if (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY) {
+    return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  }
+  if (key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) {
+    return typeof value === 'number' && Number.isFinite(value);
+  }
+  return false;
 }
 
 function normalizeLiteral<T extends string>(

@@ -36,6 +36,7 @@ import {
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
 import {
+  isSessionArtifactRecord,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
   type RebuiltSessionArtifactSnapshot,
@@ -1442,6 +1443,7 @@ export class SessionService {
     // message.
     let prevUuid: string | null = null;
     const forked: ChatRecord[] = sourceRecords.map((record) => {
+      const isArtifactRecord = isSessionArtifactRecord(record);
       const systemPayload = remapSystemPayloadForFork(
         record,
         sourceSessionId,
@@ -1452,13 +1454,15 @@ export class SessionService {
         sessionId: newSessionId,
         cwd: this.projectRoot,
         systemPayload,
-        parentUuid: prevUuid,
+        parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
           messageUuid: record.uuid,
         },
       };
-      prevUuid = record.uuid;
+      if (!isArtifactRecord) {
+        prevUuid = record.uuid;
+      }
       return next;
     });
 
@@ -1956,14 +1960,6 @@ function remapSystemPayloadForFork(
     ) as ChatRecord['systemPayload'];
   }
   return record.systemPayload;
-}
-
-function isSessionArtifactRecord(record: ChatRecord): boolean {
-  return (
-    record.type === 'system' &&
-    (record.subtype === 'session_artifact_event' ||
-      record.subtype === 'session_artifact_snapshot')
-  );
 }
 
 function includeActiveSideArtifactRecords(

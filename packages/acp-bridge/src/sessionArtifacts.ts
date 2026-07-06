@@ -199,6 +199,12 @@ interface StoredArtifact extends NormalizedArtifact {
   insertSeq: number;
 }
 
+interface WorkspaceStatusExpected {
+  sizeBytes?: number;
+  mtimeMs?: string | number | boolean | null;
+  sha256?: string | number | boolean | null;
+}
+
 export class SessionArtifactStore {
   private readonly sessionId: string;
   private readonly workspaceCwd: string;
@@ -325,9 +331,19 @@ export class SessionArtifactStore {
             continue;
           }
 
-          this.denyCrossClientMutation('upsert', existing.id, existing, {
-            clientId: artifact.clientId,
-          });
+          try {
+            this.denyCrossClientMutation('upsert', existing.id, existing, {
+              clientId: artifact.clientId,
+            });
+          } catch (error) {
+            if (validationStrict) {
+              throw error;
+            }
+            if (error instanceof SessionArtifactAuthorizationError) {
+              continue;
+            }
+            throw error;
+          }
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
             if (updated.artifact.id !== existing.id) {
@@ -509,6 +525,10 @@ export class SessionArtifactStore {
             ++this.receivedSeq,
             artifact.storage === 'published' &&
               !isFileArtifactUrl(artifact.url),
+            {
+              metadataBudget: 'persisted',
+              workspaceExpected: workspaceExpectedFromArtifact(artifact),
+            },
           );
           if (
             this.stickyEphemeralIds.has(normalized.id) &&
@@ -906,6 +926,10 @@ export class SessionArtifactStore {
     input: RestoreSessionArtifactInput,
     receivedSeq: number,
     trustedPublisherFromCaller: boolean,
+    options: {
+      metadataBudget?: 'user' | 'persisted';
+      workspaceExpected?: WorkspaceStatusExpected;
+    } = {},
   ): Promise<NormalizedArtifact> {
     if (!input || typeof input !== 'object') {
       throw new SessionArtifactValidationError('Artifact must be an object');
@@ -952,7 +976,10 @@ export class SessionArtifactStore {
       persistenceAvailable: this.persistence !== undefined,
     });
     const workspaceStatus = workspacePath
-      ? await this.getInitialWorkspaceStatus(workspacePath)
+      ? await this.getInitialWorkspaceStatus(
+          workspacePath,
+          options.workspaceExpected,
+        )
       : undefined;
     if (workspaceStatus?.escaped) {
       throw new SessionArtifactValidationError(
@@ -961,7 +988,9 @@ export class SessionArtifactStore {
       );
     }
     const metadata = withWorkspaceContentHashMetadata(
-      normalizeMetadata(input.metadata),
+      normalizeMetadata(input.metadata, {
+        budget: options.metadataBudget ?? 'user',
+      }),
       workspaceStatus,
     );
     const kind = normalizeKind(
@@ -1071,7 +1100,10 @@ export class SessionArtifactStore {
     };
   }
 
-  private async getInitialWorkspaceStatus(workspacePath: string): Promise<{
+  private async getInitialWorkspaceStatus(
+    workspacePath: string,
+    expected?: WorkspaceStatusExpected,
+  ): Promise<{
     status: DaemonSessionArtifactStatus;
     sizeBytes?: number;
     sha256?: string;
@@ -1083,6 +1115,7 @@ export class SessionArtifactStore {
         this.workspaceCwd,
         workspacePath,
         this.getRealWorkspaceCwd(),
+        expected,
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -1108,6 +1141,7 @@ export class SessionArtifactStore {
         {
           sizeBytes: artifact.sizeBytes,
           mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
+          sha256: artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY],
         },
       );
       const changed = isWorkspaceContentChanged(artifact, status);
@@ -1635,6 +1669,19 @@ function persistedArtifactToInput(
   };
 }
 
+function workspaceExpectedFromArtifact(
+  artifact: PersistedSessionArtifact,
+): WorkspaceStatusExpected | undefined {
+  if (!artifact.workspacePath) {
+    return undefined;
+  }
+  return {
+    sizeBytes: artifact.sizeBytes,
+    mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
+    sha256: artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY],
+  };
+}
+
 function toPersistedChange(
   change: SessionArtifactChange,
   recordedAt: string,
@@ -2018,6 +2065,7 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
 
 function normalizeMetadata(
   metadata: unknown,
+  options: { budget?: 'user' | 'persisted' } = {},
 ): Record<string, string | number | boolean | null> | undefined {
   if (metadata === undefined) {
     return undefined;
@@ -2086,7 +2134,7 @@ function normalizeMetadata(
   if (Object.keys(normalized).length === 0) {
     return undefined;
   }
-  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 4096) {
+  if (metadataBudgetBytes(normalized, options.budget ?? 'user') > 4096) {
     throw new SessionArtifactValidationError(
       'metadata must be 4096 bytes or fewer',
       'metadata',
@@ -2097,6 +2145,34 @@ function normalizeMetadata(
 
 function isPrototypeMetadataKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+function metadataBudgetBytes(
+  metadata: Record<string, string | number | boolean | null>,
+  budget: 'user' | 'persisted',
+): number {
+  if (budget === 'user') {
+    return Buffer.byteLength(JSON.stringify(metadata), 'utf8');
+  }
+  const userMetadata = Object.fromEntries(
+    Object.entries(metadata).filter(
+      ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
+    ),
+  );
+  return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
+}
+
+function isWorkspaceContentMetadataEntry(
+  key: string,
+  value: string | number | boolean | null,
+): boolean {
+  if (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY) {
+    return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  }
+  if (key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) {
+    return typeof value === 'number' && Number.isFinite(value);
+  }
+  return false;
 }
 
 function normalizeRetention(
@@ -2156,10 +2232,7 @@ async function getWorkspaceStatus(
   workspaceCwd: string,
   workspacePath: string,
   realWorkspaceCwd: Promise<string>,
-  expected?: {
-    sizeBytes?: number;
-    mtimeMs?: string | number | boolean | null;
-  },
+  expected?: WorkspaceStatusExpected,
 ): Promise<{
   status: DaemonSessionArtifactStatus;
   sizeBytes?: number;
@@ -2177,17 +2250,41 @@ async function getWorkspaceStatus(
     }
     const stat = await fs.stat(realPath);
     if (stat.isFile()) {
+      const expectedMtimeMs =
+        typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
+      const expectedSha256 =
+        typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
       const unchanged =
-        expected?.sizeBytes === stat.size && expected.mtimeMs === stat.mtimeMs;
+        expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
       const sizeChanged =
         expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
+      if (sizeChanged) {
+        return {
+          status: 'changed',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      if (unchanged) {
+        return {
+          status: 'available',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
+      const sha256 = await hashFile(realPath);
+      if (expectedSha256 && sha256 !== expectedSha256) {
+        return {
+          status: 'changed',
+          sizeBytes: stat.size,
+          mtimeMs: stat.mtimeMs,
+        };
+      }
       return {
         status: 'available',
         sizeBytes: stat.size,
         mtimeMs: stat.mtimeMs,
-        ...(unchanged || sizeChanged
-          ? {}
-          : { sha256: await hashFile(realPath) }),
+        sha256,
       };
     }
     return {

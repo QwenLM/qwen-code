@@ -215,16 +215,19 @@ describe('SessionArtifactStore', () => {
     const artifactId = created.changes[0]!.artifactId;
 
     await expect(
-      store.upsertMany([
-        {
-          title: 'Client B rewrite',
-          source: 'client',
-          clientId: 'client-b',
-          url: 'https://example.com/client-owned',
-          metadata: { owner: 'b' },
-          retention: 'restorable',
-        },
-      ]),
+      store.upsertMany(
+        [
+          {
+            title: 'Client B rewrite',
+            source: 'client',
+            clientId: 'client-b',
+            url: 'https://example.com/client-owned',
+            metadata: { owner: 'b' },
+            retention: 'restorable',
+          },
+        ],
+        { strict: true },
+      ),
     ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
 
     await expect(store.list()).resolves.toMatchObject({
@@ -235,6 +238,59 @@ describe('SessionArtifactStore', () => {
           clientId: 'client-a',
           metadata: { owner: 'a' },
           retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
+  it('skips cross-client upsert conflicts without dropping the batch', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-upsert-owner-batch',
+      workspaceCwd: workspace,
+    });
+
+    const owned = await store.upsertMany([
+      {
+        title: 'Client A link',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-owned-batch',
+        metadata: { owner: 'a' },
+      },
+    ]);
+    const ownedId = owned.changes[0]!.artifactId;
+
+    const result = await store.upsertMany([
+      {
+        title: 'Client B rewrite',
+        source: 'client',
+        clientId: 'client-b',
+        url: 'https://example.com/client-owned-batch',
+        metadata: { owner: 'b' },
+        retention: 'restorable',
+      },
+      {
+        title: 'Tool output',
+        url: 'https://example.com/tool-output',
+      },
+    ]);
+
+    expect(result.changes).toMatchObject([
+      {
+        action: 'created',
+        artifact: { title: 'Tool output' },
+      },
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: ownedId,
+          title: 'Client A link',
+          clientId: 'client-a',
+          metadata: { owner: 'a' },
+        },
+        {
+          title: 'Tool output',
         },
       ],
     });
@@ -2893,5 +2949,73 @@ describe('SessionArtifactStore', () => {
     const restoredArtifact = (await restored.list()).artifacts[0];
     expect(restoredArtifact).not.toHaveProperty('contentRef');
     expect(restoredArtifact).not.toHaveProperty('expiresAt');
+  });
+
+  it('restores workspace metadata near the user budget without replacing the persisted hash', async () => {
+    const sessionId = 's11-restore-workspace-baseline';
+    const workspacePath = 'baseline.txt';
+    await fs.writeFile(path.join(workspace, workspacePath), 'HELLO');
+    const persistedSha = createHash('sha256').update('hello').digest('hex');
+    const metadata = {
+      payload: 'x'.repeat(4096),
+      'qwen.workspace.sha256': persistedSha,
+      'qwen.workspace.mtimeMs': 0,
+    };
+    while (
+      Buffer.byteLength(JSON.stringify({ payload: metadata.payload }), 'utf8') >
+      4096
+    ) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      `workspace:${workspacePath}`,
+    );
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [
+          {
+            id: artifactId,
+            kind: 'file',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Baseline',
+            workspacePath,
+            sizeBytes: 5,
+            metadata,
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-04T00:00:00.000Z',
+            updatedAt: '2026-07-04T00:00:00.000Z',
+          },
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          status: 'changed',
+          metadata: {
+            payload: metadata.payload,
+            'qwen.workspace.sha256': persistedSha,
+            'qwen.workspace.mtimeMs': 0,
+          },
+        },
+      ],
+    });
   });
 });

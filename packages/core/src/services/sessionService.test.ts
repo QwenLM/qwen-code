@@ -2695,8 +2695,24 @@ describe('SessionService', () => {
 
       const result = await service.forkSession(oldId, newId);
       const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
 
       expect(result.copiedCount).toBe(3);
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['u1', 'u2']);
+      expect(
+        forkedLines.find((record) => record.uuid === 'artifact-1'),
+      ).toMatchObject({
+        parentUuid: 'u1',
+      });
+      expect(forkedLines.find((record) => record.uuid === 'u2')).toMatchObject({
+        parentUuid: 'u1',
+      });
       expect(loaded?.artifactSnapshot?.artifacts).toEqual([
         expect.objectContaining({
           id: stableSessionArtifactId(newId, 'url:https://example.com/forked'),
