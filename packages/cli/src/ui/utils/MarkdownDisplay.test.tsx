@@ -549,10 +549,11 @@ Done.`.replace(/\n/g, eol);
       expect(output).toContain('│'); // drawn as a table box, not raw text
     });
 
-    it('draws the empty table box once recognized, before the first row completes', () => {
-      // Header + separator recognized but the first row is still being typed:
-      // show the header box immediately (empty body) rather than a long blank
-      // while the first row streams (a stall in that window looked like a hang).
+    it('defers the table while it has no complete data row (no empty header box)', () => {
+      // Header + separator recognized but the first row is still being typed. A
+      // zero-row table can only render horizontally, so drawing the empty box now
+      // and flipping to vertical once a long first row lands is a visible format
+      // change. Defer instead: nothing is drawn until the first row completes.
       const text = `| Alpha | Beta |
 |---|---|
 | 1`.replace(/\n/g, eol);
@@ -560,7 +561,21 @@ Done.`.replace(/\n/g, eol);
         <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
       );
       const output = lastFrame() ?? '';
-      expect(output).toContain('Alpha'); // header box drawn with zero rows
+      expect(output).not.toContain('Alpha'); // table not drawn yet
+      expect(output).not.toContain('│');
+    });
+
+    it('draws the table once its first row completes', () => {
+      // The deferred table appears — already in its final format — as soon as the
+      // first data row terminates.
+      const text = `| Alpha | Beta |
+|---|---|
+| 1 | 2 |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Alpha');
       expect(output).toContain('│');
     });
 

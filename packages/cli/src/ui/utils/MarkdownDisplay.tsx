@@ -651,15 +651,22 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // and lock the terminal. Renders in full once the message commits to <Static>
   // (isPending=false → no clamp).
   //
-  // No `tableRows.length > 0` guard: once the header + separator are recognized
-  // draw the empty table box right away (its data rows fill in as they complete
-  // via the per-row hold-back). Otherwise the whole table area stays blank from
-  // the moment it is recognized until the first row terminates — if generation
-  // stalls in that window it looks like a hang (no box, no cue). The header does
-  // NOT flash char by char: the pre-loop trim holds it until the separator lands,
-  // so the box appears atomically. Committed (isPending=false) tables always have
-  // rows, so this only affects the live frontier.
-  if (inTable && tableHeaders.length > 0) {
+  // While PENDING, defer a table that has no COMPLETE data row yet. A zero-row
+  // table can only render horizontally (the vertical fallback needs rows to lay
+  // out), so drawing the empty header box and then flipping to the vertical
+  // `label: value` format once a long first row lands is a visible format change
+  // — and the format genuinely cannot be known from the header alone (column
+  // names are short; the width comes from the values). Waiting for the first
+  // complete row means the table first appears ALREADY in its final format, with
+  // no flip. Cost: the table area stays blank while the header + first row stream
+  // (the pre-loop trim already hid the header text, so this just extends that
+  // blank until the first row terminates). Committed (isPending=false) tables
+  // always have rows, so `!isPending` keeps their behavior unchanged.
+  if (
+    inTable &&
+    tableHeaders.length > 0 &&
+    (tableRows.length > 0 || !isPending)
+  ) {
     addContentBlock(
       <RenderTable
         key={`table-${contentBlocks.length}`}
