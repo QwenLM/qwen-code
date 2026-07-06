@@ -16,6 +16,7 @@ import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
   CRON_TASKS_DISPLAY_PATH,
+  generateCronTaskId,
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
@@ -25,7 +26,10 @@ import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
 
 const debugLogger = createDebugLogger('CRON_SCHEDULER');
 
-const MAX_JOBS = 50;
+/** Max jobs the scheduler keeps in its in-memory map. Also the durable-task
+ * load cap and the daemon route's per-file create cap — exported so all three
+ * share one source of truth. */
+export const MAX_JOBS = 50;
 export const DEFAULT_RECURRING_MAX_AGE_DAYS = 7;
 // Recurring jobs auto-expire this long after creation by default (claw-code
 // parity: covers "check my PRs every hour this week" while bounding how long
@@ -160,14 +164,10 @@ function computeJitter(
   return 0;
 }
 
-function generateId(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let id = '';
-  for (let i = 0; i < 8; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return id;
-}
+// Single id scheme, shared with the daemon's scheduled-tasks route via
+// cronTasksFile so route-created and tool-created durable tasks are
+// indistinguishable on disk.
+const generateId = generateCronTaskId;
 
 export function clampWakeupSeconds(delaySeconds: number): number {
   if (!Number.isFinite(delaySeconds)) return WAKEUP_DEFAULT_SECONDS;
@@ -630,6 +630,19 @@ export class CronScheduler {
       // either as an empty schedule would wipe every loaded durable job
       // and clear pendingRemoval guards whose removals are still in
       // flight; keep the current view and let a later reload retry.
+      //
+      // Breadcrumb: keeping the prior view means an edit that hasn't loaded
+      // yet — a just-disabled or just-deleted durable task — keeps firing
+      // until a later reload succeeds. Rare (needs a read failure exactly
+      // between the write and this reload), but otherwise silent.
+      if (this.jobs.size > 0) {
+        // eslint-disable-next-line no-console -- operator-facing breadcrumb for a silent scheduler/disk divergence
+        console.warn(
+          'CronScheduler: durable tasks reload failed; keeping the previous ' +
+            'schedule (a just-disabled or -deleted task may keep firing until ' +
+            'the next successful reload).',
+        );
+      }
       return;
     }
     if (generation !== this.durableGeneration) {
@@ -643,7 +656,17 @@ export class CronScheduler {
     // file) are skipped but left on disk: installing one would make the
     // tick's matches() throw from the interval, while dropping it from
     // the file would discard what the user wrote over a typo.
-    const tasks = read.filter(hasParseableCron);
+    //
+    // Disabled tasks (enabled === false) are skipped the same way — the
+    // management UI's off switch must stop firing without losing the
+    // task's config. Treating them as absent here is what makes the
+    // toggle effective: the reconcile below deletes any live job whose id
+    // is no longer in this filtered set, so toggling off removes the job,
+    // and toggling on reinstalls it on the next watcher reload. Absent
+    // `enabled` counts as enabled, so tool-created tasks keep firing.
+    const tasks = read.filter(
+      (t) => hasParseableCron(t) && t.enabled !== false,
+    );
 
     const now = Date.now();
     const missedOneShots: DurableCronTask[] = [];
@@ -724,17 +747,22 @@ export class CronScheduler {
     for (const id of this.pendingRemoval) {
       if (!diskIds.has(id)) this.pendingRemoval.delete(id);
     }
+    // Cap durable installs against a DURABLE-ONLY budget, not the combined
+    // job map. Session-only jobs (cron_create with durable:false) must not
+    // crowd out durable tasks the daemon route already accepted onto disk —
+    // otherwise a create that returned 201 would silently never load/fire in a
+    // session that happens to hold session-only jobs. This matches the route's
+    // MAX_SCHEDULED_TASKS (also MAX_JOBS), so a successful create is loadable.
+    // A hand-edited/force-committed file with hundreds of durable entries is
+    // still bounded here (only brand-new ids count; updates don't grow it).
+    let durableJobCount = 0;
+    for (const j of this.jobs.values()) if (j.durable) durableJobCount++;
     for (const task of tasks) {
       if (this.pendingRemoval.has(task.id)) continue;
       const existing = this.jobs.get(task.id);
-      // Bound what a project-controlled file can install, mirroring the
-      // create()-time MAX_JOBS limit. Updating an already-loaded job is
-      // always allowed (it doesn't grow the map); only brand-new ids are
-      // capped, so a hand-edited or force-committed file with hundreds of
-      // entries can't balloon the map and the 1s tick loop.
-      if (!existing && this.jobs.size >= MAX_JOBS) {
+      if (!existing && durableJobCount >= MAX_JOBS) {
         debugLogger.warn(
-          `Durable task ${task.id} skipped — MAX_JOBS (${MAX_JOBS}) reached.`,
+          `Durable task ${task.id} skipped — durable cap (${MAX_JOBS}) reached.`,
         );
         continue;
       }
@@ -743,6 +771,7 @@ export class CronScheduler {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
       this.jobs.set(task.id, job);
+      if (!existing) durableJobCount++;
     }
 
     // Stamp catch-up jobs with the current minute before delivery so the
