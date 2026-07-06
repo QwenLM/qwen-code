@@ -2064,6 +2064,61 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('logs settings reloads without inserting daemon debug blocks', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const session = createMockSession({
+      events: async function* settingsReloadEvents() {
+        yield {
+          id: 31,
+          v: 1,
+          type: 'settings_reloaded',
+          data: {
+            env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+            changedKeys: ['env', 'hooks'],
+            childReloaded: true,
+            sessionsRefreshed: ['session-1'],
+            sessionsSkipped: [],
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let signals: DaemonWorkspaceEventSignals | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(signals?.settingsVersion).toBe(1);
+    expect(blocks).not.toContainEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        text: expect.stringContaining(
+          'settings_reloaded (unrecognized daemon event)',
+        ) as string,
+      }),
+    );
+    expect(debug).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] settings reloaded:',
+      expect.objectContaining({
+        childReloaded: true,
+        changedKeys: ['env', 'hooks'],
+        env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      }),
+    );
+    debug.mockRestore();
+  });
+
   it('treats prompt abort during cancel as cancellation and keeps busy until cancel completes', async () => {
     const cancel = createDeferred<void>();
     const assistantChunk = createDeferred<void>();
