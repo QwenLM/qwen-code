@@ -36,11 +36,12 @@ PRs are exempt):
    exception. Large-scale core refactors must be maintainer-initiated.
    When counting lines, exclude test files (`*.test.ts`, `*.spec.ts`,
    `__tests__/`) and auto-generated schema declarations — only production
-   logic counts. `feat`-type PRs are NOT hard-blocked on size; they
-   escalate to the maintainer for awareness instead. Breadth alone is not
-   size — a low-risk sweep that touches 10+ files but changes a line or
-   two each is escalated to a maintainer for awareness and otherwise judged
-   under Tier 2's 100%-confidence bar, not auto-rejected on file count.
+   logic counts. `feat`-type and other non-`refactor` PRs are NOT
+   hard-blocked on size; they escalate to the maintainer for awareness
+   instead. Breadth alone is not size — a low-risk sweep that touches 10+
+   files but changes a line or two each is escalated to a maintainer for
+   awareness and otherwise judged under Tier 2's 100%-confidence bar, not
+   auto-rejected on file count.
 2. **Small-scope changes → gate may evaluate, but must be 100% confident.**
    Any doubt at all → escalate to maintainer. "The direction looks correct"
    is not confidence. The gate must name every downstream consumer; if it
