@@ -13,6 +13,9 @@ import type { LspCodeActionKind, LspDiagnosticSeverity } from './types.js';
 /** Default timeout for LSP server startup in milliseconds */
 export const DEFAULT_LSP_STARTUP_TIMEOUT_MS = 10000;
 
+/** Default timeout for graceful LSP server shutdown in milliseconds */
+export const DEFAULT_LSP_SHUTDOWN_TIMEOUT_MS = 5000;
+
 /** Default timeout for LSP requests in milliseconds */
 export const DEFAULT_LSP_REQUEST_TIMEOUT_MS = 15000;
 

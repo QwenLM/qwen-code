@@ -229,6 +229,25 @@ export interface AgentTask extends TaskBase {
   agentId: string;
   subagentType?: string;
   /**
+   * AgentId of the sub-agent that spawned this one; null when launched
+   * from the top-level session. Drives the nested-agent tree display in
+   * the LiveAgentPanel and BackgroundTasksDialog. Mirrors
+   * `AgentMeta.parentAgentId`.
+   */
+  parentAgentId?: string | null;
+  /**
+   * Display name (`subagentType`) of the spawning sub-agent, captured at
+   * registration time. Display-only: lets the orphan annotation
+   * ("· from <parent>") survive the parent's eviction from the registry.
+   */
+  parentName?: string;
+  /**
+   * Launch depth (0-based; 0 = spawned by the top-level session). Same
+   * value as `AgentMeta.depth` / `childLaunchDepth()`. User-facing level
+   * = depth + 1.
+   */
+  depth?: number;
+  /**
    * True if the task is running asynchronously (parent has moved on, the
    * task persists across turns and emits a terminal XML notification).
    * False if the parent's tool-call is synchronously awaiting it; the
@@ -409,10 +428,9 @@ export class BackgroundTaskRegistry {
     registration: AgentTaskRegistration,
     options: BackgroundTaskRegisterOptions = {},
   ): AgentTask {
-    if (registration.isBackgrounded && registration.status === 'running') {
+    if (registration.status === 'running') {
       const existing = this.agents.get(registration.agentId);
-      const isReplacingRunning =
-        existing?.isBackgrounded === true && existing.status === 'running';
+      const isReplacingRunning = existing?.status === 'running';
       if (!isReplacingRunning) {
         this.assertCanStartBackgroundAgent();
       }
@@ -432,6 +450,14 @@ export class BackgroundTaskRegistry {
       ? ((registration as AgentTask).notified ?? false)
       : false;
     entry.pendingMessages = registration.pendingMessages ?? [];
+    // Resolve the parent's display name at registration time — before the
+    // parent can evict — so the UI's orphan annotation survives it. Owned
+    // here rather than at call sites so every registration path that
+    // carries a parentAgentId (spawn, resume, future flavors) gets it
+    // without remembering to. A caller-provided name wins.
+    if (entry.parentName === undefined && entry.parentAgentId != null) {
+      entry.parentName = this.agents.get(entry.parentAgentId)?.subagentType;
+    }
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
@@ -825,7 +851,7 @@ export class BackgroundTaskRegistry {
 
   private getRunningBackgroundCount(): number {
     return Array.from(this.agents.values()).filter(
-      (entry) => entry.isBackgrounded && entry.status === 'running',
+      (entry) => entry.status === 'running',
     ).length;
   }
 

@@ -61,6 +61,12 @@ import type {
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
+  DaemonStatusReportIssue,
+  DaemonStatusReportLevel,
+  DaemonStatusReportSection,
+  DaemonStatusReportSession,
   DaemonStreamErrorData,
   DaemonStreamErrorEvent,
   DaemonStreamLifecycleEvent,
@@ -73,6 +79,13 @@ import type {
   DaemonWorkspaceTrustSource,
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceMemoryDreamOptions,
+  DaemonWorkspaceMemoryDreamResult,
+  DaemonWorkspaceMemoryDreamTask,
+  DaemonWorkspaceMemoryForgetMatch,
+  DaemonWorkspaceMemoryForgetOptions,
+  DaemonWorkspaceMemoryForgetResult,
+  DaemonWorkspaceMemoryForgetTask,
   DaemonVoiceAudioInput,
   DaemonVoiceMode,
   DaemonVoiceModelDescriptor,
@@ -82,6 +95,8 @@ import type {
   DaemonWorkspaceMemoryRememberResult,
   DaemonWorkspaceMemoryRememberTask,
   DaemonWorkspaceMemoryRememberTaskStatus,
+  DaemonWorkspaceMemoryTaskStatus,
+  DaemonWorkspaceMemoryTopic,
   DaemonWorkspaceVoiceStatus,
   DaemonWorkspaceVoiceTranscribeOptions,
   DaemonWorkspaceVoiceTranscriptionResult,
@@ -196,6 +211,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonWorkspaceMemoryRememberResult>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceMemoryRememberTask>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceMemoryRememberTaskStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryTaskStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryTopic>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetMatch>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetOptions>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetTask>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryDreamOptions>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryDreamResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryDreamTask>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupCompletedData>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupCompletedEvent>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupGitignoreResult>().not.toBeNever();
@@ -209,6 +233,14 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    // `GET /daemon/status` report surface (PR 5174 client coverage): the
+    // envelope plus the sub-shapes UI dashboards need to type against.
+    expectTypeOf<DaemonStatusReport>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportDetail>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportIssue>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {

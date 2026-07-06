@@ -18,22 +18,36 @@ static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "set_config".into(),
-        description: "Update cua-driver-rs configuration. Changes to capture_mode \
-            and max_image_dimension take effect immediately. The experimental_pip \
-            keys are persisted to ~/.cua-driver/config.json and take effect on \
-            the next daemon restart (the PiP backend is initialised once at \
-            startup).".into(),
+        description: "Update cua-driver-rs configuration. Changes to \
+            max_image_dimension and capture_scope take effect immediately. The \
+            experimental_pip keys are persisted to ~/.cua-driver/config.json and \
+            take effect on the next daemon restart (the PiP backend is \
+            initialised once at startup).\n\nNote: capture_mode is a per-call \
+            param (on get_window_state / click), not a stored setting. \
+            capture_scope IS a global setting: it gates get_desktop_state \
+            (full-display capture requires capture_scope=desktop).".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "capture_mode": {
+                "key": {
                     "type": "string",
-                    "enum": ["som", "vision", "ax"],
-                    "description": "Default capture mode for get_window_state."
+                    "description": "Name of a single config field to write ({key, value} shape, \
+                        matching the CLI `config set` and the Windows/Linux tools). Pair with `value`. \
+                        Equivalent to passing the field directly."
+                },
+                "value": {
+                    "description": "New value for `key`. JSON type depends on the key."
                 },
                 "max_image_dimension": {
                     "type": "integer",
                     "description": "Max dimension for screenshot resizing (0 = no limit)."
+                },
+                "capture_scope": {
+                    "type": "string",
+                    "enum": ["window", "desktop"],
+                    "description": "Capture scope: \"window\" (default) or \"desktop\". Desktop \
+                        scope enables get_desktop_state (full-display capture) and window-less \
+                        screen-absolute click/scroll. Global setting; takes effect immediately."
                 },
                 "experimental_pip": {
                     "type": "boolean",
@@ -69,41 +83,43 @@ impl Tool for SetConfigTool {
         // sessions don't clobber each other or the persisted default.
         let session_id = args.opt_str("_session_id");
 
+        // Accept BOTH shapes, matching Windows/Linux + the CLI `config set`:
+        //   - direct fields:  {"capture_scope":"desktop"}
+        //   - {key, value}:    {"key":"capture_scope","value":"desktop"}
+        // A direct field wins if both are somehow present.
+        let kv: Option<(String, Value)> = args
+            .opt_str("key")
+            .and_then(|k| args.get("value").map(|v| (k, v.clone())));
+        let kv_u64 = |name: &str| -> Option<u64> {
+            kv.as_ref().filter(|(k, _)| k == name).and_then(|(_, v)| v.as_u64())
+        };
+
         // Validate max_image_dimension up front so both branches share the
         // u32 check and we never half-apply.
-        let max_dim: Option<u32> = match args.opt_u64("max_image_dimension") {
+        let max_dim: Option<u32> = match args.opt_u64("max_image_dimension").or_else(|| kv_u64("max_image_dimension")) {
             Some(dim) => match u32::try_from(dim) {
                 Ok(d) => Some(d),
                 Err(_) => return ToolResult::error(format!("max_image_dimension {dim} exceeds u32::MAX")),
             },
             None => None,
         };
-        let capture_mode = args.opt_str("capture_mode");
 
-        let (effective_mode, effective_dim) = if let Some(sid) = session_id.as_deref() {
+        let effective_dim = if let Some(sid) = session_id.as_deref() {
             // Session-scoped override: in-memory only, no global write, no disk.
             self.state.session_config.set(sid, ConfigOverrides {
-                capture_mode: capture_mode.clone(),
                 max_image_dimension: max_dim,
             });
-            self.state.session_config.effective(Some(sid), &self.state.config.read().unwrap())
+            self.state.session_config.effective_max_image_dimension(Some(sid), &self.state.config.read().unwrap())
         } else {
-            // Anonymous/global session: write the shared global + persist,
-            // exactly as before this change.
+            // Anonymous/global session: write the shared global + persist.
             let mut cfg = self.state.config.write().unwrap();
-            if let Some(mode) = capture_mode.clone() {
-                cfg.capture_mode = mode.clone();
-                if let Err(e) = write_driver_config_key("capture_mode", &Value::String(mode)) {
-                    tracing::warn!("set_config: failed to persist capture_mode: {e}");
-                }
-            }
             if let Some(dim32) = max_dim {
                 cfg.max_image_dimension = dim32;
                 if let Err(e) = write_driver_config_key("max_image_dimension", &Value::Number(u64::from(dim32).into())) {
                     tracing::warn!("set_config: failed to persist max_image_dimension: {e}");
                 }
             }
-            (cfg.capture_mode.clone(), cfg.max_image_dimension)
+            cfg.max_image_dimension
         };
         // PiP keys persist to the same config.json but take effect only on
         // next daemon restart — the backend is initialised once at startup.
@@ -128,14 +144,46 @@ impl Tool for SetConfigTool {
                 pip_note = format!(" — restart cua-driver for experimental_pip_geometry={geom} to take effect");
             }
         }
+        // capture_scope: GLOBAL setting (gates get_desktop_state). Accept the
+        // direct field or {key,value} shape; validate window|desktop; write the
+        // shared global config + persist (matches Windows/Linux — not
+        // session-scoped, since it's the baseline a no-args capture tool reads).
+        let scope_arg = args.opt_str("capture_scope").or_else(|| {
+            kv.as_ref()
+                .filter(|(k, _)| k == "capture_scope")
+                .and_then(|(_, v)| v.as_str().map(str::to_owned))
+        });
+        let mut capture_scope_note = String::new();
+        if let Some(sc) = scope_arg {
+            if sc != "window" && sc != "desktop" {
+                return ToolResult::error(format!(
+                    "`capture_scope` must be \"window\" or \"desktop\", got \"{sc}\"."
+                ));
+            }
+            self.state.config.write().unwrap().capture_scope = sc.clone();
+            if let Err(e) = write_driver_config_key("capture_scope", &Value::String(sc.clone())) {
+                tracing::warn!("set_config: failed to persist capture_scope: {e}");
+            }
+            capture_scope_note = format!(", capture_scope={sc}");
+        }
+
         let scope_note = if session_id.is_some() {
             " (session-scoped; persisted default unchanged)"
         } else {
             ""
         };
+        // Echo the config back in structured content (matches Windows/Linux
+        // set_config, which callers/tests read for the applied capture_scope).
+        let capture_scope = self.state.config.read().unwrap().capture_scope.clone();
         ToolResult::text(format!(
-            "Config updated: capture_mode={}, max_image_dimension={}{}{}",
-            effective_mode, effective_dim, scope_note, pip_note
+            "Config updated: max_image_dimension={}{}{}{}",
+            effective_dim, capture_scope_note, scope_note, pip_note
         ))
+        .with_structured(serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "platform": "macos",
+            "max_image_dimension": effective_dim,
+            "capture_scope": capture_scope,
+        }))
     }
 }

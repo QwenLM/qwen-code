@@ -123,6 +123,7 @@ const mockProcessKill = vi
 // to avoid PATH/CWD binary planting. Compute the expected path the same way so
 // assertions stay in sync across platforms (SystemRoot is unset off Windows).
 const TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
 
 const shellExecutionConfig = {
   terminalWidth: 80,
@@ -1811,7 +1812,30 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        '/d /s /c dir "foo bar"',
+        `/d /s /c ${CHCP} 65001 >nul 2>nul & dir "foo bar"`,
+        expect.any(Object),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should not apply UTF-8 prefix for Git Bash on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash.exe',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+      await simulateExecution('echo hello', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      expect(mockPtySpawn).toHaveBeenCalledWith(
+        'bash.exe',
+        ['-c', 'echo hello'],
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -1852,6 +1876,11 @@ describe('ShellExecutionService', () => {
     it('should normalize PATH-like env keys on Windows for pty execution', async () => {
       mockPlatform.mockReturnValue('win32');
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
       setupConflictingPathEnv();
 
       await simulateExecution('dir', (pty) =>
@@ -1860,6 +1889,11 @@ describe('ShellExecutionService', () => {
 
       const spawnOptions = mockPtySpawn.mock.calls[0][2];
       expectNormalizedWindowsPathEnv(spawnOptions.env);
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
     });
 
     it('should use bash on Linux', async () => {
@@ -3037,7 +3071,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe with windowsVerbatimArguments on Windows', async () => {
+    it('should use cmd.exe with chcp 65001 UTF-8 prefix on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'cmd.exe',
@@ -3048,14 +3082,36 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
+      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/d', '/s', '/c', 'dir "foo bar"'],
+        ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
         expect.objectContaining({
           detached: false,
           windowsHide: true,
           windowsVerbatimArguments: true,
         }),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should not apply UTF-8 prefix for Git Bash on Windows via child_process', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash.exe',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+      await simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null));
+
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        'bash.exe',
+        ['-c', 'echo hello'],
+        expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
         executable: 'bash',

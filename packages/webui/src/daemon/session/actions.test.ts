@@ -25,6 +25,7 @@ describe('getConnectionAfterSessionClear', () => {
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
         context: contextStatus('session-a'),
+        loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -34,6 +35,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).toMatchObject({
       status: 'connected',
       workspaceCwd: '/workspace',
+      loadingTranscript: undefined,
       catchingUp: undefined,
       error: undefined,
     });
@@ -41,6 +43,36 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
     expect(next).not.toHaveProperty('tokenCount');
+    expect(next).not.toHaveProperty('supportedCommands');
+    expect(next).not.toHaveProperty('context');
+    // Workspace-scoped slash commands and skills survive a clear so skill-backed
+    // commands (e.g. /review) keep autocompleting in the fresh deferred session
+    // before its first prompt creates a session (mirrors #6153 / #6066).
+    expect(next.commands).toEqual([commandInfo('old-command')]);
+    expect(next.skills).toEqual(['old-skill']);
+  });
+
+  it('handles commands and skills being undefined before clear', () => {
+    // Optional fields: clearing before the first available_commands_update
+    // (open the app, immediately start a new chat) leaves them absent. The
+    // delete calls are harmless no-ops and nothing is fabricated.
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'disconnected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        supportedCommands: supportedCommandsStatus('session-a'),
+        context: contextStatus('session-a'),
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/workspace',
+    });
+    expect(next).not.toHaveProperty('sessionId');
     expect(next).not.toHaveProperty('commands');
     expect(next).not.toHaveProperty('skills');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -60,6 +92,7 @@ describe('getConnectionAfterSessionClear', () => {
         skills: ['new-skill'],
         supportedCommands: supportedCommandsStatus('session-b', 'new-command'),
         context: contextStatus('session-b'),
+        loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -77,6 +110,7 @@ describe('getConnectionAfterSessionClear', () => {
       skills: ['new-skill'],
       supportedCommands: supportedCommandsStatus('session-b', 'new-command'),
       context: contextStatus('session-b'),
+      loadingTranscript: undefined,
       catchingUp: undefined,
       error: undefined,
     });
@@ -138,6 +172,56 @@ describe('createDaemonSessionActions', () => {
     expect(nextSession.detach).toHaveBeenCalledOnce();
     expect(sessionRef.current).toBeUndefined();
     expect(getConnection()).not.toHaveProperty('sessionId');
+  });
+
+  it('clears the active session while a session switch is loading', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef, sessionRef } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(existingSession.detach).toHaveBeenCalledOnce();
+    expect(sessionRef.current).toBeUndefined();
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      loadingTranscript: true,
+      catchingUp: undefined,
+    });
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+  });
+
+  it('clears transcript loading when a session switch fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const existingSession = createMockSession('session-a');
+      const { actions, getConnection } = createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+      const loadPromise = actions.loadSession('session-b');
+      expect(getConnection()).toMatchObject({
+        status: 'connecting',
+        sessionId: 'session-b',
+        loadingTranscript: true,
+      });
+
+      vi.advanceTimersByTime(30_000);
+
+      await expect(loadPromise).rejects.toThrow('Session load timed out');
+      expect(getConnection()).toMatchObject({
+        sessionId: 'session-b',
+        loadingTranscript: undefined,
+        catchingUp: undefined,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('creates a detached session when the ref and connection do not match', async () => {

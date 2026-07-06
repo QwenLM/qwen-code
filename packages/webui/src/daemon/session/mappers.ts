@@ -181,7 +181,11 @@ export function mapWorkspaceSkills(
 } {
   if (!status) return { commands: [], skills: [] };
 
-  const commands = status.skills.map((skill) => ({
+  const availableSkills = status.skills.filter(
+    (skill) => skill.status === 'ok',
+  );
+
+  const commands = availableSkills.map((skill) => ({
     name: skill.name,
     description: skill.description || '',
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
@@ -195,7 +199,7 @@ export function mapWorkspaceSkills(
 
   return {
     commands,
-    skills: status.skills.map((skill) => skill.name),
+    skills: availableSkills.map((skill) => skill.name),
   };
 }
 
@@ -238,9 +242,14 @@ export function updateConnectionFromDaemonEvent(
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
+      // An available_commands_update is the daemon's authoritative snapshot of
+      // the current slash commands, so assign it directly (matching `skills`)
+      // rather than keeping the previous list when it is empty — otherwise a
+      // command list that shrank to empty would leave stale entries
+      // autocompleting.
       setConnection((current) => ({
         ...current,
-        commands: commands.length > 0 ? commands : current.commands,
+        commands,
         skills,
       }));
     }

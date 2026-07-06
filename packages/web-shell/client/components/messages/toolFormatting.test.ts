@@ -305,9 +305,15 @@ describe('toolFormatting', () => {
     it('keeps proper tool names / acronyms in English', () => {
       const t = getTranslator('zh-CN');
       expect(localizeToolDisplayName('agent', t)).toBe('Agent');
-      expect(localizeToolDisplayName('grep_search', t)).toBe('Grep');
       expect(localizeToolDisplayName('glob', t)).toBe('Glob');
       expect(localizeToolDisplayName('lsp', t)).toBe('LSP');
+    });
+
+    it('localizes grep tool aliases in Chinese', () => {
+      const t = getTranslator('zh-CN');
+      expect(localizeToolDisplayName('grep', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('grep_search', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('search', t)).toBe('搜索内容');
     });
 
     it('falls back to the English display name when the locale has no entry', () => {
@@ -325,7 +331,7 @@ describe('toolFormatting', () => {
     it('has a zh translation for every tool in the display-name map', () => {
       const tZh = getTranslator('zh-CN');
       // Tools intentionally shown in English (proper names / acronyms).
-      const keepEnglish = new Set(['agent', 'grep_search', 'glob', 'search']);
+      const keepEnglish = new Set(['agent', 'glob']);
       const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
         (wire) =>
           !keepEnglish.has(wire) &&

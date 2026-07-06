@@ -4,6 +4,9 @@ export type {
   AvailableCommand,
   BridgeSessionInfo,
   ChannelAgentBridge,
+  ChannelLoopToolCreateInput,
+  ChannelLoopToolHandler,
+  ChannelLoopToolResult,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';

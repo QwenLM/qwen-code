@@ -23,6 +23,35 @@ export interface DurableCronTask {
   recurring: boolean;
   createdAt: number;
   lastFiredAt: number | null;
+  /**
+   * Optional display name, shown in management UIs (the Web Shell
+   * scheduled-tasks page). Absent on tool-created tasks — consumers fall
+   * back to the prompt. Never used for scheduling.
+   */
+  name?: string;
+  /**
+   * Whether the task is active. Absent or `true` = scheduled; `false` =
+   * kept on disk but skipped by the scheduler — a reversible "off" switch
+   * for the management UI. Absent defaults to enabled so tool-created
+   * tasks (which never write this field) keep firing.
+   */
+  enabled?: boolean;
+}
+
+/**
+ * Generates an 8-character base36 id for a durable task. Shared by the
+ * scheduler (`CronScheduler`) and the daemon's scheduled-tasks route so
+ * route-created and tool-created tasks use one id scheme — changing it here
+ * changes it everywhere. Math.random is fine: ids only need to be unique
+ * within a <50-entry file, not unpredictable.
+ */
+export function generateCronTaskId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
 }
 
 const TASKS_FILENAME = 'scheduled_tasks.json';
@@ -241,6 +270,15 @@ export async function removeCronTasks(
   return removed;
 }
 
+// Finite, not just number: JSON like -1e999 parses to -Infinity, and a
+// non-finite timestamp poisons downstream date math — new Date(...)
+// .toISOString() throws mid-load, and age/expiry comparisons go
+// degenerate. Rejecting the entry routes it through the same
+// fix-or-delete contract as any other corrupt field.
+function isFiniteTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -249,7 +287,13 @@ function isValidTask(value: unknown): value is DurableCronTask {
     typeof obj['cron'] === 'string' &&
     typeof obj['prompt'] === 'string' &&
     typeof obj['recurring'] === 'boolean' &&
-    typeof obj['createdAt'] === 'number' &&
-    (obj['lastFiredAt'] === null || typeof obj['lastFiredAt'] === 'number')
+    isFiniteTimestamp(obj['createdAt']) &&
+    (obj['lastFiredAt'] === null || isFiniteTimestamp(obj['lastFiredAt'])) &&
+    // Optional fields (added for the management UI): absent is valid and
+    // means "unnamed" / "enabled". Present-but-wrong-type routes through
+    // the same fix-or-delete contract as any other corrupt field rather
+    // than being silently coerced or dropped.
+    (obj['name'] === undefined || typeof obj['name'] === 'string') &&
+    (obj['enabled'] === undefined || typeof obj['enabled'] === 'boolean')
   );
 }

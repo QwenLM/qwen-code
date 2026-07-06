@@ -99,7 +99,7 @@ interface ServeArgs {
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
-  workspace?: string;
+  workspace?: string | string[];
   'require-auth': boolean;
   'enable-session-shell': boolean;
   'tls-cert'?: string;
@@ -127,6 +127,12 @@ interface ServeArgs {
   'rate-limit-window-ms'?: number;
   experimentalLsp?: boolean;
   channel?: string[];
+}
+
+function primaryWorkspaceArg(
+  workspace: string | string[] | undefined,
+): string | undefined {
+  return Array.isArray(workspace) ? workspace[0] : workspace;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -449,7 +455,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // a deployment that's wide-open at boot. Suppress with
     // QWEN_CODE_SUPPRESS_YOLO_WARNING=1.
     try {
-      const loaded = loadSettings(argv.workspace ?? process.cwd());
+      const loaded = loadSettings(
+        primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
+      );
       const merged = loaded.merged;
       const approvalMode = merged.tools?.approvalMode;
       const sandbox = merged.tools?.sandbox;

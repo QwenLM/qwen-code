@@ -186,6 +186,7 @@ export default {
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
+  'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -1390,6 +1391,7 @@ export default {
   'Size:': 'Size:',
   '{{count}} bytes': '{{count}} bytes',
   'Reference in chat': 'Reference in chat',
+  'MCP server': 'MCP server',
   'MCP resource server': 'MCP resource server',
 
   // Invalid tool related translations

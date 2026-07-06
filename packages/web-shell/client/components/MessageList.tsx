@@ -36,6 +36,7 @@ interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  loadingTranscript?: boolean;
   catchingUp?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
@@ -47,7 +48,6 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
-  shellOutputMaxLines: number;
   activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
@@ -68,6 +68,10 @@ function getLastUserMessageId(messages: Message[]): string | null {
     if (msg?.role === 'user') return msg.id;
   }
   return null;
+}
+
+function getLastMessage(messages: Message[]): Message | undefined {
+  return messages[messages.length - 1];
 }
 
 function getLastTurnStartMessageId(messages: Message[]): string | null {
@@ -1652,12 +1656,53 @@ function joinClassNames(
 
 const EMPTY_SESSION_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
 
+function LoadingTranscriptSkeleton({ label }: { label: string }) {
+  return (
+    <>
+      <div role="status" aria-live="polite" className={styles.srOnly}>
+        {label}
+      </div>
+      <div
+        className={styles.loadingSkeleton}
+        data-testid="message-list-loading-skeleton"
+        aria-hidden="true"
+      >
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubble}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineShort} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineMedium} />
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineNarrow} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubbleCompact}>
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
       pendingApproval,
       onShowContextDetail,
+      loadingTranscript,
       catchingUp,
       isResponding = false,
       activeTurnStartedAt,
@@ -1666,7 +1711,6 @@ export const MessageList = memo(
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
       autoScrollTailIntoView = false,
       hideSessionTimeline = false,
       showRetryHint = false,
@@ -1676,6 +1720,7 @@ export const MessageList = memo(
     },
     ref,
   ) {
+    const { t } = useI18n();
     const compactMode = useContext(CompactModeContext);
     const mergedMessages = useMemo(
       () =>
@@ -1768,7 +1813,10 @@ export const MessageList = memo(
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
+    const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
+    const pendingNewUserSmoothScroll = useRef(false);
+    const prevLoadingTranscript = useRef(loadingTranscript);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
@@ -1906,6 +1954,7 @@ export const MessageList = memo(
     // ─────────────────────────────────────────────────────────────────────
 
     const hasTailContent = tailContent !== undefined && tailContent !== null;
+    const showLoadingSkeleton = Boolean(loadingTranscript);
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
     const tailContentIndex = headerOffset + visibleItems.length;
@@ -2440,27 +2489,45 @@ export const MessageList = memo(
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
-    useEffect(() => {
+    useLayoutEffect(() => {
       const lastId = getLastUserMessageId(messages);
-      if (catchingUp) {
+      if (catchingUp || loadingTranscript || prevLoadingTranscript.current) {
         prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
+        prevLoadingTranscript.current = loadingTranscript;
         return;
       }
-      if (lastId && lastId !== prevLastUserMsgId.current) {
+      prevLoadingTranscript.current = loadingTranscript;
+      if (!didTrackLastUserMsgRef.current) {
+        prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
+        return;
+      }
+      const lastMessage = getLastMessage(messages);
+      if (
+        lastId &&
+        lastMessage?.role === 'user' &&
+        lastId !== prevLastUserMsgId.current
+      ) {
         setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
+        pendingNewUserSmoothScroll.current = true;
+      } else {
+        pendingNewUserSmoothScroll.current = false;
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, setShouldFollow]);
+    }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
     // latest content without the viewport fighting the replay.
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (prevCatchingUp.current && !catchingUp) {
         setShouldFollow(true);
-        requestAnimationFrame(() => scrollToBottom());
+        scrollToBottom('auto');
       }
       prevCatchingUp.current = catchingUp;
     }, [catchingUp, scrollToBottom, setShouldFollow]);
@@ -2577,7 +2644,6 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 displayItem.message.id === lastCompletedAssistantId
               }
-              shellOutputMaxLines={shellOutputMaxLines}
             />
           );
         };
@@ -2612,7 +2678,6 @@ export const MessageList = memo(
         showRetryHint,
         onRetryClick,
         onBranchSession,
-        shellOutputMaxLines,
         handleToggleCollapse,
       ],
     );
@@ -2639,13 +2704,14 @@ export const MessageList = memo(
     //         and is a no-op when there's no overflow.
     useLayoutEffect(() => {
       if (catchingUp) return;
-      if (scrollCooldown.current) return;
-      if (pendingFollowRecheck.current) return;
-      if (shouldFollow.current) {
-        const lastId = getLastUserMessageId(messages);
-        const isNewUserMessage =
-          lastId !== null && lastId !== prevLastUserMsgId.current;
+      const isNewUserMessage = pendingNewUserSmoothScroll.current;
+      if (scrollCooldown.current && !isNewUserMessage) return;
+      // Preserve the new-prompt scroll even if a previous disclosure resize is
+      // still settling; it targets the latest virtualizer size from this render.
+      if (pendingFollowRecheck.current && !isNewUserMessage) return;
+      if (shouldFollow.current || isNewUserMessage) {
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
+        pendingNewUserSmoothScroll.current = false;
       }
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
@@ -2659,6 +2725,9 @@ export const MessageList = memo(
         className={styles.list}
         onClickCapture={handleDisclosureClickCapture}
       >
+        {showLoadingSkeleton && (
+          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+        )}
         <SessionTimeline
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
@@ -2668,10 +2737,9 @@ export const MessageList = memo(
         />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -2679,15 +2747,18 @@ export const MessageList = memo(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    String(virtualRow.key),
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
                 )}
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >

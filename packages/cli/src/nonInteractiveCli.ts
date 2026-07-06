@@ -146,18 +146,21 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
 function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
   const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
   const detail = reason ? ` (${loopType}: ${reason})` : '';
-  // The consecutive-identical guard and the per-turn cap both run before the
-  // skipLoopDetection gate, so that setting can't disable them — don't suggest
-  // it for those always-on loop types.
+  // The always-on guards run before the skipLoopDetection gate, so that
+  // setting can't disable them — don't suggest it for those loop types. The
+  // per-turn cap is also always-on but has its own knob, so it gets a
+  // dedicated hint instead of membership in this list.
   const isAlwaysOn =
-    loopType === LoopType.TURN_TOOL_CALL_CAP ||
     loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
     loopType === LoopType.SHELL_COMMAND_STAGNATION ||
     loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
     loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
-  const hint = isAlwaysOn
-    ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
-    : ' Set the `model.skipLoopDetection` setting to true to disable.';
+  const hint =
+    loopType === LoopType.TURN_TOOL_CALL_CAP
+      ? ' Raise the `model.maxToolCallsPerTurn` setting to allow longer turns, or set it to 0 to disable the cap.'
+      : isAlwaysOn
+        ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
+        : ' Set the `model.skipLoopDetection` setting to true to disable.';
   return `Loop detection halted the run${detail}.${hint}`;
 }
 
@@ -1375,6 +1378,9 @@ export async function runNonInteractive(
           adapter.processEvent(event);
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
+          }
+          if (event.type === GeminiEventType.ModelFallback) {
+            toolCallRequests.length = 0;
           }
           if (
             event.type === GeminiEventType.Content &&
