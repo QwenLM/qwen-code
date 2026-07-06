@@ -114,6 +114,11 @@ describe('scheduled-tasks routes', () => {
     const res = await request(h.app).get('/scheduled-tasks');
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('scheduled_tasks_read_failed');
+    // The client message must stay generic — no leak of the internal file path.
+    expect(res.body.error).toBe(
+      'Failed to read scheduled tasks (the tasks file may be corrupt)',
+    );
+    expect(res.body.error).not.toContain(file);
   });
 
   it('rejects a whitespace-only prompt', async () => {
@@ -291,7 +296,9 @@ describe('scheduled-tasks routes', () => {
     expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
   });
 
-  it('re-enabling a never-run task keeps its never-run stamp', async () => {
+  it('re-enabling a recurring task disabled before its first run also resumes from now', async () => {
+    // A task paused before ever firing must not catch-up its missed slot on
+    // re-enable — every recurring false→true transition is stamped to now.
     const createdAt = 1_700_000_000_000;
     const createdMinute = createdAt - (createdAt % 60_000);
     await seedTask({
@@ -303,10 +310,31 @@ describe('scheduled-tasks routes', () => {
       lastFiredAt: createdMinute, // never actually fired
       enabled: false,
     });
+    const now = Date.now();
     const patch = await request(h.app)
       .patch('/scheduled-tasks/n1')
       .send({ enabled: true });
     expect(patch.status).toBe(200);
-    expect(patch.body.lastFiredAt).toBe(createdMinute); // unchanged
+    expect(patch.body.lastFiredAt).toBeGreaterThan(createdMinute);
+    expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
+  });
+
+  it('re-enabling a one-shot task leaves its anchor untouched', async () => {
+    const createdAt = 1_700_000_000_000;
+    const lastFiredAt = createdAt - (createdAt % 60_000);
+    await seedTask({
+      id: 'o1',
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      createdAt,
+      lastFiredAt,
+      enabled: false,
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/o1')
+      .send({ enabled: true });
+    expect(patch.status).toBe(200);
+    expect(patch.body.lastFiredAt).toBe(lastFiredAt); // unchanged (not recurring)
   });
 });

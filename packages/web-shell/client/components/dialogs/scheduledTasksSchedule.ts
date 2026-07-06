@@ -84,7 +84,10 @@ export function describeCron(cron: string, t: TranslateFn): string {
   const isNum = (s: string) => /^\d+$/.test(s);
   const pad = (n: string) => n.padStart(2, '0');
 
-  // */N * * * *
+  // */N * * * * — only honest divisors of 60 (matching buildCron) get the
+  // "every N minutes" label; a non-divisor like */45 is anchored to the hour
+  // and fires irregularly, so fall back to the raw expression for a
+  // hand-edited / persisted one rather than mislabel it.
   if (
     /^\*\/\d+$/.test(min!) &&
     hour === '*' &&
@@ -92,7 +95,11 @@ export function describeCron(cron: string, t: TranslateFn): string {
     mon === '*' &&
     dow === '*'
   ) {
-    return t('scheduledTasks.human.everyMinutes', { n: min!.slice(2) });
+    const n = Number(min!.slice(2));
+    if (Number.isInteger(n) && n >= 1 && n <= 30 && 60 % n === 0) {
+      return t('scheduledTasks.human.everyMinutes', { n });
+    }
+    return cron;
   }
   // M * * * *  → hourly at minute M
   if (

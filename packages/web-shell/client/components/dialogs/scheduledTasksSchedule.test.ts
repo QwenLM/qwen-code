@@ -121,6 +121,9 @@ describe('describeCron', () => {
     expect(describeCron('0 0 1 1 *', t)).toBe('0 0 1 1 *'); // day-of-month pinned
     expect(describeCron('0 9 * * 1-3', t)).toBe('0 9 * * 1-3'); // weekday range
     expect(describeCron('not a cron', t)).toBe('not a cron'); // not 5 fields
+    // Non-divisor */N: fires irregularly, so it is not labeled "every N min".
+    expect(describeCron('*/45 * * * *', t)).toBe('*/45 * * * *');
+    expect(describeCron('*/7 * * * *', t)).toBe('*/7 * * * *');
   });
 });
 

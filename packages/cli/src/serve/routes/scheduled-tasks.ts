@@ -328,16 +328,17 @@ export function registerScheduledTasksRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
-        // Re-enabling a task that had genuinely fired before: resume from now
-        // rather than catching up the fires it "missed" while paused. Guarded
-        // to a real prior fire (lastFiredAt past the creation minute) so a
-        // never-run task keeps reading as "never run".
-        const createdMinute = current.createdAt - (current.createdAt % 60_000);
+        // Re-enabling a recurring task resumes it from now instead of catching
+        // up the fires it "missed" while disabled — which would run prompts the
+        // user intentionally paused. Applied to every false→true transition,
+        // including a task disabled before it ever ran, so its paused slot is
+        // not treated as overdue on the next scheduler load. (The trade-off is
+        // a re-enabled never-run task reads "last run: now" rather than "never
+        // run" — a cosmetic edge, preferred over an unwanted real fire.)
         if (
           current.enabled === false &&
           patch.enabled === true &&
-          current.lastFiredAt !== null &&
-          current.lastFiredAt > createdMinute
+          next.recurring
         ) {
           const now = Date.now();
           next.lastFiredAt = now - (now % 60_000);
