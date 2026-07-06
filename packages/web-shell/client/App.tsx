@@ -1256,15 +1256,18 @@ export function App({
     url.searchParams.delete('split');
     window.history.replaceState(null, '', url);
   }, [openSplitView]);
-  // If the viewport shrinks below the large-screen breakpoint while the Session
-  // Overview panel is open, close it — its entry point is hidden on small
-  // screens, so leaving it open would strand the user in a view they can no
-  // longer reach.
+  // If the viewport shrinks below the large-screen breakpoint, close the Session
+  // Overview panel and the split view — both are large-screen-only surfaces
+  // whose entry points are hidden on small screens, so leaving them up would
+  // strand the user in a view they can no longer re-enter.
   useEffect(() => {
     if (!isLargeScreen && activePanel === 'sessions') {
       setActivePanel(null);
     }
-  }, [isLargeScreen, activePanel]);
+    if (!isLargeScreen && mainView === 'split') {
+      setMainView('chat');
+    }
+  }, [isLargeScreen, activePanel, mainView]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus to the Back button when a panel
   // opens (or when switching directly between panels) and back to the composer
@@ -4528,6 +4531,25 @@ export function App({
               )}
               {mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
+                  {/* The outer session's approval overlay is suppressed under the
+                      split (it would own ghost keyboard shortcuts). If that
+                      session isn't one of the panes, the approval would be
+                      invisible — surface a notice with a way back to it. */}
+                  {approvalOverlayActive && (
+                    <div
+                      className={styles.splitApprovalNotice}
+                      role="status"
+                      data-testid="split-approval-notice"
+                    >
+                      <span>{t('splitView.outerApprovalPending')}</span>
+                      <button
+                        type="button"
+                        onClick={() => setMainView('chat')}
+                      >
+                        {t('splitView.goToApproval')}
+                      </button>
+                    </div>
+                  )}
                   {/* Share the app-level customization + compact-mode contexts so
                       split panes render markdown/tool-headers/thinking the same
                       way the single-session chat does (todo contexts stay chat-

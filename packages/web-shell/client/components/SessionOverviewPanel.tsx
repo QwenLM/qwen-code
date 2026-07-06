@@ -332,6 +332,14 @@ function SessionOverviewPanelInner({
           {t('sessionsOverview.popupBlocked')}
         </div>
       )}
+      {/* Cards are already on screen (empty-state error path didn't run), so a
+          later failed refresh would otherwise be silent — surface it inline and
+          keep showing the last-good cards below. */}
+      {error && (
+        <div className={styles.notice} role="alert">
+          {t('sessionsOverview.loadFailed')}: {error.message}
+        </div>
+      )}
 
       <ul className={styles.grid}>
         {cards.map((card) => (

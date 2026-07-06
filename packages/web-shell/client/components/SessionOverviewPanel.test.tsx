@@ -311,6 +311,16 @@ describe('SessionOverviewPanel', () => {
     expect(container!.textContent).toContain('Pop-up blocked');
   });
 
+  it('surfaces a refresh failure inline while keeping the last-good cards', () => {
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    sessionsState.error = new Error('daemon unreachable');
+    render();
+    // The cards stay on screen (not replaced by the empty/error-only state)…
+    expect(cardLabels()).toEqual(['One']);
+    // …and the failure is still visible rather than silently swallowed.
+    expect(container!.textContent).toContain('daemon unreachable');
+  });
+
   it('does not re-select a session that left the list and came back', () => {
     sessionsState.sessions = [
       session('a', { displayName: 'A' }),
@@ -415,6 +425,23 @@ describe('SessionOverviewPanel polling', () => {
       vi.useRealTimers();
       sessionsReload.mockReset();
       sessionsReload.mockImplementation(async () => sessionsState.sessions);
+    }
+  });
+
+  it('polls the richer status report on its own slower interval', async () => {
+    sessionsState.sessions = [session('s')];
+    vi.useFakeTimers();
+    try {
+      render();
+      statusReload.mockClear();
+      // One list tick (3s) must NOT drive a status refresh…
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(statusReload).not.toHaveBeenCalled();
+      // …but crossing the 10s status cadence does, exactly once.
+      await vi.advanceTimersByTimeAsync(7000);
+      expect(statusReload).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

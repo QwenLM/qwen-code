@@ -137,6 +137,61 @@ describe('SplitView', () => {
     expect(panes()).toHaveLength(2);
   });
 
+  it('closes the picker on Escape', () => {
+    render({ initialSessionIds: ['s1'] });
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(addButton.getAttribute('aria-expanded')).toBe('true');
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    expect(addButton.getAttribute('aria-expanded')).toBe('false');
+    expect(container!.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it('closes the picker on a click outside it', () => {
+    render({ initialSessionIds: ['s1'] });
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(container!.querySelector('[role="listbox"]')).not.toBeNull();
+    // A mousedown anywhere outside the add-wrap dismisses it…
+    act(() =>
+      document.body.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true }),
+      ),
+    );
+    expect(addButton.getAttribute('aria-expanded')).toBe('false');
+    expect(container!.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it('keeps the picker open on a click inside it', () => {
+    render({ initialSessionIds: ['s1'] });
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    const listbox = container!.querySelector('[role="listbox"]') as HTMLElement;
+    // A mousedown on the picker itself must not dismiss it (the click that
+    // selects an option would otherwise be swallowed).
+    act(() =>
+      listbox.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })),
+    );
+    expect(addButton.getAttribute('aria-expanded')).toBe('true');
+    expect(container!.querySelector('[role="listbox"]')).not.toBeNull();
+  });
+
   it('removes a pane via its close button', () => {
     render({ initialSessionIds: ['s1', 's2'] });
     const closes = container!.querySelectorAll('[data-testid="pane-close"]');
