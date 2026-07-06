@@ -120,6 +120,10 @@ describe('session-start-profiler', () => {
         deferredReminderCount: 1,
       },
     ]);
+    expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+      'session-start-profiler enabled',
+      { source: 'resume' },
+    );
   });
 
   it('rounds elapsed durations to two decimal places', async () => {
@@ -294,7 +298,7 @@ describe('session-start-profiler', () => {
     expect(() => profiler.finish({ ok: true })).not.toThrow();
     expect(debugLoggerMock.debug).toHaveBeenCalledWith(
       'session-start-profiler write failed',
-      { name: 'Error', code: 'ENOSPC' },
+      { name: 'Error', message: 'disk full', code: 'ENOSPC' },
     );
   });
 

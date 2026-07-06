@@ -112,8 +112,8 @@ function writeProfileRecord(record: SessionStartProfileRecord): void {
     } catch {
       // Best-effort hardening; profiling output must not block startup.
     }
-    fs.appendFileSync(fd, `${JSON.stringify(record)}\n`, {
-      encoding: 'utf8',
+    fs.appendFileSync(fd, Buffer.from(`${JSON.stringify(record)}\n`, 'utf8'), {
+      flush: true,
     });
   } finally {
     fs.closeSync(fd);
@@ -212,6 +212,7 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
       const code = isNodeError(error) ? error.code : undefined;
       debugLogger.debug('session-start-profiler write failed', {
         name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : undefined,
         ...(code ? { code } : {}),
       });
       // Profiling must never affect session creation.
@@ -233,6 +234,8 @@ export function createSessionStartProfiler(
   if (!enabled) {
     return disabledProfiler;
   }
+
+  debugLogger.debug('session-start-profiler enabled', { source });
 
   return new EnabledSessionStartProfiler(source, {
     now: options.now ?? (() => performance.now()),
