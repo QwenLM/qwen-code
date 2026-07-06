@@ -77,6 +77,7 @@ export interface DaemonConnectionState {
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
   error?: string;
+  errorStatus?: number;
 }
 
 export interface DaemonTokenUsage {

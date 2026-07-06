@@ -399,6 +399,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
+              errorStatus: undefined,
             }));
             const getWorkspaceCapabilities =
               workspaceGetCapabilitiesRef.current;
@@ -489,6 +490,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 sessionId: targetSessionId,
                 error: undefined,
+                errorStatus: undefined,
                 loadingTranscript: true,
               }));
             }
@@ -908,6 +910,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
+              errorStatus: undefined,
             }));
           };
           for await (const event of activeSession.events({
@@ -1124,6 +1127,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ...current,
                     status: 'connecting',
                     error: undefined,
+                    errorStatus: undefined,
                   }));
                   break;
                 }
@@ -1182,6 +1186,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: undefined,
+              errorStatus: undefined,
             }));
             return;
           }
@@ -1214,12 +1219,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               error: undefined,
+              errorStatus: undefined,
             }));
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
           const message =
             error instanceof Error ? error.message : String(error);
+          const errorStatus = extractHttpStatus(error);
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -1258,7 +1265,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
-              setConnection({ status: 'error', error: message });
+              setConnection({ status: 'error', error: message, errorStatus });
               return;
             }
             setConnection((current) => ({
@@ -1266,6 +1273,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: message,
+              errorStatus,
+              capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
             }));
@@ -1289,6 +1298,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setConnection({
               status: 'error',
               error: message,
+              errorStatus,
             });
             return;
           }
@@ -1296,6 +1306,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...current,
             status: 'disconnected',
             error: message,
+            errorStatus,
             loadingTranscript: undefined,
           }));
         }
@@ -1405,7 +1416,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (consecutiveFailures >= heartbeatFailureThreshold) {
             setConnection((current) =>
               current.sessionId === session.sessionId
-                ? { ...current, status: 'connected', error: undefined }
+                ? {
+                    ...current,
+                    status: 'connected',
+                    error: undefined,
+                    errorStatus: undefined,
+                  }
                 : current,
             );
           }
@@ -1419,7 +1435,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             error instanceof Error ? error.message : 'Session heartbeat failed';
           setConnection((current) =>
             current.sessionId === session.sessionId
-              ? { ...current, status: 'disconnected', error: message }
+              ? {
+                  ...current,
+                  status: 'disconnected',
+                  error: message,
+                  errorStatus: extractHttpStatus(error),
+                }
               : current,
           );
         });

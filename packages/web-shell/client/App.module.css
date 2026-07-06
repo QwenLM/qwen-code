@@ -345,6 +345,49 @@
   overflow: visible;
 }
 
+.missingSessionState {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+.missingSessionMessage {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.missingSessionButton {
+  min-width: 120px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.missingSessionButton:hover,
+.missingSessionButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 24%, var(--border));
+  opacity: 0.9;
+  outline: none;
+}
+
 .footer {
   position: relative;
   width: min(100%, var(--chat-shell-width));

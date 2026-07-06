@@ -5739,6 +5739,11 @@ describe('DaemonSessionProvider', () => {
       expect(connection).toMatchObject({
         status: 'disconnected',
         error: 'session gone',
+        errorStatus: status,
+        capabilities: {
+          workspaceCwd: '/mock-workspace',
+          features: [],
+        },
       });
       expect(connection?.sessionId).toBeUndefined();
     },

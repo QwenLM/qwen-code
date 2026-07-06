@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 type StreamingState = 'idle' | 'responding';
 
 type MockConnection = {
-  status: 'connected';
+  status: 'connected' | 'disconnected';
   sessionId: string | undefined;
   clientId: string;
   displayName: string | undefined;
@@ -18,6 +18,8 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  error?: string;
+  errorStatus?: number;
 };
 
 type ChatEditorTestProps = {
@@ -60,6 +62,10 @@ const {
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      attachSession: vi.fn().mockResolvedValue(undefined),
+      closeSession: vi.fn().mockResolvedValue(undefined),
+      clearSession: vi.fn().mockResolvedValue(undefined),
+      loadSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -316,7 +322,10 @@ beforeEach(() => {
     }),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
+  mockConnection.error = undefined;
+  mockConnection.errorStatus = undefined;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
@@ -335,6 +344,10 @@ beforeEach(() => {
   mockSessionActions.createSession.mockResolvedValue({
     sessionId: 'session-1',
   });
+  mockSessionActions.attachSession.mockResolvedValue(undefined);
+  mockSessionActions.closeSession.mockResolvedValue(undefined);
+  mockSessionActions.clearSession.mockResolvedValue(undefined);
+  mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
@@ -365,6 +378,38 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it.each([404, 410])(
+    'shows a missing-session empty state with a new-session action for %d',
+    async (status) => {
+      mockConnection.status = 'disconnected';
+      mockConnection.sessionId = undefined;
+      mockConnection.error = 'Session load failed';
+      mockConnection.errorStatus = status;
+
+      const onSessionIdChange = vi.fn();
+      const { container } = renderApp({
+        onSessionIdChange,
+      });
+      await flush();
+
+      expect(container.textContent).toContain('Current session does not exist');
+      expect(container.querySelector('[data-testid="submit"]')).toBeNull();
+      expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
+
+      await act(async () => {
+        Array.from(container.querySelectorAll('button'))
+          .find((button) => button.textContent === 'New session')
+          ?.click();
+        await Promise.resolve();
+      });
+
+      expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+      expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    },
+  );
+
   it('gates direct submissions and dispatches submit events with delayed sidebar reload', async () => {
     vi.useFakeTimers();
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);

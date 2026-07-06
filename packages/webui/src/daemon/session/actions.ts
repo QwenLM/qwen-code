@@ -101,6 +101,7 @@ export function getConnectionAfterSessionClear(
     loadingTranscript: undefined,
     catchingUp: undefined,
     error: undefined,
+    errorStatus: undefined,
   };
 }
 
@@ -229,6 +230,7 @@ export function createDaemonSessionActions({
       clientId: undefined,
       displayName: undefined,
       error: undefined,
+      errorStatus: undefined,
       loadingTranscript: true,
       catchingUp: undefined,
     }));
@@ -617,6 +619,7 @@ export function createDaemonSessionActions({
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
+          errorStatus: undefined,
         }));
         return nextSession;
       } catch (error) {
