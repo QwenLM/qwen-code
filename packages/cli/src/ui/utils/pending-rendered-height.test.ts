@@ -239,6 +239,47 @@ describe('fitPendingSlice', () => {
     expect(clipped).toBe(false);
   });
 
+  it('charges the vertical height on a WIDE terminal when cells wrap past MAX_ROW_LINES', () => {
+    // Regression: a wide terminal (80 ≥ minHorizontalWidth 47 for 7 cols) so the
+    // WIDTH trigger is off, but each data cell is 30 chars → at perColWidth
+    // floor((80-22-4)/7)=7 it wraps to ceil(30/7)=5 > MAX_ROW_LINES(4), so
+    // TableRenderer falls back to the taller vertical layout. The estimator must
+    // mirror that: vertical = 4 rows * 7 cells (each 30 chars → 1 line at width
+    // 80) + 3 separators + 2 margin = 33, not the horizontal 4*5+header+chrome.
+    // With intro(1) + 33 = 34 > budget 30, the table is cut before it. Modelling
+    // only the width trigger would charge the horizontal height and wrongly keep
+    // it, overflowing the live frame and locking the viewport to the top.
+    const wide = 'w'.repeat(30);
+    const lines = [
+      'intro',
+      '| A | B | C | D | E | F | G |',
+      '| - | - | - | - | - | - | - |',
+      ...Array.from(
+        { length: 4 },
+        () =>
+          `| ${wide} | ${wide} | ${wide} | ${wide} | ${wide} | ${wide} | ${wide} |`,
+      ),
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 30, CLAMP);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1); // cut before the vertical-bound table
+  });
+
+  it('still uses the shorter horizontal height when wide cells stay within MAX_ROW_LINES', () => {
+    // Same wide terminal and shape, but short cells (1 line each) → maxRowLines 1,
+    // no vertical fallback → horizontal 4*1 + header + chrome = 13. intro(1)+13 =
+    // 14 ≤ budget 30, so the small table is NOT clipped early (guards against
+    // over-charging every multi-column table as vertical).
+    const lines = [
+      'intro',
+      '| A | B | C | D | E | F | G |',
+      '| - | - | - | - | - | - | - |',
+      ...Array.from({ length: 4 }, () => '| 1 | 2 | 3 | 4 | 5 | 6 | 7 |'),
+    ];
+    const { clipped } = fitPendingSlice(lines, 80, 30, CLAMP);
+    expect(clipped).toBe(false);
+  });
+
   it('accounts for wrapping of non-table lines', () => {
     // Each line is 30 cols at width 10 → 3 rows. Budget 6 → 2 lines fit.
     const lines = Array.from({ length: 5 }, () => 'a'.repeat(30));
