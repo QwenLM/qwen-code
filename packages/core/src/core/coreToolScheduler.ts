@@ -222,7 +222,6 @@ const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 
-
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
 const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
@@ -3737,7 +3736,8 @@ export class CoreToolScheduler {
           for (const candidatePath of candidatePaths) {
             // Inject conditional rules at most once per session per rule
             // file. The registry tracks dedup internally.
-            const rulesCtx = rulesRegistry?.matchAndConsume(candidatePath);
+            const rulesCtx =
+              await rulesRegistry?.matchAndConsume(candidatePath);
             if (rulesCtx) reminderBlocks.push(rulesCtx);
           }
 
