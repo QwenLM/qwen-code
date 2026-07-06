@@ -1271,7 +1271,7 @@ function findCodeRanges(text: string): Array<[number, number]> {
     ranges.push([fenceStart, text.length]);
   }
 
-  for (const match of text.matchAll(/`[^`\n]*`/g)) {
+  for (const match of text.matchAll(/(`+)[^`\n]*\1/g)) {
     const start = match.index ?? 0;
     if (ranges.some(([from, to]) => start >= from && start < to)) continue;
     ranges.push([start, start + match[0].length]);

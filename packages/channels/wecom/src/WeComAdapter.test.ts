@@ -3333,6 +3333,26 @@ describe('WeComChannel', () => {
     });
   });
 
+  it('leaves media markers inside multi-backtick inline code spans as text', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-test-'));
+    const filePath = join(dir, 'secret.txt');
+    writeFileSync(filePath, 'secret');
+    const text = `debug \`\`[FILE: ${filePath}]\`\``;
+
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', text);
+
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(client.sendMediaMessage).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenCalledWith('chat-1', {
+      msgtype: 'markdown',
+      markdown: { content: text },
+    });
+  });
+
   it('splits long markdown responses before sending', async () => {
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();

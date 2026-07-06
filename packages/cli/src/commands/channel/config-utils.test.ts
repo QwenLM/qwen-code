@@ -8,7 +8,11 @@ vi.mock('./channel-registry.js', () => ({
   getPlugin: async (type: string) => {
     const plugins: Record<
       string,
-      { channelType: string; requiredConfigFields?: string[] }
+      {
+        channelType: string;
+        requiredConfigFields?: string[];
+        envResolvableConfigFields?: string[];
+      }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
       dingtalk: {
@@ -18,6 +22,7 @@ vi.mock('./channel-registry.js', () => ({
       wecom: {
         channelType: 'wecom',
         requiredConfigFields: ['botId', 'secret'],
+        envResolvableConfigFields: ['wsUrl'],
       },
       numeric: {
         channelType: 'numeric',
@@ -170,7 +175,7 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_SEC'];
   });
 
-  it('resolves env vars in WeCom wsUrl', async () => {
+  it('resolves env vars in plugin-declared optional config fields', async () => {
     process.env['TEST_WECOM_WS_URL'] = 'wss://example.invalid/ws';
 
     const result = await parseChannelConfig('bot', {

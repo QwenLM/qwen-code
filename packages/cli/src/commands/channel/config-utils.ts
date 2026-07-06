@@ -149,15 +149,11 @@ export async function parseChannelConfig(
       resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
     }
   }
-  if (
-    channelType === 'wecom' &&
-    typeof rawConfig['wsUrl'] === 'string' &&
-    rawConfig['wsUrl'] !== ''
-  ) {
-    resolvedRawConfig['wsUrl'] = resolveConfigEnvVar(
-      rawConfig['wsUrl'],
-      envResolution,
-    );
+  for (const field of plugin.envResolvableConfigFields ?? []) {
+    const value = rawConfig[field];
+    if (typeof value === 'string' && value !== '') {
+      resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
+    }
   }
 
   // Resolve env vars for known credential fields
