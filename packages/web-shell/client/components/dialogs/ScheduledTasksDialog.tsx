@@ -271,32 +271,48 @@ export function ScheduledTasksDialog({
 
   const handleRunNow = useCallback(
     async (task: DaemonScheduledTask) => {
-      // A disabled task must not run: enqueuing its prompt would EXECUTE it in
-      // its session even though the server's `/run` guard then refuses to record
-      // it — a real, unrecorded run. (Enable/unarchive it first.) Also serialize:
-      // only one manual run in flight, since the App holds a single pending
-      // bound-run latch and overlapping runs could drop a prompt.
+      // Cheap early exit on the (possibly stale) snapshot, and serialize: only
+      // one manual run in flight, since the App holds a single pending bound-run
+      // latch and overlapping runs could drop a prompt.
       if (!task.enabled || runningTaskId !== null) return;
       setRunningTaskId(task.id);
+      let recordId: string | null = null;
       try {
-        // Enqueue the prompt FIRST — onRunPrompt resolves once it's actually
-        // sent in the task's (bound) session, and REJECTS if that session can't
-        // be opened. Only after a successful enqueue do we record the run, so a
-        // failed session load never leaves a false "ran" entry in the history.
-        await onRunPrompt(task.prompt, task.sessionId);
+        // Server-authoritative re-check right before enqueuing: the dialog's
+        // snapshot can be stale — another tab/API may have disabled or deleted
+        // the task since it loaded. Enqueuing then would EXECUTE the prompt in
+        // the session while /run only refuses the RECORD afterward, i.e. a real
+        // unrecorded run. Refresh and bail if it's gone/disabled, and use the
+        // FRESH prompt/session so we never run an outdated one.
+        const fresh = (await actions.listScheduledTasks()).find(
+          (tk) => tk.id === task.id,
+        );
+        if (!fresh || !fresh.enabled) {
+          await reload().catch(() => {});
+          onError(
+            new Error('This task is no longer runnable.'),
+            t('scheduledTasks.error.runFailed'),
+          );
+          return;
+        }
+        // Enqueue FIRST — onRunPrompt resolves once the prompt is admitted to
+        // the session and REJECTS if it can't be. Only a successful enqueue
+        // records the run, so a failed session switch leaves no false entry.
+        await onRunPrompt(fresh.prompt, fresh.sessionId);
+        recordId = fresh.id;
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));
-        return; // the run never happened — do not record it
       } finally {
-        // Re-enable the controls as soon as the enqueue settles; recording the
-        // run below is a fast follow-up that shouldn't keep the row disabled.
+        // Re-enable the controls as soon as the enqueue settles; recording is a
+        // fast follow-up that shouldn't keep the row disabled.
         setRunningTaskId(null);
       }
+      if (recordId === null) return; // not enqueued → do not record
       try {
         // Record the trigger (updates lastFiredAt + run history) and reload so
         // the card reflects it. The prompt already ran; a record failure is
         // surfaced but the history still catches up on the next refresh.
-        await actions.runScheduledTask(task.id);
+        await actions.runScheduledTask(recordId);
         await reload();
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));

@@ -474,18 +474,20 @@ export async function unarchiveDaemonSessions(params: {
   // that task is unrecoverable (PATCH-enable 409s on the stale flag, keepalive
   // skips it). Surface a write failure in `errors` (and log it) instead of
   // swallowing, so a stranded task isn't left silent.
+  const resumeSessionIds = [...new Set([...unarchived, ...alreadyActive])];
   try {
-    await enableTasksForSessions(service.getProjectRoot(), [
-      ...unarchived,
-      ...alreadyActive,
-    ]);
+    await enableTasksForSessions(service.getProjectRoot(), resumeSessionIds);
   } catch (err) {
     logSessionArchiveWarning(
-      `enableTasksForSessions failed for [${unarchived.join(', ')}]: ${
+      `enableTasksForSessions failed for [${resumeSessionIds.join(', ')}]: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    for (const sessionId of unarchived) errors.push({ sessionId, error: err });
+    // Report against the full resume set: a failed already-active recovery must
+    // surface too, or its stranded task stays silently unrecoverable.
+    for (const sessionId of resumeSessionIds) {
+      errors.push({ sessionId, error: err });
+    }
   }
 
   return { unarchived, alreadyActive, notFound, errors };

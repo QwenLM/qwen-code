@@ -263,6 +263,27 @@ describe('ScheduledTasksDialog run now', () => {
     expect(onError).toHaveBeenCalled();
   });
 
+  it('re-checks server state and does NOT enqueue a task disabled after load', async () => {
+    // The dialog loaded the task as enabled, but another tab/API disabled it
+    // since. The server-authoritative re-check must catch that BEFORE enqueuing,
+    // or a disabled task's prompt runs unrecorded.
+    const onRunPrompt = vi.fn();
+    await mount(
+      [baseTask({ enabled: true, sessionId: 'sess-9', prompt: 'do it' })],
+      {
+        onRunPrompt,
+      },
+    );
+    // Server now reports it disabled (the re-check reload sees this).
+    actions.listScheduledTasks.mockResolvedValue([
+      baseTask({ enabled: false, sessionId: 'sess-9', prompt: 'do it' }),
+    ]);
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(onRunPrompt).not.toHaveBeenCalled(); // never executed
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+  });
+
   it('serializes run now: a second click while one is pending is ignored', async () => {
     // Hold the first run pending (session still switching), then click again —
     // the button is disabled + the handler guards, so no second prompt/record.

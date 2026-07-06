@@ -1351,6 +1351,24 @@ describe('CronScheduler', () => {
       expect(internals.firePersistPending.has('boundTick')).toBe(false); // cleared
     });
 
+    it('ref-counts firePersistPending so overlapping persists for one id do not clear early', () => {
+      // The same task can fire again before its previous lastFiredAt write lands
+      // (two persists in flight). A plain Set would drop the guard on the FIRST
+      // settle, exposing the second's window; the ref count holds it until both.
+      const internals = scheduler as unknown as {
+        firePersistPending: Map<string, number>;
+        markFirePersistPending(ids: string[]): void;
+        clearFirePersistPending(ids: string[]): void;
+      };
+      internals.markFirePersistPending(['x']); // persist A in flight
+      internals.markFirePersistPending(['x']); // persist B in flight (overlap)
+      expect(internals.firePersistPending.has('x')).toBe(true);
+      internals.clearFirePersistPending(['x']); // A settles
+      expect(internals.firePersistPending.has('x')).toBe(true); // B still pending
+      internals.clearFirePersistPending(['x']); // B settles
+      expect(internals.firePersistPending.has('x')).toBe(false); // now cleared
+    });
+
     it('skips a durable job the consumer cannot run: no fire, lastFiredAt left untouched', async () => {
       // A headless run can't expand a `<<loop.md>>` sentinel. Firing it would
       // stamp + persist lastFiredAt while the work is skipped downstream,

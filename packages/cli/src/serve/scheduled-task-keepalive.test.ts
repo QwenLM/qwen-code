@@ -227,4 +227,30 @@ describe('scheduled-task keepalive', () => {
     expect(res.loaded).toHaveLength(12); // all still loaded
     expect(maxInFlight).toBeLessThanOrEqual(4); // but batched, never all at once
   });
+
+  it('holds a worker slot for a timed-out load so real in-flight never exceeds the cap', async () => {
+    // loadSession isn't abortable: a timed-out load keeps running. The slot must
+    // stay occupied until it actually settles, or the pool starts more loads and
+    // the real number of forked children exceeds the cap.
+    const many = Array.from({ length: 12 }, (_, i) =>
+      task({ id: `t${i}`, sessionId: `s${i}` }),
+    );
+    await updateCronTasks(workspace, () => many);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const res = await rehydrateScheduledTaskSessions({
+      bridge: {
+        loadSession: async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 50)); // real load outlasts the timeout
+          inFlight--;
+        },
+      },
+      boundWorkspace: workspace,
+      loadTimeoutMs: 20, // each load is recorded failed at 20ms, but runs to 50ms
+    });
+    expect(res.failed).toHaveLength(12); // all timed out
+    expect(maxInFlight).toBeLessThanOrEqual(4); // slot held past timeout → cap kept
+  });
 });

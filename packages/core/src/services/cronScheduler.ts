@@ -259,11 +259,33 @@ export class CronScheduler {
   private pendingAdd = new Set<string>();
   // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
   // (on-time) OR a catch-up delivery. A reload racing that async write reads the
-  // stale disk stamp, so it must not re-detect and re-fire the same slot.
-  // Cleared when each persist completes. Only populated once a fire has actually
-  // been stamped/delivered, so a catch-up that was merely buffered and then
-  // dropped never enters the set and still re-detects from disk.
-  private firePersistPending = new Set<string>();
+  // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
+  // populated once a fire has actually been stamped/delivered, so a catch-up that
+  // was merely buffered and then dropped never enters it and still re-detects.
+  //
+  // REF-COUNTED per id (not a plain Set): the same task can have two persists in
+  // flight at once (it fired again before the first write landed). Clearing on
+  // the FIRST settle would drop the guard while the second write is still
+  // pending; the count keeps it until the LAST in-flight persist for that id
+  // settles.
+  private firePersistPending = new Map<string, number>();
+
+  private markFirePersistPending(ids: Iterable<string>): void {
+    for (const id of ids) {
+      this.firePersistPending.set(
+        id,
+        (this.firePersistPending.get(id) ?? 0) + 1,
+      );
+    }
+  }
+
+  private clearFirePersistPending(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const next = (this.firePersistPending.get(id) ?? 0) - 1;
+      if (next > 0) this.firePersistPending.set(id, next);
+      else this.firePersistPending.delete(id);
+    }
+  }
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -965,7 +987,7 @@ export class CronScheduler {
     // races this async write (which still reads the stale disk lastFiredAt).
     // Cleared once the write lands, after which the disk anchor is current.
     const guarded = [...stamps.keys()];
-    for (const id of guarded) this.firePersistPending.add(id);
+    this.markFirePersistPending(guarded);
     this.trackPersist(
       updateCronTasks(this.projectRoot, (tasks) => {
         let changed = false;
@@ -987,7 +1009,7 @@ export class CronScheduler {
         });
         return changed ? next : tasks;
       }).finally(() => {
-        for (const id of guarded) this.firePersistPending.delete(id);
+        this.clearFirePersistPending(guarded);
       }),
     );
   }
@@ -1252,7 +1274,7 @@ export class CronScheduler {
       // pendingRemoval). Cleared when the write lands. Symmetric to the
       // catch-up persist — see firePersistPending.
       const guarded = [...firedAt.keys()];
-      for (const id of guarded) this.firePersistPending.add(id);
+      this.markFirePersistPending(guarded);
       this.trackPersist(
         updateCronTasks(this.projectRoot, (tasks) =>
           tasks
@@ -1282,7 +1304,7 @@ export class CronScheduler {
               };
             }),
         ).finally(() => {
-          for (const id of guarded) this.firePersistPending.delete(id);
+          this.clearFirePersistPending(guarded);
         }),
       );
     }

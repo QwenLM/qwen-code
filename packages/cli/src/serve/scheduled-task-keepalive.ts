@@ -203,30 +203,46 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const loaded: string[] = [];
   const failed: string[] = [];
   const loadOne = async (sessionId: string) => {
+    const load = bridge.loadSession({
+      sessionId,
+      workspaceCwd: boundWorkspace,
+      historyReplay: 'response',
+    });
+    let settled = false;
     try {
-      await withTimeout(
-        bridge.loadSession({
-          sessionId,
-          workspaceCwd: boundWorkspace,
-          historyReplay: 'response',
-        }),
-        timeoutMs,
-        sessionId,
-      );
+      await withTimeout(load, timeoutMs, sessionId);
       loaded.push(sessionId);
+      settled = true;
     } catch (err) {
       failed.push(sessionId);
       deps.onError?.(sessionId, err);
     }
+    // loadSession isn't abortable, so a timed-out load keeps forking/replaying
+    // in the background. Hold this worker — and thus its concurrency slot —
+    // until that real load actually settles, so the number of in-flight child
+    // spawns never exceeds REHYDRATE_MAX_CONCURRENCY (the timeout only decides
+    // when the RESULT is recorded as failed, not when the slot frees).
+    if (!settled) await load.catch(() => {});
   };
-  // Load in bounded batches: concurrent within a batch (one slow/hung session
-  // can't block its batch, each capped by a timeout), but never more than
-  // REHYDRATE_MAX_CONCURRENCY child spawns in flight at once.
-  for (let i = 0; i < sessionIds.length; i += REHYDRATE_MAX_CONCURRENCY) {
-    await Promise.all(
-      sessionIds.slice(i, i + REHYDRATE_MAX_CONCURRENCY).map(loadOne),
-    );
-  }
+  // Bounded worker pool: exactly REHYDRATE_MAX_CONCURRENCY workers pull from a
+  // shared queue, each running one real load at a time (held to settlement),
+  // so no more than that many child spawns are ever in flight at once.
+  const queue = sessionIds.slice();
+  const worker = async () => {
+    for (
+      let sessionId = queue.shift();
+      sessionId !== undefined;
+      sessionId = queue.shift()
+    ) {
+      await loadOne(sessionId);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(REHYDRATE_MAX_CONCURRENCY, queue.length) },
+      () => worker(),
+    ),
+  );
   return { loaded, failed };
 }
 
