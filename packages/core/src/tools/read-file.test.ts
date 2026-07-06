@@ -395,9 +395,11 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.error).toBeUndefined();
       expect(result.returnDisplay).toBe(
-        'Read lines 1-1 of 1 from largefile.txt (truncated)',
+        'Read lines 1-1 of at least 1 from largefile.txt (truncated)',
       );
-      expect(result.llmContent).toContain('Showing lines 1-1 of 1 total lines');
+      expect(result.llmContent).toContain(
+        'Showing lines 1-1 of at least 1 total lines',
+      );
       expect(result.llmContent).toContain('... [truncated]');
     });
 

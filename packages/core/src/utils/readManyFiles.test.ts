@@ -139,7 +139,7 @@ describe('readManyFiles', () => {
       const result = await readManyFiles(mockConfig, { paths: [relativePath] });
 
       const content = contentToString(result.contentParts);
-      expect(content).toContain('Showing lines 1-1 of 1 total lines');
+      expect(content).toContain('Showing lines 1-1 of at least 1 total lines');
       expect(content).toContain('... [truncated]');
       expect(result.files).toHaveLength(1);
       expect(result.files[0]!.error).toBeUndefined();

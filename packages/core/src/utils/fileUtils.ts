@@ -18,12 +18,16 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
-import { getErrorMessage, isNodeError } from './errors.js';
+import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
 import { readNotebookWithMetadata } from './notebook.js';
 import { readTextRange } from './readTextRange.js';
+import {
+  DEFAULT_RANGE_READ_BYTES,
+  TEXT_RANGE_FAST_PATH_MAX_SIZE,
+} from './text-range-constants.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -296,6 +300,7 @@ export async function readFileWithLineAndLimit(params: {
   bom?: boolean;
   encoding?: string;
   originalLineCount: number;
+  originalLineCountExact?: boolean;
   lineEnding?: 'crlf' | 'lf';
   truncatedByBytes?: boolean;
 }> {
@@ -304,7 +309,7 @@ export async function readFileWithLineAndLimit(params: {
     const rangeMaxOutputBytes =
       typeof maxOutputBytes === 'number' && Number.isFinite(maxOutputBytes)
         ? maxOutputBytes
-        : 25_000;
+        : DEFAULT_RANGE_READ_BYTES;
     return readTextRange({
       path: filePath,
       offset: line || 0,
@@ -312,6 +317,13 @@ export async function readFileWithLineAndLimit(params: {
       maxOutputBytes: rangeMaxOutputBytes,
       ...(signal !== undefined ? { signal } : {}),
     });
+  }
+
+  const stats = await fs.promises.stat(filePath);
+  if (stats.isFile() && stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE) {
+    throw new Error(
+      `File too large for full read (${stats.size} bytes). Use offset/limit to read a range.`,
+    );
   }
 
   const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
@@ -329,6 +341,7 @@ export async function readFileWithLineAndLimit(params: {
     bom,
     encoding,
     originalLineCount,
+    originalLineCountExact: true,
   };
 }
 
@@ -837,6 +850,7 @@ export interface ProcessedFileReadResult {
   error?: string; // Optional error message for the LLM if file processing failed
   errorType?: ToolErrorType; // Structured error type
   originalLineCount?: number; // For text files, the total number of lines in the original file
+  originalLineCountExact?: boolean; // False when a large range read stopped before EOF
   isTruncated?: boolean; // Indicates if displayed content was truncated
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
   /**
@@ -1112,6 +1126,7 @@ export async function processSingleFileContent(
           });
         const originalLineCount =
           _meta?.originalLineCount ?? (await countFileLines(filePath));
+        const originalLineCountExact = _meta?.originalLineCountExact !== false;
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
         const configCharLimit = config.getTruncateToolOutputThreshold();
@@ -1169,18 +1184,20 @@ export async function processSingleFileContent(
 
         const actualEndLine = startLine + linesIncluded;
         const contentRangeTruncated =
-          startLine > 0 || actualEndLine < originalLineCount;
-        const isTruncated =
-          contentRangeTruncated ||
-          contentLengthTruncated ||
-          _meta?.truncatedByBytes === true;
+          startLine > 0 ||
+          !originalLineCountExact ||
+          actualEndLine < originalLineCount;
+        const isTruncated = contentRangeTruncated || contentLengthTruncated;
+        const lineCountLabel = originalLineCountExact
+          ? `${originalLineCount}`
+          : `at least ${originalLineCount}`;
 
         // By default, return nothing to streamline the common case of a successful read_file.
         let returnDisplay = '';
         if (isTruncated) {
           returnDisplay = `Read lines ${
             startLine + 1
-          }-${actualEndLine} of ${originalLineCount} from ${relativePathForDisplay}`;
+          }-${actualEndLine} of ${lineCountLabel} from ${relativePathForDisplay}`;
           if (contentLengthTruncated) {
             returnDisplay += ' (truncated)';
           }
@@ -1191,6 +1208,7 @@ export async function processSingleFileContent(
           returnDisplay,
           isTruncated,
           originalLineCount,
+          originalLineCountExact,
           linesShown: [startLine + 1, actualEndLine],
           stats,
         };
@@ -1319,16 +1337,14 @@ export async function processSingleFileContent(
   }
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
-}
-
 function getRangeReadByteLimit(config: Config): number {
   const charLimit = config.getTruncateToolOutputThreshold();
   if (!Number.isFinite(charLimit)) {
-    return 25_000;
+    return DEFAULT_RANGE_READ_BYTES;
   }
-  return Math.max(25_000, Math.floor(charLimit) * 4);
+  // Leave enough byte headroom for UTF-8 text so the character budget remains
+  // the primary truncation control for normal source/log content.
+  return Math.max(DEFAULT_RANGE_READ_BYTES, Math.floor(charLimit) * 4);
 }
 
 export async function fileExists(filePath: string): Promise<boolean> {

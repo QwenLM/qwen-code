@@ -8,8 +8,10 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
 import { isUtf8CompatibleEncoding } from './iconvHelper.js';
-
-const FAST_PATH_MAX_SIZE = 10 * 1024 * 1024;
+import {
+  DEFAULT_RANGE_READ_BYTES,
+  TEXT_RANGE_FAST_PATH_MAX_SIZE,
+} from './text-range-constants.js';
 
 export interface ReadTextRangeRequest {
   path: string;
@@ -25,6 +27,7 @@ export interface ReadTextRangeResult {
   encoding?: string;
   bom?: boolean;
   lineEnding?: 'crlf' | 'lf';
+  originalLineCountExact: boolean;
   truncatedByBytes: boolean;
 }
 
@@ -44,10 +47,11 @@ export async function readTextRange(
   const stats = await stat(request.path);
   const maxOutputBytes = normalizeMaxBytes(request.maxOutputBytes);
 
-  if (stats.size < FAST_PATH_MAX_SIZE) {
+  if (stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE) {
     const { content, encoding, bom } = await readFileWithEncodingInfo(
       request.path,
     );
+    request.signal?.throwIfAborted();
     const range = sliceDecodedContent(
       content,
       request.offset,
@@ -67,7 +71,7 @@ export async function readTextRange(
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
   if (!Number.isFinite(maxOutputBytes)) {
-    return 25_000;
+    return DEFAULT_RANGE_READ_BYTES;
   }
   return Math.max(0, Math.floor(maxOutputBytes));
 }
@@ -79,7 +83,10 @@ function sliceDecodedContent(
   maxOutputBytes: number,
 ): Pick<
   ReadTextRangeResult,
-  'content' | 'originalLineCount' | 'truncatedByBytes'
+  | 'content'
+  | 'originalLineCount'
+  | 'originalLineCountExact'
+  | 'truncatedByBytes'
 > {
   const lines = content.split('\n');
   const originalLineCount = lines.length;
@@ -91,6 +98,7 @@ function sliceDecodedContent(
   return {
     content: truncated.content,
     originalLineCount,
+    originalLineCountExact: true,
     truncatedByBytes: truncated.truncated,
   };
 }
@@ -114,6 +122,7 @@ async function readLargeUtf8Range(
   let firstChunk = true;
   let lineEnding: 'crlf' | 'lf' = 'lf';
   let previousChunkEndedWithCR = false;
+  let originalLineCountExact = true;
 
   const stream = createReadStream(request.path, {
     encoding: 'utf8',
@@ -174,11 +183,19 @@ async function readLargeUtf8Range(
       }
       currentLine++;
       start = newline + 1;
+      if (currentLine >= endLine || truncatedByBytes) {
+        originalLineCountExact = false;
+        break;
+      }
       newline = chunk.indexOf('\n', start);
     }
 
     if (start < chunk.length && isSelectedLine()) {
       appendSelected(chunk.slice(start));
+    }
+    if (currentLine >= endLine || truncatedByBytes) {
+      originalLineCountExact = false;
+      break;
     }
   }
 
@@ -188,6 +205,7 @@ async function readLargeUtf8Range(
     encoding: 'utf-8',
     bom,
     lineEnding,
+    originalLineCountExact,
     truncatedByBytes,
   };
 }
@@ -206,6 +224,9 @@ function truncateUtf8(
 
   const buffer = Buffer.from(content, 'utf8');
   let end = Math.min(maxBytes, buffer.length);
+  // `end` is the first excluded byte. If it lands inside a multi-byte UTF-8
+  // sequence, the byte at `end` is a continuation byte, so back up until the
+  // prefix ends before the incomplete character.
   while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
     end--;
   }

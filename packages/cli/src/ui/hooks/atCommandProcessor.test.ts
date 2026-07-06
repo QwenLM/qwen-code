@@ -182,7 +182,9 @@ describe('handleAtCommand', () => {
           .join('')
       : '';
 
-    expect(processedText).toContain('Showing lines 1-1 of 1 total lines');
+    expect(processedText).toContain(
+      'Showing lines 1-1 of at least 1 total lines',
+    );
     expect(processedText).toContain('... [truncated]');
     expect(result.shouldProceed).toBe(true);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);

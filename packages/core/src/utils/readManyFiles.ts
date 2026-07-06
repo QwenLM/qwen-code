@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { getErrorMessage } from './errors.js';
+import { getErrorMessage, isAbortError } from './errors.js';
 import type { ProcessedFileReadResult } from './fileUtils.js';
 import {
   isCacheableReadResult,
@@ -242,7 +242,11 @@ async function readFileContent(
       ) {
         const [start, end] = fileReadResult.linesShown!;
         const total = fileReadResult.originalLineCount!;
-        fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
+        const totalLabel =
+          fileReadResult.originalLineCountExact === false
+            ? `at least ${total}`
+            : total;
+        fileContentForLlm = `Showing lines ${start}-${end} of ${totalLabel} total lines.\n---\n${fileReadResult.llmContent}`;
       } else {
         fileContentForLlm = fileReadResult.llmContent;
       }
@@ -273,10 +277,6 @@ async function readFileContent(
     }
     return null;
   }
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
 }
 
 /**

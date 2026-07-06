@@ -286,7 +286,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     ) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
-      llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
+      const totalLabel =
+        result.originalLineCountExact === false ? `at least ${total}` : total;
+      llmContent = `Showing lines ${start}-${end} of ${totalLabel} total lines.\n\n---\n\n${result.llmContent}`;
     } else {
       llmContent = result.llmContent || '';
     }

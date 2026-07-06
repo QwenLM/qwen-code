@@ -29,6 +29,7 @@ export type ReadTextFileResponse = {
     bom?: boolean;
     encoding?: string;
     originalLineCount?: number;
+    originalLineCountExact?: boolean;
     lineEnding?: LineEnding;
     truncatedByBytes?: boolean;
   };
@@ -291,6 +292,7 @@ export class StandardFileSystemService implements FileSystemService {
         bom: readResult.bom,
         encoding: readResult.encoding,
         originalLineCount: readResult.originalLineCount,
+        originalLineCountExact: readResult.originalLineCountExact,
         lineEnding: detectedLineEnding,
         ...(readResult.truncatedByBytes !== undefined
           ? { truncatedByBytes: readResult.truncatedByBytes }

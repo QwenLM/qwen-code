@@ -28,6 +28,7 @@ import {
   processSingleFileContent,
   detectBOM,
   decodeBufferWithEncodingInfo,
+  readFileWithLineAndLimit,
   readFileWithEncoding,
   readFileWithEncodingInfo,
   detectFileEncoding,
@@ -1467,6 +1468,20 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([1, 2]);
     });
 
+    it('should reject unbounded full reads for large text files', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: Number.POSITIVE_INFINITY,
+        }),
+      ).rejects.toThrow(/File too large for full read/);
+    });
+
     it('should not byte-truncate multibyte text before the character limit', async () => {
       const content = '你'.repeat(1000);
       actualNodeFs.writeFileSync(testTextFilePath, content, 'utf-8');
@@ -1577,8 +1592,37 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('Line 1');
       expect(result.returnDisplay).toContain('Read lines 1-');
       expect(result.isTruncated).toBe(true);
-      expect(result.originalLineCount).toBe(65_000);
+      expect(result.originalLineCount).toBeGreaterThanOrEqual(
+        result.linesShown?.[1] ?? 1,
+      );
+      expect(result.originalLineCount).toBeLessThan(65_000);
+      expect(result.originalLineCountExact).toBe(false);
       expect(result.linesShown?.[0]).toBe(1);
+    });
+
+    it('should mark byte truncation without character truncation', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+      const noCharacterLimitConfig = {
+        ...mockConfig,
+        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        noCharacterLimitConfig,
+      );
+
+      expect(typeof result.llmContent).toBe('string');
+      const llmContent = result.llmContent as string;
+      expect(llmContent).toBe('x'.repeat(25_000) + '... [truncated]');
+      expect(llmContent.match(/\.\.\. \[truncated\]/g)).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from test.txt (truncated)',
+      );
+      expect(result.isTruncated).toBe(true);
     });
 
     it('should still return an error if an inline media file exceeds 10MB', async () => {

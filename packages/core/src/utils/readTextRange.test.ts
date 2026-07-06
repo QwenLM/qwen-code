@@ -83,7 +83,9 @@ describe('readTextRange', () => {
       expect.stringContaining('line-42002'),
       expect.stringContaining('line-42003'),
     ]);
-    expect(result.originalLineCount).toBe(65_000);
+    expect(result.originalLineCount).toBeGreaterThanOrEqual(42_004);
+    expect(result.originalLineCount).toBeLessThan(65_000);
+    expect(result.originalLineCountExact).toBe(false);
     expect(result.encoding).toBe('utf-8');
     expect(result.bom).toBe(false);
     expect(result.truncatedByBytes).toBe(false);
@@ -106,7 +108,9 @@ describe('readTextRange', () => {
     expect(result.content).toContain('\r\n');
     expect(result.content.split('\n')[0]).toMatch(/\r$/);
     expect(result.lineEnding).toBe('crlf');
-    expect(result.originalLineCount).toBe(65_000);
+    expect(result.originalLineCount).toBeGreaterThanOrEqual(4);
+    expect(result.originalLineCount).toBeLessThan(65_000);
+    expect(result.originalLineCountExact).toBe(false);
   });
 
   it('strips UTF-8 BOM from large file content and reports BOM metadata', async () => {
@@ -127,6 +131,23 @@ describe('readTextRange', () => {
     expect(result.content).toContain('line-1');
     expect(result.bom).toBe(true);
     expect(result.encoding).toBe('utf-8');
+    expect(result.originalLineCountExact).toBe(false);
+  });
+
+  it('does not split a UTF-8 character when byte-truncating', async () => {
+    const filePath = await writeFile('emoji.txt', `a🙂b`);
+
+    const result = await readTextRange({
+      path: filePath,
+      offset: 0,
+      limit: 1,
+      maxOutputBytes: 4,
+    });
+
+    expect(result.content).toBe('a');
+    expect(result.content).not.toContain('\uFFFD');
+    expect(result.truncatedByBytes).toBe(true);
+    expect(result.originalLineCountExact).toBe(true);
   });
 
   it('rejects large non-UTF-8 files with a targeted error', async () => {
@@ -162,6 +183,7 @@ describe('readTextRange', () => {
 
     expect(result.content).toBe('x'.repeat(1024));
     expect(result.originalLineCount).toBe(1);
+    expect(result.originalLineCountExact).toBe(false);
     expect(result.truncatedByBytes).toBe(true);
   });
 
