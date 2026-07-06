@@ -569,6 +569,58 @@ describe('ToolRegistry', () => {
       toolRegistry.removeMcpToolsByServer('slack');
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
+
+    it('includes deferred tools listed in visibleTools in function declarations', () => {
+      const visibleConfig = new Config({
+        ...baseConfigParams,
+        visibleTools: ['should-appear'],
+      });
+      const registry = new ToolRegistry(visibleConfig);
+      registry.registerTool(new MockTool({ name: 'always-visible' }));
+      registry.registerTool(
+        new MockTool({ name: 'should-appear', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'still-hidden', shouldDefer: true }),
+      );
+
+      const names = registry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toContain('always-visible');
+      expect(names).toContain('should-appear');
+      expect(names).not.toContain('still-hidden');
+    });
+
+    it('excludes visibleTools items from deferred tool summary', () => {
+      const visibleConfig = new Config({
+        ...baseConfigParams,
+        visibleTools: ['alpha'],
+      });
+      const registry = new ToolRegistry(visibleConfig);
+      registry.registerTool(
+        new MockTool({ name: 'alpha', description: 'a', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'beta', description: 'b', shouldDefer: true }),
+      );
+
+      const summary = registry.getDeferredToolSummary();
+      expect(summary).toEqual([{ name: 'beta', description: 'b' }]);
+    });
+
+    it('visibleTools has no effect on non-deferred tools', () => {
+      const visibleConfig = new Config({
+        ...baseConfigParams,
+        visibleTools: ['regular'],
+      });
+      const registry = new ToolRegistry(visibleConfig);
+      registry.registerTool(new MockTool({ name: 'regular' }));
+
+      const names = registry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toContain('regular');
+
+      const summary = registry.getDeferredToolSummary();
+      expect(summary).toEqual([]);
+    });
   });
 
   describe('getToolsByServer', () => {

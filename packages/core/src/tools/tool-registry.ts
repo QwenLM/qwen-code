@@ -698,6 +698,7 @@ export class ToolRegistry {
           includeDeferred ||
           !tool.shouldDefer ||
           tool.alwaysLoad ||
+          this.config.getVisibleTools().has(tool.name) ||
           this.revealedDeferred.has(tool.name),
       )
       .sort(ToolRegistry.compareToolsByDeclarationName)
@@ -749,7 +750,11 @@ export class ToolRegistry {
   getDeferredToolSummary(): DeferredToolSummary[] {
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
-      if (tool.shouldDefer && !tool.alwaysLoad) {
+      if (
+        tool.shouldDefer &&
+        !tool.alwaysLoad &&
+        !this.config.getVisibleTools().has(tool.name)
+      ) {
         summary.push({
           name: tool.name,
           description: tool.description,
