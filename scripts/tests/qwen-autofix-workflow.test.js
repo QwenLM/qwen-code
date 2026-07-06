@@ -549,10 +549,20 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('npm install -g');
     }
     expect(workflow).not.toContain('run_shell_command(node dist/cli.js)');
-    expect(developFixStep).toContain('run_shell_command(npm)');
-    expect(triageAndAddressStep).toContain('run_shell_command(npm)');
+    for (const command of [
+      'run_shell_command(npm run build)',
+      'run_shell_command(npm run typecheck)',
+      'run_shell_command(npm run lint)',
+      'run_shell_command(npm run test)',
+    ]) {
+      expect(developFixStep).toContain(command);
+      expect(triageAndAddressStep).toContain(command);
+    }
+    expect(developFixStep).not.toContain('run_shell_command(npm)');
+    expect(triageAndAddressStep).not.toContain('run_shell_command(npm)');
     expect(assessCandidatesStep).not.toContain('run_shell_command(npm)');
-    expect(workflow).not.toContain('run_shell_command(npm run build)');
+    expect(workflow).not.toContain('run_shell_command(npm publish)');
+    expect(workflow).not.toContain('run_shell_command(npm exec)');
     expect(workflow).not.toContain('run_shell_command(npm run bundle)');
     expect(workflow).not.toContain('run_shell_command(npx vitest)');
     expect(workflowAndSkill).toContain(
@@ -561,6 +571,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflowAndSkill).toContain('npm run build');
     expect(workflowAndSkill).toContain('npm run typecheck');
     expect(workflowAndSkill).toContain('npm run lint');
+    expect(workflowAndSkill).toContain(
+      'Do not run the CLI, examples, release scripts',
+    );
+    expect(workflowAndSkill).toContain('do not commit');
     expect(workflow).toContain('"sandbox": "docker"');
     expect(workflow).not.toContain('"sandbox": false');
     expect(workflow).not.toContain('"sandbox": true');
