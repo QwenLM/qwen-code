@@ -152,6 +152,43 @@ export interface DaemonGlobResult {
   matches: string[];
 }
 
+// ── Scheduled Tasks (durable cron, server-only) ─────────────────────
+
+/** A durable scheduled task as returned by the daemon. `name`/`enabled` are
+ * normalized (never undefined): `name: null` = unnamed, `enabled` defaults to
+ * true for tasks created before the field existed. */
+export interface DaemonScheduledTask {
+  id: string;
+  name: string | null;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  enabled: boolean;
+  createdAt: number;
+  lastFiredAt: number | null;
+}
+
+export interface DaemonCreateScheduledTaskRequest {
+  cron: string;
+  prompt: string;
+  /** Omit or null for an unnamed task. */
+  name?: string | null;
+  /** Defaults to true (fire on every match until deleted/expired). */
+  recurring?: boolean;
+  /** Defaults to true. */
+  enabled?: boolean;
+}
+
+/** Partial update. `name: null` (or '') clears the name. Omitted fields are
+ * left unchanged. */
+export interface DaemonUpdateScheduledTaskRequest {
+  cron?: string;
+  prompt?: string;
+  name?: string | null;
+  recurring?: boolean;
+  enabled?: boolean;
+}
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -258,6 +295,17 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonWorkspaceFileEditResult>;
   stat(filePath: string): Promise<DaemonFileStat>;
   listDirectory(dirPath: string): Promise<DaemonDirectoryListing>;
+
+  // Scheduled tasks (durable cron)
+  listScheduledTasks(): Promise<DaemonScheduledTask[]>;
+  createScheduledTask(
+    req: DaemonCreateScheduledTaskRequest,
+  ): Promise<DaemonScheduledTask>;
+  updateScheduledTask(
+    id: string,
+    patch: DaemonUpdateScheduledTaskRequest,
+  ): Promise<DaemonScheduledTask>;
+  deleteScheduledTask(id: string): Promise<void>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;

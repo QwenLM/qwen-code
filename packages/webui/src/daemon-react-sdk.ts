@@ -272,6 +272,12 @@ export type {
   DaemonGlobOptions,
   /** Glob match result containing matched file paths. */
   DaemonGlobResult,
+  /** A durable scheduled task (cron) as returned by the daemon. */
+  DaemonScheduledTask,
+  /** Request body for creating a scheduled task. */
+  DaemonCreateScheduledTaskRequest,
+  /** Partial-update body for a scheduled task. */
+  DaemonUpdateScheduledTaskRequest,
   /** Memory file scope: `'workspace' | 'global'`. */
   DaemonContextFileScope,
 } from './daemon/index.js';
