@@ -17,7 +17,10 @@ import { useLaunchEditor } from '../hooks/useLaunchEditor.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { SettingScope } from '../../config/settings.js';
-import { sanitizeMultilineForDisplay } from '../utils/textUtils.js';
+import {
+  sanitizeFilenameForDisplay,
+  sanitizeMultilineForDisplay,
+} from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import type { PendingSkillView } from '../contexts/UIStateContext.js';
@@ -105,12 +108,14 @@ export const SkillReviewDialog = ({
   const settings = useSettings();
   const config = useConfig();
   const { columns } = useTerminalSize();
-  // MaxSizedBox wraps the preview at this width, and its height cap counts the
-  // WRAPPED rows — so this must never exceed the dialog's actual inner text
-  // width (columns − marginLeft 1 − border 2 − paddingX 2 = columns − 5), or
-  // Ink would re-wrap at render time and push rows past the cap. −6 keeps one
-  // column of slack.
-  const previewWidth = Math.max(20, columns - 6);
+  // The dialog does not span the full terminal: the layout caps the dialog
+  // container at min(terminalWidth − 4, 100) (mainAreaWidth in AppContainer;
+  // DiffDialog applies the same clamp). MaxSizedBox wraps the preview at this
+  // width, and its height cap counts the WRAPPED rows — so this must never
+  // exceed the dialog's actual inner text width (container − marginLeft 1 −
+  // border 2 − paddingX 2 = container − 5), or Ink would re-wrap at render
+  // time and push rows past the cap. −6 keeps one column of slack.
+  const previewWidth = Math.max(20, Math.min(columns - 4, 100) - 6);
 
   const current = snapshot[index];
   const stagedPath = current?.stagedManifestPath;
@@ -182,7 +187,22 @@ export const SkillReviewDialog = ({
 
   const turnOff = () => {
     // Persist for next launch...
-    settings.setValue(SettingScope.Workspace, 'memory.enableAutoSkill', false);
+    try {
+      settings.setValue(
+        SettingScope.Workspace,
+        'memory.enableAutoSkill',
+        false,
+      );
+    } catch (err) {
+      // saveSettings re-throws write failures (read-only workspace, ENOSPC).
+      // Surface the error and keep the dialog open with the feature untouched
+      // so the choice can be retried — letting the throw escape the keypress
+      // handler would take down the render tree.
+      setActionError(
+        `Failed to save setting: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
     // ...and stop the scheduler for the rest of THIS session (Config copies the
     // setting at startup, so persisting alone wouldn't take effect until relaunch
     // and another review could still pop this dialog after the user asked to stop).
@@ -328,9 +348,16 @@ export const SkillReviewDialog = ({
         {t('Auto-generated skill — keep it?')} ({index + 1}/{snapshot.length})
       </Text>
       <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.primary}>{current.name}</Text>
+        {/* Name and description are model-generated too — sanitize them just
+            like the preview body, or an escape sequence in the frontmatter
+            would reach the terminal through the header. */}
+        <Text color={theme.text.primary}>
+          {sanitizeFilenameForDisplay(current.name)}
+        </Text>
         {current.description ? (
-          <Text color={theme.text.secondary}>{current.description}</Text>
+          <Text color={theme.text.secondary}>
+            {sanitizeMultilineForDisplay(current.description)}
+          </Text>
         ) : null}
       </Box>
 

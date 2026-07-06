@@ -355,6 +355,30 @@ describe('SkillReviewDialog', () => {
     expect(lastFrame()).toContain('u007f');
   });
 
+  it('sanitizes the model-generated name and description in the header', async () => {
+    // The header fields come from the same model-generated source as the
+    // preview body (directory basename / frontmatter) — an escape smuggled
+    // there must not bypass the sanitizer just because it is not in the body.
+    const stagedManifestPath = await writeSkill(
+      'auto-skill-header',
+      '---\nname: x\n---\nHEADER_BODY\n',
+    );
+    const { lastFrame } = renderDialog([
+      {
+        name: 'evil-\u001b[2Jname',
+        description: `desc_${String.fromCharCode(7)}end`,
+        stagedManifestPath,
+      },
+    ]);
+    await vi.waitFor(() => expect(lastFrame()).toContain('HEADER_BODY'));
+    // Raw escape/control bytes must not reach the terminal...
+    expect(lastFrame()).not.toContain('\u001b[2J');
+    expect(lastFrame()).not.toContain(String.fromCharCode(7));
+    // ...they render as inert, escaped text, same as the preview body.
+    expect(lastFrame()).toContain('u001b[2J');
+    expect(lastFrame()).toContain('u0007');
+  });
+
   it('renders CRLF line endings as ordinary line breaks, not CR escapes', async () => {
     // Windows-authored / editor-saved file: every line ends with \r\n.
     const { lastFrame } = await renderPreviewSkill(
@@ -571,6 +595,27 @@ describe('SkillReviewDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onDismiss).not.toHaveBeenCalled();
     expect(onReject).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dialog open and the feature untouched when persisting turn-off fails', async () => {
+    // saveSettings re-throws write failures (read-only workspace, ENOSPC);
+    // the throw must not escape the keypress handler, and a half-applied
+    // turn-off (live flag off, setting still on) must not be left behind.
+    setValue.mockImplementation(() => {
+      throw new Error('EACCES: permission denied');
+    });
+    const onClose = vi.fn();
+    const onDismiss = vi.fn();
+    const { lastFrame } = renderDialog(skills, { onClose, onDismiss });
+    captured.onSelect!('turnOff');
+    // The failure is surfaced in the dialog so the user can retry or move on.
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('Failed to save setting'),
+    );
+    expect(lastFrame()).toContain('EACCES');
+    expect(setAutoSkillEnabled).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 
   it('the retired `t` hotkey is inert', () => {

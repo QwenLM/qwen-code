@@ -273,124 +273,129 @@ async function main() {
   );
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-textcap-'));
-  const alphaPath = path.join(dir, 'run-e2e-headless', 'SKILL.md');
-  const betaPath = path.join(dir, 'vitest-mock-hoisting', 'SKILL.md');
-  await fs.mkdir(path.dirname(alphaPath), { recursive: true });
-  await fs.mkdir(path.dirname(betaPath), { recursive: true });
-  await fs.writeFile(alphaPath, ALPHA);
-  await fs.writeFile(betaPath, BETA);
+  // try/finally so a failed render or frame-wait doesn't leak the temp dir.
+  try {
+    const alphaPath = path.join(dir, 'run-e2e-headless', 'SKILL.md');
+    const betaPath = path.join(dir, 'vitest-mock-hoisting', 'SKILL.md');
+    await fs.mkdir(path.dirname(alphaPath), { recursive: true });
+    await fs.mkdir(path.dirname(betaPath), { recursive: true });
+    await fs.writeFile(alphaPath, ALPHA);
+    await fs.writeFile(betaPath, BETA);
 
-  const skills: PendingSkillView[] = [
-    {
-      name: 'run-e2e-headless',
-      description:
-        'Run the Qwen CLI headlessly against a mock model and inspect API traffic.',
-      stagedManifestPath: alphaPath,
-    },
-    {
-      name: 'vitest-mock-hoisting',
-      description:
-        'Hoist vi.mock factories in CLI tests so mocks apply at load time.',
-      stagedManifestPath: betaPath,
-    },
-  ];
+    const skills: PendingSkillView[] = [
+      {
+        name: 'run-e2e-headless',
+        description:
+          'Run the Qwen CLI headlessly against a mock model and inspect API traffic.',
+        stagedManifestPath: alphaPath,
+      },
+      {
+        name: 'vitest-mock-hoisting',
+        description:
+          'Hoist vi.mock factories in CLI tests so mocks apply at load time.',
+        stagedManifestPath: betaPath,
+      },
+    ];
 
-  // ── BEFORE ────────────────────────────────────────────────────────────────
-  if (shouldPrint('before')) {
-    try {
-      const before = await renderGlobalBefore(skills);
-      banner(
-        `BEFORE — global qwen ${before.version} dialog (name + description only)`,
-      );
-      console.log(before.frame);
-    } catch (err) {
-      // The baseline must come from the globally installed qwen or not at
-      // all — a hand-maintained pre-change fixture can silently drift from
-      // what actually shipped, so there is deliberately no local fallback.
-      const reason = err instanceof Error ? err.message : String(err);
-      banner('BEFORE — unavailable: could not render the global qwen dialog');
-      console.log(
-        `${reason}\nInstall it first: npm install -g @qwen-code/qwen-code`,
-      );
-      if (mode === 'before') throw err;
+    // ── BEFORE ────────────────────────────────────────────────────────────────
+    if (shouldPrint('before')) {
+      try {
+        const before = await renderGlobalBefore(skills);
+        banner(
+          `BEFORE — global qwen ${before.version} dialog (name + description only)`,
+        );
+        console.log(before.frame);
+      } catch (err) {
+        // The baseline must come from the globally installed qwen or not at
+        // all — a hand-maintained pre-change fixture can silently drift from
+        // what actually shipped, so there is deliberately no local fallback.
+        const reason = err instanceof Error ? err.message : String(err);
+        banner('BEFORE — unavailable: could not render the global qwen dialog');
+        console.log(
+          `${reason}\nInstall it first: npm install -g @qwen-code/qwen-code`,
+        );
+        if (mode === 'before') throw err;
+      }
     }
-  }
 
-  // ── AFTER: skipped entirely in `before` mode so the baseline capture never
-  // executes the implementation under review.
-  if (mode === 'all' || mode.startsWith('after-')) {
-    const { SkillReviewDialog } = await import(
-      '../../../packages/cli/src/ui/components/SkillReviewDialog.js'
-    );
+    // ── AFTER: skipped entirely in `before` mode so the baseline capture never
+    // executes the implementation under review.
+    if (mode === 'all' || mode.startsWith('after-')) {
+      const { SkillReviewDialog } = await import(
+        '../../../packages/cli/src/ui/components/SkillReviewDialog.js'
+      );
 
-    function AfterHarness({
-      dialogSkills,
-    }: {
-      dialogSkills: PendingSkillView[];
-    }) {
-      const [open, setOpen] = React.useState(true);
-      if (!open) {
+      function AfterHarness({
+        dialogSkills,
+      }: {
+        dialogSkills: PendingSkillView[];
+      }) {
+        const [open, setOpen] = React.useState(true);
+        if (!open) {
+          return (
+            <Text>
+              Auto-skill turned off. Re-enable it any time from /memory.
+            </Text>
+          );
+        }
         return (
-          <Text>
-            Auto-skill turned off. Re-enable it any time from /memory.
-          </Text>
+          <SkillReviewDialog
+            skills={dialogSkills}
+            onAccept={noop}
+            onReject={noop}
+            onClose={() => setOpen(false)}
+            onDismiss={() => setOpen(false)}
+          />
         );
       }
-      return (
-        <SkillReviewDialog
-          skills={dialogSkills}
-          onAccept={noop}
-          onReject={noop}
-          onClose={() => setOpen(false)}
-          onDismiss={() => setOpen(false)}
-        />
-      );
-    }
 
-    // The preview and turn-off frames showcase the COMMON single-skill case
-    // (1/1, no bulk options); the advance frame needs a two-skill batch. They
-    // use separate dialog instances so `all` can show both — a single-skill
-    // dialog closes on its first decision and could never reach a second
-    // skill (this exact mismatch once made default-mode runs time out).
-    if (mode !== 'after-second') {
-      const single = render(wrap(<AfterHarness dialogSkills={[skills[0]!]} />));
-      // Wait for body-only text from the skill's preview (not its name or
-      // description, which show before the async read resolves).
-      await waitForFrame(() => single.lastFrame(), 'OPENAI_BASE_URL');
-      if (shouldPrint('after-preview')) {
-        banner(
-          'AFTER — common 1/1 review with inline preview and visible turn-off option',
+      // The preview and turn-off frames showcase the COMMON single-skill case
+      // (1/1, no bulk options); the advance frame needs a two-skill batch. They
+      // use separate dialog instances so `all` can show both — a single-skill
+      // dialog closes on its first decision and could never reach a second
+      // skill (this exact mismatch once made default-mode runs time out).
+      if (mode !== 'after-second') {
+        const single = render(
+          wrap(<AfterHarness dialogSkills={[skills[0]!]} />),
         );
-        console.log(single.lastFrame());
+        // Wait for body-only text from the skill's preview (not its name or
+        // description, which show before the async read resolves).
+        await waitForFrame(() => single.lastFrame(), 'OPENAI_BASE_URL');
+        if (shouldPrint('after-preview')) {
+          banner(
+            'AFTER — common 1/1 review with inline preview and visible turn-off option',
+          );
+          console.log(single.lastFrame());
+        }
+        if (shouldPrint('after-turn-off')) {
+          // Select "Turn off auto-generated skills" — in the single-skill case
+          // the options are keep / discard / turn-off, so numeric quick-select
+          // "3" picks it.
+          single.stdin.write('3');
+          await waitForFrame(() => single.lastFrame(), 'turned off');
+          banner(
+            'AFTER — after selecting "Turn off auto-generated skills": batch closed',
+          );
+          console.log(single.lastFrame());
+        }
+        single.unmount();
       }
-      if (shouldPrint('after-turn-off')) {
-        // Select "Turn off auto-generated skills" — in the single-skill case
-        // the options are keep / discard / turn-off, so numeric quick-select
-        // "3" picks it.
-        single.stdin.write('3');
-        await waitForFrame(() => single.lastFrame(), 'turned off');
-        banner(
-          'AFTER — after selecting "Turn off auto-generated skills": batch closed',
-        );
-        console.log(single.lastFrame());
-      }
-      single.unmount();
-    }
 
-    if (shouldPrint('after-second')) {
-      const batch = render(wrap(<AfterHarness dialogSkills={skills} />));
-      await waitForFrame(() => batch.lastFrame(), 'OPENAI_BASE_URL');
-      // Drive Enter (keep skill 1 → advance to skill 2), then wait for body-only
-      // text from the SECOND skill's preview so we never capture "Loading preview…".
-      batch.stdin.write('\r');
-      await waitForFrame(() => batch.lastFrame(), 'vi.hoisted');
-      banner('AFTER — 2/2 final batch item hides bulk options');
-      console.log(batch.lastFrame());
-      batch.unmount();
+      if (shouldPrint('after-second')) {
+        const batch = render(wrap(<AfterHarness dialogSkills={skills} />));
+        await waitForFrame(() => batch.lastFrame(), 'OPENAI_BASE_URL');
+        // Drive Enter (keep skill 1 → advance to skill 2), then wait for body-only
+        // text from the SECOND skill's preview so we never capture "Loading preview…".
+        batch.stdin.write('\r');
+        await waitForFrame(() => batch.lastFrame(), 'vi.hoisted');
+        banner('AFTER — 2/2 final batch item hides bulk options');
+        console.log(batch.lastFrame());
+        batch.unmount();
+      }
     }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
   }
-
-  await fs.rm(dir, { recursive: true, force: true });
 }
 
 void main().then(
