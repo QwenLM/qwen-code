@@ -1051,8 +1051,12 @@ export class SessionService {
       fileHistorySnapshots.length > MAX_SNAPSHOTS
         ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
         : fileHistorySnapshots;
-    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+    const activeBranchRecords = includeActiveSideArtifactRecords(
+      records,
       messages,
+    );
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      activeBranchRecords,
       firstRecord.sessionId,
     );
 
@@ -1415,7 +1419,10 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    const sourceRecords = this.reconstructHistory(records);
+    const sourceRecords = includeActiveSideArtifactRecords(
+      records,
+      this.reconstructHistory(records),
+    );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
@@ -1939,6 +1946,41 @@ function remapSystemPayloadForFork(
     ) as ChatRecord['systemPayload'];
   }
   return record.systemPayload;
+}
+
+function isSessionArtifactRecord(record: ChatRecord): boolean {
+  return (
+    record.type === 'system' &&
+    (record.subtype === 'session_artifact_event' ||
+      record.subtype === 'session_artifact_snapshot')
+  );
+}
+
+function includeActiveSideArtifactRecords(
+  records: ChatRecord[],
+  activeRecords: ChatRecord[],
+): ChatRecord[] {
+  const activeByUuid = new Map(
+    activeRecords.map((record) => [record.uuid, record]),
+  );
+  const activeUuids = new Set(activeByUuid.keys());
+  const selected: ChatRecord[] = [];
+  for (const record of records) {
+    const activeRecord = activeByUuid.get(record.uuid);
+    if (activeRecord) {
+      selected.push(activeRecord);
+      activeByUuid.delete(record.uuid);
+      continue;
+    }
+    if (
+      isSessionArtifactRecord(record) &&
+      record.parentUuid !== null &&
+      activeUuids.has(record.parentUuid)
+    ) {
+      selected.push(record);
+    }
+  }
+  return selected;
 }
 
 function collectFileHistorySnapshotPromptIds(

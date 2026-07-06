@@ -25,6 +25,10 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
+import {
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  stableSessionArtifactId,
+} from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -466,6 +470,69 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('loads artifact side records attached to the active branch', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      const artifactId = stableSessionArtifactId(
+        sessionIdB,
+        'url:https://example.com/report',
+      );
+      const artifactRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'artifact-1',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: sessionIdB,
+          sequence: 1,
+          recordedAt: '2026-07-06T00:00:00.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Report',
+                url: 'https://example.com/report',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-06T00:00:00.000Z',
+                updatedAt: '2026-07-06T00:00:00.000Z',
+                persistedAt: '2026-07-06T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        artifactRecord,
+        recordB2,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(
+        loaded?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(['b1', 'b2']);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: artifactId,
+          title: 'Report',
+        }),
+      ]);
     });
 
     it('keeps the latest file history snapshot for a prompt id', async () => {
@@ -2509,6 +2576,69 @@ describe('SessionService', () => {
         .map((l) => JSON.parse(l));
       expect(srcLines.every((r) => r.sessionId === oldId)).toBe(true);
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
+    });
+
+    it('copies artifact side records from the active branch', async () => {
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const oldArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/forked',
+      );
+      const artifactRecord = {
+        uuid: 'artifact-1',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Forked artifact',
+                url: 'https://example.com/forked',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], artifactRecord, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+
+      expect(result.copiedCount).toBe(3);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(newId, 'url:https://example.com/forked'),
+          title: 'Forked artifact',
+        }),
+      ]);
     });
 
     it('preserves file history snapshots on the forked session', async () => {
