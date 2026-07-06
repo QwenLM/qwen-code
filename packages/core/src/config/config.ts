@@ -1683,7 +1683,7 @@ export class Config {
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
   // re-checks shareability instead of reusing the first repo's result.
   private readonly teamMemoryShareabilityChecked = new Set<string>();
-  private readonly enableAutoSkill: boolean;
+  private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
   private visionModel?: string;
@@ -5389,6 +5389,16 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
+  }
+
+  /**
+   * Toggle auto-skill for the running session. The startup value is copied from
+   * settings, so persisting a settings change alone would not take effect until
+   * the next launch; the skill-review scheduler reads `getAutoSkillEnabled()`
+   * live, so flipping this stops (or resumes) reviews immediately.
+   */
+  setAutoSkillEnabled(enabled: boolean): void {
+    this.enableAutoSkill = enabled;
   }
 
   getAutoSkillConfirmEnabled(): boolean {

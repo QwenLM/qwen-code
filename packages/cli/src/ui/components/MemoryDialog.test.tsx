@@ -35,9 +35,12 @@ const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
 describe('MemoryDialog', () => {
+  let setAutoSkillEnabled: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
 
+    setAutoSkillEnabled = vi.fn();
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
@@ -48,6 +51,7 @@ describe('MemoryDialog', () => {
       getManagedAutoMemoryEnabled: vi.fn(() => false),
       getManagedAutoDreamEnabled: vi.fn(() => false),
       getAutoSkillEnabled: vi.fn(() => false),
+      setAutoSkillEnabled,
     } as never);
 
     mockedUseSettings.mockReturnValue({
@@ -187,6 +191,9 @@ describe('MemoryDialog', () => {
       'memory.enableAutoSkill',
       true,
     );
+    // Also drives the live Config flag so it takes effect this session (and can
+    // re-enable auto-skill after the review dialog's `t` disabled it).
+    expect(setAutoSkillEnabled).toHaveBeenCalledWith(true);
     expect(lastFrame()).toContain('› Auto-skill: on');
   });
 

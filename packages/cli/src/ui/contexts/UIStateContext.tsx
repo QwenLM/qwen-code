@@ -44,6 +44,8 @@ import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 export interface PendingSkillView {
   name: string;
   description: string;
+  /** Absolute path of the staged SKILL.md, for inline preview / open-in-editor. */
+  stagedManifestPath: string;
 }
 
 export interface UIState {

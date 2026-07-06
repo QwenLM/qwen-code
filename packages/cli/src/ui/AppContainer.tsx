@@ -1346,6 +1346,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
         name: string;
         description: string;
+        stagedManifestPath: string;
       }>;
       const sig = `${withPending.id}|${pendingSkills
         .map((p) => p.name)
@@ -1357,6 +1358,7 @@ export const AppContainer = (props: AppContainerProps) => {
         skills: pendingSkills.map((p) => ({
           name: p.name,
           description: p.description,
+          stagedManifestPath: p.stagedManifestPath,
         })),
       });
     };
@@ -1736,16 +1738,27 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [streamingState]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
+  // Gated on the live auto-skill flag: after the dialog's turn-off option
+  // (which disables the feature and closes WITHOUT dismissing), the batch must
+  // not re-pop — but re-enabling auto-skill from /memory flips the flag back,
+  // and the batch can then reopen. The flag lives on the stable `config`
+  // object (mutated imperatively), so no dependency changes when it flips;
+  // `isMemoryDialogOpen` is a dependency precisely so that closing /memory —
+  // the only in-session place the flag can be re-enabled — re-runs this check
+  // even when the app is already idle. It doubles as a gate so the review
+  // dialog never pops over the open /memory dialog.
   useEffect(() => {
     if (
       skillReviewPending &&
       skillReviewPending.skills.length > 0 &&
       streamingState === StreamingState.Idle &&
+      !isMemoryDialogOpen &&
+      config.getAutoSkillEnabled() &&
       !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
     ) {
       setIsSkillReviewDialogOpen(true);
     }
-  }, [skillReviewPending, streamingState]);
+  }, [skillReviewPending, streamingState, isMemoryDialogOpen, config]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
