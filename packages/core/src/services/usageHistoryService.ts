@@ -206,6 +206,7 @@ export function metricsToUsageRecord(
 
 async function rebuildFromSessionJsonl(
   skipSessionInRebuild?: string,
+  persist = true,
 ): Promise<UsageSummaryRecord[]> {
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
@@ -291,7 +292,10 @@ async function rebuildFromSessionJsonl(
     }
   }
 
-  if (results.length > 0) {
+  // Persist rebuilt records as a one-time migration so later reads are fast.
+  // Read-only callers (e.g. the daemon dashboard, which serves a GET) pass
+  // `persist: false` so opening the dashboard never writes to `~/.qwen`.
+  if (persist && results.length > 0) {
     const usagePath = getUsageHistoryPath();
     for (const record of results) {
       // Skip the in-progress current session: persistSessionUsage() will write
@@ -322,6 +326,7 @@ function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
 
 export async function loadUsageHistory(
   skipSessionInRebuild?: string,
+  options?: { persistRebuild?: boolean },
 ): Promise<UsageSummaryRecord[]> {
   try {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
@@ -331,7 +336,12 @@ export async function loadUsageHistory(
     debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
 
-  return dedupBySessionId(await rebuildFromSessionJsonl(skipSessionInRebuild));
+  return dedupBySessionId(
+    await rebuildFromSessionJsonl(
+      skipSessionInRebuild,
+      options?.persistRebuild ?? true,
+    ),
+  );
 }
 
 export function getTimeRangeBounds(range: TimeRange): {

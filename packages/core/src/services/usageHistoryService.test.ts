@@ -184,6 +184,35 @@ describe('metricsToUsageRecord', () => {
     expect(record.files.linesAdded).toBe(50);
     expect(record.files.linesRemoved).toBe(10);
   });
+
+  it('copies SessionMetrics.skills into the persisted record', () => {
+    const metrics = makeMetrics({
+      skills: {
+        totalCalls: 3,
+        totalSuccess: 3,
+        totalFail: 0,
+        byName: {
+          qreview: { count: 2, success: 2, fail: 0 },
+          simplify: { count: 1, success: 1, fail: 0 },
+        },
+      },
+    });
+    const record = metricsToUsageRecord('s', '/p', 0, 1000, metrics);
+    expect(record.skills).toEqual({
+      totalCalls: 3,
+      totalSuccess: 3,
+      totalFail: 0,
+      byName: {
+        qreview: { count: 2, success: 2, fail: 0 },
+        simplify: { count: 1, success: 1, fail: 0 },
+      },
+    });
+  });
+
+  it('omits skills when SessionMetrics has none', () => {
+    const record = metricsToUsageRecord('s', '/p', 0, 1000, makeMetrics());
+    expect(record.skills).toBeUndefined();
+  });
 });
 
 function makeRecord(
@@ -548,6 +577,28 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     let totalTokens = 0;
     for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
     expect(totalTokens).toBe(1600);
+  });
+
+  it('read-only: persistRebuild:false rebuilds without writing usage_record.jsonl', async () => {
+    const sessionId = 'sess-readonly';
+    plantChatJsonl(sessionId, 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    // The daemon dashboard loads read-only: it rebuilds + returns data but must
+    // not write to ~/.qwen on a GET.
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe(sessionId);
+    expect(fs.existsSync(usagePath)).toBe(false);
+
+    // The default (persisting) load still migrates the rebuilt records to disk.
+    await loadUsageHistory();
+    expect(fs.existsSync(usagePath)).toBe(true);
   });
 
   it('end-to-end: /stats during first turn + /clear must not 2x the session', async () => {

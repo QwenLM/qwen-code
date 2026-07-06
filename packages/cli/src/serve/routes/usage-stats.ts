@@ -9,8 +9,10 @@
  * "统计 / Usage" tab. Serves the selected range's (`today`/`week`/`month`)
  * flattened token totals plus a trailing per-day heatmap, computed by core's
  * `buildUsageDashboard` from the durable local usage history (global `~/.qwen`,
- * cross-project) — the same source the TUI `/stats` command reads. No new
- * instrumentation; nothing is written.
+ * cross-project) — the same source the TUI `/stats` command reads. The history
+ * load runs read-only (`persistRebuild: false`), so serving a GET never writes
+ * to `~/.qwen`, even when the persisted file is missing and the loader falls
+ * back to transcript replay.
  *
  * Open GET (no `mutate` gate), consistent with `GET /daemon/status` and
  * `GET /scheduled-tasks`: it exposes only aggregate local usage counts.
@@ -65,28 +67,41 @@ export function registerUsageStatsRoutes(
   app: Application,
   deps: RegisterUsageStatsRoutesDeps = {},
 ): void {
-  const loadHistory = deps.loadHistory ?? (() => loadUsageHistory());
+  const loadHistory =
+    deps.loadHistory ??
+    (() => loadUsageHistory(undefined, { persistRebuild: false }));
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 
   // Closure-scoped, range-independent history cache (one daemon per process).
-  // The in-flight promise is cached so concurrent requests share one load.
-  let cache: { at: number; promise: Promise<UsageSummaryRecord[]> } | null =
-    null;
+  // A pending load is always reused regardless of age, so concurrent requests
+  // share one load even when it runs longer than the TTL (the slow transcript-
+  // replay path). The TTL window only starts once the load settles; a rejected
+  // load clears the cache so the next request retries (and is consumed here so
+  // a failed load never surfaces as an unhandled rejection).
+  interface HistoryCache {
+    promise: Promise<UsageSummaryRecord[]>;
+    settledAt: number | null;
+  }
+  let cache: HistoryCache | null = null;
 
   const getRecords = (): Promise<UsageSummaryRecord[]> => {
     const now = Date.now();
-    if (!cache || now - cache.at >= ttlMs) {
-      const promise = loadHistory();
-      const entry = { at: now, promise };
+    const fresh =
+      cache !== null &&
+      (cache.settledAt === null || now - cache.settledAt < ttlMs);
+    if (!fresh) {
+      const entry: HistoryCache = { promise: loadHistory(), settledAt: null };
       cache = entry;
-      // Don't cache a rejection for the whole TTL window — drop it so the next
-      // request retries, and consume it so a failed load never surfaces as an
-      // unhandled rejection.
-      promise.catch(() => {
-        if (cache === entry) cache = null;
-      });
+      entry.promise.then(
+        () => {
+          if (cache === entry) entry.settledAt = Date.now();
+        },
+        () => {
+          if (cache === entry) cache = null;
+        },
+      );
     }
-    return cache.promise;
+    return cache!.promise;
   };
 
   app.get('/usage/dashboard', async (req, res) => {

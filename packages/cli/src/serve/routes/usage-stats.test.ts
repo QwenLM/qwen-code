@@ -90,6 +90,36 @@ describe('usage-stats route (cache + range + clamping)', () => {
     expect(loads).toBe(1); // range-independent cache
   });
 
+  it('reuses a pending load for later requests even after the TTL elapses', async () => {
+    let loads = 0;
+    let resolveLoad: (r: UsageSummaryRecord[]) => void = () => {};
+    const gate = new Promise<UsageSummaryRecord[]>((r) => {
+      resolveLoad = r;
+    });
+    const now = Date.now();
+    const app = mount({
+      cacheTtlMs: 0, // TTL always elapsed — the old cache would reload each request
+      loadHistory: () => {
+        loads++;
+        return gate;
+      },
+    });
+    // `.then` forces supertest to send now (it is otherwise lazy), so both
+    // handlers reach getRecords while the single load is still pending.
+    const p1 = request(app)
+      .get('/usage/dashboard')
+      .then((r) => r);
+    const p2 = request(app)
+      .get('/usage/dashboard')
+      .then((r) => r);
+    await new Promise((r) => setTimeout(r, 20));
+    resolveLoad([rec({ sessionId: 'a', timestamp: now, totalTokens: 5 })]);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(loads).toBe(1); // pending load shared, not restarted past the TTL
+  });
+
   it('scopes totals by range; invalid range falls back to today', async () => {
     const now = Date.now();
     const records = [
