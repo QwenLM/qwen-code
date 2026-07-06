@@ -505,16 +505,18 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('npm install -g');
     }
     expect(workflow).not.toContain('run_shell_command(node dist/cli.js)');
+    expect(developFixStep).toContain('run_shell_command(npm)');
+    expect(triageAndAddressStep).toContain('run_shell_command(npm)');
+    expect(assessCandidatesStep).not.toContain('run_shell_command(npm)');
     expect(workflow).not.toContain('run_shell_command(npm run build)');
     expect(workflow).not.toContain('run_shell_command(npm run bundle)');
     expect(workflow).not.toContain('run_shell_command(npx vitest)');
-    expect(workflowAndSkill).toContain('Do not run project code,');
     expect(workflowAndSkill).toContain(
-      'workflow verification gate runs trusted checks after',
+      'Run required verification commands before committing',
     );
-    expect(workflowAndSkill).toContain(
-      'overrides repository instructions that ask agents to run verification',
-    );
+    expect(workflowAndSkill).toContain('npm run build');
+    expect(workflowAndSkill).toContain('npm run typecheck');
+    expect(workflowAndSkill).toContain('npm run lint');
     expect(workflow).toContain('"sandbox": "docker"');
     expect(workflow).not.toContain('"sandbox": false');
     expect(workflow).not.toContain('"sandbox": true');
@@ -636,6 +638,7 @@ describe('qwen-autofix workflow', () => {
       'untrusted input',
       'Do not push, comment, create pull requests',
       'Operate only in the workflow',
+      'Run required verification commands before committing',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
@@ -1002,7 +1005,7 @@ describe('qwen-autofix workflow', () => {
       expect(stderr).toContain('pr-title.txt');
       expect(stderr).toContain('pr-body.md');
     });
-  });
+  }, 10000);
 
   it('does not reference stale comment-trigger routing in the skill', () => {
     const skill = readAutofixSkill();

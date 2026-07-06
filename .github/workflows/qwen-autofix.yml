@@ -632,6 +632,7 @@ jobs:
                 "run_shell_command(git switch)",
                 "run_shell_command(ls)",
                 "run_shell_command(mkdir)",
+                "run_shell_command(npm)",
                 "run_shell_command(pwd)"
               ],
               "tools": {
@@ -1177,6 +1178,7 @@ jobs:
                 "run_shell_command(git status)",
                 "run_shell_command(ls)",
                 "run_shell_command(mkdir)",
+                "run_shell_command(npm)",
                 "run_shell_command(pwd)"
               ],
               "tools": {
