@@ -1858,7 +1858,7 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_request') {
-      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}`;
+      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${envelope.senderId ?? ''}`;
       this.pendingClears.set(pendingKey, Date.now() + 60_000);
       await this.sendMessage(
         envelope.chatId,
@@ -1917,7 +1917,7 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
-      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}`;
+      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${envelope.senderId ?? ''}`;
       const expiresAt = this.pendingClears.get(pendingKey);
       this.pendingClears.delete(pendingKey);
       if (expiresAt === undefined || expiresAt < Date.now()) {
