@@ -584,7 +584,10 @@ export async function getInitialChatHistory(
  *    `composePostCompactHistory`. These synthetic entries must not be
  *    counted as real user prompts for rewind indexing.
  */
-export function getStartupContextLength(history: Content[]): number {
+export function getStartupContextLength(
+  history: Content[],
+  options: { includeCompressed?: boolean } = {},
+): number {
   const firstEntry = history[0];
   if (firstEntry?.role !== 'user') return 0;
   const firstText = firstEntry.parts?.[0]?.text;
@@ -609,27 +612,52 @@ export function getStartupContextLength(history: Content[]): number {
   ) {
     return 2;
   }
-  // Post-compression prefix: composePostCompactHistory always produces
-  // [user(summary), model(ack)] and optionally appends user(postAckParts)
-  // when file restorations or state reminders accompany the summary. The
-  // summary is plain prose (not <system-reminder>-wrapped) so it would pass
-  // isUserTextContent and corrupt rewind turn-counting. Detected via the
-  // compression-specific ack sentinel — distinct from the legacy ack above.
+  if (!options.includeCompressed) return 0;
+
+  // Post-compression prefix for rewind indexing only. The startup-context
+  // refresh/restore paths need compressed history to look like "no startup
+  // prelude" so they don't strip or skip the compressed summary.
   if (
+    typeof firstText === 'string' &&
+    firstText.includes('Resume the prior task') &&
     history[1]?.role === 'model' &&
     history[1]?.parts?.[0]?.text ===
       'Got it. Thanks for the additional context!'
   ) {
-    if (isUserTextContextEntry(history[2])) return 3;
+    if (isPostCompactAttachmentEntry(history[2])) {
+      if (isModelFunctionCallEntry(history[3])) return 4;
+      return 3;
+    }
     return 2;
   }
   return 0;
 }
 
-function isUserTextContextEntry(content: Content | undefined): boolean {
+function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
   if (content?.role !== 'user') return false;
   const parts = content.parts ?? [];
-  return parts.length > 0 && !parts.some((part) => 'functionResponse' in part);
+  return parts.some(
+    (part) =>
+      typeof part.text === 'string' &&
+      (part.text.startsWith('<plan-mode-active>') ||
+        part.text.startsWith('<background-tasks>') ||
+        part.text.startsWith(
+          'The following files were recently accessed before context was compacted.',
+        ) ||
+        part.text.startsWith(
+          'Recently accessed file (full current content embedded):',
+        ) ||
+        part.text.startsWith(
+          'Recent visual snapshots preserved from before context was compacted',
+        )),
+  );
+}
+
+function isModelFunctionCallEntry(content: Content | undefined): boolean {
+  return (
+    content?.role === 'model' &&
+    (content.parts ?? []).some((part) => 'functionCall' in part)
+  );
 }
 
 /**

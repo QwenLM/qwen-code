@@ -100,7 +100,9 @@ export function computeApiTruncationIndex(
   }
 
   // Determine the starting index in the API history (skip startup context)
-  const startIndex = getStartupContextLength(apiHistory);
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
 
   if (uiUserTurnCount === 0) {
     // Rewinding to the first user turn: keep only startup context (if any)
