@@ -30,10 +30,17 @@ export const MAX_SPLIT_PANES = 6;
 export function buildSplitUrl(
   sessionIds: string[],
   currentHref: string,
+  token?: string,
 ): string {
   const url = new URL(currentHref);
   url.pathname = '/';
   url.searchParams.set(SPLIT_PARAM, sessionIds.join(','));
+  // The current tab already stripped the daemon token from its URL, so carry it
+  // into the new tab's fragment (never sent to the server / logs) — otherwise a
+  // token-auth (`serve --open`) deployment opens the split tab unauthenticated.
+  if (token) {
+    url.hash = new URLSearchParams({ token }).toString();
+  }
   return url.toString();
 }
 

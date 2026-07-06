@@ -27,16 +27,20 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 vi.mock('./ChatPane', () => ({
-  ChatPane: (props: any) => (
-    <div data-testid="chat-pane" data-current={props.isCurrent ? 'yes' : 'no'}>
-      <span data-testid="pane-title">{props.title}</span>
-      {props.onClose && (
-        <button data-testid="pane-close" onClick={props.onClose}>
-          x
-        </button>
-      )}
-    </div>
-  ),
+  ChatPane: (props: any) => {
+    // Let a test force a render crash to exercise the per-pane ErrorBoundary.
+    if (props.title === 'BOOM') throw new Error('pane exploded');
+    return (
+      <div data-testid="chat-pane" data-current={props.isCurrent ? 'yes' : 'no'}>
+        <span data-testid="pane-title">{props.title}</span>
+        {props.onClose && (
+          <button data-testid="pane-close" onClick={props.onClose}>
+            x
+          </button>
+        )}
+      </div>
+    );
+  },
 }));
 
 const { SplitView } = await import('./SplitView');
@@ -160,5 +164,17 @@ describe('SplitView', () => {
     render({ initialSessionIds: sessionsState.map((s) => s.sessionId) });
     // Eight requested, but only six live panes mount.
     expect(panes()).toHaveLength(6);
+  });
+
+  it('isolates a crashing pane so the rest of the split survives', () => {
+    sessionsState = [
+      { sessionId: 's1', workspaceCwd: '/w', displayName: 'BOOM' },
+      { sessionId: 's2', workspaceCwd: '/w', displayName: 'Two' },
+    ];
+    render({ initialSessionIds: ['s1', 's2'] });
+    // The crashing pane shows its error fallback; the healthy pane still renders.
+    expect(container!.textContent).toContain('This session pane hit an error');
+    expect(panes()).toHaveLength(1);
+    expect(titles()).toEqual(['Two']);
   });
 });

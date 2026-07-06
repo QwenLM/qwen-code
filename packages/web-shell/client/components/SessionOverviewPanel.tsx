@@ -18,6 +18,7 @@ import type {
 import { useI18n } from '../i18n';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
+import { getDaemonToken } from '../config/daemon';
 import { ErrorBoundary } from './ErrorBoundary';
 import styles from './SessionOverviewPanel.module.css';
 
@@ -249,7 +250,9 @@ function SessionOverviewPanelInner({
   // window features makes browsers open a tab rather than a popup window.
   const openSelectedInNewTab = useCallback(() => {
     if (splitIds.length === 0) return;
-    const url = buildSplitUrl(splitIds, window.location.href);
+    // Carry the (already-stripped-from-the-URL) daemon token so the new tab can
+    // authenticate on token-auth deployments.
+    const url = buildSplitUrl(splitIds, window.location.href, getDaemonToken());
     const win = window.open(url, '_blank');
     win?.focus();
     setPopupBlocked(!win);

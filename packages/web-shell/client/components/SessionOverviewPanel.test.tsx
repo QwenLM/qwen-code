@@ -365,3 +365,56 @@ describe('SessionOverviewPanel', () => {
     expect(onOpenSplit.mock.calls[0][0]).toHaveLength(6);
   });
 });
+
+describe('SessionOverviewPanel polling', () => {
+  it('polls the session list on an interval', async () => {
+    sessionsState.sessions = [session('s')];
+    vi.useFakeTimers();
+    try {
+      render();
+      sessionsReload.mockClear();
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(sessionsReload).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips polling while the tab is hidden', async () => {
+    sessionsState.sessions = [session('s')];
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => true,
+    });
+    vi.useFakeTimers();
+    try {
+      render();
+      sessionsReload.mockClear();
+      await vi.advanceTimersByTimeAsync(6200);
+      expect(sessionsReload).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      Object.defineProperty(document, 'hidden', {
+        configurable: true,
+        get: () => false,
+      });
+    }
+  });
+
+  it('does not overlap polls while one is still in flight', async () => {
+    sessionsState.sessions = [session('s')];
+    // A never-resolving reload keeps the in-flight guard set.
+    sessionsReload.mockImplementation(() => new Promise<never>(() => {}));
+    vi.useFakeTimers();
+    try {
+      render();
+      sessionsReload.mockClear();
+      await vi.advanceTimersByTimeAsync(9300); // three list ticks
+      expect(sessionsReload).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      sessionsReload.mockReset();
+      sessionsReload.mockImplementation(async () => sessionsState.sessions);
+    }
+  });
+});

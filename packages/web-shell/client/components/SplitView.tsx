@@ -12,6 +12,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 import styles from './SplitView.module.css';
 
@@ -181,21 +182,45 @@ export function SplitView({
         ) : (
           paneIds.map((sessionId) => (
             <div className={styles.paneSlot} key={sessionId}>
-              <DaemonSessionProvider
-                sessionId={sessionId}
-                // Distinct from the main view's client (and from any other tab's
-                // panes) for the same session, so the attachments don't collide
-                // on one client identity.
-                clientId={`split-pane:${instanceId}:${sessionId}`}
-                suppressOwnUserEcho
+              {/* Contain a render crash to its own pane — a malformed block in
+                  one session must not white-screen the whole split. */}
+              <ErrorBoundary
+                label={`split-pane:${sessionId}`}
+                resetKeys={[sessionId]}
+                fallback={(error) => (
+                  <div className={styles.paneError} role="alert">
+                    <div className={styles.paneErrorTitle}>
+                      {titleById.get(sessionId) ?? sessionId.slice(0, 8)}
+                    </div>
+                    <div className={styles.paneErrorMessage}>
+                      {t('splitView.paneError')}: {error.message}
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.paneErrorClose}
+                      onClick={() => removePane(sessionId)}
+                    >
+                      {t('splitView.closePane')}
+                    </button>
+                  </div>
+                )}
               >
-                <ChatPane
-                  title={titleById.get(sessionId)}
-                  isCurrent={sessionId === currentSessionId}
-                  onClose={() => removePane(sessionId)}
-                  onError={onError}
-                />
-              </DaemonSessionProvider>
+                <DaemonSessionProvider
+                  sessionId={sessionId}
+                  // Distinct from the main view's client (and from any other
+                  // tab's panes) for the same session, so the attachments don't
+                  // collide on one client identity.
+                  clientId={`split-pane:${instanceId}:${sessionId}`}
+                  suppressOwnUserEcho
+                >
+                  <ChatPane
+                    title={titleById.get(sessionId)}
+                    isCurrent={sessionId === currentSessionId}
+                    onClose={() => removePane(sessionId)}
+                    onError={onError}
+                  />
+                </DaemonSessionProvider>
+              </ErrorBoundary>
             </div>
           ))
         )}
