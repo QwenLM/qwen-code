@@ -31,13 +31,14 @@ backbone. External PRs touching them face a two-tier gate (maintainer-authored
 PRs are exempt):
 
 1. **Large-scope `refactor` changes (500+ production logic lines in core,
-   excluding test files) → hard block.**
+   excluding test and generated/schema files) → hard block.**
    Skip evaluation entirely — the maintainer exemption above is the sole
    exception. Large-scale core refactors must be maintainer-initiated.
-   When counting lines, exclude files matching `*.test.ts`, `*.spec.ts`,
-   `__tests__/**`, `*.schema.ts`, `*.generated.ts`, and `**/generated/**` —
-   only production logic counts. `feat`-type and other non-`refactor` PRs are NOT
-   hard-blocked on size; they escalate to the maintainer for awareness
+   When counting lines, exclude files matching `*.test.ts`, `*.test.tsx`,
+   `*.spec.ts`, `*.spec.tsx`, `__tests__/**`, `*.schema.ts`, `*.schema.json`,
+   `*.generated.ts`, and `**/generated/**` — only production logic counts.
+   `feat`-type and other non-`refactor` PRs are NOT hard-blocked on size; they
+   escalate to the maintainer for awareness
    instead. Breadth alone is not size — a low-risk sweep that touches 10+
    files but changes a line or two each is escalated to a maintainer for
    awareness and otherwise judged under Tier 2's 100%-confidence bar, not
