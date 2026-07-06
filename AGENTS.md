@@ -38,8 +38,9 @@ PRs are exempt):
    `*.spec.ts`, `*.spec.tsx`, `__tests__/**`, `*.schema.ts`, `*.schema.json`,
    `*.generated.ts`, and `**/generated/**` — only production logic counts.
    `feat`-type and other non-`refactor` PRs are NOT hard-blocked on size; they
-   escalate to the maintainer for awareness
-   instead. Breadth alone is not size — a low-risk sweep that touches 10+
+   escalate to the maintainer for awareness instead. A non-blocking advisory
+   also applies at 1000+ production logic lines. Breadth alone is not size — a
+   low-risk sweep that touches 10+
    files but changes a line or two each is escalated to a maintainer for
    awareness and otherwise judged under Tier 2's 100%-confidence bar, not
    auto-rejected on file count.
