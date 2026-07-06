@@ -2741,10 +2741,9 @@ export const MessageList = memo(
         />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -2752,15 +2751,18 @@ export const MessageList = memo(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    String(virtualRow.key),
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
                 )}
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >

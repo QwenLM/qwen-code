@@ -30,6 +30,25 @@
   transition: width 320ms ease;
 }
 
+.virtualSizer {
+  position: relative;
+  width: 100%;
+  max-width: none;
+  margin-right: 0;
+  margin-left: 0;
+  transition: none;
+}
+
+.virtualRow {
+  width: min(
+    100%,
+    var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+  );
+  margin-right: auto;
+  margin-left: auto;
+  transition: width 320ms ease;
+}
+
 .loadingSkeleton {
   display: flex;
   flex-direction: column;
