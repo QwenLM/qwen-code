@@ -427,6 +427,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      // Registry injection supplies the primary workspace service through the
+      // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
         deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
       sessionShellCommandEnabled,

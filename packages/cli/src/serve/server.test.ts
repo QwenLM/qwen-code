@@ -14164,6 +14164,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       .set('Host', '127.0.0.1:0')
       .expect(200);
     expect(res.body.workspaceCwd).toBe('/work/registry-primary');
+    expect(res.body.features).toContain('workspace_reload');
   });
 
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
