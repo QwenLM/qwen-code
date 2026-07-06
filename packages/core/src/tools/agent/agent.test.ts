@@ -3464,8 +3464,9 @@ describe('AgentTool', () => {
       expect(mockRegistry.unregisterForeground).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
       );
-      expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalled();
-      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalled();
+      expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
+      expect(mockRegistry.releaseBackgroundSlot).not.toHaveBeenCalled();
       expect(
         (
           mockAgent as unknown as {
@@ -3489,23 +3490,14 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
     });
 
-    it('waits for a slot before foreground subagent setup', async () => {
+    it('does not wait for a background slot before foreground subagent setup', async () => {
       const fgSubagent: SubagentConfig = {
         ...bgSubagent,
         name: 'file-search',
         background: undefined,
       };
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
-      const slotReservation = { id: Symbol('foreground-slot') };
-      let releaseSlot:
-        | ((reservation: { readonly id: symbol }) => void)
-        | undefined;
       mockRegistry.tryReserveBackgroundSlot.mockReturnValue(undefined);
-      mockRegistry.waitForBackgroundSlot.mockReturnValue(
-        new Promise((resolve) => {
-          releaseSlot = resolve;
-        }),
-      );
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -3514,23 +3506,13 @@ describe('AgentTool', () => {
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       });
-      const executePromise = invocation.execute();
-      await Promise.resolve();
-
-      expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalled();
-      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
-      expect(mockRegistry.register).not.toHaveBeenCalled();
-
-      releaseSlot?.(slotReservation);
-      await executePromise;
+      await invocation.execute();
 
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalled();
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );
-      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledWith(
-        slotReservation,
-      );
+      expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
     });
 
     it('routes owned monitor notifications and cleanup for foreground agents', async () => {

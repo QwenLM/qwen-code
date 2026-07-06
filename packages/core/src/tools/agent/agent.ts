@@ -2142,7 +2142,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
 
-      if (!isFork) {
+      if (!isFork && shouldRunInBackground) {
         const registry = this.config.getBackgroundTaskRegistry();
         backgroundSlotReservation = registry.tryReserveBackgroundSlot();
         if (!backgroundSlotReservation) {

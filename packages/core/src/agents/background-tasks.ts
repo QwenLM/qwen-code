@@ -940,7 +940,10 @@ export class BackgroundTaskRegistry {
 
   private getRunningBackgroundCount(): number {
     return Array.from(this.agents.values()).filter(
-      (entry) => entry.isBackgrounded && entry.status === 'running',
+      (entry) =>
+        entry.isBackgrounded &&
+        (entry.status === 'running' ||
+          (entry.status === 'cancelled' && !entry.notified)),
     ).length;
   }
 

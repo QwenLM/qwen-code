@@ -571,6 +571,28 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-2')?.status).toBe('running');
     });
 
+    it('keeps a cancelled background agent in its slot until it settles', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      registry.cancel('bg-1');
+
+      await Promise.resolve();
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.complete('bg-1', 'cancelled agent settled');
+      const reservation = await reservationPromise;
+      registry.register(makeRegistration('bg-2'), {
+        slotReservation: reservation,
+      });
+      expect(registry.get('bg-2')?.status).toBe('running');
+    });
+
     it('reserves a drained slot until registration consumes it', async () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,
