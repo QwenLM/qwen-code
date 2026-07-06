@@ -1009,11 +1009,11 @@ export async function processSingleFileContent(
     // explicit page reads can bypass the inline-data cap. Full-document text
     // fallback is separately gated by page count or size heuristic below. Use
     // 9.9MB to leave margin for base64 encoding overhead (#1880). A separate
-    // upper bound applies to the extraction path so a multi-GB file can't hang
-    // pdftotext until the 30s timeout.
+    // upper bound applies to full-document extraction so a multi-GB file can't
+    // hang pdftotext until the 30s timeout.
     const willExtractPdfText =
       fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
-    if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
+    if (!pages && willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
       return {
         llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Split the document into smaller files before retrying.`,
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_EXTRACTION_MAX_MB}MB).`,

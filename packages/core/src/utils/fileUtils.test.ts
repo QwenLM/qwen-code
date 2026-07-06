@@ -1874,14 +1874,13 @@ describe('fileUtils', () => {
       }
     });
 
-    it('should reject PDFs that exceed the text-extraction size cap (100MB)', async () => {
+    it('should allow explicit page ranges above the full-PDF text-extraction size cap', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'selected page text', stderr: '', code: 0 });
 
-      // 200MB PDF — text-extraction path skips the 10MB gate but still
-      // needs a sane ceiling so pdftotext can't be asked to stream GBs
-      // until the 30s timeout fires.
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
         size: 200 * 1024 * 1024,
         isDirectory: () => false,
@@ -1902,9 +1901,9 @@ describe('fileUtils', () => {
           { pages: '1-5' },
         );
 
-        expect(result.error).toMatch(/exceeds extraction size limit/i);
-        expect(result.returnDisplay).toMatch(/PDF file too large/i);
-        expect(result.errorType).toBeDefined();
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe('selected page text');
+        expect(result.returnDisplay).toContain('Read pdf as text (pages 1-5)');
       } finally {
         statSpy.mockRestore();
       }
