@@ -239,7 +239,11 @@ export class WeComChannel extends ChannelBase {
       if (this.connectingClient === client) this.connectingClient = undefined;
       if (this.authentication === authentication)
         this.authentication = undefined;
-      client.disconnect();
+      try {
+        client.disconnect();
+      } catch {
+        // cleanup must not mask the original connection error
+      }
       throw err;
     }
     if (!this.dedupTimer) {
