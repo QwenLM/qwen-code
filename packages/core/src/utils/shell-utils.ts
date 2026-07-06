@@ -736,6 +736,40 @@ function pkillTargetsSelf(tokens: string[]): boolean {
   return args.some((arg) => matchesSelfProcessPattern(arg));
 }
 
+// Matches a bare self-process name (node/qwen/qwen-code, with optional .exe
+// suffix) in a pgrep argument string. Path components (`/`) are excluded so
+// that `pgrep /usr/bin/node` (targeting a specific binary path) is allowed.
+// The negative lookahead also excludes names followed by identifier, hyphen,
+// or slash characters (e.g. `nodejs`, `node-server`, `node/script`).
+const PGREP_BARE_SELF_TARGET =
+  /(?<![a-z0-9_/-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?![a-z0-9_-])/i;
+
+const KILL_COMMAND_SUBSTITUTION_PGREP =
+  /\$\(\s*pgrep\b([^)]*)\)|`\s*pgrep\b([^`]*)`/gi;
+
+function killCommandTargetsSelf(segment: string): boolean {
+  let match: RegExpExecArray | null;
+  KILL_COMMAND_SUBSTITUTION_PGREP.lastIndex = 0;
+  while ((match = KILL_COMMAND_SUBSTITUTION_PGREP.exec(segment)) !== null) {
+    const pgrepArgs = match[1] ?? match[2] ?? '';
+    const bareMatch = pgrepArgs.match(PGREP_BARE_SELF_TARGET);
+    if (!bareMatch) {
+      continue;
+    }
+    // When pgrep is invoked with `-f`, the non-option argument is a full
+    // command-line pattern rather than a bare process name. If the self-name
+    // is followed by a space and then a non-whitespace, non-quote character,
+    // it is part of a broader command pattern (e.g. `node server.js`) and
+    // should not be treated as a broad self-kill.
+    const after = pgrepArgs.slice(bareMatch.index! + bareMatch[0]!.length);
+    if (/^\s+[^"'\s]/.test(after)) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 export function detectSelfKillCommand(command: string): boolean {
   if (!/kill/i.test(command)) {
     return false;
@@ -761,6 +795,12 @@ export function detectSelfKillCommand(command: string): boolean {
       return true;
     }
     if (root === 'pkill' && pkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'pgrep' && pkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'kill' && killCommandTargetsSelf(segment)) {
       return true;
     }
   }

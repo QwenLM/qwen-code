@@ -642,6 +642,33 @@ describe('detectSelfKillCommand', () => {
     );
   });
 
+  it('detects kill with pgrep command substitution targeting self processes', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep qwen-code)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep qwen)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 `pgrep node`')).toBe(true);
+    expect(detectSelfKillCommand('kill $(pgrep -f qwen)')).toBe(true);
+    expect(detectSelfKillCommand('kill -SIGTERM $(pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('echo pre && kill -9 $(pgrep node)')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f "node server.js")')).toBe(
+      false,
+    );
+    expect(detectSelfKillCommand('kill -9 $(pgrep vite)')).toBe(false);
+  });
+
+  it('detects pgrep targeting self processes (piped to xargs kill)', () => {
+    expect(detectSelfKillCommand('pgrep node | xargs kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep -f qwen-code | xargs kill -9')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep qwen | xargs -I{} kill -9 {}')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep vite | xargs kill')).toBe(false);
+  });
+
   it('allows targeted process kills and unrelated process patterns', () => {
     expect(detectSelfKillCommand('taskkill /PID 1234 /F')).toBe(false);
     expect(detectSelfKillCommand('kill 1234')).toBe(false);
