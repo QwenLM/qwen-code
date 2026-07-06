@@ -1587,6 +1587,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
+      getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
@@ -1601,6 +1602,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        flush: vi.fn().mockResolvedValue(undefined),
+      }),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -6406,6 +6410,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('rewindSession extension method rewinds the active session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
+    const artifactSnapshot = {
+      v: 1,
+      sessionId,
+      sequence: 0,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          loadSession: vi.fn().mockResolvedValue({ artifactSnapshot }),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
 
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -6437,6 +6456,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       apiTruncateIndex: 2,
       filesChanged: [],
       filesFailed: [],
+      artifactSnapshot,
     });
 
     mockConnectionState.resolve();

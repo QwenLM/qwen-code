@@ -7673,15 +7673,21 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('GET /session/:id/artifacts requires a client id', async () => {
+    it('GET /session/:id/artifacts allows missing client id', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
       const res = await auth(request(app).get('/session/session-A/artifacts'));
 
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('client_id_required');
-      expect(bridge.sessionArtifactsCalls).toEqual([]);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 'session-A',
+        artifacts: [],
+      });
+      expect(bridge.sessionArtifactsCalls).toEqual([
+        { sessionId: 'session-A' },
+      ]);
     });
 
     it('GET /session/:id/artifacts returns 404 for an unknown session', async () => {
