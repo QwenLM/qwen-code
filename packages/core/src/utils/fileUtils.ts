@@ -23,6 +23,7 @@ import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
 import { readNotebookWithMetadata } from './notebook.js';
+import { readTextRange } from './readTextRange.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -288,13 +289,31 @@ export async function readFileWithLineAndLimit(params: {
   path: string;
   limit: number;
   line?: number;
+  maxOutputBytes?: number;
+  signal?: AbortSignal;
 }): Promise<{
   content: string;
   bom?: boolean;
   encoding?: string;
   originalLineCount: number;
+  lineEnding?: 'crlf' | 'lf';
+  truncatedByBytes?: boolean;
 }> {
-  const { path: filePath, limit, line } = params;
+  const { path: filePath, limit, line, maxOutputBytes, signal } = params;
+  if (Number.isFinite(limit)) {
+    const rangeMaxOutputBytes =
+      typeof maxOutputBytes === 'number' && Number.isFinite(maxOutputBytes)
+        ? maxOutputBytes
+        : 25_000;
+    return readTextRange({
+      path: filePath,
+      offset: line || 0,
+      limit,
+      maxOutputBytes: rangeMaxOutputBytes,
+      ...(signal !== undefined ? { signal } : {}),
+    });
+  }
+
   const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
   const lines = content.split('\n');
   const originalLineCount = lines.length;
@@ -856,6 +875,7 @@ export interface ProcessSingleFileContentOptions {
    * sets this after deciding the vision bridge should handle the image.
    */
   preserveUnsupportedImage?: boolean;
+  signal?: AbortSignal;
 }
 
 /**
@@ -924,9 +944,16 @@ export async function processSingleFileContent(
           limit: legacyLimit,
           pages: legacyPages,
         };
-  const { offset, limit, pages, preserveUnsupportedImage = false } = options;
+  const {
+    offset,
+    limit,
+    pages,
+    preserveUnsupportedImage = false,
+    signal,
+  } = options;
   const rootDirectory = config.getTargetDir();
   try {
+    signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
     try {
       // Async stat doubles as the existence check — ENOENT is handled below
@@ -999,7 +1026,7 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
-    if (fileSizeInMB > 9.9 && !willExtractPdfText) {
+    if (fileSizeInMB > 9.9 && !willExtractPdfText && fileType !== 'text') {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
         returnDisplay: 'File size exceeds the 10MB limit.',
@@ -1080,6 +1107,8 @@ export async function processSingleFileContent(
             path: filePath,
             limit: limit ?? config.getTruncateToolOutputLines(),
             line: offset,
+            maxOutputBytes: getRangeReadByteLimit(config),
+            ...(signal !== undefined ? { signal } : {}),
           });
         const originalLineCount =
           _meta?.originalLineCount ?? (await countFileLines(filePath));
@@ -1125,10 +1154,26 @@ export async function processSingleFileContent(
           linesIncluded = selectedLines.length;
         }
 
+        if (_meta?.truncatedByBytes === true) {
+          const marker = '... [truncated]';
+          if (!llmContent.endsWith(marker)) {
+            if (Number.isFinite(configCharLimit)) {
+              const sliceLength = Math.max(configCharLimit - marker.length, 0);
+              llmContent = llmContent.slice(0, sliceLength) + marker;
+            } else {
+              llmContent += marker;
+            }
+          }
+          contentLengthTruncated = true;
+        }
+
         const actualEndLine = startLine + linesIncluded;
         const contentRangeTruncated =
           startLine > 0 || actualEndLine < originalLineCount;
-        const isTruncated = contentRangeTruncated || contentLengthTruncated;
+        const isTruncated =
+          contentRangeTruncated ||
+          contentLengthTruncated ||
+          _meta?.truncatedByBytes === true;
 
         // By default, return nothing to streamline the common case of a successful read_file.
         let returnDisplay = '';
@@ -1258,6 +1303,9 @@ export async function processSingleFileContent(
       }
     }
   } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      throw error;
+    }
     const errorMessage = getErrorMessage(error);
     const displayPath = path
       .relative(rootDirectory, filePath)
@@ -1269,6 +1317,18 @@ export async function processSingleFileContent(
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function getRangeReadByteLimit(config: Config): number {
+  const charLimit = config.getTruncateToolOutputThreshold();
+  if (!Number.isFinite(charLimit)) {
+    return 25_000;
+  }
+  return Math.max(25_000, Math.floor(charLimit) * 4);
 }
 
 export async function fileExists(filePath: string): Promise<boolean> {

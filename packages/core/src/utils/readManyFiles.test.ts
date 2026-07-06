@@ -130,6 +130,22 @@ describe('readManyFiles', () => {
       expect(content).toContain('--- End of content ---');
     });
 
+    it('should include truncated large text files instead of reporting a size error', async () => {
+      const relativePath = 'large.log';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, 'x'.repeat(11 * 1024 * 1024), 'utf-8');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Showing lines 1-1 of 1 total lines');
+      expect(content).toContain('... [truncated]');
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toBeUndefined();
+      expect(result.files[0]!.filePath).toBe(absolutePath);
+    });
+
     it('should include truncated notebooks that do not expose text line ranges', async () => {
       const relativePath = 'large.ipynb';
       const absolutePath = path.join(tempRootDir, relativePath);

@@ -156,6 +156,38 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
+  it('should attach a truncated text file larger than 10MB', async () => {
+    const filePath = await createTestFile(
+      path.join(testRootDir, 'large.log'),
+      'x'.repeat(11 * 1024 * 1024),
+    );
+
+    const result = await handleAtCommand({
+      query: `@${filePath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 626,
+      signal: abortController.signal,
+    });
+
+    const processedText = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+          .map((part) =>
+            typeof part === 'string'
+              ? part
+              : 'text' in part
+                ? part.text
+                : JSON.stringify(part),
+          )
+          .join('')
+      : '';
+
+    expect(processedText).toContain('Showing lines 1-1 of 1 total lines');
+    expect(processedText).toContain('... [truncated]');
+    expect(result.shouldProceed).toBe(true);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
   it('should only allow actual temp directory paths outside the workspace', async () => {
     const tempParentDir = await fsPromises.mkdtemp(
       path.join(os.tmpdir(), 'at-command-temp-'),

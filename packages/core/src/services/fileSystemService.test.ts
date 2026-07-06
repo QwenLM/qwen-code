@@ -116,6 +116,31 @@ describe('StandardFileSystemService', () => {
       expect(result._meta?.originalLineCount).toBe(100);
     });
 
+    it('should pass maxOutputBytes and return byte-truncation metadata', async () => {
+      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
+        content: 'partial',
+        bom: false,
+        encoding: 'utf-8',
+        originalLineCount: 100,
+        truncatedByBytes: true,
+      });
+
+      const result = await fileSystem.readTextFile({
+        path: '/test/file.txt',
+        limit: 10,
+        line: 5,
+        maxOutputBytes: 128,
+      });
+
+      expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
+        path: '/test/file.txt',
+        limit: 10,
+        line: 5,
+        maxOutputBytes: 128,
+      });
+      expect(result._meta?.truncatedByBytes).toBe(true);
+    });
+
     it('should return encoding info for GBK file', async () => {
       vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
         content: '你好世界',

@@ -133,7 +133,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     const absPath = path.resolve(this.params.file_path);
     const projectRoot = this.config.getTargetDir();
     // Auto-memory files (AGENTS.md and friends under the auto-memory
@@ -207,6 +207,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         offset: this.params.offset,
         limit: this.params.limit,
         pages: this.params.pages,
+        signal,
       },
     );
 

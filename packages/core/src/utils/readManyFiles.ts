@@ -104,7 +104,11 @@ export async function readManyFiles(
   config: Config,
   options: ReadManyFilesOptions,
 ): Promise<ReadManyFilesResult> {
-  const { paths: inputPatterns, preserveUnsupportedImageForBridge } = options;
+  const {
+    paths: inputPatterns,
+    preserveUnsupportedImageForBridge,
+    signal,
+  } = options;
 
   const seenFiles = new Set<string>();
   const contentParts: Part[] = [];
@@ -134,6 +138,7 @@ export async function readManyFiles(
           config,
           fullPath,
           preserveUnsupportedImageForBridge,
+          signal,
         );
         if (readResult) {
           contentParts.push(...readResult.contentParts);
@@ -142,6 +147,9 @@ export async function readManyFiles(
       }
     }
   } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      throw error;
+    }
     const errorMessage = `Error during file search: ${getErrorMessage(error)}`;
     return {
       contentParts: [errorMessage],
@@ -190,10 +198,12 @@ async function readFileContent(
   config: Config,
   filePath: string,
   preserveUnsupportedImage = false,
+  signal?: AbortSignal,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
       preserveUnsupportedImage,
+      ...(signal !== undefined ? { signal } : {}),
     });
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
@@ -257,9 +267,16 @@ async function readFileContent(
         isDirectory: false,
       },
     };
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) {
+      throw error;
+    }
     return null;
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 /**

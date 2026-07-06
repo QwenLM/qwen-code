@@ -30,7 +30,21 @@ export type ReadTextFileResponse = {
     encoding?: string;
     originalLineCount?: number;
     lineEnding?: LineEnding;
+    truncatedByBytes?: boolean;
   };
+};
+
+export type CoreReadTextFileRequest = Omit<
+  ReadTextFileRequest,
+  'sessionId' | 'line'
+> & {
+  /**
+   * Core-local callers use 0-based line offsets. ACP protocol boundaries remain
+   * 1-based and convert explicitly before remote calls.
+   */
+  line?: number | null;
+  maxOutputBytes?: number;
+  signal?: AbortSignal;
 };
 
 /**
@@ -50,9 +64,7 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
  * Interface for file system operations that may be delegated to different implementations
  */
 export interface FileSystemService {
-  readTextFile(
-    params: Omit<ReadTextFileRequest, 'sessionId'>,
-  ): Promise<ReadTextFileResponse>;
+  readTextFile(params: CoreReadTextFileRequest): Promise<ReadTextFileResponse>;
 
   writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
@@ -261,18 +273,30 @@ export function encodeTextFileContent(
  */
 export class StandardFileSystemService implements FileSystemService {
   async readTextFile(
-    params: Omit<ReadTextFileRequest, 'sessionId'>,
+    params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    const { path, limit, line } = params;
-    // Use encoding-aware reader that handles BOM and non-UTF-8 encodings (e.g. GBK)
-    const { content, bom, encoding, originalLineCount } =
-      await readFileWithLineAndLimit({
-        path,
-        limit: limit ?? Number.POSITIVE_INFINITY,
-        line: line || 0,
-      });
-    const lineEnding = detectLineEnding(content);
-    return { content, _meta: { bom, encoding, originalLineCount, lineEnding } };
+    const { path, limit, line, maxOutputBytes, signal } = params;
+    const readResult = await readFileWithLineAndLimit({
+      path,
+      limit: limit ?? Number.POSITIVE_INFINITY,
+      line: line || 0,
+      ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    const detectedLineEnding =
+      readResult.lineEnding ?? detectLineEnding(readResult.content);
+    return {
+      content: readResult.content,
+      _meta: {
+        bom: readResult.bom,
+        encoding: readResult.encoding,
+        originalLineCount: readResult.originalLineCount,
+        lineEnding: detectedLineEnding,
+        ...(readResult.truncatedByBytes !== undefined
+          ? { truncatedByBytes: readResult.truncatedByBytes }
+          : {}),
+      },
+    };
   }
 
   async writeTextFile(

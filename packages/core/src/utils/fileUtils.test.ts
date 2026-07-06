@@ -1467,6 +1467,20 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([1, 2]);
     });
 
+    it('should not byte-truncate multibyte text before the character limit', async () => {
+      const content = '你'.repeat(1000);
+      actualNodeFs.writeFileSync(testTextFilePath, content, 'utf-8');
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+      );
+
+      expect(result.llmContent).toBe(content);
+      expect(result.returnDisplay).toBe('');
+      expect(result.isTruncated).toBe(false);
+    });
+
     it('should truncate long lines in text files', async () => {
       const longLine = 'a'.repeat(2500);
       actualNodeFs.writeFileSync(
@@ -1547,31 +1561,43 @@ describe('fileUtils', () => {
       );
     });
 
-    it('should return an error if the file size exceeds 10MB', async () => {
-      // Create a small test file
-      actualNodeFs.writeFileSync(testTextFilePath, 'test content');
+    it('should read large text files through bounded truncation instead of the 10MB gate', async () => {
+      const lines = Array.from(
+        { length: 65_000 },
+        (_, index) => `Line ${index + 1} ${'x'.repeat(180)}`,
+      );
+      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
 
-      // Spy on fs.promises.stat to return a large file size
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 11 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+      );
 
-      try {
-        const result = await processSingleFileContent(
-          testTextFilePath,
-          mockConfig,
-        );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Line 1');
+      expect(result.returnDisplay).toContain('Read lines 1-');
+      expect(result.isTruncated).toBe(true);
+      expect(result.originalLineCount).toBe(65_000);
+      expect(result.linesShown?.[0]).toBe(1);
+    });
 
-        expect(result.error).toContain('File size exceeds the 10MB limit');
-        expect(result.returnDisplay).toContain(
-          'File size exceeds the 10MB limit',
-        );
-        expect(result.llmContent).toContain('File size exceeds the 10MB limit');
-      } finally {
-        statSpy.mockRestore();
-      }
+    it('should still return an error if an inline media file exceeds 10MB', async () => {
+      mockMimeGetType.mockReturnValue('image/png');
+      actualNodeFs.writeFileSync(
+        testImageFilePath,
+        Buffer.alloc(11 * 1024 * 1024),
+      );
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfig,
+      );
+
+      expect(result.error).toContain('File size exceeds the 10MB limit');
+      expect(result.returnDisplay).toContain(
+        'File size exceeds the 10MB limit',
+      );
+      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
     });
 
     it('should reject PDFs that exceed the text-extraction size cap (100MB)', async () => {
