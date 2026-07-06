@@ -377,7 +377,9 @@ describe('handleGroup', () => {
     expect(env['isReplyToBot']).toBe(true);
     expect(env['chatId']).toBe('group-openid-1');
     // allowMention defaults to true
-    expect(env['text']).toBe('[atMention=true] [Bob]: <@OPENID_BOT> 你好');
+    expect(env['text']).toBe(
+      '[atMention=true] [Bob(member-o…)]: <@OPENID_BOT> 你好',
+    );
   });
 
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
@@ -397,7 +399,8 @@ describe('handleGroup', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['text']).toBe('[atMention=true] [Bob]: 帮我翻译这段');
+    // allowMention=false; senderOpenId still displayed
+    expect(env['text']).toBe('[atMention=true] [Bob(member-o…)]: 帮我翻译这段');
   });
 
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
@@ -674,7 +677,10 @@ describe('handleGroupAll', () => {
     );
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['text']).toBe('[atMention=false] [Charlie]: hello world');
+    // isAtBot=false → no botOpenId, no suffix, but senderOpenId displayed
+    expect(env['text']).toBe(
+      '[atMention=false] [Charlie(member-o…)]: hello world',
+    );
   });
 });
 
