@@ -70,6 +70,13 @@ const MESSAGE_EVENTS = [
   'message.video',
 ] as const;
 
+const SENSITIVE_ERROR_FIELDS = new Set([
+  'secret',
+  'aeskey',
+  'token',
+  'password',
+  'authorization',
+]);
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
@@ -498,6 +505,9 @@ export class WeComChannel extends ChannelBase {
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
         try {
+          if (this.disconnectGeneration !== connectionGeneration) {
+            return attachments;
+          }
           mkdirSync(dir, { recursive: true, mode: 0o700 });
           await writeFile(filePath, data, { mode: 0o600 });
           if (this.disconnectGeneration !== connectionGeneration) {
@@ -1094,7 +1104,12 @@ function formatSdkError(err: unknown): string {
         .join(' ');
     }
     try {
-      return JSON.stringify(record);
+      const redacted = Object.fromEntries(
+        Object.entries(record).map(([key, value]) =>
+          SENSITIVE_ERROR_FIELDS.has(key) ? [key, '[REDACTED]'] : [key, value],
+        ),
+      );
+      return JSON.stringify(redacted);
     } catch {
       // Fall through to String below.
     }
@@ -1327,6 +1342,14 @@ function findCodeRanges(text: string): Array<[number, number]> {
     if (ranges.some(([from, to]) => start >= from && start < to)) continue;
     ranges.push([start, start + match[0].length]);
   }
+
+  const lineRe = /^(?: {4,}|\t).*$/gm;
+  for (const match of text.matchAll(lineRe)) {
+    const start = match.index ?? 0;
+    if (ranges.some(([from, to]) => start >= from && start < to)) continue;
+    ranges.push([start, start + match[0].length]);
+  }
+
   return ranges;
 }
 
