@@ -8,15 +8,19 @@ import process from 'node:process';
 
 type TerminalEnvironment = Record<string, string | undefined>;
 
-function isCiEnvironment(env: TerminalEnvironment): boolean {
-  if (env['CI'] === '0' || env['CI'] === 'false') {
-    return false;
-  }
-
+function isActiveCiValue(value: string | undefined): boolean {
   return (
-    'CI' in env ||
-    'CONTINUOUS_INTEGRATION' in env ||
-    Object.keys(env).some((key) => key.startsWith('CI_'))
+    value !== undefined && value !== '' && value !== '0' && value !== 'false'
+  );
+}
+
+function isCiEnvironment(env: TerminalEnvironment): boolean {
+  return (
+    isActiveCiValue(env['CI']) ||
+    isActiveCiValue(env['CONTINUOUS_INTEGRATION']) ||
+    Object.keys(env).some(
+      (key) => key.startsWith('CI_') && isActiveCiValue(env[key]),
+    )
   );
 }
 

@@ -21,6 +21,7 @@ import {
   validateDnsResolutionOrder,
 } from './gemini.js';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
+import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
@@ -1264,9 +1265,11 @@ describe('startInteractiveUI', () => {
 
   let initialExitListeners: NodeJS.ExitListener[] = [];
   let originalStdoutIsTTY: boolean | undefined;
+  let restoreCiEnv = () => {};
 
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreCiEnv = clearCiEnv();
     originalStdoutIsTTY = process.stdout.isTTY;
     Object.defineProperty(process.stdout, 'isTTY', {
       value: true,
@@ -1284,6 +1287,7 @@ describe('startInteractiveUI', () => {
         configurable: true,
       });
     }
+    restoreCiEnv();
     const currentExitListeners = process.listeners(
       'exit',
     ) as NodeJS.ExitListener[];

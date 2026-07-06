@@ -48,7 +48,20 @@ describe('isInteractiveTerminal', () => {
       isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: 'true' }),
     ).toBe(false);
     expect(isInteractiveTerminal(true, { CI_NAME: 'buildkite' })).toBe(false);
+    expect(isInteractiveTerminal(true, { CI: '' })).toBe(true);
     expect(isInteractiveTerminal(true, { CI: '0' })).toBe(true);
     expect(isInteractiveTerminal(true, { CI: 'false' })).toBe(true);
+    expect(isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: '' })).toBe(
+      true,
+    );
+    expect(isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: '0' })).toBe(
+      true,
+    );
+    expect(
+      isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: 'false' }),
+    ).toBe(true);
+    expect(isInteractiveTerminal(true, { CI_NAME: '' })).toBe(true);
+    expect(isInteractiveTerminal(true, { CI_NAME: '0' })).toBe(true);
+    expect(isInteractiveTerminal(true, { CI_NAME: 'false' })).toBe(true);
   });
 });

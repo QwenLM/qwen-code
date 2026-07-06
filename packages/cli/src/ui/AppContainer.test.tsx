@@ -177,6 +177,7 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
+import { clearCiEnv } from '../test-utils/ci-env.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -208,9 +209,11 @@ describe('AppContainer State Management', () => {
   const mockedUseTerminalSize = useTerminalSize as Mock;
   const mockedUseKeypress = useKeypress as Mock;
   let originalStdoutIsTTY: boolean | undefined;
+  let restoreCiEnv = () => {};
 
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreCiEnv = clearCiEnv();
     originalStdoutIsTTY = process.stdout.isTTY;
     Object.defineProperty(process.stdout, 'isTTY', {
       value: true,
@@ -426,6 +429,7 @@ describe('AppContainer State Management', () => {
         configurable: true,
       });
     }
+    restoreCiEnv();
     cleanup();
   });
 
