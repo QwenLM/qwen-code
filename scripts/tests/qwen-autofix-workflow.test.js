@@ -101,14 +101,6 @@ const installAndBuildSteps =
   workflow.match(
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
-const reviewAddressJob =
-  workflow.match(
-    /\n {2}review-address:[\s\S]*?(?=\n {2}[a-zA-Z0-9_-]+:|\n?$)/,
-  )?.[0] ?? '';
-const liveReviewTargetStep =
-  workflow.match(
-    /- name: 'Live recheck review target'[\s\S]*?(?=\n[ ]{6}- name: ')/,
-  )?.[0] ?? '';
 
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
@@ -274,54 +266,26 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('github.event.sender.author_association');
   });
 
-  it('routes trusted PR review feedback directly into review addressing', () => {
-    expect(workflow).toContain(
+  it('does not expose comment-triggered autofix commands', () => {
+    expect(workflow).not.toContain(
+      "issue_comment:\n    types:\n      - 'created'",
+    );
+    expect(workflow).not.toContain(
       "pull_request_review_comment:\n    types:\n      - 'created'",
     );
-    expect(workflow).toContain(
+    expect(workflow).not.toContain(
       "pull_request_review:\n    types:\n      - 'submitted'",
     );
-    expect(workflow).toContain("issue_comment:\n    types:\n      - 'created'");
-    expect(workflow).toContain(
+    expect(workflow).not.toContain(
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
-    );
-    expect(routeStep).toContain('review_event_trusted=false');
-    expect(routeStep).toContain(
-      '[[ "${REVIEW_EVENT_AUTHOR}" == "${REVIEW_BOT}" ]] && review_event_trusted=true',
-    );
-    expect(routeStep).toContain(
-      '[[ "${REVIEW_EVENT_AUTHOR}" == "${AUTOFIX_BOT}" ]] && review_event_trusted=false',
-    );
-    expect(routeStep).toContain(
-      'pull_request_review_comment event accepted for PR #${ROUTE_PR}',
-    );
-    expect(routeStep).toContain(
-      'pull_request_review event accepted for PR #${ROUTE_PR}',
-    );
-    expect(routeStep).toContain('@qwen-code /address-review');
-    expect(routeStep).toContain(
-      'address-review command accepted for PR #${ROUTE_PR}',
     );
     expect(workflow).not.toContain('@qwen-code /autofix');
     expect(workflow).not.toContain('/autofix run');
+    expect(workflow).not.toContain('@qwen-code /address-review');
+    expect(routeStep).not.toContain('comment command accepted');
+    expect(routeStep).not.toContain('address-review command accepted');
+    expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
     expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
-  });
-
-  it('pauses scheduled issue autofix when review backlog is high', () => {
-    expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '10'");
-    expect(routeStep).toContain(
-      '[[ "${EVENT_NAME}" == \'schedule\' && "${DO_ISSUE}" == \'true\' ]]',
-    );
-    expect(routeStep).toContain(
-      'gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}"',
-    );
-    expect(routeStep).toContain(
-      '[.[] | select(.headRefName | startswith($p))] | length',
-    );
-    expect(routeStep).toContain(
-      'Open autofix PR backlog ${BACKLOG_COUNT} is at or above ${MAX_OPEN_AUTOFIX_PRS}; pausing scheduled issue autofix.',
-    );
-    expect(routeStep).toContain('DO_ISSUE=false');
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
@@ -640,31 +604,6 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
   });
 
-  it('rechecks review targets before expensive review-address setup', () => {
-    expect(liveReviewTargetStep.length).toBeGreaterThan(0);
-    expect(liveReviewTargetStep).toContain('gh pr view "${PR}"');
-    expect(liveReviewTargetStep).toContain('should_continue=false');
-    expect(liveReviewTargetStep).toContain('autofix-eval');
-    expect(liveReviewTargetStep).toContain('is_draft');
-    expect(liveReviewTargetStep).toContain('ROUND}" -ge "${MAX_ROUNDS}"');
-    expect(liveReviewTargetStep).toContain(
-      'N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0',
-    );
-    expect(liveReviewTargetStep).toContain(
-      'could not fetch issue comments for PR #${PR}.',
-    );
-    expect(liveReviewTargetStep).toContain('ROUND=${ROUND}');
-    expect(liveReviewTargetStep).toContain('WATERMARK=${EFF_WM}');
-    expect(liveReviewTargetStep).toContain('should_continue=true');
-    expect(
-      reviewAddressJob.indexOf("- name: 'Live recheck review target'"),
-    ).toBeLessThan(reviewAddressJob.indexOf("- name: 'Set up Node.js"));
-    expect(reviewAddressJob).toContain(
-      "steps.live.outputs.should_continue == 'true'",
-    );
-    expect(reviewAddressJob).toContain('max-parallel: 6');
-  });
-
   it('clears persistent autofix workdirs before agent steps run', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
     expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
@@ -941,7 +880,7 @@ describe('qwen-autofix workflow', () => {
     const reviewVerificationGateStep = verificationGateSteps[1];
 
     expect(reviewVerificationGateStep).toContain(
-      "if: |-\n          ${{ always() && steps.live.outputs.should_continue == 'true' }}",
+      'if: |-\n          ${{ always() }}',
     );
     expect(reviewVerificationGateStep).toContain('failure.md');
     expect(reviewVerificationGateStep).toContain('outcome=failed');
