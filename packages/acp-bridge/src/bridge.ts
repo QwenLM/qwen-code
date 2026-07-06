@@ -5957,7 +5957,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         isArtifactRestoreFailureWarning,
       );
       const shouldRecordArtifactSnapshot =
-        shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
+        artifactSnapshotUnavailable !== undefined ||
+        (shouldRestoreArtifactSnapshot && !artifactRestoreFailed);
       const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
         ? await entry.artifacts.recordSnapshot()
         : [];
