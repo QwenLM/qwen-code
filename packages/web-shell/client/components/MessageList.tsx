@@ -626,7 +626,10 @@ function timelineLabelForTurn(message: Message): string {
   return compact;
 }
 
-function isScheduledTaskMessage(message: Message): boolean {
+function isScheduledTaskMessage(message: {
+  role: Message['role'];
+  source?: string;
+}): boolean {
   return (
     message.role === 'user' &&
     (message.source === 'cron' || message.source === 'loop')
