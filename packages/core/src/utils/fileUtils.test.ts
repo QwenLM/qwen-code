@@ -1484,6 +1484,20 @@ describe('fileUtils', () => {
       expect(result._meta?.truncatedByBytes).toBe(true);
     });
 
+    it('should enforce maxOutputBytes for default file-system reads below the large-file threshold', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(100));
+
+      const result = await fsService.readTextFile({
+        path: testTextFilePath,
+        maxOutputBytes: 10,
+      });
+
+      expect(result.content).toBe('x'.repeat(10));
+      expect(result._meta?.originalLineCount).toBe(1);
+      expect(result._meta?.originalLineCountExact).toBe(true);
+      expect(result._meta?.truncatedByBytes).toBe(true);
+    });
+
     it('should propagate aborts from unbounded full reads', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
       const controller = new AbortController();

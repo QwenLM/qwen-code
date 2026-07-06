@@ -312,6 +312,7 @@ export async function readFileWithLineAndLimit(params: {
   const stats = await fs.promises.stat(filePath);
   if (
     Number.isFinite(limit) ||
+    maxOutputBytes !== undefined ||
     (stats.isFile() && stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE)
   ) {
     return readTextRange({
