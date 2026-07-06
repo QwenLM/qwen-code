@@ -68,7 +68,6 @@ const {
       attachSession: vi.fn().mockResolvedValue(undefined),
       closeSession: vi.fn().mockResolvedValue(undefined),
       clearSession: vi.fn().mockResolvedValue(undefined),
-      loadSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -117,6 +116,8 @@ const {
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+  isMissingSessionHttpStatus: (status: number | undefined) =>
+    status === 404 || status === 410,
   useActions: () => mockSessionActions,
   useConnection: () => mockConnection,
   useDaemonFollowupSuggestion: () => ({
@@ -751,7 +752,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     // A gated tool call arrives.
     await act(async () => {
@@ -773,7 +776,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [
@@ -799,7 +804,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -867,7 +874,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     testState.prompt = '/schedule';
     await clickSubmit(container);
@@ -887,7 +896,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock({ resolved: true })];
@@ -895,7 +906,9 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('keeps the composer dormant (dialogOpen) while an approval overlay is up', async () => {
@@ -927,7 +940,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/model';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -976,7 +991,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     const sidebar = container.querySelector('[data-testid="sidebar"]');
     await act(async () => {
@@ -985,7 +1002,9 @@ describe('App session callbacks', () => {
       );
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('marks the composer dormant (dialogOpen) while a panel replaces the chat', async () => {
@@ -1031,7 +1050,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
     editorFocus.mockClear();
 
     await act(async () => {
@@ -1058,7 +1079,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       container
@@ -1105,7 +1128,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     testState.prompt = '/resume session-2';
     await clickSubmit(container);

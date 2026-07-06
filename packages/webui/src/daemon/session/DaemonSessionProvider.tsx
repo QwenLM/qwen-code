@@ -73,6 +73,7 @@ import {
   isPendingPromptEvent,
   publishPendingPromptEvent,
 } from '../pendingPromptVersion.js';
+import { isMissingSessionHttpStatus } from './status.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -2077,15 +2078,15 @@ function isTerminalSessionHttpError(error: unknown): boolean {
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
 }
 
-function isMissingSessionHttpStatus(status: number | undefined): boolean {
-  return status === 404 || status === 410;
-}
-
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
 }
 
+/**
+ * Preserve 404/410 after heartbeat detects a missing session so a later
+ * status-less transport retry cannot hide the missing-session empty state.
+ */
 function resolveConnectionErrorStatus(
   nextStatus: number | undefined,
   currentStatus: number | undefined,

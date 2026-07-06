@@ -21,6 +21,7 @@ import {
   useTranscriptStore,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  isMissingSessionHttpStatus,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -574,10 +575,6 @@ function isAbortError(error: unknown): boolean {
     (error instanceof DOMException && error.name === 'AbortError') ||
     (error instanceof Error && error.name === 'AbortError')
   );
-}
-
-function isMissingSessionErrorStatus(status: number | undefined): boolean {
-  return status === 404 || status === 410;
 }
 
 interface AlreadyDispatchedError extends Error {
@@ -2201,7 +2198,7 @@ export function App({
     }
     if (
       !connection.sessionId &&
-      isMissingSessionErrorStatus(connection.errorStatus)
+      isMissingSessionHttpStatus(connection.errorStatus)
     ) {
       // Keep the missing-session route visible until the user chooses a new chat.
       lastNotifiedSessionIdRef.current = connection.sessionId;
@@ -2415,6 +2412,7 @@ export function App({
     }
   }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
   const handleMissingSessionNewSession = useCallback(async () => {
+    setMainView('chat');
     const success = await createNewSession();
     if (success) {
       onSessionIdChange?.(undefined);
@@ -3927,8 +3925,7 @@ export function App({
     !pendingApproval &&
     !btwMessage;
   const missingSession =
-    !connection.sessionId &&
-    isMissingSessionErrorStatus(connection.errorStatus);
+    !connection.sessionId && isMissingSessionHttpStatus(connection.errorStatus);
   const effectiveChatWidthMode: ChatWidthMode = isChatEmptyState
     ? getDefaultChatWidthMode()
     : chatWidthMode;
