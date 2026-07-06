@@ -210,6 +210,7 @@ interface NormalizedArtifact extends DaemonSessionArtifact {
 
 interface StoredArtifact extends NormalizedArtifact {
   insertSeq: number;
+  durableTombstoneRequired?: boolean;
 }
 
 interface WorkspaceStatusExpected {
@@ -478,15 +479,22 @@ export class SessionArtifactStore {
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
       this.artifacts.delete(artifactId);
-      const changes: SessionArtifactChange[] = [
-        {
-          action: 'removed',
-          artifactId,
-          artifact: toPublicArtifact(existing),
-          reason: 'explicit',
-        },
-      ];
+      const removeChange: SessionArtifactChange & {
+        durableTombstoneRequired?: boolean;
+      } = {
+        action: 'removed',
+        artifactId,
+        artifact: toPublicArtifact(existing),
+        reason: 'explicit',
+        durableTombstoneRequired:
+          existing.durableTombstoneRequired ||
+          existing.retention !== 'ephemeral'
+            ? true
+            : undefined,
+      };
+      const changes: SessionArtifactChange[] = [removeChange];
       const warnings = await this.persistChanges(changes, false);
+      delete removeChange.durableTombstoneRequired;
       return {
         v: 1,
         sessionId: this.sessionId,
@@ -576,6 +584,8 @@ export class SessionArtifactStore {
             status: normalized.status,
             restoreState: 'restored',
             persistenceWarning,
+            durableTombstoneRequired:
+              retention !== 'ephemeral' ? true : undefined,
             insertSeq: ++this.insertSeq,
           };
           this.artifacts.set(stored.id, stored);
@@ -763,6 +773,7 @@ export class SessionArtifactStore {
         const stored = this.artifacts.get(change.artifactId);
         if (!stored) continue;
         stored.persistedAt = recordedAt;
+        stored.durableTombstoneRequired = true;
         change.artifact = toPublicArtifact(stored);
       }
       this.applyDurableMarkers(durableChanges);
@@ -853,6 +864,8 @@ export class SessionArtifactStore {
       if (!stored) continue;
       stored.retention = 'ephemeral';
       stored.persistenceWarning = 'persistence_unavailable';
+      stored.durableTombstoneRequired =
+        stored.durableTombstoneRequired || stored.persistedAt !== undefined;
       delete stored.persistedAt;
       change.artifact = toPublicArtifact(stored);
       downgraded = true;
@@ -1763,7 +1776,12 @@ function isFileArtifactUrl(raw: unknown): boolean {
 
 function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
   if (!change.artifact) return false;
-  return change.artifact.retention !== 'ephemeral';
+  return (
+    change.artifact.retention !== 'ephemeral' ||
+    (change.action === 'removed' &&
+      (change as { durableTombstoneRequired?: boolean })
+        .durableTombstoneRequired === true)
+  );
 }
 
 function cloneStoredArtifact(artifact: StoredArtifact): StoredArtifact {

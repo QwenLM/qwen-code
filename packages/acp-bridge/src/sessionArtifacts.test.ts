@@ -2751,6 +2751,52 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('writes a tombstone when deleting a downgraded durable artifact', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let failNext = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-downgraded-tombstone',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error('disk full');
+          }
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/downgraded' }],
+      { strict: true },
+    );
+
+    failNext = true;
+    const downgraded = await store.upsertMany([
+      {
+        title: 'Durable',
+        url: 'https://example.com/downgraded',
+        metadata: { phase: 'updated' },
+      },
+    ]);
+    expect(downgraded.changes[0]?.artifact).toMatchObject({
+      retention: 'ephemeral',
+      persistenceWarning: 'persistence_unavailable',
+    });
+
+    await store.remove(created.changes[0]!.artifactId);
+
+    expect(events.at(-1)?.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: created.changes[0]?.artifactId,
+        reason: 'explicit',
+      }),
+    ]);
+  });
+
   it('restores rebuilt durable artifacts as metadata-only restored entries', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
