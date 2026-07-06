@@ -249,6 +249,130 @@ Possible distribution models:
 In this model, the skill is available only because the rendering client chose to
 provide it.
 
+### Web Shell Host Integration
+
+A Web Shell host that wants chart output should opt in to both halves of the
+contract:
+
+1. Register an `echarts-fulldata` Markdown code block renderer.
+2. Provide the matching chart skill from
+   `packages/web-shell/docs/examples/qwencode-viz/SKILL.md`.
+
+For example:
+
+```tsx
+import * as echarts from 'echarts';
+import {
+  WebShellWithProviders,
+  createEchartsFullDataRenderer,
+} from '@qwen-code/web-shell';
+
+<WebShellWithProviders
+  baseUrl="http://127.0.0.1:4170"
+  token={token}
+  sessionId={sessionId}
+  markdown={{
+    renderCodeBlock: createEchartsFullDataRenderer({
+      loadEcharts: () => echarts,
+      resolveDataRef: async (ref, meta) =>
+        loadControlledChartDataset(ref, meta),
+    }),
+  }}
+/>;
+```
+
+In this renderer configuration, `loadEcharts` lets the host provide the
+approved ECharts runtime, either as a static import or a lazy-loaded module.
+`resolveDataRef` is only used for `data.kind="ref"` chart blocks; it is the
+host-owned bridge from a model-visible data reference to a trusted dataset.
+The model-facing envelope format is described by the optional skill template in
+`packages/web-shell/docs/examples/qwencode-viz/SKILL.md`; the renderer-side
+validation lives in
+`packages/web-shell/client/components/messages/EchartsFullDataBlock.tsx`.
+
+The skill file should be installed or injected only by hosts that perform this
+registration. A simple file-based integration can copy:
+
+```text
+packages/web-shell/docs/examples/qwencode-viz/SKILL.md
+```
+
+to the workspace or user skill directory, for example:
+
+```text
+.qwen/skills/qwencode-viz/SKILL.md
+```
+
+An integration with its own skill distribution layer can instead load the same
+file as the canonical source content and expose it through that layer. In both
+cases, core does not auto-load the skill; the host owns enabling it because the
+host owns the renderer.
+
+For `data.kind="ref"` envelopes, the built-in renderer validates that `data.ref`
+uses a normalized `artifact://` or `session-file://` reference before it calls
+the host-controlled `resolveDataRef(ref, meta)` implementation. The renderer
+also parses the block as JSON and sanitizes the ECharts option before rendering;
+it does not evaluate model-provided JavaScript, fetch arbitrary URLs, or read
+local files by itself. A custom renderer should preserve the same split:
+renderer-level JSON/ref/option validation first, host-owned artifact resolution
+second.
+
+A daemon-backed host can treat the workspace file API as one artifact backend.
+For example, the host can persist chart artifacts under a controlled workspace
+directory such as `.qwen/artifacts/`, expose model-facing references like
+`artifact://chart-data/orders.csv`, and resolve them through daemon
+`GET /file?path=.qwen/artifacts/chart-data/orders.csv`. This keeps
+`artifact://` as the public chart contract while allowing the first
+implementation to reuse daemon workspace files.
+
+The resolver must still enforce the artifact root before calling the daemon:
+
+```tsx
+const ARTIFACT_ROOT = '.qwen/artifacts/';
+const MAX_CHART_DATA_BYTES = 256 * 1024;
+
+async function resolveDataRef(
+  ref: string,
+  meta: { format?: string; dimensions?: string[] },
+) {
+  const artifactPrefix = 'artifact://';
+  if (!ref.startsWith(artifactPrefix)) {
+    throw new Error(`Unsupported chart data ref: ${ref}`);
+  }
+
+  const artifactPath = ref.slice(artifactPrefix.length);
+  if (
+    artifactPath.length === 0 ||
+    artifactPath.startsWith('/') ||
+    artifactPath.includes('\\') ||
+    artifactPath.split('/').includes('..')
+  ) {
+    throw new Error(`Invalid chart data ref: ${ref}`);
+  }
+
+  const url = new URL('/file', daemonBaseUrl);
+  url.searchParams.set('path', `${ARTIFACT_ROOT}${artifactPath}`);
+  url.searchParams.set('maxBytes', String(MAX_CHART_DATA_BYTES));
+
+  const response = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to read chart data: ${response.status}`);
+  }
+
+  const file = (await response.json()) as { content: string };
+  return meta.format === 'csv'
+    ? parseCsvAsArrayRows(file.content, meta.dimensions)
+    : JSON.parse(file.content);
+}
+```
+
+This example intentionally maps only normalized `artifact://` paths under
+`.qwen/artifacts/`. If a host later moves artifacts to object storage or a
+session-scoped artifact service, only `resolveDataRef` needs to change; the
+model-facing `echarts-fulldata` block can keep using the same ref shape.
+
 ### Pros
 
 - Minimal core change.

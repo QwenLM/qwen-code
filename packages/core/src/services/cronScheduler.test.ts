@@ -937,6 +937,95 @@ describe('CronScheduler', () => {
     });
   });
 
+  describe('durable enabled flag', () => {
+    let tmpDir: string;
+
+    beforeEach(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-enabled-test-'));
+      Storage.setRuntimeBaseDir(tmpDir);
+      scheduler = new CronScheduler(tmpDir);
+    });
+
+    afterEach(async () => {
+      await removeTmpDir(tmpDir);
+    });
+
+    const seed = (
+      overrides: Partial<DurableCronTask> & Pick<DurableCronTask, 'id'>,
+    ): DurableCronTask => ({
+      cron: '0 9 * * *',
+      prompt: `prompt-${overrides.id}`,
+      recurring: true,
+      createdAt: Date.now(),
+      lastFiredAt: null,
+      ...overrides,
+    });
+
+    it('loads enabled and legacy tasks but skips enabled:false ones', async () => {
+      await writeCronTasks(tmpDir, [
+        seed({ id: 'on', enabled: true }),
+        seed({ id: 'off', enabled: false }),
+        // No enabled field — a tool-created task must still fire.
+        seed({ id: 'legacy' }),
+      ]);
+
+      await scheduler.enableDurable('session-1');
+
+      const ids = scheduler.list().map((j) => j.id);
+      expect(ids).toContain('on');
+      expect(ids).toContain('legacy');
+      expect(ids).not.toContain('off');
+    });
+
+    it('never fires a disabled task even when its minute matches', async () => {
+      const onFire = vi.fn();
+      await writeCronTasks(tmpDir, [
+        seed({ id: 'off', cron: '30 10 * * *', enabled: false }),
+      ]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start(onFire);
+
+      // A minute the disabled task's cron matches — a live job would fire.
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      expect(onFire).not.toHaveBeenCalled();
+    });
+
+    it('drops a live job when the file flips it to disabled on reload', async () => {
+      await writeCronTasks(tmpDir, [seed({ id: 'x', enabled: true })]);
+      await scheduler.enableDurable('session-1');
+      expect(scheduler.list().map((j) => j.id)).toContain('x');
+
+      // Rewrite the file with the task disabled; the file watcher reloads
+      // (debounced) and the reconcile must remove the now-disabled job.
+      await writeCronTasks(tmpDir, [seed({ id: 'x', enabled: false })]);
+      await vi.waitFor(
+        () => {
+          expect(scheduler.list().map((j) => j.id)).not.toContain('x');
+        },
+        { timeout: 5000 },
+      );
+    });
+
+    it('does not let session-only jobs crowd out durable loads', async () => {
+      // 40 session-only jobs + 20 durable on disk. A combined 50-cap would load
+      // only 10 durable; the durable-only cap loads all 20 so a route-accepted
+      // create is actually loadable.
+      for (let i = 0; i < 40; i++) {
+        scheduler.create('0 9 * * *', `session ${i}`, true);
+      }
+      const durable = Array.from({ length: 20 }, (_unused, i) =>
+        seed({ id: `d${i}` }),
+      );
+      await writeCronTasks(tmpDir, durable);
+      await scheduler.enableDurable('session-1');
+
+      const loadedIds = new Set(scheduler.list().map((j) => j.id));
+      for (const d of durable) {
+        expect(loadedIds.has(d.id)).toBe(true);
+      }
+    });
+  });
+
   describe('durable ownership', () => {
     let tmpDir: string;
 
