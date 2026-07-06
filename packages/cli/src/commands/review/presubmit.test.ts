@@ -116,7 +116,93 @@ describe('presubmitCommand', () => {
     const result = JSON.parse(String(content));
 
     expect(result.ciStatus.class).toBe('all_pass');
+    expect(result.ciStatus.totalChecks).toBe(1);
     expect(result.downgradeApprove).toBe(false);
-    expect(result.downgradeReasons).not.toContain('CI still running');
+    expect(result.downgradeReasons).toEqual([]);
+  });
+
+  it('does not filter check runs when GITHUB_RUN_ID is unset', async () => {
+    delete process.env['GITHUB_RUN_ID'];
+    ghApiMock.mockImplementation((path: string) => {
+      if (path.endsWith('/check-runs')) {
+        return {
+          check_runs: [
+            {
+              name: 'Test (ubuntu-latest, Node 22.x)',
+              status: 'completed',
+              conclusion: 'success',
+            },
+            {
+              name: 'review-pr',
+              status: 'in_progress',
+              conclusion: null,
+              details_url:
+                'https://github.com/QwenLM/qwen-code/actions/runs/28788268483/job/85362025778',
+            },
+          ],
+        };
+      }
+      if (path.endsWith('/status')) {
+        return { statuses: [] };
+      }
+      return null;
+    });
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.ciStatus.class).toBe('all_pending');
+    expect(result.ciStatus.totalChecks).toBe(2);
+    expect(result.downgradeApprove).toBe(true);
+    expect(result.downgradeReasons).toContain('CI still running');
+  });
+
+  it('filters the current actions run by html_url', async () => {
+    ghApiMock.mockImplementation((path: string) => {
+      if (path.endsWith('/check-runs')) {
+        return {
+          check_runs: [
+            {
+              name: 'Test (ubuntu-latest, Node 22.x)',
+              status: 'completed',
+              conclusion: 'success',
+            },
+            {
+              name: 'review-pr',
+              status: 'in_progress',
+              conclusion: null,
+              html_url:
+                'https://github.com/QwenLM/qwen-code/actions/runs/28788268483/job/85362025778',
+            },
+          ],
+        };
+      }
+      if (path.endsWith('/status')) {
+        return { statuses: [] };
+      }
+      return null;
+    });
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.ciStatus.class).toBe('all_pass');
+    expect(result.ciStatus.totalChecks).toBe(1);
+    expect(result.downgradeApprove).toBe(false);
+    expect(result.downgradeReasons).toEqual([]);
   });
 });
