@@ -92,6 +92,14 @@ import type {
   GroupDelRobotEvent,
   GroupMsgToggleEvent,
 } from './types.js';
+import { Intent } from './types.js';
+import type {
+  QQMessageEvent,
+  QQGroupMessageEvent,
+  GroupAddRobotEvent,
+  GroupDelRobotEvent,
+  GroupMsgToggleEvent,
+} from './types.js';
 
 function makeChannel(
   configOverrides?: Record<string, unknown>,
@@ -567,7 +575,7 @@ describe('handleGroupAll', () => {
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
 
-  it('isAtBot=false 时不设置 replyMsgId', () => {
+  it('sets replyMsgId for all messages passing the policy gate (including non-@)', () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroupAll'](
@@ -575,8 +583,9 @@ describe('handleGroupAll', () => {
     );
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
-    ] as Map<string, unknown>;
-    expect(replyMsgId.has('group-openid-1')).toBe(false);
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    const entry = replyMsgId.get('group-openid-1');
+    expect(entry?.msgId).toBe('msg-groupall-001');
   });
 
   it('isAtBot=true 时设置 replyMsgId', () => {
@@ -805,6 +814,108 @@ describe('群管理事件', () => {
       };
       pvt['handleGroupMsgReceive'](evt);
       expect(groupActiveMsgEnabled.get('group-recv-1')).toBe(true);
+    });
+  });
+
+  describe('isCrossEventDuplicate', () => {
+    it('returns false on first call for a new chatId+eventId', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const evt = makeGroupEvent({ id: 'dedup-1' });
+      expect(pvt['isCrossEventDuplicate']('group-openid-1', evt)).toBe(false);
+    });
+
+    it('returns true on second call with same chatId+eventId', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const evt = makeGroupEvent({ id: 'dedup-2' });
+      pvt['isCrossEventDuplicate']('group-openid-1', evt);
+      expect(pvt['isCrossEventDuplicate']('group-openid-1', evt)).toBe(true);
+    });
+
+    it('returns false for same eventId but different chatId', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const evt = makeGroupEvent({ id: 'dedup-3' });
+      pvt['isCrossEventDuplicate']('group-a', evt);
+      expect(pvt['isCrossEventDuplicate']('group-b', evt)).toBe(false);
+    });
+
+    it('returns false for same chatId but different eventId', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const evt1 = makeGroupEvent({ id: 'dedup-4a' });
+      const evt2 = makeGroupEvent({ id: 'dedup-4b' });
+      pvt['isCrossEventDuplicate']('group-openid-1', evt1);
+      expect(pvt['isCrossEventDuplicate']('group-openid-1', evt2)).toBe(false);
+    });
+  });
+
+  describe('sendIdentify intent subscription', () => {
+    it('includes GROUP_MESSAGE intent when groupAllPolicy=keyword', () => {
+      const ch = makeChannel({ groupAllPolicy: 'keyword' });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['_ready'] = true;
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.op).toBe(2); // IDENTIFY
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(
+        Intent.GROUP_MESSAGE,
+      );
+    });
+
+    it('includes GROUP_MESSAGE intent when groupAllPolicy=all', () => {
+      const ch = makeChannel({ groupAllPolicy: 'all' });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(
+        Intent.GROUP_MESSAGE,
+      );
+    });
+
+    it('excludes GROUP_MESSAGE intent when groupAllPolicy=log', () => {
+      const ch = makeChannel({ groupAllPolicy: 'log' });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(0);
+    });
+
+    it('excludes GROUP_MESSAGE intent when groupAllPolicy is undefined', () => {
+      const ch = makeChannel({ groupAllPolicy: undefined });
+      const pvt = ch as unknown as QQChannelRaw;
+      let sentPayload: string | null = null;
+      (ch as unknown as Record<string, unknown>)['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
+      pvt['sendIdentify']();
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(0);
     });
   });
 });

@@ -237,9 +237,13 @@ export class QQChannel extends ChannelBase {
     // events arrive without a listener. This permanent listener catches them.
     if (this.qqConfig['cron-msg-experimental']) {
       this._cronTextHandler = (sessionId: string, text: string) => {
+        // Capture _inCronFlow BEFORE setImmediate to avoid a race:
+        // if the flag is cleared in the same event-loop turn, the
+        // deferred callback would see false and silently drop chunks.
+        const wasInCronFlow = this._inCronFlow;
         setImmediate(() => {
           if (!this._ready) return;
-          if (!this._inCronFlow) return;
+          if (!wasInCronFlow) return;
           let entry = this.cronBuffer.get(sessionId);
           if (!entry) {
             entry = { buffer: '', timer: null };
@@ -267,6 +271,42 @@ export class QQChannel extends ChannelBase {
                     process.stderr.write(
                       `[QQ:${this.name}] Cron flush (size cap) send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
                     );
+                    const retries =
+                      (this.cronRetryCount.get(sessionId) ?? 0) + 1;
+                    this.cronRetryCount.set(sessionId, retries);
+                    if (retries >= QQChannel.MAX_CRON_RETRIES) {
+                      process.stderr.write(
+                        `[QQ:${this.name}] Cron flush (size cap) exhausted retries (${QQChannel.MAX_CRON_RETRIES}) for ${sessionId}, discarding\n`,
+                      );
+                      this.cronRetryCount.delete(sessionId);
+                      this.cronBuffer.delete(sessionId);
+                      return;
+                    }
+                    entry!.buffer = toFlushNow + (entry!.buffer || '');
+                    if (this.cronBuffer.get(sessionId) !== entry) {
+                      this.cronBuffer.set(sessionId, entry!);
+                    }
+                    entry!.timer = setTimeout(() => {
+                      const retryEntry = this.cronBuffer.get(sessionId);
+                      if (!retryEntry || !retryEntry.buffer) return;
+                      const retryTarget = this.router.getTarget(sessionId);
+                      if (!retryTarget) return;
+                      this.sendMessage(retryTarget.chatId, retryEntry.buffer)
+                        .then(() => {
+                          this.cronRetryCount.delete(sessionId);
+                          if (!retryEntry.buffer)
+                            this.cronBuffer.delete(sessionId);
+                        })
+                        .catch((retryErr) => {
+                          process.stderr.write(
+                            `[QQ:${this.name}] Cron flush (size cap) retry error: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
+                          );
+                          this.cronRetryCount.delete(sessionId);
+                          if (!retryEntry.buffer)
+                            this.cronBuffer.delete(sessionId);
+                        });
+                    }, 2000);
+                    entry!.timer.unref();
                   });
                 return;
               }
@@ -306,7 +346,7 @@ export class QQChannel extends ChannelBase {
                     if (this.cronBuffer.get(sessionId) !== entry) {
                       this.cronBuffer.set(sessionId, entry!);
                     }
-                    setTimeout(() => {
+                    entry!.timer = setTimeout(() => {
                       const retryEntry = this.cronBuffer.get(sessionId);
                       if (!retryEntry || !retryEntry.buffer) return;
                       const retryTarget = this.router.getTarget(sessionId);
@@ -326,7 +366,8 @@ export class QQChannel extends ChannelBase {
                           if (!retryEntry.buffer)
                             this.cronBuffer.delete(sessionId);
                         });
-                    }, 2000).unref();
+                    }, 2000);
+                    entry!.timer.unref();
                   });
                 return;
               }
@@ -337,6 +378,21 @@ export class QQChannel extends ChannelBase {
         });
       };
       this.attachCronHandler();
+    }
+  }
+
+  /**
+   * Public gate for external cron/scheduler integration.
+   * Wraps a cron message flow to activate `_inCronFlow` so that
+   * `textChunk` events are captured into the cron accumulation buffer.
+   * Always resets `_inCronFlow` in a `finally` block.
+   */
+  async runCronFlow(fn: () => Promise<void>): Promise<void> {
+    this._inCronFlow = true;
+    try {
+      await fn();
+    } finally {
+      this._inCronFlow = false;
     }
   }
 
@@ -1929,7 +1985,12 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) return;
+    if (event.author.bot) {
+      process.stderr.write(
+        `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
+      );
+      return;
+    }
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
 
@@ -2019,7 +2080,12 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) return;
+    if (event.author.bot) {
+      process.stderr.write(
+        `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(chatId, 64)}\n`,
+      );
+      return;
+    }
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
@@ -2090,9 +2156,10 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (isAtBot) {
-      this.setReplyMsgId(chatId, event.id);
-    }
+    // Set replyMsgId for all messages that pass the policy gate,
+    // not just @-bot ones. This ensures keyword-triggered non-@
+    // messages get proper msg_id referencing in bot replies.
+    this.setReplyMsgId(chatId, event.id);
     this.handleInbound({
       channelName: this.name,
       chatId,
