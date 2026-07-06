@@ -315,8 +315,15 @@ export class StreamingToolCallParser {
             args === null ||
             Array.isArray(args)
           ) {
+            debugLogger.debug(
+              `Collapsing non-object arguments for tool call ${meta.name} (id=${meta.id}) at index ${index}; buffer likely polluted by a misrouted fragment`,
+            );
             args = {};
           }
+        } else {
+          debugLogger.debug(
+            `Emitting no-argument tool call ${meta.name} (id=${meta.id}) at index ${index} with empty buffer`,
+          );
         }
 
         completed.push({
