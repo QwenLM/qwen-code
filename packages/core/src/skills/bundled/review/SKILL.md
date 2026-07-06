@@ -116,10 +116,10 @@ If it does, determine whether the PR is maintainer-authored using a deterministi
 
 For external PRs, count **only additions + deletions within the core-infrastructure paths listed above** (not the whole diff — test/doc lines outside those paths do not count toward the threshold):
 
-- If core-path additions + deletions are **500+ lines**, hard block: report that the PR must be maintainer-initiated, run `qwen review cleanup pr-<n>` to remove the worktree and `qwen-review/pr-<n>` ref, then stop before Step 3. **Exception:** a low-risk sweep that touches many files but changes only a line or two each is not auto-rejected on line count alone — escalate to a maintainer under the smaller-change tier instead.
+- If core-path additions + deletions are **500+ lines**, hard block: report that the PR must be maintainer-initiated, run `qwen review cleanup pr-<n>` to remove the worktree and `qwen-review/pr-<n>` ref, then stop — do not proceed to Step 2 (`load-rules`) or beyond. **Exception:** a low-risk sweep that touches many files but changes only a line or two each is not auto-rejected on line count alone — escalate to a maintainer under the smaller-change tier instead.
 - If smaller, continue only if the review can be 100% confident and can name every downstream consumer. Any doubt means **escalate to a maintainer**.
 
-**Gate verdict mapping** (the pipeline defines only Approve / Request changes / Comment — there is no separate "escalate" event, so map it explicitly): a **hard block** stops before Step 3 with a "must be maintainer-initiated" message and is never an `APPROVE`. When the gate **escalates**, carry an `escalate` flag into Steps 6–7: emit `event=COMMENT` with the escalation note in the body, and **never `APPROVE`** even when the agents find nothing (treat it exactly like `downgradeApprove`).
+**Gate verdict mapping** (the pipeline defines only Approve / Request changes / Comment — there is no separate "escalate" event, so map it explicitly): a **hard block** stops before Step 2 with a "must be maintainer-initiated" message and is never an `APPROVE`; when running in `--comment` mode, post that message as an `event=COMMENT` on the PR (matching the escalate path's GitHub visibility) so the author sees the governance block instead of only a terminal message. When the gate **escalates**, carry an `escalate` flag into Steps 6–7: emit `event=COMMENT` with the escalation note in the body, and **never `APPROVE`** even when the agents find nothing (treat it exactly like `downgradeApprove`).
 
 ## Step 2: Load project review rules
 
