@@ -272,6 +272,12 @@ export type {
   DaemonGlobOptions,
   /** Glob match result containing matched file paths. */
   DaemonGlobResult,
+  /** A durable scheduled task (cron) as returned by the daemon. */
+  DaemonScheduledTask,
+  /** Request body for creating a scheduled task. */
+  DaemonCreateScheduledTaskRequest,
+  /** Partial-update body for a scheduled task. */
+  DaemonUpdateScheduledTaskRequest,
   /** Memory file scope: `'workspace' | 'global'`. */
   DaemonContextFileScope,
 } from './daemon/index.js';
@@ -293,6 +299,8 @@ export type {
   DaemonStatusReportSection,
   /** Per-session diagnostics row in a `detail=full` report. */
   DaemonStatusReportSession,
+  /** One time-bucketed sample in the Daemon Status metrics series (charts). */
+  DaemonMetricsSeriesBucket,
   /** Full agent detail including system prompt, tools, and run config. */
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */

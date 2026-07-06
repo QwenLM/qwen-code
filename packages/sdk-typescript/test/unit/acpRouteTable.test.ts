@@ -209,6 +209,23 @@ describe('acpRouteTable – matchRoute', () => {
     });
   });
 
+  it('GET /workspace/:id/sessions extracts organized view filters', () => {
+    const result = matchRoute('/workspace/%2Fwork%2Fa/sessions', 'GET');
+    expect(result).not.toBeNull();
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('view=organized&group=pinned&size=25'),
+    );
+    expect(params).toEqual({
+      workspaceCwd: '/work/a',
+      view: 'organized',
+      group: 'pinned',
+      _meta: { size: 25 },
+    });
+  });
+
   // ---- POST /session/:id/model → session/set_model --------------------
 
   it('POST /session/:id/model maps to session/set_model', () => {
@@ -223,6 +240,81 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s6/metadata', 'PATCH');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/update_metadata');
+  });
+
+  it('PATCH /session/:id/organization maps to _qwen/session/update_organization', () => {
+    const result = matchRoute('/session/s6/organization', 'PATCH');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/update_organization');
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        { isPinned: true, groupId: 'g-1' },
+        'PATCH',
+      ),
+    ).toEqual({ sessionId: 's6', isPinned: true, groupId: 'g-1' });
+  });
+
+  it('keeps URL session id when organization body contains sessionId', () => {
+    const result = matchRoute('/session/s6/organization', 'PATCH');
+    expect(result).not.toBeNull();
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        { sessionId: 'other', isPinned: true },
+        'PATCH',
+      ),
+    ).toEqual({ sessionId: 's6', isPinned: true });
+  });
+
+  it('maps session group CRUD routes to _qwen workspace methods', () => {
+    const list = matchRoute('/workspace/%2Fwork%2Fa/session-groups', 'GET');
+    expect(list?.mapping.method).toBe('_qwen/workspace/session_groups/list');
+    expect(
+      list!.mapping.extractParams(list!.segments, undefined, 'GET'),
+    ).toEqual({ workspaceCwd: '/work/a' });
+
+    const create = matchRoute('/workspace/%2Fwork%2Fa/session-groups', 'POST');
+    expect(create?.mapping.method).toBe(
+      '_qwen/workspace/session_groups/create',
+    );
+    expect(
+      create!.mapping.extractParams(
+        create!.segments,
+        { workspaceCwd: '/other', name: 'Frontend', color: 'blue' },
+        'POST',
+      ),
+    ).toEqual({ workspaceCwd: '/work/a', name: 'Frontend', color: 'blue' });
+
+    const update = matchRoute(
+      '/workspace/%2Fwork%2Fa/session-groups/g-1',
+      'PATCH',
+    );
+    expect(update?.mapping.method).toBe(
+      '_qwen/workspace/session_groups/update',
+    );
+    expect(
+      update!.mapping.extractParams(
+        update!.segments,
+        {
+          workspaceCwd: '/other',
+          groupId: 'other-group',
+          name: 'UI',
+        },
+        'PATCH',
+      ),
+    ).toEqual({ workspaceCwd: '/work/a', groupId: 'g-1', name: 'UI' });
+
+    const remove = matchRoute(
+      '/workspace/%2Fwork%2Fa/session-groups/g-1',
+      'DELETE',
+    );
+    expect(remove?.mapping.method).toBe(
+      '_qwen/workspace/session_groups/delete',
+    );
+    expect(
+      remove!.mapping.extractParams(remove!.segments, undefined, 'DELETE'),
+    ).toEqual({ workspaceCwd: '/work/a', groupId: 'g-1' });
   });
 
   it('POST /session/:id/heartbeat maps to _qwen/session/heartbeat', () => {

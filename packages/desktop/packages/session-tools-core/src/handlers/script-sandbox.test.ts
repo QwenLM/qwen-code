@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionToolContext } from '../context.ts';
@@ -63,7 +69,9 @@ describe('script_sandbox', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('inputFile must be within the session directory');
+    expect(result.content[0]?.text).toContain(
+      'inputFile must be within the session directory',
+    );
   });
 
   it('enforces network/filesystem isolation or fails with clear diagnostics', async () => {
@@ -79,11 +87,11 @@ describe('script_sandbox', () => {
       expect(text.length > 0).toBe(true);
       expect(
         text.includes('network isolation') ||
-        text.includes('filesystem isolation') ||
-        text.includes('networkIsolation:') ||
-        text.includes('filesystemIsolation:') ||
-        text.includes('runtime') ||
-        text.includes('Error running sandboxed script')
+          text.includes('filesystem isolation') ||
+          text.includes('networkIsolation:') ||
+          text.includes('filesystemIsolation:') ||
+          text.includes('runtime') ||
+          text.includes('Error running sandboxed script'),
       ).toBe(true);
       return;
     }
@@ -122,7 +130,8 @@ describe('script_sandbox', () => {
   it('passes stdin through when sandbox backend is available', async () => {
     const result = await handleScriptSandbox(ctx(), {
       language: 'node',
-      script: "process.stdin.on('data', d => process.stdout.write(String(d).toUpperCase()));",
+      script:
+        "process.stdin.on('data', d => process.stdout.write(String(d).toUpperCase()));",
       stdin: 'hello stdin',
       timeoutMs: 1500,
     });
@@ -130,12 +139,10 @@ describe('script_sandbox', () => {
     const text = result.content[0]?.text ?? '';
     if (
       result.isError &&
-      (
-        text.includes('filesystem isolation') ||
+      (text.includes('filesystem isolation') ||
         text.includes('network isolation') ||
         text.includes('sandbox_apply') ||
-        text.includes('Operation not permitted')
-      )
+        text.includes('Operation not permitted'))
     ) {
       expect(text.length > 0).toBe(true);
       return;
@@ -155,12 +162,10 @@ describe('script_sandbox', () => {
     const text = result.content[0]?.text ?? '';
     if (
       result.isError &&
-      (
-        text.includes('filesystem isolation') ||
+      (text.includes('filesystem isolation') ||
         text.includes('network isolation') ||
         text.includes('sandbox_apply') ||
-        text.includes('Operation not permitted')
-      )
+        text.includes('Operation not permitted'))
     ) {
       expect(text.length > 0).toBe(true);
       return;

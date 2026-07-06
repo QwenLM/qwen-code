@@ -137,6 +137,7 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -254,6 +255,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
+import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -2361,6 +2363,7 @@ export async function deliverClientMcpMessage(
   connection: AgentSideConnection | undefined,
   serverName: string,
   message: JSONRPCMessage,
+  sessionId?: string,
 ): Promise<JSONRPCMessage> {
   if (!connection) {
     throw new Error(
@@ -2369,7 +2372,11 @@ export async function deliverClientMcpMessage(
   }
   const response = await connection.extMethod(
     SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
-    { server: serverName, payload: message },
+    {
+      server: serverName,
+      payload: message,
+      ...(sessionId ? { sessionId } : {}),
+    },
   );
   const payload = (response as { payload?: unknown })['payload'];
   if (payload === undefined || payload === null) {
@@ -2702,6 +2709,24 @@ function parseAcpSessionListCursor(
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
+  // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
+  // (Daemon Status child-resource chart). The daemon polls this at a fixed
+  // cadence, so successive calls form a clean delta window independent of tool
+  // activity. Init is guarded — `process.cpuUsage()` can throw in restricted
+  // containers.
+  private readonly childCpuCoreCount =
+    os.availableParallelism?.() ?? os.cpus().length ?? 1;
+  private prevChildCpu: NodeJS.CpuUsage | null = (() => {
+    try {
+      return process.cpuUsage();
+    } catch {
+      // null (not {0,0}) so the first successful poll skips the delta instead
+      // of billing the since-start total as one window — mirrors the daemon's
+      // own safeCpuUsage() null-on-failure contract.
+      return null;
+    }
+  })();
+  private prevChildCpuAt = Date.now();
 
   /**
    * Workspace-shared MCP transport pool. Eagerly constructed; lazy
@@ -5529,6 +5554,49 @@ class QwenAgent implements Agent {
         return (await this.buildAcpPreflightCells(
           this.config,
         )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceResource: {
+        // Process-wide rss/cpu of this ACP child, for the Daemon Status
+        // child-resource chart. cpuPercent is a delta since the previous poll
+        // (mirrors the daemon's own self-sampler), normalized by core count and
+        // clamped to [0,100].
+        const now = Date.now();
+        let cpu: NodeJS.CpuUsage | null = null;
+        try {
+          cpu = process.cpuUsage();
+        } catch {
+          /* keep prev baseline on failure → this window reads 0, and the next
+             successful poll still measures a correct delta window */
+        }
+        // Shared delta math: returns 0 when either sample is null (init-time or
+        // read failure) or the window is non-positive, so no phantom spike.
+        const cpuPercent = computeCpuPercent(
+          this.prevChildCpu,
+          cpu,
+          now - this.prevChildCpuAt,
+          this.childCpuCoreCount,
+        );
+        // Advance the baseline ONLY on a successful read (this also seeds it
+        // after an init-time null). Advancing prevAt after a throw would pair a
+        // full since-last-success cpuUs with a short since-last-failure
+        // elapsedMs on the next poll → a ~2x phantom spike.
+        if (cpu) {
+          this.prevChildCpu = cpu;
+          this.prevChildCpuAt = now;
+        }
+        // Guard memoryUsage too (same restricted-container risk as cpuUsage): on
+        // failure report 0 rss but keep the already-computed cpuPercent rather
+        // than throwing the whole handler.
+        let rssBytes = 0;
+        try {
+          rssBytes = process.memoryUsage().rss;
+        } catch {
+          /* restricted container — report 0 rss */
+        }
+        return {
+          rssBytes,
+          cpuPercent,
+        };
+      }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -7852,9 +7920,9 @@ class QwenAgent implements Agent {
    * servers in this session share one callback — the `serverName` argument
    * routes to the right client-hosted server in the parent.
    */
-  private buildClientMcpSender(): SendSdkMcpMessage {
+  private buildClientMcpSender(sessionId?: string): SendSdkMcpMessage {
     return (serverName: string, message: JSONRPCMessage) =>
-      deliverClientMcpMessage(this.connection, serverName, message);
+      deliverClientMcpMessage(this.connection, serverName, message, sessionId);
   }
 
   private async newSessionConfig(
@@ -8032,7 +8100,7 @@ class QwenAgent implements Agent {
       // client-hosted (extension) MCP server added at runtime reaches the
       // daemon WS. Servers that aren't client-hosted never use this callback
       // (the daemon only adds SDK-type runtime servers for client MCP).
-      sendSdkMcpMessage: this.buildClientMcpSender(),
+      sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
     });
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a

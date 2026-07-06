@@ -311,6 +311,17 @@ class FakeBridge {
     return this.workspaceSessions;
   }
 
+  getSessionSummary(sessionId: string) {
+    const summary = this.workspaceSessions.find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (summary) return summary;
+    if (sessionId === 'sess-1') {
+      return { sessionId, workspaceCwd: '/ws' };
+    }
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+
   detached: Array<{ sessionId: string; clientId?: string }> = [];
 
   async cancelSession(sessionId: string) {
@@ -1043,6 +1054,30 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/voice/set',
+    );
+  });
+
+  it('initialize advertises session organization methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/update_organization',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/list',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/create',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/update',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/delete',
     );
   });
 
@@ -6250,6 +6285,298 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ result: { v: 1, tools: [] } });
     });
+
+    it('session organization methods persist groups and organized list state', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 70,
+          method: '_qwen/workspace/session_groups/create',
+          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string; name: string; color: string } };
+        };
+        const group = createFrame.result.group;
+        expect(group).toMatchObject({ name: 'Frontend', color: 'blue' });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 71,
+          method: '_qwen/session/update_organization',
+          params: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 72,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: group.id,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: group.id,
+              },
+            ],
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 73,
+          method: '_qwen/workspace/session_groups/delete',
+          params: { workspaceCwd: '/ws', groupId: group.id },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { deleted: true },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 74,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: null,
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/update_organization assigns a color echoed by session/list', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440011';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'purple' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'purple', groupId: null },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 81,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [{ sessionId, color: 'purple', groupId: null }],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list group=ungrouped excludes color-tagged sessions', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        // Tag the session with a color and no named group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'red', groupId: null },
+        });
+
+        // A color tag is its own sidebar bucket, so the session is not
+        // "ungrouped" even though it belongs to no named group. The server
+        // filter must agree with that taxonomy for REST/ACP consumers.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list group=<id> excludes sessions that also carry a color tag', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440013';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/session_groups/create',
+          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string } };
+        };
+        const groupId = createFrame.result.group.id;
+
+        // An SDK/API consumer can set both groupId and color in one update —
+        // the core store keeps both. The sidebar gives color precedence, so the
+        // named-group filter must not surface this session under the group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, groupId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, groupId, color: 'red' },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 86,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: groupId,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list rejects group filter without organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 75,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          group: 'pinned',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 75,
+        error: {
+          code: -32602,
+          message: '`group` requires `view` to be "organized"',
+        },
+      });
+    });
+
+    it.each([
+      {
+        params: { isPinned: true },
+        message: '`sessionId` is required',
+      },
+      {
+        params: { sessionId: 'session-1', isPinned: 'yes' },
+        message: '`isPinned` must be a boolean',
+      },
+      {
+        params: { sessionId: 'session-1', groupId: 1 },
+        message: '`groupId` must be a string or null',
+      },
+      {
+        params: { sessionId: 'session-1', color: 'pink' },
+        message: '`color` must be a supported color or null',
+      },
+    ])(
+      '_qwen/session/update_organization rejects invalid params: $message',
+      async ({ params, message }) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 76,
+          method: '_qwen/session/update_organization',
+          params,
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 76,
+          error: {
+            code: -32602,
+            message,
+          },
+        });
+      },
+    );
 
     it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
       const connId = await initialize();

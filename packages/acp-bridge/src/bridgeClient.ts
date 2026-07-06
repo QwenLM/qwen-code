@@ -490,6 +490,18 @@ export class BridgeClient implements Client {
      */
     private readonly clientMcpSender?: ClientMcpMessageSender,
     private readonly ownsSession: (sessionId: string) => boolean = () => true,
+    /**
+     * Optional daemon token-usage hook. Called once per model round with the
+     * per-round input/output token increments read from
+     * `agent_message_chunk._meta.usage` at {@link sessionUpdate} (the single
+     * session/update fan-in). Wired only by the daemon host for the Daemon
+     * Status token-burn chart; omitted by tests / Mode A in-process consumers.
+     */
+    private readonly onTokenUsage?: (
+      inputTokens: number,
+      outputTokens: number,
+      durationMs?: number,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -592,6 +604,16 @@ export class BridgeClient implements Client {
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
+    }
+    // Daemon token-burn accounting for LIVE turns only (see method doc). Batch
+    // load-replay routes through seedSessionUpdates, not here, so replayed
+    // history never lands in the current metrics window. Wrapped so a throwing
+    // injected onTokenUsage callback can't skip the critical artifact processing
+    // below — metrics are optional, artifacts are not.
+    try {
+      this.recordLiveTokenUsage(params, entry);
+    } catch {
+      // Metrics callback failed; artifact processing must still run.
     }
     if (entry && prepared.artifacts.length > 0) {
       await this.upsertAndPublishArtifacts(entry, prepared.artifacts, {
@@ -704,6 +726,42 @@ export class BridgeClient implements Client {
         trustedPublisher: batch.trustedPublisher,
       });
     }
+  }
+
+  /**
+   * Daemon token-burn accounting for LIVE model turns. Called only from
+   * `sessionUpdate` (the live session/update fan-in), never from
+   * `seedSessionUpdates` — so batch load-replay never lands historical usage in
+   * the current metrics window. Additionally guarded on a live `entry`: a stray
+   * pending-restore frame (entry not yet registered) is skipped too, so replayed
+   * history can't post a phantom burn spike with no model call.
+   *
+   * Usage rides an otherwise-empty `agent_message_chunk` as `update._meta.usage`
+   * with per-round camelCase increments; subagent frames carry their own usage
+   * (tagged `parentToolCallId`) and are independent turns, so counting each
+   * frame once is the correct total. `_meta`/`usage` are optional and untyped.
+   */
+  private recordLiveTokenUsage(
+    params: SessionNotification,
+    entry: BridgeClientSessionEntry | undefined,
+  ): void {
+    if (!this.onTokenUsage || !entry) return;
+    const updateMeta = (params.update as { _meta?: Record<string, unknown> })
+      ._meta;
+    const usage = updateMeta?.['usage'];
+    if (usage === null || typeof usage !== 'object') return;
+    const inputTokens = (usage as { inputTokens?: unknown }).inputTokens;
+    const outputTokens = (usage as { outputTokens?: unknown }).outputTokens;
+    if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number') {
+      return;
+    }
+    // `_meta.durationMs` (the LLM API round-trip) rides the same frame.
+    const durationMs = updateMeta?.['durationMs'];
+    this.onTokenUsage(
+      typeof inputTokens === 'number' ? inputTokens : 0,
+      typeof outputTokens === 'number' ? outputTokens : 0,
+      typeof durationMs === 'number' ? durationMs : undefined,
+    );
   }
 
   /**

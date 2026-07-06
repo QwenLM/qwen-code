@@ -23,7 +23,6 @@ import {
   closeCompletion,
   completionStatus,
   moveCompletionSelection,
-  pickedCompletion,
   startCompletion,
   type Completion,
 } from '@codemirror/autocomplete';
@@ -45,25 +44,24 @@ import {
   DEFAULT_COMMAND_CATEGORY_ORDER,
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
-import {
-  createAtCompletionSource,
-  type AtReferenceCompletion,
-} from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
+import { useAtMentionMenu, type AtMentionMenuState } from './useAtMentionMenu';
 import { useI18n } from '../i18n';
 import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
+import { cssUrlValue } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from '../components/composerTagIcons';
 import type {
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
-  WebShellComposerTagKind,
+  WebShellComposerTagIconMap,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
+  WebShellAtProvider,
 } from '../customization';
 
 // ---- Large paste handling (shared utilities) ----
@@ -500,24 +498,6 @@ export function getComposerTagDisplay(tag: WebShellComposerTag): string {
   return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
 }
 
-function buildAtReferenceTag(
-  completion: AtReferenceCompletion,
-): WebShellComposerTag | null {
-  if (!completion.atReferenceKind || !completion.label) return null;
-  const kind = completion.atReferenceKind as WebShellComposerTagKind;
-  const serialized =
-    typeof completion.apply === 'string'
-      ? completion.apply.trim()
-      : completion.label.trim();
-  return {
-    id: serialized,
-    kind,
-    label: completion.atReferenceLabel,
-    value: completion.atReferenceValue,
-    serialized,
-  };
-}
-
 export function buildComposerPrompt(
   text: string,
   tags: readonly WebShellComposerTag[],
@@ -533,11 +513,19 @@ export function buildComposerPrompt(
 interface InlineTagRange {
   from: number;
   to: number;
-  tag: WebShellComposerTag;
+  tag: InlineComposerTag;
 }
 
 interface InlineTagDecorationSpec {
-  tag: WebShellComposerTag;
+  tag: InlineComposerTag;
+}
+
+type InlineComposerTag = WebShellComposerTag & { iconUrl?: string };
+
+function toPublicComposerTag(tag: InlineComposerTag): WebShellComposerTag {
+  const publicTag = { ...tag };
+  delete publicTag.iconUrl;
+  return publicTag;
 }
 
 export const addInlineTagEffect = StateEffect.define<InlineTagRange>({
@@ -549,7 +537,7 @@ export const removeInlineTagEffect = StateEffect.define<{
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
 class ComposerTagWidget extends WidgetType {
-  constructor(private readonly tag: WebShellComposerTag) {
+  constructor(private readonly tag: InlineComposerTag) {
     super();
   }
 
@@ -560,7 +548,8 @@ class ComposerTagWidget extends WidgetType {
       this.tag.value === other.tag.value &&
       this.tag.kind === other.tag.kind &&
       this.tag.serialized === other.tag.serialized &&
-      this.tag.removable === other.tag.removable
+      this.tag.removable === other.tag.removable &&
+      this.tag.iconUrl === other.tag.iconUrl
     );
   }
 
@@ -571,13 +560,13 @@ class ComposerTagWidget extends WidgetType {
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
-    const iconUrl = getComposerTagIconUrl(this.tag.kind);
+    const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
 
     if (iconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
-      icon.style.setProperty('--composer-tag-icon-url', `url("${iconUrl}")`);
+      icon.style.setProperty('--composer-tag-icon-url', cssUrlValue(iconUrl));
       chip.appendChild(icon);
     }
 
@@ -696,7 +685,7 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
     .field(inlineComposerTagField)
     .between(0, view.state.doc.length, (_from, _to, value) => {
       const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-      if (tag) tags.push(tag);
+      if (tag) tags.push(toPublicComposerTag(tag));
     });
   return tags;
 }
@@ -801,8 +790,14 @@ function createFollowupGhostExtension(suggestion: string | null) {
 
 // ---- Hook options ----
 
+export type ComposerSubmitCommit = () => void;
+
 export interface UseComposerCoreOptions {
-  onSubmit: (text: string, images?: PromptImage[]) => boolean | void;
+  onSubmit: (
+    text: string,
+    images?: PromptImage[],
+    commitAccepted?: ComposerSubmitCommit,
+  ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
@@ -822,6 +817,8 @@ export interface UseComposerCoreOptions {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  atProviders?: readonly WebShellAtProvider[];
+  composerTagIcons?: WebShellComposerTagIconMap;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -930,6 +927,13 @@ export interface UseComposerCoreReturn {
   closeSlashMenu: () => void;
   selectSlashCompletion: (index: number) => boolean;
   acceptSlashCompletion: (index?: number) => boolean;
+  atMenu: AtMentionMenuState | null;
+  closeAtMenu: () => void;
+  selectAtCompletion: (index: number) => boolean;
+  acceptAtCompletion: (index?: number) => boolean;
+  enterAtCategory: (index?: number) => boolean;
+  backAtCategories: () => false | 'items' | 'categories';
+  updateAtSearch: (query: string) => boolean;
 }
 
 export function useComposerCore(
@@ -955,6 +959,8 @@ export function useComposerCore(
     sessionName,
     composerInput,
     composerInputVersion,
+    atProviders,
+    composerTagIcons,
     editorTheme,
   } = options;
 
@@ -994,9 +1000,57 @@ export function useComposerCore(
   languageRef.current = language;
   const workspaceActionsRef = useRef(workspace?.actions);
   workspaceActionsRef.current = workspace?.actions;
+  const composerTagIconsRef = useRef(composerTagIcons);
+  composerTagIconsRef.current = composerTagIcons;
+  const resolveComposerTagIcon = useCallback(
+    (tag: WebShellComposerTag): InlineComposerTag => {
+      const iconUrl = getComposerTagIconUrl(
+        tag.kind,
+        composerTagIconsRef.current,
+      );
+      return iconUrl ? { ...tag, iconUrl } : tag;
+    },
+    [],
+  );
   const [shellMode, setShellMode] = useState(false);
   const shellModeRef = useRef(shellMode);
   shellModeRef.current = shellMode;
+  const atMenu = useAtMentionMenu({
+    viewRef,
+    disabledRef,
+    shellModeRef,
+    workspaceActionsRef,
+    providers: atProviders,
+    createInlineTagEffect: (range) =>
+      addInlineTagEffect.of({
+        ...range,
+        tag: resolveComposerTagIcon(range.tag),
+      }),
+  });
+  const closeAtMenuState = atMenu.close;
+  const refreshAtMenuForView = atMenu.refreshForView;
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const effects: StateEffect<unknown>[] = [clearInlineTagsEffect.of()];
+    view.state
+      .field(inlineComposerTagField)
+      .between(0, view.state.doc.length, (from, to, value) => {
+        const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+        if (!tag) return;
+        effects.push(
+          addInlineTagEffect.of({
+            from,
+            to,
+            tag: resolveComposerTagIcon(toPublicComposerTag(tag)),
+          }),
+        );
+      });
+    if (effects.length === 1) return;
+    view.dispatch({ effects });
+  }, [composerTagIcons, resolveComposerTagIcon]);
+
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
       onDismissFollowupRef.current?.();
@@ -1044,6 +1098,42 @@ export function useComposerCore(
     setSlashMenuState(next);
   }, []);
 
+  const clearAutoAtTriggerIfIntact = useCallback(() => {
+    const trigger = autoTriggerRef.current;
+    const view = viewRef.current;
+    if (!trigger || !view) return;
+    const doc = view.state.doc;
+    const to = trigger.from + trigger.text.length;
+    if (
+      doc.length === to &&
+      doc.sliceString(trigger.from, to) === trigger.text
+    ) {
+      view.dispatch({
+        changes: {
+          from: trigger.from,
+          to,
+          insert: '',
+        },
+      });
+    }
+    autoTriggerRef.current = null;
+  }, []);
+
+  const closeAtMenu = useCallback(() => {
+    clearAutoAtTriggerIfIntact();
+    closeAtMenuState();
+  }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
+
+  const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
+  const closeAtMenuIfOpen = useCallback(() => {
+    const result = closeAtMenuIfOpenFn();
+    if (!result) return false;
+    if (result === 'closed') {
+      clearAutoAtTriggerIfIntact();
+    }
+    return true;
+  }, [clearAutoAtTriggerIfIntact, closeAtMenuIfOpenFn]);
+
   const refreshSlashMenuForView = useCallback(
     (view: EditorView | null, preferredIndex?: number) => {
       if (!view || disabledRef.current || shellModeRef.current) {
@@ -1075,6 +1165,7 @@ export function useComposerCore(
         setSlashMenu(null);
         return;
       }
+      closeAtMenu();
       const currentIndex =
         preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
       const selectedIndex = Math.max(
@@ -1083,7 +1174,7 @@ export function useComposerCore(
       );
       setSlashMenu({ ...result, selectedIndex });
     },
-    [setSlashMenu],
+    [closeAtMenu, setSlashMenu],
   );
 
   const closeSlashMenu = useCallback(() => {
@@ -1211,6 +1302,7 @@ export function useComposerCore(
     const view = viewRef.current;
     if (!view) return;
     closeSlashMenu();
+    closeAtMenu();
     const query = view.state.doc.toString();
     searchDraftRef.current = query;
     setSearchMode(true);
@@ -1222,7 +1314,7 @@ export function useComposerCore(
     setSearchActiveIndex(0);
     history.resetSearch();
     setTimeout(() => searchInputRef.current?.focus(), 0);
-  }, [closeSlashMenu, getSearchMatches]);
+  }, [closeAtMenu, closeSlashMenu, getSearchMatches]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
 
@@ -1361,60 +1453,42 @@ export function useComposerCore(
       const prompt = buildComposerPrompt(text, tags);
       const images = pastedImagesRef.current;
       const isShellMode = shellModeRef.current;
+      let committed = false;
+      const commitAccepted = () => {
+        if (committed) return;
+        committed = true;
+        setSlashMenu(null);
+        if (followupCompletion) {
+          onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+        }
+        onDismissFollowupRef.current?.();
+        pendingPastesRef.current.clear();
+        nextPasteIdRef.current = 1;
+        if (isShellMode) {
+          shellHistoryActionsRef.current.push(text);
+          shellHistoryActionsRef.current.reset();
+        } else {
+          historyActionsRef.current.push(text);
+          historyActionsRef.current.reset();
+        }
+        historyBrowseActiveRef.current = false;
+        setComposerTags([]);
+        setPastedImages([]);
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: '' },
+          effects: clearInlineTagsEffect.of(),
+        });
+      };
       const accepted = onSubmitRef.current(
         isShellMode ? `!${prompt}` : prompt,
         images.length > 0 ? [...images] : undefined,
+        commitAccepted,
       );
       if (accepted === false) return true;
-      setSlashMenu(null);
-      if (followupCompletion) {
-        onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-      }
-      onDismissFollowupRef.current?.();
-      pendingPastesRef.current.clear();
-      nextPasteIdRef.current = 1;
-      if (isShellMode) {
-        shellHistoryActionsRef.current.push(text);
-        shellHistoryActionsRef.current.reset();
-      } else {
-        historyActionsRef.current.push(text);
-        historyActionsRef.current.reset();
-      }
-      historyBrowseActiveRef.current = false;
-      setComposerTags([]);
-      setPastedImages([]);
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: '' },
-        effects: clearInlineTagsEffect.of(),
-      });
+      commitAccepted();
       return true;
     };
     submitTextRef.current = submitText;
-
-    const completionSources = [
-      createAtCompletionSource(
-        () => workspaceActionsRef.current?.globWorkspace,
-        () => workspaceActionsRef.current?.loadExtensionsStatus,
-        () =>
-          workspaceActionsRef.current?.loadMcpStatus
-            ? async () => {
-                const status =
-                  await workspaceActionsRef.current!.loadMcpStatus();
-                return {
-                  servers: (status?.servers ?? []).map((server) => ({
-                    name: server.name,
-                    description: server.description,
-                  })),
-                };
-              }
-            : undefined,
-        {
-          extensions: t('quickActions.extensions'),
-          mcpServers: t('mcp.title'),
-          files: t('editor.hintFiles'),
-        },
-      ),
-    ];
 
     const insertNewline = (view: EditorView) => {
       view.dispatch(view.state.replaceSelection('\n'));
@@ -1492,6 +1566,9 @@ export function useComposerCore(
       {
         key: 'Enter',
         run: (view) => {
+          if (atMenu.accept()) {
+            return true;
+          }
           if (slashMenuRef.current) {
             return acceptSlashCompletion();
           }
@@ -1527,6 +1604,9 @@ export function useComposerCore(
       {
         key: 'Escape',
         run: () => {
+          if (closeAtMenuIfOpen()) {
+            return true;
+          }
           if (slashMenuRef.current) {
             closeSlashMenu();
             return true;
@@ -1565,6 +1645,7 @@ export function useComposerCore(
           // auto-opened menu is closed. (Gate uses historyBrowseActiveRef, not
           // the sticky history.isNavigating — see its declaration.)
           if (!isBrowsingHistory) {
+            if (atMenu.moveSelection('up')) return true;
             if (moveSlashCompletionSelection('up')) return true;
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(false)(view);
@@ -1572,6 +1653,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
+            closeAtMenu();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
           if (multilineBoundary === 'handled') return true;
@@ -1614,6 +1696,7 @@ export function useComposerCore(
           // the slash menu and native completion only capture arrows once the
           // user is no longer paging through history.
           if (!isBrowsingHistory) {
+            if (atMenu.moveSelection('down')) return true;
             if (moveSlashCompletionSelection('down')) return true;
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(true)(view);
@@ -1621,6 +1704,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
+            closeAtMenu();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
@@ -1660,6 +1744,9 @@ export function useComposerCore(
       {
         key: 'Tab',
         run: (view) => {
+          if (atMenu.accept()) {
+            return true;
+          }
           if (acceptFollowupIntoEditor(view, 'tab')) {
             return true;
           }
@@ -1746,6 +1833,15 @@ export function useComposerCore(
       }
       if (update.docChanged || update.selectionSet) {
         refreshSlashMenuForView(update.view);
+        // Match slash command behavior: history-recalled text like "@foo"
+        // should stay as plain recalled input until the user edits it.
+        if (historyBrowseActiveRef.current) {
+          closeAtMenu();
+        } else {
+          if (refreshAtMenuForView(update.view)) {
+            closeSlashMenu();
+          }
+        }
       }
     });
 
@@ -1771,7 +1867,13 @@ export function useComposerCore(
               d.length === from + trigger.text.length &&
               d.sliceString(from) === trigger.text
             ) {
-              view.dispatch({ changes: { from, to: d.length, insert: '' } });
+              view.dispatch({
+                changes: {
+                  from,
+                  to: from + trigger.text.length,
+                  insert: '',
+                },
+              });
             }
           }, 0);
         }
@@ -1790,38 +1892,18 @@ export function useComposerCore(
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         autocompletion({
-          override: completionSources,
+          override: [],
           activateOnTyping: true,
           icons: false,
           optionClass: (completion) => {
-            const ref = completion as AtReferenceCompletion;
             const classes: string[] = [];
             if (completion.type === 'file') classes.push('cm-file-completion');
-            if (ref.atReferenceKind) {
-              classes.push(`cm-at-ref-completion-${ref.atReferenceKind}`);
-            }
             if (hasCommandHoverInfo(completion)) {
               classes.push('cm-command-info-completion');
             }
             return classes.join(' ');
           },
           addToOptions: [
-            {
-              render: (completion) => {
-                const ref = completion as AtReferenceCompletion;
-                if (!ref.atReferenceKind) return null;
-                const iconUrl = getComposerTagIconUrl(ref.atReferenceKind);
-                if (!iconUrl) return null;
-                const icon = document.createElement('span');
-                icon.className = 'cm-at-ref-completion-icon';
-                icon.style.setProperty(
-                  '--composer-tag-icon-url',
-                  `url("${iconUrl}")`,
-                );
-                return icon;
-              },
-              position: 20,
-            },
             {
               render: renderCompletionHoverInfo,
               position: 90,
@@ -1862,29 +1944,6 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
-          for (const tr of update.transactions) {
-            const completion = tr.annotation(pickedCompletion) as
-              | AtReferenceCompletion
-              | undefined;
-            if (!completion) continue;
-            const tag = buildAtReferenceTag(completion);
-            if (!tag) continue;
-            const inserted = serializeComposerTag(tag);
-            const changes = tr.changes;
-            if (changes.empty) continue;
-            let from = -1;
-            changes.iterChanges((_fA, _tA, fromB, toB, insertedText) => {
-              if (from !== -1) return;
-              if (insertedText.toString().includes(inserted)) {
-                from = fromB;
-              }
-            });
-            if (from === -1) continue;
-            const to = from + inserted.length;
-            update.view.dispatch({
-              effects: addInlineTagEffect.of({ from, to, tag }),
-            });
-          }
           if (update.docChanged) {
             const text = update.state.doc.toString();
             const followup = followupStateRef.current;
@@ -1920,8 +1979,25 @@ export function useComposerCore(
           return false;
         }),
         EditorView.domEventHandlers({
-          blur() {
+          blur(event) {
             closeSlashMenu();
+            if (
+              event.relatedTarget instanceof Element &&
+              event.relatedTarget.closest('[data-at-mention-panel="true"]')
+            ) {
+              return false;
+            }
+            window.setTimeout(() => {
+              const currentView = viewRef.current;
+              if (currentView?.hasFocus) return;
+              if (
+                document.activeElement instanceof Element &&
+                document.activeElement.closest('[data-at-mention-panel="true"]')
+              ) {
+                return;
+              }
+              closeAtMenu();
+            }, 0);
             return false;
           },
           paste(event) {
@@ -2095,11 +2171,12 @@ export function useComposerCore(
     if (!view) return;
     if (dialogOpen) {
       closeSlashMenu();
+      closeAtMenu();
       view.contentDOM.blur();
     } else {
       view.focus();
     }
-  }, [dialogOpen, closeSlashMenu]);
+  }, [closeAtMenu, dialogOpen, closeSlashMenu]);
 
   // Global keydown handler for focus-stealing
   useEffect(() => {
@@ -2196,7 +2273,8 @@ export function useComposerCore(
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
-            startCompletion(nextView);
+            closeSlashMenu();
+            refreshAtMenuForView(nextView);
           }
         }, 0);
       }
@@ -2204,7 +2282,14 @@ export function useComposerCore(
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchMode, dialogOpen, refreshSlashMenuForView, toggleShellMode]);
+  }, [
+    refreshAtMenuForView,
+    closeSlashMenu,
+    searchMode,
+    dialogOpen,
+    refreshSlashMenuForView,
+    toggleShellMode,
+  ]);
 
   // ---- Imperative methods ----
 
@@ -2285,12 +2370,13 @@ export function useComposerCore(
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
-            startCompletion(nextView);
+            closeSlashMenu();
+            refreshAtMenuForView(nextView);
           }
         }, 0);
       }
     },
-    [refreshSlashMenuForView],
+    [closeSlashMenu, refreshAtMenuForView, refreshSlashMenuForView],
   );
 
   const getText = useCallback(() => {
@@ -2386,7 +2472,12 @@ export function useComposerCore(
           changes: { from: selection.from, to: selection.to, insert: text },
           effects:
             ranges.length > 0
-              ? ranges.map((range) => addInlineTagEffect.of(range))
+              ? ranges.map((range) =>
+                  addInlineTagEffect.of({
+                    ...range,
+                    tag: resolveComposerTagIcon(range.tag),
+                  }),
+                )
               : undefined,
           selection: { anchor: selection.from + text.length },
           scrollIntoView: true,
@@ -2407,7 +2498,7 @@ export function useComposerCore(
         return next;
       });
     },
-    [],
+    [resolveComposerTagIcon],
   );
 
   const removeTopTag = useCallback(
@@ -2510,7 +2601,7 @@ export function useComposerCore(
             addInlineTagEffect.of({
               from,
               to: from + tagText.length,
-              tag,
+              tag: resolveComposerTagIcon(tag),
             }),
           );
           from += tagText.length + 1;
@@ -2541,7 +2632,7 @@ export function useComposerCore(
         window.clearTimeout(submitTimer);
       }
     };
-  }, [composerInputVersion, submit]);
+  }, [composerInputVersion, resolveComposerTagIcon, submit]);
 
   // ---- Search state ----
 
@@ -2760,5 +2851,12 @@ export function useComposerCore(
     closeSlashMenu,
     selectSlashCompletion,
     acceptSlashCompletion,
+    atMenu: atMenu.state,
+    closeAtMenu,
+    selectAtCompletion: atMenu.select,
+    acceptAtCompletion: atMenu.accept,
+    enterAtCategory: atMenu.enterCategory,
+    backAtCategories: atMenu.backToCategories,
+    updateAtSearch: atMenu.updateSearch,
   };
 }

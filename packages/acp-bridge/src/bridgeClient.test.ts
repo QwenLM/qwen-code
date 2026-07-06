@@ -548,6 +548,175 @@ describe('BridgeClient — original timestamp preservation', () => {
   });
 });
 
+describe('BridgeClient — token usage accounting', () => {
+  const noFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  function makeClientWithTokenHook(
+    sessionId: string,
+    onTokenUsage: (inputTokens: number, outputTokens: number) => void,
+  ) {
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+    };
+    return new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession → default () => true
+      onTokenUsage,
+    );
+  }
+
+  it('reports per-round input/output tokens from update._meta.usage', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:usage', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:usage',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 1200, outputTokens: 340, totalTokens: 1540 },
+          durationMs: 4200,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).toHaveBeenCalledTimes(1);
+    // The sibling `_meta.durationMs` (LLM round-trip) rides through too.
+    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200);
+  });
+
+  it('does not report when the update carries no usage meta', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:nousage', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:nousage',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello' },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('defaults a missing input or output token field to 0', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:partial', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:partial',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { outputTokens: 50 } },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    // No `_meta.durationMs` on this frame → the round-trip arg is undefined.
+    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined);
+  });
+
+  it('does NOT count tokens for replayed history frames (no live entry yet)', async () => {
+    // Regression guard for the `session/load` replay path: HistoryReplayer
+    // re-emits saved assistant usage as live `session/update` frames that reach
+    // sessionUpdate *before* the session entry is registered, so `resolveEntry`
+    // returns undefined and events flow through the pending-restore bus instead.
+    // Counting those would dump the whole session's historical token total into
+    // the current window as a phantom burn spike; the `&& entry` guard blocks it.
+    const onTokenUsage = vi.fn();
+    const publish = vi.fn().mockReturnValue(true);
+    const sessionId = 'sess:replay';
+    const client = new BridgeClient(
+      (() => undefined) as never, // resolveEntry → no live entry yet (replay)
+      ((sid: string) => (sid === sessionId ? { publish } : undefined)) as never, // restore bus
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession → default () => true
+      onTokenUsage,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 5000, outputTokens: 1200, totalTokens: 6200 },
+          durationMs: 900,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    // The frame is still published to the restore bus (history replay works)...
+    expect(publish).toHaveBeenCalled();
+    // ...but its historical usage is NOT added to the live token-burn metric.
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('does NOT count tokens when replaying history via seedSessionUpdates (batch load)', async () => {
+    // #6309 routes batch load-replay through seedSessionUpdates, which prepares
+    // frames and seeds them WITHOUT going through the live sessionUpdate token
+    // sniff. Even though a replayed assistant frame carries usage, it must not
+    // land in the live token-burn metric.
+    const onTokenUsage = vi.fn();
+    const sessionId = 'sess:seed';
+    const fakeEntry = {
+      sessionId,
+      events: {
+        publish: vi.fn().mockReturnValue(true),
+        seedReplayEvents: vi.fn(),
+      },
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      (() => undefined) as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession
+      onTokenUsage,
+    );
+
+    await client.seedSessionUpdates(
+      fakeEntry as never,
+      [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 9000, outputTokens: 2000 } },
+        },
+      ] as never,
+    );
+
+    // History is seeded into the event bus...
+    expect(fakeEntry.events.seedReplayEvents).toHaveBeenCalled();
+    // ...but the replayed usage is NOT counted as live burn.
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — artifact ingress', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

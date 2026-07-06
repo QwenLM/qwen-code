@@ -81,7 +81,11 @@ import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
 } from '../tools/artifact/publisher.js';
-import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
+import type {
+  LspClient,
+  LspServiceReinitializeResult,
+  LspStatusSnapshot,
+} from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
 import { ApprovalMode } from './approval-mode.js';
 
@@ -1123,6 +1127,14 @@ export interface ConfigParameters {
    */
   visionModel?: string;
   /**
+   * Ordered list of fallback model IDs to try when the primary model hits
+   * capacity errors (429/503/529). At most 3 entries; duplicate fallback
+   * entries are filtered during normalization, and primary/current model
+   * matches are skipped at runtime.
+   * Configurable via the `modelFallbacks` setting or `--fallback-model` CLI flag.
+   */
+  modelFallbacks?: string[];
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1251,6 +1263,30 @@ export function normalizeMaxSubagentDepth(
   return value == null || !Number.isFinite(value)
     ? DEFAULT_MAX_SUBAGENT_DEPTH
     : Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.max(1, Math.floor(value)));
+}
+
+/** Maximum number of fallback models allowed in the chain. */
+const MAX_MODEL_FALLBACKS = 3;
+
+/**
+ * Normalize model fallback entries: deduplicate, trim, remove blanks,
+ * and cap at {@link MAX_MODEL_FALLBACKS}.
+ *
+ * @param raw - Raw fallback model IDs, or undefined.
+ * @returns A deduplicated, capped array of model IDs (may be empty).
+ */
+function normalizeModelFallbacks(raw: string[] | undefined): string[] {
+  if (!raw || raw.length === 0) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of raw) {
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+    if (result.length >= MAX_MODEL_FALLBACKS) break;
+  }
+  return result;
 }
 
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
@@ -1651,6 +1687,7 @@ export class Config {
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
   private visionModel?: string;
+  private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
@@ -1953,6 +1990,7 @@ export class Config {
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
+    this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
@@ -3149,6 +3187,15 @@ export class Config {
    */
   setVisionModel(model: string | undefined): void {
     this.visionModel = model || undefined;
+  }
+
+  /**
+   * Return the ordered list of fallback model IDs configured for this session.
+   * The list is already normalized (deduplicated, capped at 3, blanks removed).
+   * Returns an empty array when no fallbacks are configured.
+   */
+  getModelFallbacks(): readonly string[] {
+    return this.modelFallbacks;
   }
 
   /**
@@ -4412,7 +4459,7 @@ export class Config {
 
     if (this.lspClient) {
       return {
-        ...this.createLspStatusSnapshot(true),
+        ...this.createLspStatusSnapshot(true, this.lspInitializationError),
         statusUnavailable: true,
       };
     }
@@ -4453,8 +4500,36 @@ export class Config {
     if (this.initialized) {
       throw new Error('Cannot set LSP status after initialization');
     }
+    this.setRuntimeLspInitializationError(error);
+  }
+
+  private setRuntimeLspInitializationError(
+    error: Error | string | undefined,
+  ): void {
     this.lspInitializationError =
       error instanceof Error ? error.message : error;
+  }
+
+  async reinitializeLsp(): Promise<LspServiceReinitializeResult | undefined> {
+    if (!this.isLspEnabled() || !this.lspClient?.reinitialize) {
+      return undefined;
+    }
+    try {
+      const result = await this.lspClient.reinitialize();
+      if (result.reconcile.failed.length > 0) {
+        this.setRuntimeLspInitializationError(
+          `LSP reload partially failed: ${result.reconcile.failed.join(', ')}`,
+        );
+      } else {
+        this.setRuntimeLspInitializationError(undefined);
+      }
+      return result;
+    } catch (error) {
+      this.setRuntimeLspInitializationError(
+        error instanceof Error ? error : String(error),
+      );
+      throw error;
+    }
   }
 
   getSessionSubagents(): SubagentConfig[] {

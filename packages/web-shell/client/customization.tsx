@@ -64,7 +64,14 @@ export interface WebShellMarkdownCustomization {
 export type MarkdownTableMode = 'basic' | 'advanced';
 
 export type ToolHeaderKind =
-  'agent' | 'edit' | 'fetch' | 'read' | 'shell' | 'todo' | 'write' | 'other';
+  | 'agent'
+  | 'edit'
+  | 'fetch'
+  | 'read'
+  | 'shell'
+  | 'todo'
+  | 'write'
+  | 'other';
 
 export interface ToolHeaderExtraRenderInfo {
   kind: ToolHeaderKind;
@@ -82,7 +89,17 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellComposerTagKind = 'extension' | 'mcp' | 'file' | 'skill';
+export type WebShellBuiltinComposerTagKind =
+  | 'extension'
+  | 'mcp'
+  | 'file'
+  | 'skill';
+
+export type WebShellComposerTagKind =
+  | WebShellBuiltinComposerTagKind
+  | (string & {});
+
+export type WebShellComposerTagIconMap = Readonly<Record<string, string>>;
 
 export interface WebShellComposerTag {
   id: string;
@@ -108,6 +125,26 @@ export interface WebShellComposerInput {
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
   submit?: boolean;
+}
+
+export interface WebShellAtItem {
+  id: string;
+  label: string;
+  description?: string;
+  detail?: string;
+  insertText?: string;
+  composerTag?: WebShellComposerTag;
+}
+
+export interface WebShellAtProvider {
+  id: string;
+  label: string;
+  description?: string;
+  order?: number;
+  search(params: {
+    query: string;
+    signal: AbortSignal;
+  }): Promise<readonly WebShellAtItem[]>;
 }
 
 export interface WebShellComposerApi {
@@ -184,7 +221,9 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
 }
 
 export type WebShellTaskInfo =
-  WebShellAgentTask | WebShellShellTask | WebShellMonitorTask;
+  | WebShellAgentTask
+  | WebShellShellTask
+  | WebShellMonitorTask;
 
 // ---- Model info (public type for footer renderer) ----
 

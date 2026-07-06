@@ -37,8 +37,10 @@ import {
   AppContainer,
   dedupeNewestFirst,
   getNextRenderMode,
+  isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
+  shouldDrainMessageQueue,
 } from './AppContainer.js';
 import {
   formatSessionWindowTitle,
@@ -65,6 +67,7 @@ import {
 import {
   type HistoryItem,
   type HistoryItemWithoutId,
+  StreamingState,
   ToolCallStatus,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
@@ -941,6 +944,48 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('keeps input active while compression is processing', () => {
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: true,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(true);
+
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('does not drain queued messages while compression is processing', () => {
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: true,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(false);
+
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(true);
     });
 
     it('submits /btw immediately instead of queueing while responding', () => {
