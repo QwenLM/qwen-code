@@ -150,6 +150,7 @@ describe('speculationToolGate', () => {
       ToolNames.ASK_USER_QUESTION,
       ToolNames.EXIT_PLAN_MODE,
       ToolNames.ENTER_PLAN_MODE,
+      ToolNames.TEAM_PLAN_APPROVAL,
       ToolNames.WEB_FETCH,
     ])('hits boundary for %s', async (toolName) => {
       const result = await evaluateToolCall(

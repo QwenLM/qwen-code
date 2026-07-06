@@ -18,7 +18,11 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ChatCompletionToolWithCache } from './types.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import {
+  DEFAULT_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -48,19 +52,18 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
-// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
-vi.mock('../constants.js', () => ({
-  DEFAULT_TIMEOUT: 120000,
-  DEFAULT_MAX_RETRIES: 3,
-  DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
-  DEFAULT_DASHSCOPE_BASE_URL:
-    'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
-  DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
-  get DASHSCOPE_PROXY_BASE_URL() {
-    return process.env['DASHSCOPE_PROXY_BASE_URL'];
-  },
-}));
+// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value, while
+// delegating every other constant (timeouts, sentinel, resolveRequestTimeout)
+// to the real module so the mock cannot drift from the implementation.
+vi.mock('../constants.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../constants.js')>();
+  return {
+    ...actual,
+    get DASHSCOPE_PROXY_BASE_URL() {
+      return process.env['DASHSCOPE_PROXY_BASE_URL'];
+    },
+  };
+});
 
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
@@ -105,49 +108,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
   describe('constructor', () => {
     it('should initialize with provided configs', () => {
       expect(provider).toBeInstanceOf(DashScopeOpenAICompatibleProvider);
-    });
-  });
-
-  describe('getResponseParsingOptions', () => {
-    it('should enable tagged thinking parsing for GLM models', () => {
-      const glmProvider = new DashScopeOpenAICompatibleProvider(
-        { ...mockContentGeneratorConfig, model: 'glm-5.2' },
-        mockCliConfig,
-      );
-
-      expect(glmProvider.getResponseParsingOptions()).toEqual({
-        taggedThinkingTags: true,
-      });
-    });
-
-    it('should match GLM models case-insensitively', () => {
-      const glmProvider = new DashScopeOpenAICompatibleProvider(
-        { ...mockContentGeneratorConfig, model: 'GLM-5.1' },
-        mockCliConfig,
-      );
-
-      expect(glmProvider.getResponseParsingOptions()).toEqual({
-        taggedThinkingTags: true,
-      });
-    });
-
-    it('should use the request model override when provided', () => {
-      expect(provider.getResponseParsingOptions('glm-5.2')).toEqual({
-        taggedThinkingTags: true,
-      });
-    });
-
-    it('should let a non-GLM request model override a configured GLM model', () => {
-      const glmProvider = new DashScopeOpenAICompatibleProvider(
-        { ...mockContentGeneratorConfig, model: 'glm-5.2' },
-        mockCliConfig,
-      );
-
-      expect(glmProvider.getResponseParsingOptions('qwen-max')).toEqual({});
-    });
-
-    it('should not enable tagged thinking parsing for non-GLM models', () => {
-      expect(provider.getResponseParsingOptions()).toEqual({});
     });
   });
 
@@ -549,6 +509,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         }),
       );
     });
+
+    it('should disable the timeout when configured to 0', () => {
+      mockContentGeneratorConfig.timeout = 0;
+
+      provider.buildClient();
+
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: DISABLED_REQUEST_TIMEOUT_MS,
+        }),
+      );
+    });
   });
 
   describe('buildMetadata', () => {
@@ -613,6 +585,116 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const lastMessage = result.messages[1];
       expect(lastMessage.role).toBe('user');
       expect(lastMessage.content).toBe('Hello!');
+    });
+
+    it('sends enable_thinking:true on a qwen model when a reasoning effort is set', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+    });
+
+    it('strips the pipeline-injected nested reasoning when enable_thinking is added on a qwen model', () => {
+      // The pipeline injects a nested `reasoning: { effort }` object for
+      // OpenAI-compatible endpoints. qwen drives thinking via `enable_thinking`,
+      // so shipping both would send two competing knobs — the nested form must
+      // be dropped (mirrors deepseek.ts / zai.ts).
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning']).toBeUndefined();
+    });
+
+    it('vision model: injects enable_thinking and strips nested reasoning on a qwen-vl model', () => {
+      // The vision branch of buildRequest duplicates the enable_thinking / strip
+      // logic; exercise it directly so a divergence from the text path is caught.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen-vl-max',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        model: 'qwen-vl-max',
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning']).toBeUndefined();
+      expect(result['vl_high_resolution_images']).toBe(true);
+    });
+
+    it('keeps the nested reasoning for a non-qwen wire model (no enable_thinking, no strip)', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-4.6',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        model: 'glm-4.6',
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['reasoning']).toEqual({ effort: 'high' });
+    });
+
+    it('omits enable_thinking when no reasoning effort is set', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
+    it('does not send enable_thinking for a non-qwen wire model even with effort set', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-4.6',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'glm-4.6' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
     });
 
     it('should add cache control to system message only for non-streaming requests with tools', () => {

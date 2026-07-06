@@ -16,6 +16,7 @@ import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
 import {
   collectAvailableSkillEntries,
+  clearCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
 
@@ -82,6 +83,9 @@ describe('SkillTool', () => {
     mockAddSessionAllowRule = vi.fn();
     vi.mocked(recordSkillInvocation).mockClear();
 
+    // Clear skill-entries cache so fake timers don't cause stale hits.
+    clearCollectedSkillEntriesCache();
+
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
@@ -138,6 +142,7 @@ describe('SkillTool', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+    clearCollectedSkillEntriesCache(mockSkillManager);
   });
 
   // The skill listing moved out of the tool description into a system-reminder

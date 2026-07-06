@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
+  generateCronTaskId,
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
@@ -115,11 +116,56 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
+    it('throws for non-finite timestamps', async () => {
+      // JSON.parse turns -1e999 into -Infinity — typeof number, but it
+      // poisons date math downstream (new Date(-Infinity).toISOString()
+      // throws mid-load). Must be rejected like any other corrupt field.
+      const raw = (createdAt: string, lastFiredAt: string) =>
+        `[{"id":"t1","cron":"* * * * *","prompt":"p","recurring":true,` +
+        `"createdAt":${createdAt},"lastFiredAt":${lastFiredAt}}]`;
+      await seedTasksFile(tmpDir, raw('-1e999', 'null'));
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await seedTasksFile(tmpDir, raw(`${Date.now()}`, '1e999'));
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('reads valid tasks', async () => {
       const task = makeTask();
       await seedTasksFile(tmpDir, JSON.stringify([task]));
       const result = await readCronTasks(tmpDir);
       expect(result).toEqual([task]);
+    });
+
+    it('round-trips the optional name/enabled fields', async () => {
+      const task = makeTask({ name: 'Weekly digest', enabled: false });
+      await writeCronTasks(tmpDir, [task]);
+      const result = await readCronTasks(tmpDir);
+      expect(result).toEqual([task]);
+    });
+
+    it('accepts legacy tasks with no name/enabled fields', async () => {
+      // A task written before the fields existed must still read back.
+      const legacy = makeTask();
+      await seedTasksFile(tmpDir, JSON.stringify([legacy]));
+      const result = await readCronTasks(tmpDir);
+      expect(result[0]!.name).toBeUndefined();
+      expect(result[0]!.enabled).toBeUndefined();
+    });
+
+    it('rejects a task whose name is not a string', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), name: 123 }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a task whose enabled is not a boolean', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), enabled: 'yes' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
   });
 
@@ -321,6 +367,21 @@ describe('cronTasksFile', () => {
       expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(
         'after-race',
       );
+    });
+  });
+
+  describe('generateCronTaskId', () => {
+    it('returns an 8-character base36 id', () => {
+      expect(generateCronTaskId()).toMatch(/^[a-z0-9]{8}$/);
+    });
+
+    it('is very unlikely to collide across calls', () => {
+      const ids = new Set(
+        Array.from({ length: 200 }, () => generateCronTaskId()),
+      );
+      // 36^8 space — 200 draws essentially never collide (P ~ 1e-8). Assert
+      // near-uniqueness with a tiny margin so this can't flake.
+      expect(ids.size).toBeGreaterThan(195);
     });
   });
 });

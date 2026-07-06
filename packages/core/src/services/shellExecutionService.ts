@@ -13,7 +13,7 @@ import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
@@ -100,15 +100,32 @@ export function getShellAbortReasonKind(
 }
 
 /**
- * On Windows with PowerShell, prefix the command with a statement that forces
- * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
- * as UTF-8 regardless of the system codepage.
+ * On Windows, prefix the command with a statement that forces UTF-8 output
+ * encoding so that non-ASCII characters are emitted as UTF-8 regardless of
+ * the system codepage.
+ *
+ * - PowerShell: uses `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;`
+ * - cmd.exe: uses `{SystemRoot}\System32\chcp.com 65001 >nul 2>nul &`
  */
-function applyPowerShellUtf8Prefix(command: string, shell: string): string {
-  if (os.platform() === 'win32' && shell === 'powershell') {
-    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
+
+function applyUtf8Prefix(command: string, shell: ShellType): string {
+  if (os.platform() !== 'win32') return command;
+  switch (shell) {
+    case 'powershell':
+      return (
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command
+      );
+    case 'cmd':
+      // Resolved at module-load time (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
+      return `${CHCP} 65001 >nul 2>nul & ${command}`;
+    case 'bash':
+      return command;
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
   }
-  return command;
 }
 
 /**
@@ -682,7 +699,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -1376,7 +1393,7 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
 
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements

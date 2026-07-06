@@ -8,58 +8,48 @@ import {
 
 describe('DingTalk markdown utilities', () => {
   describe('convertTables', () => {
-    it('converts a simple markdown table to pipe-separated text', () => {
-      const input = [
-        '| Name | Age |',
-        '| --- | --- |',
-        '| Alice | 30 |',
-        '| Bob | 25 |',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).toContain('Name | Age');
-      expect(result).toContain('Alice | 30');
-      expect(result).not.toContain('---');
+    it('converts markdown tables to readable text', () => {
+      const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
+
+      expect(convertTables(input)).toBe('A | B  \n1 | 2');
     });
 
-    it('preserves non-table content', () => {
-      const input = 'Hello world\n\nSome text';
-      expect(convertTables(input)).toBe(input);
+    it('passes through non-table pipe text', () => {
+      expect(convertTables('Use foo | bar in text')).toBe(
+        'Use foo | bar in text',
+      );
+    });
+
+    it('preserves text around converted tables', () => {
+      const input = [
+        'before',
+        '| A | B |',
+        '| --- | --- |',
+        '| 1 | 2 |',
+        'after',
+      ].join('\n');
+
+      expect(convertTables(input)).toBe('before\nA | B  \n1 | 2\nafter');
+    });
+
+    it('supports alignment colons in table separators', () => {
+      const input = ['| Left | Right |', '| :--- | ---: |', '| 1 | 2 |'].join(
+        '\n',
+      );
+
+      expect(convertTables(input)).toBe('Left | Right  \n1 | 2');
     });
 
     it('does not convert tables inside code fences', () => {
       const input = [
         '```',
-        '| Name | Age |',
-        '| --- | --- |',
-        '| Alice | 30 |',
-        '```',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).toBe(input);
-    });
-
-    it('handles table with surrounding text', () => {
-      const input = [
-        'Before',
         '| A | B |',
         '| --- | --- |',
         '| 1 | 2 |',
-        'After',
+        '```',
       ].join('\n');
-      const result = convertTables(input);
-      expect(result).toContain('Before');
-      expect(result).toContain('After');
-      expect(result).toContain('A | B');
-    });
 
-    it('handles table with alignment colons in separator', () => {
-      const input = [
-        '| Left | Center | Right |',
-        '| :--- | :---: | ---: |',
-        '| a | b | c |',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).not.toContain(':---');
+      expect(convertTables(input)).toBe(input);
     });
   });
 
@@ -221,11 +211,10 @@ describe('DingTalk markdown utilities', () => {
   });
 
   describe('normalizeDingTalkMarkdown', () => {
-    it('converts tables and splits into chunks', () => {
+    it('converts markdown tables to readable text while splitting into chunks', () => {
       const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
       const result = normalizeDingTalkMarkdown(input);
-      expect(result.length).toBeGreaterThanOrEqual(1);
-      expect(result[0]).not.toContain('---');
+      expect(result).toEqual(['A | B  \n1 | 2']);
     });
 
     it('passes through plain text', () => {

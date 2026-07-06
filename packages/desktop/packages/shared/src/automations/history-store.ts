@@ -140,12 +140,98 @@ async function runCompaction(
 // Pure compaction algorithm — shared by sync and async paths
 // ============================================================================
 
+function recoverHistoryObjectsFromLine(line: string): string[] {
+  const recovered: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let cursor = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line.charAt(i);
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (inString) {
+      if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0 && line.slice(cursor, i).trim() !== '') {
+        return recovered;
+      }
+      if (depth === 0) start = i;
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        recovered.push(line.slice(start, i + 1));
+        cursor = i + 1;
+        start = -1;
+      } else if (depth < 0) {
+        return recovered;
+      }
+    } else if (depth === 0 && char.trim() !== '') {
+      return recovered;
+    }
+  }
+
+  return recovered;
+}
+
+function isValidHistoryObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getHistoryObjectId(value: Record<string, unknown>): string {
+  return typeof value.id === 'string' ? value.id : '';
+}
+
+function parseHistoryLine(line: string): Array<{ raw: string; id: string }> {
+  try {
+    const parsed = JSON.parse(line);
+    if (isValidHistoryObject(parsed)) {
+      return [{ raw: line, id: getHistoryObjectId(parsed) }];
+    }
+    return [];
+  } catch {
+    const recovered = recoverHistoryObjectsFromLine(line);
+    const entries: Array<{ raw: string; id: string }> = [];
+    for (const raw of recovered) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (isValidHistoryObject(parsed)) {
+          entries.push({ raw, id: getHistoryObjectId(parsed) });
+        }
+      } catch {
+        // Skip only this recovered segment; keep any other valid objects.
+      }
+    }
+    return entries;
+  }
+}
+
 /**
  * Apply two-tier retention to JSONL content:
  * 1. Per-automation cap: keep last `maxPerMatcher` entries per automation ID
  * 2. Global cap: keep last `maxTotal` entries overall
  *
- * Also drops malformed JSON lines.
+ * Also drops malformed JSON lines, while preserving balanced object records
+ * from glued history lines before rewriting the file.
  *
  * Returns the compacted output string, or `null` if no compaction was needed.
  */
@@ -159,13 +245,13 @@ function compactEntries(
 
   // Parse all lines, dropping malformed ones
   const entries: Array<{ raw: string; id: string }> = [];
+  let needsRewrite = false;
   for (const line of lines) {
-    try {
-      const parsed = JSON.parse(line);
-      entries.push({ raw: line, id: parsed.id ?? '' });
-    } catch {
-      // Drop malformed lines
+    const parsedEntries = parseHistoryLine(line);
+    if (parsedEntries.length !== 1 || parsedEntries[0]?.raw !== line) {
+      needsRewrite = true;
     }
+    entries.push(...parsedEntries);
   }
 
   // Track original line count (including malformed) for dirty-check
@@ -198,7 +284,7 @@ function compactEntries(
     trimmed = trimmed.slice(-maxTotal);
   }
 
-  if (trimmed.length === originalLineCount) return null;
+  if (!needsRewrite && trimmed.length === originalLineCount) return null;
 
   return trimmed.map(e => e.raw).join('\n') + '\n';
 }

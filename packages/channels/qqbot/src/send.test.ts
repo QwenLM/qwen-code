@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ChannelAgentBridge } from '@qwen-code/channel-base';
-import { isValidChatId, hasMarkdownSyntax, splitText } from './QQChannel.js';
+import type {
+  ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
+} from '@qwen-code/channel-base';
+import { isValidChatId } from './QQChannel.js';
 
 const {
   mockSendQQMessage,
@@ -52,6 +55,7 @@ vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
   existsSync: vi.fn(() => false),
 }));
 
@@ -62,6 +66,7 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: mockFetchGatewayUrl,
 }));
 
+import { renameSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 vi.mock('ws', () => ({
   default: MockWebSocket,
 }));
@@ -77,10 +82,6 @@ vi.mock('./login.js', () => ({
 }));
 
 vi.mock('@qwen-code/channel-base', async () => {
-  // Pull the REAL sanitizeSenderName from the shared helper so a trojan-source
-  // or control-char regression is caught here, not masked by a stub. The vitest
-  // config aliases @qwen-code/channel-base to its SOURCE, so this resolves with
-  // no prior channel-base build (dist may be absent/stale in package-local runs).
   const real = await vi.importActual<typeof import('@qwen-code/channel-base')>(
     '@qwen-code/channel-base',
   );
@@ -106,6 +107,7 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected handleInbound(_env: unknown): Promise<void> {
         return Promise.resolve();
       }
+      protected onTaskLifecycle(_event: unknown): void {}
     },
     SessionRouter: class {
       restoreSessions(): Promise<void> {
@@ -115,8 +117,6 @@ vi.mock('@qwen-code/channel-base', async () => {
     getGlobalQwenDir: () => '/tmp/test-qwen',
     sanitizeSenderName: real.sanitizeSenderName,
     sanitizePromptText: real.sanitizePromptText,
-    // Use the REAL log sanitizer so the audit-log hygiene test exercises the
-    // shared strip set (C0/DEL + PROMPT_UNSAFE_INVISIBLES), not a stub.
     sanitizeLogText: real.sanitizeLogText,
   };
 });
@@ -182,100 +182,6 @@ describe('isValidChatId', () => {
 
   it('rejects IDs with dots', () => {
     expect(isValidChatId('abc.def')).toBe(false);
-  });
-});
-
-describe('hasMarkdownSyntax', () => {
-  it('detects headings', () => {
-    expect(hasMarkdownSyntax('# Title')).toBe(true);
-    expect(hasMarkdownSyntax('## Subtitle')).toBe(true);
-    expect(hasMarkdownSyntax('###### Deep heading')).toBe(true);
-  });
-
-  it('detects code blocks', () => {
-    expect(hasMarkdownSyntax('```js\ncode\n```')).toBe(true);
-  });
-
-  it('detects bold (double asterisk)', () => {
-    expect(hasMarkdownSyntax('**bold**')).toBe(true);
-  });
-
-  it('detects bold (double underscore)', () => {
-    expect(hasMarkdownSyntax('__bold__')).toBe(true);
-  });
-
-  it('detects strikethrough', () => {
-    expect(hasMarkdownSyntax('~~strikethrough~~')).toBe(true);
-  });
-
-  it('detects inline code', () => {
-    expect(hasMarkdownSyntax('use `code` here')).toBe(true);
-  });
-
-  it('detects links', () => {
-    expect(hasMarkdownSyntax('[text](url)')).toBe(true);
-  });
-
-  it('detects unordered list markers', () => {
-    expect(hasMarkdownSyntax('- item')).toBe(true);
-    expect(hasMarkdownSyntax('* item')).toBe(true);
-    expect(hasMarkdownSyntax('+ item')).toBe(true);
-  });
-
-  it('detects ordered list markers', () => {
-    expect(hasMarkdownSyntax('1. first')).toBe(true);
-    expect(hasMarkdownSyntax('123. item')).toBe(true);
-  });
-
-  it('returns false for plain text', () => {
-    expect(hasMarkdownSyntax('hello world')).toBe(false);
-    expect(hasMarkdownSyntax('no special chars here')).toBe(false);
-  });
-
-  it('returns false for text with single asterisks (not list marker at line start)', () => {
-    expect(hasMarkdownSyntax('this is *not* italic in this regex')).toBe(false);
-  });
-
-  it('false positive: "- temperature" triggers list pattern', () => {
-    expect(hasMarkdownSyntax('- temperature: 5°C')).toBe(true);
-  });
-
-  it('false positive: "1. first thing" at line start triggers ordered-list pattern', () => {
-    expect(hasMarkdownSyntax('1. first thing in sentence')).toBe(true);
-  });
-});
-
-describe('splitText', () => {
-  it('returns single-element array for short text', () => {
-    expect(splitText('hello')).toEqual(['hello']);
-  });
-
-  it('returns single-element array for exactly 2000 chars', () => {
-    const text = 'a'.repeat(2000);
-    const result = splitText(text);
-    expect(result).toHaveLength(1);
-    expect(result[0]).toHaveLength(2000);
-  });
-
-  it('splits text longer than 2000 chars into chunks', () => {
-    const text = 'a'.repeat(4500);
-    const result = splitText(text);
-    expect(result).toHaveLength(3);
-    expect(result[0]).toHaveLength(2000);
-    expect(result[1]).toHaveLength(2000);
-    expect(result[2]).toHaveLength(500);
-  });
-
-  it('preserves content across chunk boundaries', () => {
-    const text = 'x'.repeat(2000) + 'y'.repeat(500);
-    const result = splitText(text);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBe('x'.repeat(2000));
-    expect(result[1]).toBe('y'.repeat(500));
-  });
-
-  it('handles empty string', () => {
-    expect(splitText('')).toEqual(['']);
   });
 });
 
@@ -350,6 +256,22 @@ describe('session persistence paths', () => {
   });
 });
 
+// Security model for group sender-name sanitization:
+//   QQ group message authors supply their own nickname (username), which is
+//   attacker-controlled. The channel prepends `[sanitizeLogText(name, 64)]:`
+//   before each message body. An unsanitized name could contain:
+//
+//   - Newlines or ANSI escapes → forge fake audit entries in handleGroup logs
+//   - Unicode line breaks (NEL U+0085, C1 U+009B, LS U+2028) → bypass regex-
+//     based line-splitting, creating a second visual line in audit output
+//   - BiDi overrides (RLO U+202E) → reverse text in terminals that render it
+//   - Brackets `[]` → prematurely close the [name] tag so attacker content
+//     appears outside the bracket, impersonating a system message
+//
+//   `sanitizeLogText` (imported via vi.importActual so a trojan-source
+//   regression is caught) neutralizes: escape sequences, control chars,
+//   newlines, Unicode line separators, and BiDi overrides. The tests below
+//   validate each threat class individually.
 describe('group sender-name sanitization', () => {
   function makeChannel() {
     return new QQChannel(
@@ -371,8 +293,6 @@ describe('group sender-name sanitization', () => {
   }
 
   it('neutralizes a crafted nickname (brackets, newline, >64 chars) before self-prefixing', () => {
-    // Fake timers so isDuplicate's eviction interval / saveQQState debounce don't
-    // leak past the test.
     vi.useFakeTimers();
     const ch = makeChannel();
     const inbound = vi.fn().mockResolvedValue(undefined);
@@ -393,16 +313,13 @@ describe('group sender-name sanitization', () => {
       text: string;
       alreadyPrefixed?: boolean;
     };
-    // No newline escapes the tag, and only the wrapper's own [ ] survive.
     expect(env.text).not.toContain('\n');
     expect((env.text.match(/[[\]]/g) ?? []).length).toBe(2);
-    // The nick inside the tag is capped at 64 chars.
     const inside = env.text.slice(
       env.text.indexOf('[') + 1,
       env.text.indexOf(']'),
     );
     expect(inside.length).toBeLessThanOrEqual(64);
-    // Normal (non-slash) group messages stay self-prefixed.
     expect(env.alreadyPrefixed).toBe(true);
     expect(env.text).toContain('hello world');
   });
@@ -432,8 +349,6 @@ describe('group sender-name sanitization', () => {
   });
 
   it('passes a group slash command through verbatim without the [sender] tag or alreadyPrefixed', () => {
-    // Fake timers so isDuplicate's eviction interval / saveQQState debounce don't
-    // leak past the test.
     vi.useFakeTimers();
     const ch = makeChannel();
     const inbound = vi.fn().mockResolvedValue(undefined);
@@ -453,22 +368,11 @@ describe('group sender-name sanitization', () => {
       text: string;
       alreadyPrefixed?: boolean;
     };
-    // The slash command is forwarded raw — no [Alice] prefix would let it parse
-    // as a command, so the cleanText must arrive untouched.
     expect(env.text).toBe('/clear');
-    // And alreadyPrefixed must NOT be set: setting it would route the command
-    // through ChannelBase as already-attributed text. A regression that always
-    // sets alreadyPrefixed is caught here.
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
-    // event.author.username and content are attacker-controlled. The slash-command
-    // audit log must use the sanitized name and a neutralized command string, so a
-    // crafted QQ nick/message with CR/LF or ANSI escapes can't forge or corrupt the
-    // operator audit trail. Mutation check: logging the RAW senderName/cleanText
-    // (the pre-fix code) lets the ESC and the injected newline through and fails the
-    // assertions below.
     vi.useFakeTimers();
     const ch = makeChannel();
     (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
@@ -484,11 +388,6 @@ describe('group sender-name sanitization', () => {
       });
 
     const ESC = String.fromCharCode(0x1b);
-    // NEL (U+0085) is a Unicode line break and U+009B a C1 CSI introducer: both are
-    // attacker-controlled C1 chars that must be neutralized like ESC/CR, or a raw
-    // NEL would render as a line break and forge a second audit entry. U+2028 (line
-    // separator) likewise renders as a break and U+202E (bidi RTL override) reorders
-    // the line (trojan-source) — both covered by the shared log sanitizer.
     const NEL = String.fromCharCode(0x85);
     const C1 = String.fromCharCode(0x9b);
     const LS = String.fromCharCode(0x2028);
@@ -504,26 +403,14 @@ describe('group sender-name sanitization', () => {
 
     const audit = writes.find((w) => w.includes('Slash cmd from'));
     expect(audit).toBeDefined();
-    // No ANSI escape survives in the log line.
     expect(audit!.includes(ESC)).toBe(false);
-    // The only newline is the log line's own trailing one — no injected break from
-    // the nick or command text (which would forge a second audit entry).
     expect(audit!.split('\n')).toHaveLength(2);
     expect(audit!.endsWith('\n')).toBe(true);
-    // The raw (unsanitized) nick fragment never appears verbatim.
     expect(audit!.includes(`Ev${ESC}`)).toBe(false);
-    // The C1 block is neutralized too: a raw NEL (U+0085) would render as a line
-    // break — forging a second audit entry — and U+009B is a CSI introducer.
-    // Mutation check: reverting the strip to C0/DEL only lets NEL/C1 through here.
     expect(audit!.includes(NEL)).toBe(false);
     expect(audit!.includes(C1)).toBe(false);
-    // The Unicode line separator U+2028 (renders as a break) and the bidi RTL
-    // override U+202E (reorders the line) are neutralized via the shared sanitizer's
-    // PROMPT_UNSAFE_INVISIBLES half. Mutation check: dropping PROMPT_UNSAFE_INVISIBLES
-    // from sanitizeLogText lets U+2028/U+202E through here.
     expect(audit!.includes(LS)).toBe(false);
     expect(audit!.includes(RLO)).toBe(false);
-    // The command's embedded newline is rendered visibly (\n), not as a real break.
     expect(audit).toContain('\\n');
     expect(audit).toContain('Slash cmd from');
     expect(audit).toContain('grp-1');
@@ -536,7 +423,9 @@ describe('sendMessage', () => {
     disposed?: boolean;
     chatType?: 'c2c' | 'group';
     replyMsgId?: string;
+    replyMsgIdTimestamp?: number;
     tokenExpiresAt?: number;
+    accessToken?: string;
   }): QQChannelInstance {
     const ch = new QQChannel(
       'test-bot',
@@ -555,10 +444,8 @@ describe('sendMessage', () => {
       {} as unknown as ChannelAgentBridge,
     );
 
-    // Set internal state for sendMessage preconditions.
-    // accessToken and tokenExpiresAt bypass the fetchToken flow.
     const chp = ch as unknown as Record<string, unknown>;
-    chp['accessToken'] = 'test-token';
+    chp['accessToken'] = overrides?.accessToken ?? 'test-token';
     chp['tokenExpiresAt'] = overrides?.tokenExpiresAt ?? Date.now() + 3600_000;
     if (overrides?.disposed) chp['disposed'] = true;
 
@@ -569,10 +456,12 @@ describe('sendMessage', () => {
       );
     }
     if (overrides?.replyMsgId) {
-      (chp['replyMsgId'] as Map<string, string>).set(
-        'test-chat-id',
-        overrides.replyMsgId,
-      );
+      (
+        chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+      ).set('test-chat-id', {
+        msgId: overrides.replyMsgId,
+        timestamp: overrides.replyMsgIdTimestamp ?? Date.now(),
+      });
     }
 
     return ch;
@@ -588,7 +477,7 @@ describe('sendMessage', () => {
     mockFetchGatewayUrl.mockResolvedValue('wss://gateway.qq.test/ws');
   });
 
-  it('sends plain text to C2C chat with msg_type=0', async () => {
+  it('sends markdown-first (msg_type=2) for plain text', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     await ch.sendMessage('test-chat-id', 'hello');
 
@@ -597,7 +486,7 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'hello', msg_type: 0 },
+      { msg_type: 2, markdown: { content: 'hello' } },
     );
   });
 
@@ -622,11 +511,11 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/groups/test-chat-id/messages',
       'test-token',
-      { content: 'hello', msg_type: 0 },
+      { msg_type: 2, markdown: { content: 'hello' } },
     );
   });
 
-  it('falls back to plain text when markdown is rejected', async () => {
+  it('falls back to plain text when markdown is rejected (no msgId)', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown unsupported'))
@@ -635,7 +524,6 @@ describe('sendMessage', () => {
     await ch.sendMessage('test-chat-id', '**bold**');
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
-    // First attempt: markdown
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
       1,
       'https://api.sgroup.qq.com',
@@ -643,7 +531,6 @@ describe('sendMessage', () => {
       'test-token',
       { msg_type: 2, markdown: { content: '**bold**' } },
     );
-    // Fallback: plain text
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
       2,
       'https://api.sgroup.qq.com',
@@ -653,14 +540,122 @@ describe('sendMessage', () => {
     );
   });
 
-  it('stops on first chunk failure (no fallback for plain text)', async () => {
+  it('retries as active message when markdown passive reply is rejected', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-001' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-001', 0);
+
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 400, 'markdown unsupported'))
+      .mockResolvedValueOnce(mockResponse(true));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      1,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      {
+        msg_type: 2,
+        markdown: { content: '**bold**' },
+        msg_id: 'msg-001',
+        msg_seq: 1,
+      },
+    );
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      2,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 1 },
+    );
+
+    // Post-success state: sequence reflects successful send (not rolled back)
+    expect(msgSeqMap.get('msg-001')).toBe(1);
+    // saveQQState was called to persist
+    expect(saveSpy).toHaveBeenCalled();
+
+    saveSpy.mockRestore();
+  });
+
+  it('does plain-text fallback when markdown fails without msgId', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
-    mockSendQQMessage.mockResolvedValue(mockResponse(false, 500));
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 500))
+      .mockResolvedValueOnce(mockResponse(true));
 
     await ch.sendMessage('test-chat-id', 'hello');
 
-    // Only one attempt — plain text doesn't retry, and we break on failure
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      1,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello' } },
+    );
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      2,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { content: 'hello', msg_type: 0 },
+    );
+  });
+
+  it('logs and returns when plain-text fallback also fails', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as { saveQQState: () => void };
+    const saveSpy = vi.spyOn(chp, 'saveQQState');
+    const writes: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 500))
+      .mockResolvedValueOnce(mockResponse(false, 500));
+    await ch.sendMessage('test-chat-id', 'hello');
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(writes.some((w) => w.includes('MESSAGE DROPPED'))).toBe(true);
+    expect(saveSpy).not.toHaveBeenCalled();
+    saveSpy.mockRestore();
+    stderrSpy.mockRestore();
+  });
+
+  it('logs MESSAGE DROPPED when plain-text fallback is rate-limited (429)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const writes: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 500))
+      .mockResolvedValueOnce(mockResponse(false, 429));
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(
+      writes.some((w) =>
+        w.includes(
+          'MESSAGE DROPPED: rate-limited (429) on plain-text fallback',
+        ),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
   });
 
   it('returns early when disposed', async () => {
@@ -671,14 +666,14 @@ describe('sendMessage', () => {
   });
 
   it('defaults to C2C path for unknown chatId', async () => {
-    const ch = makeChannel(); // no chatType set → not group → C2C path
+    const ch = makeChannel();
     await ch.sendMessage('unknown-chat', 'hello');
 
     expect(mockSendQQMessage).toHaveBeenCalledWith(
       'https://api.sgroup.qq.com',
       '/v2/users/unknown-chat/messages',
       'test-token',
-      { content: 'hello', msg_type: 0 },
+      { msg_type: 2, markdown: { content: 'hello' } },
     );
   });
 
@@ -785,32 +780,90 @@ describe('sendMessage', () => {
     ch.disconnect();
   });
 
-  it('catches thrown sendQQMessage errors and stops sending', async () => {
+  it('re-throws when sendQQMessage throws', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockRejectedValue(new Error('network down'));
 
-    await ch.sendMessage('test-chat-id', 'hello');
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow(
+      'network down',
+    );
 
-    // No crash, and the catch+break prevents further attempts
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 
   it('includes msg_id and msg_seq when replyMsgId is set', async () => {
     const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-456' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
     await ch.sendMessage('test-chat-id', 'hello');
 
     expect(mockSendQQMessage).toHaveBeenCalledWith(
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'hello', msg_type: 0, msg_id: 'msg-456', msg_seq: 1 },
+      {
+        msg_type: 2,
+        markdown: { content: 'hello' },
+        msg_id: 'msg-456',
+        msg_seq: 1,
+      },
+    );
+    expect(saveSpy).toHaveBeenCalled();
+    expect((chp['msgSeqMap'] as Map<string, number>).get('msg-456')).toBe(1);
+    saveSpy.mockRestore();
+  });
+
+  it('sends single request even for long text (no splitting)', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-789' });
+    const text = 'a'.repeat(4500);
+    await ch.sendMessage('test-chat-id', text);
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      {
+        msg_type: 2,
+        markdown: { content: text },
+        msg_id: 'msg-789',
+        msg_seq: 1,
+      },
     );
   });
 
-  it('sends multi-chunk text as separate messages with incrementing msg_seq', async () => {
-    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-789' });
-    const text = 'a'.repeat(2500); // 2 chunks: 2000 + 500
-    await ch.sendMessage('test-chat-id', text);
+  it('sends without msg_id when replyMsgId is older than 5 minutes', async () => {
+    const ch = makeChannel({
+      chatType: 'c2c',
+      replyMsgId: 'msg-old',
+      replyMsgIdTimestamp: Date.now() - 300_001,
+    });
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello' } },
+    );
+    const callArgs = mockSendQQMessage.mock.calls[0];
+    const body = callArgs[3] as Record<string, unknown>;
+    expect(body['msg_id']).toBeUndefined();
+    expect(body['msg_seq']).toBeUndefined();
+    // Verify expired entries were cleaned from maps
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMap = chp['replyMsgId'] as Map<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, unknown>;
+    expect(replyMap.has('test-chat-id')).toBe(false);
+    expect(seqMap.has('msg-old')).toBe(false);
+  });
+
+  it('increments msg_seq on consecutive sendMessage calls', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-999' });
+
+    await ch.sendMessage('test-chat-id', 'first');
+    await ch.sendMessage('test-chat-id', 'second');
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
@@ -818,15 +871,351 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'a'.repeat(2000), msg_type: 0, msg_id: 'msg-789', msg_seq: 1 },
+      {
+        msg_type: 2,
+        markdown: { content: 'first' },
+        msg_id: 'msg-999',
+        msg_seq: 1,
+      },
     );
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
       2,
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: 'a'.repeat(500), msg_type: 0, msg_id: 'msg-789', msg_seq: 2 },
+      {
+        msg_type: 2,
+        markdown: { content: 'second' },
+        msg_id: 'msg-999',
+        msg_seq: 2,
+      },
     );
+  });
+
+  it('skips plain-text fallback when active retry fails (msgId present)', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-001' });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
+      .mockResolvedValueOnce(mockResponse(false, 500, 'server error'));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops at 429 early return after active retry rate-limited', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-429' });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
+      .mockResolvedValueOnce(mockResponse(false, 429, 'rate limited'));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    const secondBody = mockSendQQMessage.mock.calls[1][3] as Record<
+      string,
+      unknown
+    >;
+    expect(secondBody['msg_type']).toBe(0);
+  });
+
+  it('rolls back msgSeqMap when sendQQMessage throws with replyMsgId set', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', {
+      msgId: 'msg-rollback',
+      timestamp: Date.now(),
+    });
+
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-rollback', 5);
+
+    mockSendQQMessage.mockRejectedValue(new Error('connection reset'));
+
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow(
+      'connection reset',
+    );
+
+    expect(msgSeqMap.get('msg-rollback')).toBe(5);
+  });
+
+  it('rolls back msgSeqMap when sendQQMessage throws with replyMsgId (new session)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', {
+      msgId: 'msg-new',
+      timestamp: Date.now(),
+    });
+
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    const saveSpy = vi.spyOn(
+      ch as unknown as { saveQQState: () => void },
+      'saveQQState',
+    );
+    mockSendQQMessage.mockRejectedValue(new Error('network error'));
+
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow(
+      'network error',
+    );
+
+    expect(msgSeqMap.get('msg-new')).toBe(0);
+    expect(saveSpy).toHaveBeenCalled();
+  });
+  it('returns early without sending when text is <noreply>', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns early for <noreply> with leading/trailing whitespace', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    await ch.sendMessage('test-chat-id', '  <noreply>  ');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('writes stderr when <noreply> is suppressed', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    spy.mockRestore();
+    expect(writes.some((w) => w.includes('<noreply> skipped'))).toBe(true);
+  });
+
+  it('does not mutate msgSeqMap or replyMsgId on <noreply> suppression', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-001' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-001', 3);
+
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    // msgSeqMap should be unchanged
+    expect(msgSeqMap.get('msg-001')).toBe(3);
+    // replyMsgId should still be present
+    const replyMsgId = chp['replyMsgId'] as Map<string, unknown>;
+    expect(replyMsgId.has('test-chat-id')).toBe(true);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('stops at 429 on first markdown attempt and rolls back msgSeqMap', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-429-1st' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-429-1st', 0);
+
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    // No second call — 429 bails immediately
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // First call had msg_seq=1 (0 + 1)
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect(body['msg_seq']).toBe(1);
+    expect(body['msg_id']).toBe('msg-429-1st');
+
+    // msgSeqMap rolled back from 1 to 0
+    expect(msgSeqMap.get('msg-429-1st')).toBe(0);
+    // saveQQState was called to persist the rollback
+    expect(saveSpy).toHaveBeenCalled();
+
+    saveSpy.mockRestore();
+  });
+
+  it('stops silently at 429 when no replyMsgId is set', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // No second call — 429 bails immediately without fallback or rollback
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('setReplyMsgId', () => {
+  function makeChannel(): QQChannelInstance {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    return ch;
+  }
+
+  it('cleans up old msgSeqMap entry when setting new replyMsgId for same chatId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    replyMsgId.set('test-chat-id', {
+      msgId: 'old-msg-id',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('old-msg-id', 5);
+    msgSeqMap.set('other-msg-id', 10);
+
+    (chp['setReplyMsgId'] as (chatId: string, msgId: string) => void)(
+      'test-chat-id',
+      'new-msg-id',
+    );
+
+    expect(msgSeqMap.has('old-msg-id')).toBe(false);
+    expect(msgSeqMap.get('other-msg-id')).toBe(10);
+    expect(replyMsgId.get('test-chat-id')!.msgId).toBe('new-msg-id');
+  });
+
+  it('does nothing when chatId has no prior replyMsgId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('existing-seq', 3);
+
+    (chp['setReplyMsgId'] as (chatId: string, msgId: string) => void)(
+      'new-chat',
+      'msg-new',
+    );
+
+    expect(msgSeqMap.get('existing-seq')).toBe(3);
+    expect(replyMsgId.get('new-chat')!.msgId).toBe('msg-new');
+  });
+
+  it('no-ops msgSeqMap.delete when setting the same msgId for same chatId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    replyMsgId.set('test-chat-id', {
+      msgId: 'same-msg-id',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('same-msg-id', 3);
+
+    // Set the same msgId again — the guard should prevent delete
+    (chp['setReplyMsgId'] as (chatId: string, msgId: string) => void)(
+      'test-chat-id',
+      'same-msg-id',
+    );
+
+    // msgSeqMap entry should still exist (was not deleted)
+    expect(msgSeqMap.get('same-msg-id')).toBe(3);
+    expect(replyMsgId.get('test-chat-id')!.msgId).toBe('same-msg-id');
+  });
+});
+
+describe('lifecycle status hooks', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('keeps prompt lifecycle hooks as explicit no-ops', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      onPromptStart: (
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ) => void;
+      onPromptEnd: (
+        chatId: string,
+        sessionId: string,
+        messageId?: string,
+      ) => void;
+    };
+
+    expect(() => {
+      chp.onPromptStart('test-chat-id', 'session-1', 'msg-1');
+      chp.onPromptEnd('test-chat-id', 'session-1', 'msg-1');
+    }).not.toThrow();
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not synthesize task lifecycle status messages', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      onTaskLifecycle: (event: ChannelTaskLifecycleEvent) => void;
+    };
+
+    expect(() => {
+      chp.onTaskLifecycle({
+        type: 'started',
+        channelName: 'qqbot',
+        chatId: 'test-chat-id',
+        sessionId: 'session-1',
+        messageId: 'msg-1',
+        identity: { id: 'channel:qqbot', displayName: 'qqbot' },
+        memoryScope: { namespace: 'channel:qqbot', mode: 'metadata-only' },
+      } satisfies ChannelTaskLifecycleEvent);
+    }).not.toThrow();
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -884,5 +1273,515 @@ describe('gateway reconnect timer', () => {
     } finally {
       clearTimeoutSpy.mockRestore();
     }
+  });
+});
+
+describe('connect() sanitized-error on final retry', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sanitizes error message containing newlines and control chars in final retry throw', async () => {
+    vi.useFakeTimers();
+
+    // fetchToken succeeds each attempt
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'tok',
+      expiresIn: 7200,
+    });
+    // fetchGatewayUrl always fails with dangerous text — exercised 3× by
+    // the 3-attempt connect loop
+    mockFetchGatewayUrl.mockRejectedValue(
+      new Error('wss://evil\nhost\x00leaked\tsecret'),
+    );
+    // Suppress noisy stderr writes from the retry log lines
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // Suppress unhandledRejection from the { cause: e } chain
+    const onUnhandled = vi.fn();
+    process.on('unhandledRejection', onUnhandled);
+    const ch = makeChannel();
+    const connectPromise = (
+      ch as unknown as { connect: () => Promise<void> }
+    ).connect.call(ch);
+
+    // Advance past the two retry sleeps in the connect loop
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    await expect(connectPromise).rejects.toThrow();
+
+    try {
+      await connectPromise;
+    } catch (e) {
+      const msg = (e as Error).message;
+      // The message must have been sanitized: no raw newlines, no NUL, no tab
+      expect(msg).not.toContain('\n');
+      expect(msg).not.toContain('\0');
+      expect(msg).not.toContain('\t');
+      // sanitizeLogText strips control characters (newlines, NUL, tabs)
+      // but preserves readable content — the message should still contain
+      // the readable parts of the error.
+      expect(msg).toContain('wss://');
+      expect(msg).toContain('evil');
+      expect(msg).toContain('secret');
+    }
+
+    stderrSpy.mockRestore();
+    process.off('unhandledRejection', onUnhandled);
+  });
+});
+
+describe('restoreQQState validation filters', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('filters chatTypeMap to only accept c2c and group values', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        chatTypeMap: [
+          ['a', 'c2c'],
+          ['b', 'group'],
+          ['c', 'unknown'],
+          ['d', null],
+          ['e', ''],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const chatTypeMap = (ch as unknown as { chatTypeMap: Map<string, string> })
+      .chatTypeMap;
+    expect(chatTypeMap.size).toBe(2);
+    expect(chatTypeMap.get('a')).toBe('c2c');
+    expect(chatTypeMap.get('b')).toBe('group');
+    expect(chatTypeMap.has('c')).toBe(false);
+    expect(chatTypeMap.has('d')).toBe(false);
+    expect(chatTypeMap.has('e')).toBe(false);
+  });
+
+  it('filters replyMsgId to only accept strings ≤ 128 chars', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        replyMsgId: [
+          ['a', 'valid-id'],
+          ['b', 'x'.repeat(128)],
+          ['c', 'x'.repeat(129)],
+          ['d', 123],
+          ['e', null],
+          ['f', ''],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const replyMsgId = (
+      ch as unknown as {
+        replyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    ).replyMsgId;
+    expect(replyMsgId.size).toBe(3);
+    expect(replyMsgId.get('a')?.msgId).toBe('valid-id');
+    expect(replyMsgId.get('b')?.msgId).toBe('x'.repeat(128));
+    expect(replyMsgId.get('f')?.msgId).toBe('');
+    expect(replyMsgId.has('c')).toBe(false);
+    expect(replyMsgId.has('d')).toBe(false);
+    expect(replyMsgId.has('e')).toBe(false);
+  });
+
+  it('filters replyMsgId entries with far-future timestamps', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    // Use raw JSON to force a timestamp far beyond real-time
+    const farFuture = Date.now() + 1e15;
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        replyMsgId: [
+          ['a', { msgId: 'valid', timestamp: Date.now() }],
+          ['b', { msgId: 'far-future', timestamp: farFuture }],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const replyMsgId = (
+      ch as unknown as {
+        replyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    ).replyMsgId;
+    expect(replyMsgId.size).toBe(1);
+    expect(replyMsgId.get('a')?.msgId).toBe('valid');
+    expect(replyMsgId.has('b')).toBe(false);
+  });
+
+  it('filters msgSeqMap to only accept non-negative numbers', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        msgSeqMap: [
+          ['a', 0],
+          ['b', 42],
+          ['c', -1],
+          ['d', 'string'],
+          ['e', null],
+          ['f', 3.14],
+          ['g', Infinity],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.size).toBe(2);
+    expect(msgSeqMap.get('a')).toBe(0);
+    expect(msgSeqMap.get('b')).toBe(42);
+    expect(msgSeqMap.has('c')).toBe(false);
+    expect(msgSeqMap.has('d')).toBe(false);
+    expect(msgSeqMap.has('e')).toBe(false);
+    expect(msgSeqMap.has('f')).toBe(false);
+    expect(msgSeqMap.has('g')).toBe(false);
+  });
+
+  it('filters non-safe-integer msgSeqMap values (fractional, overflow, Infinity, -Infinity)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — loses precision
+    // 1e999 / -1e999 are parsed as Infinity / -Infinity by JSON.parse
+    // Use raw JSON string: JSON.stringify(Infinity) → "null", which
+    // bypasses Number.isSafeInteger (caught by typeof check instead).
+    vi.mocked(readFileSync).mockReturnValue(
+      '{"msgSeqMap":[["a",1.5],["b",9007199254740992],["c",1e999],["d",-1e999],["e",42],["f",0]]}',
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.size).toBe(2);
+    expect(msgSeqMap.get('e')).toBe(42);
+    expect(msgSeqMap.get('f')).toBe(0);
+    // Edge cases must ALL be filtered by Number.isSafeInteger
+    expect(msgSeqMap.has('a')).toBe(false);
+    expect(msgSeqMap.has('b')).toBe(false);
+    expect(msgSeqMap.has('c')).toBe(false);
+    expect(msgSeqMap.has('d')).toBe(false);
+  });
+
+  it('returns false and does not throw on corrupt JSON', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('not json{{{');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false when state file does not exist', () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on non-object JSON (number)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('42');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on non-object JSON (string)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('"state"');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on non-object JSON (array)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('[1,2,3]');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on null JSON', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('null');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+});
+
+describe('atomic state persistence', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('flushQQState writes to tmp path then renames to final path', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      flushQQState: () => void;
+      qqStatePath: string;
+    };
+
+    chp.flushQQState();
+
+    // First writes to tmp, then renames
+    const writeCalls = vi.mocked(writeFileSync).mock.calls;
+    const renameCalls = vi.mocked(renameSync).mock.calls;
+
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(renameCalls.length).toBeGreaterThanOrEqual(1);
+
+    // The write should target the .tmp path
+    const writeTarget = writeCalls[0][0] as string;
+    expect(writeTarget).toContain('.tmp');
+
+    // The rename should go from .tmp to the final path
+    expect(renameCalls[0][0]).toBe(writeTarget);
+    expect(renameCalls[0][1]).toBe(chp.qqStatePath);
+  });
+
+  it('flushQQState writes valid JSON with expected keys', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as { flushQQState: () => void };
+
+    chp.flushQQState();
+
+    const writeCalls = vi.mocked(writeFileSync).mock.calls;
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+
+    const written = JSON.parse(writeCalls[0][1] as string);
+    expect(written).toHaveProperty('chatTypeMap');
+    expect(written).toHaveProperty('replyMsgId');
+    expect(written).toHaveProperty('msgSeqMap');
+  });
+
+  it('flushQQState sets file mode 0o600', () => {
+    const ch = makeChannel();
+    (ch as unknown as { flushQQState: () => void }).flushQQState();
+
+    const writeCalls = vi.mocked(writeFileSync).mock.calls;
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(writeCalls[0][2]).toEqual({ mode: 0o600 });
+  });
+
+  it('saveQQState sets debounced unref timer', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      saveQQState: () => void;
+      saveTimer: ReturnType<typeof setTimeout> | null;
+    };
+
+    chp.saveQQState();
+
+    expect(chp.saveTimer).not.toBeNull();
+    expect(chp.saveTimer?.hasRef()).toBe(false);
+  });
+
+  it('does not write state when disposed after timer is scheduled', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      saveQQState: () => void;
+      saveTimer: ReturnType<typeof setTimeout> | null;
+    };
+
+    // Schedule a save
+    chp.saveQQState();
+    expect(chp.saveTimer).not.toBeNull();
+
+    // Mark disposed before the timer fires
+    (ch as unknown as { disposed: boolean }).disposed = true;
+
+    // Advance time past debounce interval
+    vi.advanceTimersByTime(600);
+
+    // The callback should have returned early due to disposed check
+    expect(writeFileSync).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+});
+
+describe('replyMsgId cleanup timer', () => {
+  function makeChannel(): QQChannelInstance {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    return ch;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('evicts expired replyMsgId entries and persists cleanup', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    // Seed expired entry (6 min old)
+    replyMsgId.set('chat-old', {
+      msgId: 'msg-old',
+      timestamp: Date.now() - 360_000,
+    });
+    msgSeqMap.set('msg-old', 5);
+    // Seed fresh entry (1 min old)
+    replyMsgId.set('chat-fresh', {
+      msgId: 'msg-fresh',
+      timestamp: Date.now() - 60_000,
+    });
+    msgSeqMap.set('msg-fresh', 2);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Expired entries removed
+    expect(replyMsgId.has('chat-old')).toBe(false);
+    expect(msgSeqMap.has('msg-old')).toBe(false);
+    // Fresh entries remain
+    expect(replyMsgId.has('chat-fresh')).toBe(true);
+    expect(replyMsgId.get('chat-fresh')!.msgId).toBe('msg-fresh');
+    expect(msgSeqMap.get('msg-fresh')).toBe(2);
+    // Cleanup was persisted
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+
+    saveSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('does not call saveQQState when no entries are evicted', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    // Only fresh entries
+    replyMsgId.set('chat-fresh', {
+      msgId: 'msg-fresh',
+      timestamp: Date.now() - 60_000,
+    });
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    expect(replyMsgId.has('chat-fresh')).toBe(true);
+    expect(saveSpy).not.toHaveBeenCalled();
+
+    saveSpy.mockRestore();
+    ch.disconnect();
   });
 });

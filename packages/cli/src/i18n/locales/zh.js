@@ -178,6 +178,7 @@ export default {
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
+  'toolDisplayName.RecordArtifact': '记录制品',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
   'toolDisplayName.ExitPlanMode': '退出计划模式',
@@ -196,6 +197,7 @@ export default {
   'toolDisplayName.TaskStop': '停止任务',
   'toolDisplayName.TeamCreate': '创建团队',
   'toolDisplayName.TeamDelete': '删除团队',
+  'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
@@ -1329,6 +1331,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 字节',
   'Reference in chat': '在对话中引用',
+  'MCP server': 'MCP 服务器',
   'MCP resource server': 'MCP 资源服务器',
 
   // Invalid tool related translations
@@ -2126,6 +2129,8 @@ export default {
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
   'Exited plan mode. Previous approval mode restored.':

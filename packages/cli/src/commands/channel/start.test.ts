@@ -4,8 +4,10 @@ import { pathToFileURL } from 'node:url';
 import type { ChannelBaseOptions } from '@qwen-code/channel-base';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
-const mockProxyAgent = vi.hoisted(() =>
-  vi.fn((url: string) => ({ proxyUrl: url })),
+const mockEnvHttpProxyAgent = vi.hoisted(() =>
+  vi.fn((opts: { httpProxy: string; httpsProxy: string }) => ({
+    proxyUrl: opts.httpProxy,
+  })),
 );
 const mockNormalizeProxyUrl = vi.hoisted(() => vi.fn((url?: string) => url));
 const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
@@ -38,6 +40,7 @@ const mockChannelConnect = vi.hoisted(() => vi.fn());
 const mockChannelDisconnect = vi.hoisted(() => vi.fn());
 const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
+const mockChannelDispatchToolCall = vi.hoisted(() => vi.fn());
 const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -93,7 +96,7 @@ const mockSessionRouter = vi.hoisted(() =>
 );
 
 vi.mock('undici', () => ({
-  ProxyAgent: mockProxyAgent,
+  EnvHttpProxyAgent: mockEnvHttpProxyAgent,
   setGlobalDispatcher: mockSetGlobalDispatcher,
 }));
 
@@ -176,6 +179,7 @@ const mockChannel = {
   disconnect: mockChannelDisconnect,
   onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
+  dispatchToolCall: mockChannelDispatchToolCall,
   setBridge: mockChannelSetBridge,
 };
 
@@ -208,6 +212,7 @@ beforeEach(() => {
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
   delete process.env['http_proxy'];
+  delete process.env['QWEN_CODE_DISABLE_CRON'];
 });
 
 describe('resolveProxy', () => {
@@ -220,7 +225,10 @@ describe('resolveProxy', () => {
     );
 
     expect(proxy).toBe('http://cli.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith('http://cli.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://cli.example.com:8080',
+      httpsProxy: 'http://cli.example.com:8080',
+    });
     expect(mockSetGlobalDispatcher).toHaveBeenCalledWith({
       proxyUrl: 'http://cli.example.com:8080',
     });
@@ -232,9 +240,10 @@ describe('resolveProxy', () => {
     const proxy = resolveProxy(undefined, 'http://settings.example.com:8080');
 
     expect(proxy).toBe('http://settings.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith(
-      'http://settings.example.com:8080',
-    );
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://settings.example.com:8080',
+      httpsProxy: 'http://settings.example.com:8080',
+    });
   });
 
   it('falls back to proxy environment variables', () => {
@@ -243,7 +252,10 @@ describe('resolveProxy', () => {
     const proxy = resolveProxy();
 
     expect(proxy).toBe('http://env.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith('http://env.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://env.example.com:8080',
+      httpsProxy: 'http://env.example.com:8080',
+    });
   });
 });
 
@@ -307,8 +319,14 @@ describe('startCommand.handler', () => {
     }
 
     expect(mockLoadSettings).toHaveBeenCalledWith(process.cwd());
-    expect(mockProxyAgent).toHaveBeenCalledWith(settingsProxy);
-    expect(mockProxyAgent).not.toHaveBeenCalledWith(envProxy);
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: settingsProxy,
+      httpsProxy: settingsProxy,
+    });
+    expect(mockEnvHttpProxyAgent).not.toHaveBeenCalledWith({
+      httpProxy: envProxy,
+      httpsProxy: envProxy,
+    });
     expect(mockCreateChannel).toHaveBeenCalledWith(
       'telegram',
       mockParsedChannelConfig,
@@ -367,6 +385,83 @@ describe('startCommand.handler', () => {
       | ChannelBaseOptions
       | undefined;
     expect(() => options?.loopController?.validateCron('0 0 31 2 *')).toThrow();
+  });
+
+  it('does not expose channel loops when cron is disabled', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    process.env['QWEN_CODE_DISABLE_CRON'] = '1';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env['QWEN_CODE_DISABLE_CRON'];
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(options?.loopController).toBeUndefined();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+  });
+
+  it('does not expose channel loops when starting all channels with cron disabled', async () => {
+    const channels = {
+      telegram: { type: 'telegram' },
+      feishu: { type: 'feishu' },
+    };
+    process.env['QWEN_CODE_DISABLE_CRON'] = '1';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env['QWEN_CODE_DISABLE_CRON'];
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+    for (const call of mockCreateChannel.mock.calls) {
+      const options = call[3] as ChannelBaseOptions;
+      expect(options.loopController).toBeUndefined();
+    }
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+  });
+
+  it('does not expose channel loops when cron is disabled in settings', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({
+      merged: { channels, experimental: { cron: false } },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(options?.loopController).toBeUndefined();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
   });
 
   it('cleans up a single channel when pidfile creation races', async () => {
@@ -584,7 +679,8 @@ describe('startCommand.handler', () => {
     toolCallListener!(event);
 
     expect(mockRouterGetTarget).toHaveBeenCalledWith('s-1');
-    expect(mockChannelOnToolCall).toHaveBeenCalledWith('chat1', event);
+    expect(mockChannelDispatchToolCall).toHaveBeenCalledWith(event);
+    expect(mockChannelOnToolCall).not.toHaveBeenCalled();
   });
 
   it('dispatches session death to the owning channel when the route is known', async () => {

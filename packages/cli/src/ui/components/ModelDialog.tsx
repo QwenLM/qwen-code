@@ -118,7 +118,22 @@ interface ModelDialogProps {
   isVisionModelMode?: boolean;
   /** Override which settings scope to persist the selection to. */
   persistScope?: 'workspace' | 'user';
+  availableTerminalHeight?: number;
 }
+
+const MAX_MODEL_ITEMS_TO_SHOW = 10;
+// Non-list dialog chrome to reserve when capping visible model rows: outer
+// round border (2) + outer padding (2) + title (1) + gap before the list (1)
+// + highlighted-entry detail panel (divider + up to 4 detail rows, ~6) +
+// footer gap and hint text (2). The list intentionally omits the ▲/▼ scroll
+// indicators other list dialogs enable: they are two always-rendered chrome
+// rows, and in a height-capped dialog those rows are better spent on two
+// more entries — the entry numbering already shows where the visible window
+// sits in the list. Adjust this whenever the surrounding layout changes, and
+// re-verify with an E2E height sweep rather than guessing.
+const MODEL_DIALOG_FIXED_ROWS = 14;
+const MODEL_OPTION_ROW_HEIGHT = 1;
+const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
 
 function maskApiKey(apiKey: string | undefined): string {
   if (!apiKey) return `(${t('not set')})`;
@@ -271,6 +286,7 @@ export function ModelDialog({
   isVoiceModelMode,
   isVisionModelMode,
   persistScope,
+  availableTerminalHeight,
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
@@ -411,6 +427,34 @@ export function ModelDialog({
       ),
     [availableModelEntries],
   );
+  const modelOptionRowHeight = MODEL_OPTIONS.some(
+    ({ description }) =>
+      typeof description !== 'string' || description.trim().length > 0,
+  )
+    ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
+    : MODEL_OPTION_ROW_HEIGHT;
+  // The error box adds its own marginTop plus one row per line (errorPrefix +
+  // blank line from the "\n\n" join + the underlying error's own lines), plus
+  // a buffer since the error Text wraps and long lines can span extra rows on
+  // narrow terminals.
+  const errorMessageRows = errorMessage
+    ? 2 + errorMessage.split('\n').length
+    : 0;
+  const maxModelItemsToShow =
+    availableTerminalHeight === undefined
+      ? MAX_MODEL_ITEMS_TO_SHOW
+      : Math.max(
+          1,
+          Math.min(
+            MAX_MODEL_ITEMS_TO_SHOW,
+            Math.floor(
+              (availableTerminalHeight -
+                MODEL_DIALOG_FIXED_ROWS -
+                errorMessageRows) /
+                modelOptionRowHeight,
+            ),
+          ),
+        );
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
@@ -859,6 +903,7 @@ export function ModelDialog({
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
+            maxItemsToShow={maxModelItemsToShow}
           />
         </Box>
       )}

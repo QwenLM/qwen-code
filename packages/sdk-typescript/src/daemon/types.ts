@@ -130,6 +130,277 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
   return caps.workspaceCwd;
 }
 
+/** Detail level accepted by `GET /daemon/status?detail=`. */
+export type DaemonStatusReportDetail = 'summary' | 'full';
+
+/** Overall health rollup of a daemon status report. */
+export type DaemonStatusReportLevel = 'ok' | 'warning' | 'error';
+
+/** One triage finding surfaced by the daemon status rollup. */
+export interface DaemonStatusReportIssue {
+  code: string;
+  severity: 'warning' | 'error';
+  message: string;
+  /** Status section the issue was derived from (e.g. `workspace.mcp`). */
+  section?: string;
+}
+
+/**
+ * One independently-degraded workspace diagnostics section in a
+ * `detail=full` status report (`full.workspace.<name>`). `data` is the raw
+ * section payload (shape varies per section) — render `summary` instead.
+ */
+export interface DaemonStatusReportSection {
+  status: DaemonStatusReportLevel | 'unavailable';
+  durationMs: number;
+  summary?: Record<string, string | number | boolean | null>;
+  data?: unknown;
+  error?: { kind: 'timeout' | 'error'; message: string };
+}
+
+/** Per-session diagnostics row in a `detail=full` status report. */
+export interface DaemonStatusReportSession {
+  sessionId: string;
+  workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  subscriberCount: number;
+  attachCount: number;
+  pendingPromptCount: number;
+  pendingPermissionCount: number;
+  hasActivePrompt: boolean;
+  lastEventId: number;
+  lastSeenAt?: number;
+  currentModelId?: string;
+  currentApprovalMode?: string;
+}
+
+/**
+ * One time-bucketed sample in the Daemon Status metrics series. **Manual mirror
+ * of `packages/cli/src/serve/daemon-metrics-ring.ts` → `DaemonMetricsBucket`;
+ * keep the two field lists in sync.** Each bucket covers a fixed window: the
+ * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
+ * `promptsCompleted` aggregate what happened *during* the window, while
+ * `activeSessions`/`activePrompts`/`queuedPrompts`/`rssBytes`/`heapUsedBytes`/
+ * `eventLoopLagP99Ms` are gauges read at seal time `t`.
+ */
+export interface DaemonMetricsSeriesBucket {
+  /** Epoch ms at which this bucket was sealed (window end). */
+  t: number;
+  /** Active sessions at seal time. */
+  activeSessions: number;
+  /** In-flight prompts at seal time (tasks running concurrently). */
+  activePrompts: number;
+  /** Prompts queued (accepted, not yet dispatched) across sessions at seal time. */
+  queuedPrompts: number;
+  /** HTTP requests completed in the window. */
+  requests: number;
+  /** Subset of `requests` returning 4xx/5xx. */
+  errors: number;
+  /** Median HTTP request duration over the window (ms); 0 when idle. */
+  latencyP50Ms: number;
+  /** p95 HTTP request duration over the window (ms); 0 when idle. */
+  latencyP95Ms: number;
+  /** Prompts that finished in the window (task throughput). */
+  promptsCompleted: number;
+  /** p95 prompt queue-wait over the window (ms); backpressure signal. */
+  promptQueueWaitP95Ms: number;
+  /** p95 end-to-end prompt duration over the window (ms). */
+  promptDurationP95Ms: number;
+  /** Median per-round LLM API round-trip over the window (ms); daemon→model,
+   *  not the client→daemon `latency*`. 0 when none. */
+  llmApiP50Ms: number;
+  /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
+  llmApiP95Ms: number;
+  /** Process CPU utilization over the window, percent of total capacity across
+   *  all cores, clamped to [0,100]. */
+  cpuPercent: number;
+  /** Resident set size at seal time (bytes). */
+  rssBytes: number;
+  /** V8 heap used at seal time (bytes). */
+  heapUsedBytes: number;
+  /** Event-loop lag p99 over the window (ms); CPU-saturation signal. */
+  eventLoopLagP99Ms: number;
+  /** Bytes received from the ACP child over the stdio pipe in the window. */
+  pipeInBytes: number;
+  /** Bytes sent to the ACP child over the stdio pipe in the window. */
+  pipeOutBytes: number;
+  /** Active REST/SSE streams at seal time. */
+  sseConnections: number;
+  /** Active ACP WebSocket streams at seal time. */
+  wsConnections: number;
+  /** Active ACP connections at seal time. */
+  acpConnections: number;
+  /** Rate-limited (429) rejections in the window. */
+  rateLimitRejected: number;
+  /** Input (prompt) tokens burned in the window. */
+  tokensIn: number;
+  /** Output (completion) tokens burned in the window. */
+  tokensOut: number;
+  /** ACP child process CPU % at seal time (self-reported over ACP; percent of
+   *  total capacity across all cores, clamped [0,100]) — where the real LLM/tool
+   *  work runs. 0 when no child. */
+  childCpuPercent: number;
+  /** ACP child process RSS at seal time (bytes; self-reported). 0 when none. */
+  childRssBytes: number;
+}
+
+/**
+ * Status report envelope returned from `GET /daemon/status`. Fields the
+ * daemon may add over time arrive as additive optional members, mirroring
+ * the `DaemonCapabilities` convention.
+ */
+export interface DaemonStatusReport {
+  v: 1;
+  detail: DaemonStatusReportDetail;
+  generatedAt: string;
+  status: DaemonStatusReportLevel;
+  issues: DaemonStatusReportIssue[];
+  daemon: {
+    pid: number;
+    uptimeMs: number;
+    mode: DaemonMode;
+    workspaceCwd: string;
+    /** Startup timing/preheat snapshot; `preheat.status` is widened to string. */
+    startup?: {
+      processStartedAt: string;
+      listenerReadyAt?: string;
+      processToListenMs?: number;
+      runQwenServeToListenMs?: number;
+      preheat: { status: string; durationMs?: number; error?: string };
+    };
+    qwenCodeVersion?: string;
+    daemonId?: string;
+    /** Present only in `detail=full` responses. */
+    logPath?: string;
+  };
+  security: {
+    tokenConfigured: boolean;
+    requireAuth: boolean;
+    loopbackBind: boolean;
+    allowOriginConfigured: boolean;
+    allowOriginMode: string;
+    sessionShellCommandEnabled: boolean;
+  };
+  limits: {
+    maxSessions: number | null;
+    maxPendingPromptsPerSession: number | null;
+    listenerMaxConnections: number | null;
+    eventRingSize: number;
+    promptDeadlineMs: number | null;
+    writerIdleTimeoutMs: number | null;
+    channelIdleTimeoutMs: number;
+    sessionIdleTimeoutMs: number;
+    acpConnectionCap: number | null;
+  };
+  capabilities: {
+    protocolVersions: DaemonProtocolVersions;
+    features: string[];
+  };
+  runtime: {
+    /** Present while the daemon runtime is still starting up. */
+    loading?: boolean;
+    /** Present when the daemon runtime failed to start. */
+    error?: string;
+    sessions: { active: number };
+    permissions: { pending: number; policy: string };
+    channel: { live: boolean };
+    // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
+    // widened to string to avoid coupling the wire type to the daemon's unions.
+    channelWorker: {
+      enabled: boolean;
+      state: string;
+      channels: string[];
+      requestedChannels?: string[];
+      pid?: number;
+      startedAt?: string;
+      exitCode?: number | null;
+      signal?: string | null;
+      error?: string;
+      restartCount?: number;
+      lastExitAt?: string;
+      lastRestartAt?: string;
+      nextRestartAt?: string;
+      lastHeartbeatAt?: string;
+      staleHeartbeatAt?: string;
+    };
+    transport: {
+      restSseActive: number;
+      acp: {
+        enabled: boolean;
+        connections: number;
+        connectionStreams: number;
+        sessionStreams: number;
+        sseStreams: number;
+        wsStreams: number;
+        pendingClientRequests: number;
+      };
+    };
+    rateLimit: {
+      enabled: boolean;
+      rejectedSinceStart: Record<string, number>;
+    };
+    /** Optional daemon-process performance counters. */
+    perf?: {
+      eventLoop: {
+        meanMs: number;
+        p50Ms: number;
+        p99Ms: number;
+        maxMs: number;
+      };
+      promptQueueWait?: {
+        count: number;
+        meanMs: number;
+        maxMs: number;
+        lastMs: number | null;
+      };
+      pipe: {
+        inbound: { count: number; totalBytes: number; maxBytes: number };
+        outbound: { count: number; totalBytes: number; maxBytes: number };
+      };
+    };
+    /**
+     * Rolling per-interval activity series backing the Daemon Status charts
+     * (requests, latency, prompts, tokens, memory, event-loop lag over time).
+     * Optional/additive: absent on daemons predating it or before the sampler
+     * seals its first bucket. Ordered oldest→newest.
+     */
+    metrics?: {
+      series: DaemonMetricsSeriesBucket[];
+    };
+    /**
+     * Prompt/session activity counters. Optional because this is additive to
+     * v=1; daemons predating it omit the sub-object. `lastActivityAt`/
+     * `idleSinceMs` are null when the daemon has seen no activity yet.
+     */
+    activity?: {
+      activePrompts: number;
+      pendingPrompts?: number;
+      queuedPrompts?: number;
+      lastActivityAt: string | null;
+      idleSinceMs: number | null;
+    };
+    process: {
+      rss: number;
+      heapTotal: number;
+      heapUsed: number;
+      external?: number;
+      arrayBuffers?: number;
+    };
+  };
+  /** Present only when requested with `detail=full`. */
+  full?: {
+    sessions: DaemonStatusReportSession[];
+    acpConnections: Array<Record<string, unknown>>;
+    workspace: Record<string, DaemonStatusReportSection>;
+    auth: {
+      supportedDeviceFlowProviders: string[];
+      pendingDeviceFlowCount: number;
+    };
+  };
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -212,9 +483,94 @@ export interface DaemonSessionSummary {
   clientCount?: number;
   hasActivePrompt?: boolean;
   isArchived?: boolean;
+  isPinned?: boolean;
+  pinnedAt?: string;
+  groupId?: string | null;
+  /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
+  color?: DaemonSessionGroupColor | null;
+}
+
+export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
+
+export interface DaemonSessionExportResult {
+  content: string;
+  filename: string;
+  mimeType: string;
+  format: DaemonSessionExportFormat;
 }
 
 export type DaemonSessionArchiveState = 'active' | 'archived';
+
+export type DaemonSessionGroupColor =
+  | 'red'
+  | 'orange'
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'purple';
+
+export interface DaemonSessionGroup {
+  id: string;
+  name: string;
+  color: DaemonSessionGroupColor;
+  order: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DaemonSessionGroupCatalog {
+  groups: DaemonSessionGroup[];
+  colorOptions: DaemonSessionGroupColor[];
+}
+
+export interface DaemonSessionGroupInput {
+  name: string;
+  color: DaemonSessionGroupColor;
+}
+
+export interface DaemonSessionGroupUpdate {
+  name?: string;
+  color?: DaemonSessionGroupColor;
+  order?: number;
+}
+
+export interface DaemonSessionOrganizationUpdate {
+  isPinned?: boolean;
+  groupId?: string | null;
+  color?: DaemonSessionGroupColor | null;
+}
+
+export interface DaemonSessionOrganizationResult {
+  sessionId: string;
+  groupId: string | null;
+  isPinned: boolean;
+  pinnedAt?: string;
+  color?: DaemonSessionGroupColor | null;
+  updatedAt: string;
+}
+
+export type DaemonSessionListView = 'organized';
+
+export type DaemonSessionGroupFilter =
+  | 'all'
+  | 'pinned'
+  | 'ungrouped'
+  | (string & {});
+
+export interface DaemonSessionListPageOptions {
+  pageSize?: number;
+  cursor?: string;
+  archiveState?: DaemonSessionArchiveState;
+  view?: DaemonSessionListView;
+  group?: DaemonSessionGroupFilter;
+}
+
+export interface DaemonSessionListPage {
+  sessions: DaemonSessionSummary[];
+  nextCursor?: string;
+  liveMergeFailed?: boolean;
+  truncated?: boolean;
+}
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -233,6 +589,112 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+}
+
+type OpenStringUnion<T extends string> = T | (string & {});
+
+/** Known artifact kinds mirrored from the daemon/core contract. */
+export type KnownDaemonSessionArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type DaemonSessionArtifactKind =
+  OpenStringUnion<KnownDaemonSessionArtifactKind>;
+
+export type KnownDaemonSessionArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export type DaemonSessionArtifactStorage =
+  OpenStringUnion<KnownDaemonSessionArtifactStorage>;
+
+export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
+
+export type DaemonSessionArtifactSource =
+  OpenStringUnion<KnownDaemonSessionArtifactSource>;
+
+export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
+
+export type DaemonSessionArtifactStatus =
+  OpenStringUnion<KnownDaemonSessionArtifactStatus>;
+
+export interface DaemonSessionArtifactInput {
+  kind?: KnownDaemonSessionArtifactKind;
+  storage?: Exclude<KnownDaemonSessionArtifactStorage, 'published'>;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+export interface DaemonSessionArtifact {
+  id: string;
+  kind: DaemonSessionArtifactKind;
+  storage: DaemonSessionArtifactStorage;
+  source: DaemonSessionArtifactSource;
+  status: DaemonSessionArtifactStatus;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+  clientRetained: boolean;
+  createdAt: string;
+  updatedAt: string;
+  toolCallId?: string;
+  toolName?: string;
+  hookEventName?: string;
+  clientId?: string;
+}
+
+export type KnownDaemonSessionArtifactChangeAction =
+  | 'created'
+  | 'updated'
+  | 'removed';
+export type DaemonSessionArtifactChangeAction =
+  OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
+
+export type KnownDaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type DaemonSessionArtifactRemovalReason =
+  OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
+
+export interface DaemonSessionArtifactChange {
+  action: DaemonSessionArtifactChangeAction;
+  artifactId: string;
+  artifact?: DaemonSessionArtifact;
+  reason?: DaemonSessionArtifactRemovalReason;
+}
+
+export interface DaemonSessionArtifactsEnvelope {
+  v: 1;
+  sessionId: string;
+  artifacts: DaemonSessionArtifact[];
+  generatedAt: string;
+  limits: {
+    maxArtifacts: number;
+  };
+}
+
+export interface DaemonSessionArtifactMutationResult {
+  v: 1;
+  sessionId: string;
+  changes: DaemonSessionArtifactChange[];
 }
 
 export type DaemonStatus =
@@ -501,6 +963,7 @@ export interface DaemonWorkspaceProvidersStatus {
   initialized: boolean;
   acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
+  approvalMode?: DaemonApprovalMode;
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
 }
@@ -571,11 +1034,20 @@ export interface DaemonWriteMemoryResult {
 
 export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
 
-export type DaemonWorkspaceMemoryRememberTaskStatus =
+export type DaemonWorkspaceMemoryTaskStatus =
   | 'queued'
   | 'running'
   | 'completed'
   | 'failed';
+
+export type DaemonWorkspaceMemoryRememberTaskStatus =
+  DaemonWorkspaceMemoryTaskStatus;
+
+export type DaemonWorkspaceMemoryTopic =
+  | 'user'
+  | 'feedback'
+  | 'project'
+  | 'reference';
 
 export interface DaemonWorkspaceMemoryRememberResult {
   summary?: string;
@@ -585,7 +1057,7 @@ export interface DaemonWorkspaceMemoryRememberResult {
 
 export interface DaemonWorkspaceMemoryRememberTask {
   taskId: string;
-  status: DaemonWorkspaceMemoryRememberTaskStatus;
+  status: DaemonWorkspaceMemoryTaskStatus;
   contextMode: DaemonWorkspaceMemoryRememberContextMode;
   createdAt: string;
   updatedAt: string;
@@ -598,6 +1070,56 @@ export interface DaemonWorkspaceMemoryRememberTask {
 
 export interface DaemonWorkspaceMemoryRememberOptions {
   contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceMemoryForgetMatch {
+  topic: DaemonWorkspaceMemoryTopic;
+  summary: string;
+  filePath: string;
+}
+
+export interface DaemonWorkspaceMemoryForgetResult {
+  summary?: string;
+  removedEntries: DaemonWorkspaceMemoryForgetMatch[];
+  touchedTopics: DaemonWorkspaceMemoryTopic[];
+}
+
+export interface DaemonWorkspaceMemoryForgetTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryForgetResult;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryForgetOptions {
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceMemoryDreamResult {
+  summary?: string;
+  touchedTopics: DaemonWorkspaceMemoryTopic[];
+  dedupedEntries: number;
+}
+
+export interface DaemonWorkspaceMemoryDreamTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryDreamResult;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryDreamOptions {
   clientId?: string;
 }
 
@@ -980,6 +1502,21 @@ export interface DaemonSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one. Absent for agents
+   * launched by the top-level session. Sub-agents may spawn sub-agents
+   * (bounded by `maxSubagentDepth`); clients render the roster as a tree
+   * by correlating this against sibling `id`s.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction from the
+   * registry. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface DaemonSessionShellTaskStatus {
@@ -1114,6 +1651,83 @@ export interface DaemonSessionStatsStatus {
     totalFail: number;
     byName: Record<string, DaemonSessionStatsSkillByName>;
   };
+}
+
+/**
+ * Summary window the usage dashboard aggregates over (UI: Today / 7D / 30D).
+ * `week` = trailing 7 days, `month` = trailing 30 days. Mirrors the subset of
+ * core's `TimeRange` the route accepts.
+ */
+export type DaemonUsageRange = 'today' | 'week' | 'month';
+
+/**
+ * Flattened summary totals for the usage dashboard hero + breakdown tiles.
+ * Mirrors core's `UsageDashboardTotals`.
+ */
+export interface DaemonUsageDashboardTotals {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  thoughtsTokens: number;
+  requests: number;
+  sessions: number;
+  toolCalls: number;
+  linesAdded: number;
+  linesRemoved: number;
+  /** cachedTokens / inputTokens as a 0..1 fraction (0 when there is no input). */
+  cacheReadRate: number;
+}
+
+/** One model's token share of the range. Mirrors core's `UsageModelShare`. */
+export interface DaemonUsageModelShare {
+  model: string;
+  totalTokens: number;
+  /** cachedTokens / inputTokens, 0..1. */
+  cacheReadRate: number;
+  /** totalTokens / range total, 0..1. */
+  share: number;
+}
+
+/** One skill's invocation count over the range. Mirrors `UsageSkillCall`. */
+export interface DaemonUsageSkillCall {
+  name: string;
+  count: number;
+}
+
+/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+export interface DaemonUsageDailyPoint {
+  date: string;
+  tokens: number;
+  sessions: number;
+}
+
+/** One heatmap cell: tokens (intensity) + cache rate. Mirrors `UsageHeatmapDay`. */
+export interface DaemonUsageHeatmapDay {
+  tokens: number;
+  /** cachedTokens / inputTokens for that day, 0..1. */
+  cacheReadRate: number;
+}
+
+/**
+ * Returned from `GET /usage/dashboard`. Aggregate local token usage across all
+ * projects, powering the Daemon Status "统计 / Usage" tab. Mirrors core's
+ * `UsageDashboard`.
+ */
+export interface DaemonUsageDashboard {
+  generatedAt: string;
+  /** The window `summary` covers; the heatmap below is always ~6 months. */
+  range: DaemonUsageRange;
+  summary: DaemonUsageDashboardTotals;
+  /** Per-model token share for the range, sorted by tokens desc. */
+  models: DaemonUsageModelShare[];
+  /** Skill invocations for the range, sorted by count desc. */
+  skills: DaemonUsageSkillCall[];
+  /** Per-day tokens + sessions across the range window. */
+  daily: DaemonUsageDailyPoint[];
+  /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
+  heatmap: Record<string, DaemonUsageHeatmapDay>;
+  heatmapDays: number;
 }
 
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */

@@ -242,7 +242,10 @@ within this session only; it is not a cross-session activity aggregate.
 ### Session Tasks (`session_tasks` capability tag)
 
 `GET /session/:id/tasks` returns a background-task snapshot for agent tasks,
-shell tasks, monitor tasks, and their lifecycle states.
+shell tasks, monitor tasks, and their lifecycle states. Agent entries spawned
+by another sub-agent carry optional lineage fields (`parentAgentId`,
+`parentName`, `depth`) so clients can render nested sub-agents as a tree; see
+the payload example in `qwen-serve-protocol.md`.
 
 ### Session LSP Status (`session_lsp` capability tag)
 

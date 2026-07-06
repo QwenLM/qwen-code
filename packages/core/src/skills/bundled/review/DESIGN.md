@@ -2,20 +2,22 @@
 
 > Architecture decisions, trade-offs, and rejected alternatives for the `/review` skill.
 
-## Why 9 agents + 1 verify + iterative reverse, not 1 agent?
+## Why 10 agents + 1 verify + iterative reverse, not 1 agent?
 
 **Considered:**
 
 - **1 agent (Copilot approach):** Single agent with tool-calling, reads and reviews in one pass. Cheapest (1 LLM call). But dimensional coverage depends entirely on one prompt's attention — easy to miss performance issues while focused on security.
 - **5 parallel agents (original design):** Each agent focuses on one dimension. Higher coverage through forced diversity of perspective. Limited by combined Correctness+Security and a single undirected pass — recall ceiling left findings on the table that the user only discovered in subsequent /review rounds.
-- **9 parallel agents (current):** 6 review dimensions (Correctness, Security, Code Quality, Performance, Test Coverage, Undirected) + Build & Test. Undirected runs as 3 personas in parallel.
+- **9 parallel agents:** 6 review dimensions (Correctness, Security, Code Quality, Performance, Test Coverage, Undirected) + Build & Test. Undirected runs as 3 personas in parallel.
+- **10 parallel agents (current):** The 9-agent design plus Issue Fidelity & Root-Cause Ownership, which compares linked issue evidence against the PR's claimed fix before accepting a client-side change.
 
-**Decision:** 9 agents. The marginal cost (9x vs 1x) is acceptable because:
+**Decision:** 10 agents. The marginal cost (10x vs 1x) is acceptable because:
 
-1. Parallel execution means time cost is ~1x (all 9 agents launch in one response)
+1. Parallel execution means time cost is ~1x (all 10 agents launch in one response)
 2. Dimensional focus produces higher recall (fewer missed issues)
 3. Three undirected personas (attacker / 3am-oncall / maintainer) catch cross-dimensional issues that a single undirected agent's prompt-induced bias would miss
-4. The "Silence is better than noise" principle + verification controls precision
+4. Issue Fidelity prevents a common false approval mode: a PR can be internally well-tested while solving only the author's mistaken diagnosis, not the linked issue's original failure
+5. The "Silence is better than noise" principle + verification controls precision
 
 ### Why split Correctness from Security
 
@@ -24,6 +26,16 @@ A single Correctness+Security agent has split attention — empirically one dime
 ### Why a dedicated Test Coverage agent
 
 Test gaps are a systematic blind spot. Review agents focused on bugs in the new code itself rarely look at whether the change came with adequate tests. A dedicated agent that asks "what scenarios in this diff are untested?" catches misses no other dimension hits.
+
+### Why a dedicated Issue Fidelity agent
+
+Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --json title,body,comments` (the `--json` form is required — it returns the issue **body**, which `--comments` alone omits). This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript. The agent runs only for PR targets — a local-diff or file-path review has no PR or linked issue, so it is skipped there (9 agents instead of 10).
+
+The agent also enforces the root-cause ownership gate: a client-side parser/sanitizer workaround for malformed upstream output is not acceptable as a root-cause fix unless a maintainer explicitly asked for that defensive mitigation.
+
+### Why the core infrastructure gate runs before agents
+
+Large external core changes are a governance decision before they are a review-quality problem. Running the full agent ensemble on a PR that should be maintainer-initiated wastes review budget and can produce a misleading "looks good" narrative. The prompt therefore applies the repository's two-tier core gate in Step 1: hard-block external 500+ line core changes, and escalate smaller core changes whenever downstream impact cannot be named with 100% confidence.
 
 ### Why three undirected personas instead of one or many
 
@@ -190,18 +202,18 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 **Decision:** Tips. Qwen Code's follow-up suggestion system is a core UX differentiator. Blocking prompts interrupt flow. Tips are zero-friction and let users decide when/if to act.
 
-## LLM call budget (variable, ~11-13)
+## LLM call budget (variable, ~12-14)
 
-| Stage                   | Calls             | Why                                                                 |
-| ----------------------- | ----------------- | ------------------------------------------------------------------- |
-| Review agents           | 9 (8)             | 6 dimensions + 3 undirected personas; Agent 7 skipped in cross-repo |
-| Batch verification      | 1                 | O(1) not O(N) — batch is as good as individual                      |
-| Iterative reverse audit | 1-3               | Loop until "No issues found" or 3-round hard cap                    |
-| **Total**               | **11-13 (10-12)** | Same-repo: 11-13; cross-repo lightweight: 10-12                     |
+| Stage                   | Calls             | Why                                                                                                                      |
+| ----------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Review agents           | 10 (9)            | issue fidelity + 6 dimensions + 3 undirected personas; Agent 7 skipped in cross-repo, Agent 0 skipped for non-PR reviews |
+| Batch verification      | 1                 | O(1) not O(N) — batch is as good as individual                                                                           |
+| Iterative reverse audit | 1-3               | Loop until "No issues found" or 3-round hard cap                                                                         |
+| **Total**               | **12-14 (11-13)** | Same-repo PR: 12-14; cross-repo lightweight PR or local/file (no Agent 0): 11-13                                         |
 
-The exact count depends on how many iterative reverse audit rounds run. Most PRs converge after 1-2 rounds; the cap prevents runaway cost.
+The exact count depends on how many iterative reverse audit rounds run. Most PRs converge after 1-2 rounds; the cap prevents runaway cost. Agent 0 (Issue Fidelity) runs only for PR targets, so local-diff and file-path reviews launch one fewer agent.
 
-Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Our 11-13 biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
+Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Our 12-14 biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
 
 ## Why cross-repo uses lightweight mode
 
@@ -219,6 +231,29 @@ Key implementation detail: Step 7 must use the owner/repo extracted from the URL
 - **Auto-discovery from CI config (chosen)**: Read `.github/workflows/*.yml`, `Makefile`, etc. to find what commands the project already runs in CI. Zero user effort.
 
 **Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, the build/test discovery is simply skipped and LLM agents still review the diff.
+
+## Why Suggestion-level findings go to an updatable issue comment instead of inline comments
+
+**Considered:**
+
+- **All findings inline (original behavior):** both Critical and Suggestion high-confidence findings became per-line inline review comments. Strong per-line signal for both severities.
+- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists still accumulate across runs (one body per review) and never converge.
+- **Critical inline, Suggestion in one updatable issue comment (chosen):** Critical stays per-line (real blockers pinned to code). Suggestion findings go to a single PR issue comment that is located by author + an embedded marker and PATCHed in place on every /review run, so the Suggestion list is one living view that refreshes rather than grows.
+
+**Decision:** Updatable issue comment. The root cause of "issues never converge" is not that Critical and Suggestion shared a severity bucket — it's that every /review run _re-emitted_ a new batch of inline comments with no concept of "this suggestion was already posted and is still open." Inline comments create a persistent conversation thread per line that the PR author (especially an agentic author iterating on the PR) feels obligated to resolve one-by-one, so the "Files changed" view grows noisier every round.
+
+Routing Suggestion findings to one comment that is updated in place attacks both halves of that: (1) there is exactly one Suggestion list per PR at any time, refreshed rather than appended; (2) the deterministic locate-and-PATCH lives in a `qwen review post-suggestions` subcommand, so the LLM never re-posts a duplicate — the second run finds the marker and overwrites the first run's body.
+
+Critical stays inline because blockers must be pinned to the exact code line and carry the strongest possible "fix this before merge" signal — convergence is not the priority there, correctness is.
+
+**Trade-off:**
+
+- ✅ Exactly one Suggestion list per PR, refreshed on each /review. No growing pile of threads.
+- ✅ Agentic authors are no longer forced to walk a queue of Suggestion threads — they read one list, address what they accept, push, and the next run overwrites it.
+- ✅ Reuses the same "locate-by-author-and-update" pattern already used for triage comments, and the same `gh` wrapper the other subcommands use — no new platform primitive.
+- ❌ Suggestion findings are less visually prominent than inline comments: they appear in the PR conversation thread rather than pinned next to the code in "Files changed." Mitigated by keeping a `file:line` column in the summary table so each row stays directly actionable.
+- When an author fully addresses all suggestions and the next /review run finds zero new Suggestions, the stale summary is automatically replaced with a short "all addressed" message (rather than left as a frozen artifact). If no prior summary exists and there are no suggestions, the step is skipped entirely.
+- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) flatten into table rows — the aggregation is visible in the terminal output, which retains the full structured form, but the PR summary lists representative instances.
 
 ## Rejected alternatives
 
@@ -245,14 +280,15 @@ For a PR with 15 findings:
 | Gemini (2 LLM tasks)                                | 2         | Good cost, medium coverage                           |
 | Our design (5 agents, N verify)                     | 21        | 5+15+1 — too expensive                               |
 | Our design (5 agents, batch verify, single reverse) | 7         | 5+1+1 — original design                              |
-| Our design (9 agents, iterative reverse, current)   | 11-13     | 9+1+(1-3) — +50% cost for meaningfully higher recall |
+| Our design (9 agents, iterative reverse)            | 11-13     | 9+1+(1-3) — +50% cost for meaningfully higher recall |
+| Our design (10 agents, current)                     | 12-14     | 10+1+(1-3) — adds issue-fidelity/root-cause gate     |
 | Claude /ultrareview                                 | 5-20      | Cloud-hosted, cost on Anthropic                      |
 
 ## Future optimization: Fork Subagent
 
 > Dependency: [Fork Subagent proposal](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report-p0-p1-core.md#2-fork-subagentp0)
 
-**Current problem:** Each of the 11-13 LLM calls (9 review + 1 verify + 1-3 reverse audit rounds) creates a new subagent from scratch. The system prompt (~50K tokens) is sent independently to each, totaling ~550-650K input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters more under the current 9-agent design than under the original 5-agent design.
+**Current problem:** Each of the 12-14 LLM calls (10 review + 1 verify + 1-3 reverse audit rounds) creates a new subagent from scratch. The system prompt (~50K tokens) is sent independently to each, totaling ~620-730K input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters more under the current 10-agent design than under the original 5-agent design.
 
 **Fork Subagent solution:** Instead of creating independent subagents, fork the current conversation. All forks inherit the parent's full context (system prompt, conversation history, Step 1/1.1/1.5 results) and share a prompt cache prefix. The API caches the common prefix once; each fork only pays for its unique delta (~2K per agent).
 
@@ -260,13 +296,13 @@ For a PR with 15 findings:
 Current (independent subagents):
   Agent 1: [50K system] + [2K task]  = 52K
   Agent 2: [50K system] + [2K task]  = 52K
-  ...× 11-13 agents                 = ~570-680K total input tokens
+  ...× 12-14 agents                 = ~620-730K total input tokens
 
 With Fork + prompt cache sharing:
   Cached prefix: [50K system + conversation history]  (cached once)
   Fork 1: [cache hit] + [2K delta]   = ~2K effective
   Fork 2: [cache hit] + [2K delta]   = ~2K effective
-  ...× 11-13 forks                  = ~50K cached + ~22-26K delta = ~72-76K total
+  ...× 12-14 forks                  = ~50K cached + ~24-28K delta = ~74-78K total
 ```
 
 **Additional benefits for /review:**

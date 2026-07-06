@@ -193,6 +193,7 @@ export interface OpenDialogActionReturn {
     | 'trust'
     | 'permissions'
     | 'approval-mode'
+    | 'effort'
     | 'resume'
     | 'delete'
     | 'branch'

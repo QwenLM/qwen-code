@@ -186,6 +186,7 @@ export default {
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
+  'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -204,6 +205,7 @@ export default {
   'toolDisplayName.TaskStop': 'toolDisplayName.TaskStop',
   'toolDisplayName.TeamCreate': 'toolDisplayName.TeamCreate',
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
+  'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
@@ -1389,6 +1391,7 @@ export default {
   'Size:': 'Size:',
   '{{count}} bytes': '{{count}} bytes',
   'Reference in chat': 'Reference in chat',
+  'MCP server': 'MCP server',
   'MCP resource server': 'MCP resource server',
 
   // Invalid tool related translations
@@ -2381,6 +2384,8 @@ export default {
     'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
   'Exited plan mode. Previous approval mode restored.':

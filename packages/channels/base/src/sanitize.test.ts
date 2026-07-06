@@ -19,8 +19,14 @@ const CSI = String.fromCharCode(0x009b); // CONTROL SEQUENCE INTRODUCER (another
 const ZWSP = String.fromCharCode(0x200b); // ZERO WIDTH SPACE
 const ZWNJ = String.fromCharCode(0x200c); // ZERO WIDTH NON-JOINER
 const ZWJ = String.fromCharCode(0x200d); // ZERO WIDTH JOINER
+const LRM = String.fromCharCode(0x200e); // LEFT-TO-RIGHT MARK
+const RLM = String.fromCharCode(0x200f); // RIGHT-TO-LEFT MARK
+const SHY = String.fromCharCode(0x00ad); // SOFT HYPHEN
+const ALM = String.fromCharCode(0x061c); // ARABIC LETTER MARK
+const INVISIBLE_PLUS = String.fromCharCode(0x2064); // INVISIBLE PLUS
 const WJ = String.fromCharCode(0x2060); // WORD JOINER
 const BOM = String.fromCharCode(0xfeff); // ZERO WIDTH NO-BREAK SPACE / BOM
+const VS16 = String.fromCharCode(0xfe0f); // VARIATION SELECTOR-16
 // U+1F389 PARTY POPPER as its UTF-16 surrogate pair, kept ASCII in source. A
 // length cap landing between the two units yields a lone surrogate (-> `replace`
 // char downstream); the sanitizers truncate on code-point boundaries to avoid it.
@@ -254,6 +260,19 @@ describe('sanitizeLogText', () => {
     expect(out).not.toContain(PS);
     expect(out).not.toContain(RLO);
     expect(out).not.toContain(PDI);
+  });
+
+  it('neutralizes format characters that can visually hide inside text', () => {
+    const out = sanitizeLogText(
+      `a${SHY}${ALM}${LRM}${RLM}${INVISIBLE_PLUS}${VS16}b`,
+      80,
+    );
+    expect(out).not.toContain(SHY);
+    expect(out).not.toContain(ALM);
+    expect(out).not.toContain(LRM);
+    expect(out).not.toContain(RLM);
+    expect(out).not.toContain(INVISIBLE_PLUS);
+    expect(out).not.toContain(VS16);
   });
 
   it('caps to maxLen code points without splitting a surrogate pair', () => {

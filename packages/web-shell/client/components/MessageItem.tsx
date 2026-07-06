@@ -30,7 +30,6 @@ interface MessageItemProps {
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
-  shellOutputMaxLines: number;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -44,7 +43,6 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
-  shellOutputMaxLines,
 }: MessageItemProps) {
   const body = ((): ReactElement | null => {
     switch (message.role) {
@@ -77,7 +75,6 @@ export const MessageItem = memo(function MessageItem({
             tools={message.tools}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
           />
         );
       case 'plan':
@@ -149,21 +146,42 @@ export const MessageItem = memo(function MessageItem({
     </ErrorBoundary>
   );
 
+  // Re-enable text selection on every message row so users can long-press /
+  // drag-select reply text. The blanket `html * { user-select: none }` in
+  // standalone.css disables selection on UI chrome (native-app feel); this
+  // attribute opts the message subtree back in, including descendants
+  // (Markdown body, code blocks, tool panels, sub-messages).
+  //
+  // `display: contents` keeps this wrapper out of layout: several parents
+  // (e.g. MessageTimestamp's chat row) are flex containers whose items used
+  // to be the message body itself. A plain div here becomes the flex item
+  // instead and shrinks to its content width, squeezing user chat bubbles
+  // (whose max-width: 80% then resolves against the shrunken wrapper) so
+  // even short messages wrap mid-word. The user-select re-enable rule
+  // matches `[data-user-selectable] *`, so the boxless wrapper does not
+  // affect it.
+  const selectableSafeBody = (
+    <div data-user-selectable="true" style={{ display: 'contents' }}>
+      {safeBody}
+    </div>
+  );
+
   if (message.role === 'assistant') {
     if (showAssistantActions) {
-      return safeBody;
+      return selectableSafeBody;
     }
     return (
       <MessageTimestamp timestamp={message.timestamp}>
-        {safeBody}
+        {selectableSafeBody}
       </MessageTimestamp>
     );
   }
 
-  // The cancellation marker is a right-aligned, full-width turn-terminal row; a
-  // hover timestamp would overlap its text, so render it without the wrapper.
+  // The cancellation marker is a right-aligned, full-width turn-terminal row;
+  // a hover timestamp would overlap its text, so skip the MessageTimestamp
+  // wrapper. The data-user-selectable div is still applied for consistency.
   if (message.role === 'system' && message.source === 'prompt_cancelled') {
-    return safeBody;
+    return selectableSafeBody;
   }
 
   return (
@@ -173,7 +191,7 @@ export const MessageItem = memo(function MessageItem({
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle="Copy"
     >
-      {safeBody}
+      {selectableSafeBody}
     </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
@@ -218,7 +236,6 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 
