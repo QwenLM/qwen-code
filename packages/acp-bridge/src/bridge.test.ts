@@ -391,6 +391,87 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('prunes expired pins during remove with deleteContent false without GC', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-04T00:00:00.000Z'));
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const pinned = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const pinnedArtifactId = pinned.changes[0]!.artifactId;
+      const removed = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Later link',
+          url: 'https://example.com/later',
+        },
+        { clientId: session.clientId },
+      );
+      const removedArtifactId = removed.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        pinnedArtifactId,
+        { clientId: session.clientId },
+        { mode: 'content', ttlDays: 1 },
+      );
+      gcSpy.mockClear();
+
+      vi.setSystemTime(new Date('2026-07-06T00:00:00.000Z'));
+      await expect(
+        bridge.removeSessionArtifact(
+          session.sessionId,
+          removedArtifactId,
+          { clientId: session.clientId },
+          { deleteContent: false },
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId: removedArtifactId }],
+      });
+      expect(gcSpy).not.toHaveBeenCalled();
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({
+            id: pinnedArtifactId,
+            retention: 'restorable',
+            persistenceWarning: 'content_expired',
+          }),
+        ]),
+      });
+    } finally {
+      gcSpy.mockRestore();
+      vi.useRealTimers();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('re-reads an artifact after pruning before re-pinning expired content', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));

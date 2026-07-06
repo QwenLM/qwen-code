@@ -2810,12 +2810,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const pruneExpiredArtifactPins = async (
     entry: SessionEntry,
     originatorClientId?: string,
+    options: { deleteContent?: boolean } = {},
   ): Promise<{ warnings: string[]; gcRan: boolean }> => {
     const pruned = await entry.artifacts.pruneExpiredPins();
     const warnings = [...(pruned.warnings ?? [])];
     let gcRan = false;
     if (pruned.changes.length > 0) {
       publishArtifactChanges(entry, pruned.changes, originatorClientId);
+    }
+    if (pruned.changes.length > 0 && options.deleteContent !== false) {
       try {
         await gcArtifactContent(entry);
         gcRan = true;
@@ -2835,9 +2838,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     originatorClientId: string | undefined,
     action: string,
+    options: { deleteContent?: boolean } = {},
   ): Promise<{ warnings: string[]; gcRan: boolean }> => {
     try {
-      return await pruneExpiredArtifactPins(entry, originatorClientId);
+      return await pruneExpiredArtifactPins(entry, originatorClientId, options);
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${entry.sessionId} action=${action} reason=${JSON.stringify(
@@ -4785,14 +4789,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const result = await entry.artifacts.remove(artifactId, { clientId });
       publishArtifactChanges(entry, result.changes, clientId);
       const warnings = [...(result.warnings ?? [])];
-      if (result.changes.length > 0 && removeOptions.deleteContent !== false) {
+      if (result.changes.length > 0) {
         const pruneResult = await pruneExpiredArtifactPinsBestEffort(
           entry,
           clientId,
           'remove_prune_failed',
+          { deleteContent: removeOptions.deleteContent },
         );
         warnings.push(...pruneResult.warnings);
-        if (!pruneResult.gcRan) {
+        if (removeOptions.deleteContent !== false && !pruneResult.gcRan) {
           try {
             await gcArtifactContent(entry);
           } catch (error) {
