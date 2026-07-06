@@ -93,6 +93,20 @@ describe('serve command args', () => {
 
     expect(parsed['channel']).toEqual(['telegram', 'feishu']);
   });
+
+  it('parses a single --workspace value as a string', () => {
+    const parsed = buildParser().parseSync('--workspace /tmp/primary');
+
+    expect(parsed['workspace']).toBe('/tmp/primary');
+  });
+
+  it('parses repeatable --workspace values as an array', () => {
+    const parsed = buildParser().parseSync(
+      '--workspace /tmp/primary --workspace /tmp/secondary',
+    );
+
+    expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
 });
 
 describe('serve rate limit env parsing', () => {

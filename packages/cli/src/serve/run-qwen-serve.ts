@@ -153,6 +153,11 @@ const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
+
+type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
+  token?: string;
+  workspace?: string | string[];
+};
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 
@@ -214,6 +219,21 @@ function envFlagDisabled(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   const normalized = raw.trim().toLowerCase();
   return normalized === '0' || normalized === 'false';
+}
+
+function resolveSingleWorkspaceInput(workspace: unknown): string {
+  if (Array.isArray(workspace)) {
+    if (workspace.length === 0) return process.cwd();
+    if (workspace.length > 1) {
+      throw new Error(
+        'Multiple --workspace values are not supported yet. ' +
+          'Multi-workspace serve is not enabled; pass one --workspace.',
+      );
+    }
+    return String(workspace[0]);
+  }
+  if (workspace === undefined) return process.cwd();
+  return String(workspace);
 }
 
 function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
@@ -1321,7 +1341,7 @@ function runSynchronousRequestGate(
  * hard rule, not a warning, per the threat model in the design issue.
  */
 export async function runQwenServe(
-  optsIn: Omit<ServeOptions, 'token'> & { token?: string },
+  optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
@@ -1381,11 +1401,13 @@ export async function runQwenServe(
   const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
     optsIn.allowOrigins,
   );
+  const rawWorkspace = resolveSingleWorkspaceInput(optsIn.workspace);
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
+    workspace: rawWorkspace,
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
       (!envFlagDisabled(clientMcpOverWsEnv) &&
@@ -1625,7 +1647,6 @@ export async function runQwenServe(
   // multiple daemon processes, not intra-daemon routing.
   //
   // Boot-loud validation: absolute path, exists, is a directory.
-  const rawWorkspace = opts.workspace ?? process.cwd();
   if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
       `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
@@ -2026,7 +2047,7 @@ export async function runQwenServe(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
-        `daemon:${daemonWorkspaceHash}:${process.pid}`,
+        `daemon:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
           telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
@@ -2701,7 +2722,7 @@ export async function runQwenServe(
         performance.now() - runStartedAt,
       );
       profileCheckpoint('serve_listener_ready');
-      finalizeStartupProfile(daemonLog.getDaemonId() || 'serve');
+      finalizeStartupProfile(`serve-${process.pid}`);
 
       // Listener-level connection cap, set inside the listen callback
       // because Node only exposes the underlying `Server` after
