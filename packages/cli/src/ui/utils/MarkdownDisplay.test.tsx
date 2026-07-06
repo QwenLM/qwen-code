@@ -587,6 +587,24 @@ Done.`.replace(/\n/g, eol);
       expect(stripAnsi(lastFrame() ?? '')).toContain('ZZZ');
     });
 
+    it('does not hold a pipe line inside an open display-math block', () => {
+      // Inside a `$$ … $$` block the main parser pushes every line verbatim as
+      // math content, never as a table. The hold-back must mirror that: a `| … |`
+      // line (a norm/matrix row) while the math block is still open is NOT a
+      // forming table and must render, not be blanked until the block closes.
+      const text = `$$
+| ZZZ | YYY |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={20}
+        />,
+      );
+      expect(stripAnsi(lastFrame() ?? '')).toContain('ZZZ');
+    });
+
     it('renders the table once the separator matches the header columns', () => {
       const text = `| Alpha | Beta |
 |---|---|

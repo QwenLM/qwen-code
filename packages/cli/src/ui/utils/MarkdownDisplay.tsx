@@ -203,24 +203,39 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     let start = lines.length;
     while (start > 0 && /^\s*\|/.test(lines[start - 1]!)) start--;
     if (start < lines.length) {
-      // Don't touch pipe-lines that are actually fenced code-block content.
-      // Track the OPEN fence's delimiter, not a naive toggle: a closing fence
-      // must use the same char and be at least as long (mirrors the main parser),
-      // or a nested fence (```` inside ```` ) mis-toggles and a real code line
-      // like `| A | B |` gets held back as a forming table.
+      // Don't touch pipe-lines that are actually fenced code-block OR display-math
+      // (`$$ … $$`) content: the main parser pushes those verbatim, never as a
+      // table (a `| a | b |` norm/matrix line inside `$$` would otherwise be held
+      // back as a forming table and blank until the block closes). Track the OPEN
+      // code fence's delimiter, not a naive toggle: a closing fence must use the
+      // same char and be at least as long (mirrors the main parser), or a nested
+      // fence (```` inside ```` ) mis-toggles and a real code line like `| A | B |`
+      // gets held back. Mirror the main parser's precedence — a code block wins,
+      // then a math block — so a `$$` inside a code fence does not open math.
       let activeCodeFence = '';
+      let insideMathBlock = false;
       for (let i = 0; i < start; i++) {
-        const fenceMatch = lines[i]!.match(codeFenceRegex);
-        if (!fenceMatch) continue;
+        const line = lines[i]!;
         if (activeCodeFence) {
+          const fenceMatch = line.match(codeFenceRegex);
           if (
+            fenceMatch &&
             fenceMatch[1]!.startsWith(activeCodeFence[0]!) &&
             fenceMatch[1]!.length >= activeCodeFence.length
           ) {
             activeCodeFence = '';
           }
-        } else {
+          continue;
+        }
+        if (insideMathBlock) {
+          if (mathFenceRegex.test(line)) insideMathBlock = false;
+          continue;
+        }
+        const fenceMatch = line.match(codeFenceRegex);
+        if (fenceMatch) {
           activeCodeFence = fenceMatch[1]!;
+        } else if (mathFenceRegex.test(line)) {
+          insideMathBlock = true;
         }
       }
       const insideCodeFence = activeCodeFence !== '';
@@ -240,7 +255,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // back for the whole stream. The trailing pipe is stripped only when
       // present, so a still-forming header (`| A | B`) is counted mid-type.
       let headerCells = 0;
-      if (!insideCodeFence) {
+      if (!insideCodeFence && !insideMathBlock) {
         let hdr = lines[start]!.replace(/^\s*\|/, '');
         if (/\|\s*$/.test(hdr)) hdr = hdr.replace(/\|\s*$/, '');
         headerCells = splitMarkdownTableRow(hdr).length;
