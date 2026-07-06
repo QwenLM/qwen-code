@@ -29,7 +29,7 @@ Test gaps are a systematic blind spot. Review agents focused on bugs in the new 
 
 ### Why a dedicated Issue Fidelity agent
 
-Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --comments`. This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript.
+Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis can be wrong. The linked issue's original reproduction, observed payload, expected behavior, and maintainer comments must be checked before judging whether the implementation is a real fix. The implementation deliberately keeps issue discovery out of `pr-context`: the Issue Fidelity agent fetches GitHub's closing-issue metadata with `gh pr view --json closingIssuesReferences`, then fetches relevant issue discussions with `gh issue view --json title,body,comments` (the `--json` form is required — it returns the issue **body**, which `--comments` alone omits). This keeps relevance judgment in the agent instead of baking fragile PR-body parsing into TypeScript. The agent runs only for PR targets — a local-diff or file-path review has no PR or linked issue, so it is skipped there (9 agents instead of 10).
 
 The agent also enforces the root-cause ownership gate: a client-side parser/sanitizer workaround for malformed upstream output is not acceptable as a root-cause fix unless a maintainer explicitly asked for that defensive mitigation.
 
@@ -204,14 +204,14 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 ## LLM call budget (variable, ~12-14)
 
-| Stage                   | Calls             | Why                                                                                  |
-| ----------------------- | ----------------- | ------------------------------------------------------------------------------------ |
-| Review agents           | 10 (9)            | issue fidelity + 6 dimensions + 3 undirected personas; Agent 7 skipped in cross-repo |
-| Batch verification      | 1                 | O(1) not O(N) — batch is as good as individual                                       |
-| Iterative reverse audit | 1-3               | Loop until "No issues found" or 3-round hard cap                                     |
-| **Total**               | **12-14 (11-13)** | Same-repo: 12-14; cross-repo lightweight: 11-13                                      |
+| Stage                   | Calls             | Why                                                                                                                      |
+| ----------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Review agents           | 10 (9)            | issue fidelity + 6 dimensions + 3 undirected personas; Agent 7 skipped in cross-repo, Agent 0 skipped for non-PR reviews |
+| Batch verification      | 1                 | O(1) not O(N) — batch is as good as individual                                                                           |
+| Iterative reverse audit | 1-3               | Loop until "No issues found" or 3-round hard cap                                                                         |
+| **Total**               | **12-14 (11-13)** | Same-repo PR: 12-14; cross-repo lightweight PR or local/file (no Agent 0): 11-13                                         |
 
-The exact count depends on how many iterative reverse audit rounds run. Most PRs converge after 1-2 rounds; the cap prevents runaway cost.
+The exact count depends on how many iterative reverse audit rounds run. Most PRs converge after 1-2 rounds; the cap prevents runaway cost. Agent 0 (Issue Fidelity) runs only for PR targets, so local-diff and file-path reviews launch one fewer agent.
 
 Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Our 12-14 biases toward higher recall — the assumption is that "find more issues per round" is more valuable than minimizing per-run cost, because every missed issue forces the user into another `/review` iteration.
 
@@ -288,7 +288,7 @@ For a PR with 15 findings:
 
 > Dependency: [Fork Subagent proposal](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report-p0-p1-core.md#2-fork-subagentp0)
 
-**Current problem:** Each of the 12-14 LLM calls (10 review + 1 verify + 1-3 reverse audit rounds) creates a new subagent from scratch. The system prompt (~50K tokens) is sent independently to each, totaling ~600-700K input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters more under the current 10-agent design than under the original 5-agent design.
+**Current problem:** Each of the 12-14 LLM calls (10 review + 1 verify + 1-3 reverse audit rounds) creates a new subagent from scratch. The system prompt (~50K tokens) is sent independently to each, totaling ~620-730K input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters more under the current 10-agent design than under the original 5-agent design.
 
 **Fork Subagent solution:** Instead of creating independent subagents, fork the current conversation. All forks inherit the parent's full context (system prompt, conversation history, Step 1/1.1/1.5 results) and share a prompt cache prefix. The API caches the common prefix once; each fork only pays for its unique delta (~2K per agent).
 

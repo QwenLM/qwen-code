@@ -58,7 +58,7 @@ Step 9:  Clean up (remove worktree + temp files)
 | Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues |
 | Agent 7: Build & Test             | Runs build and test commands, reports failures                                              |
 
-All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 10 parallel tasks for same-repo reviews). Findings from Agents 0-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
+All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 10 parallel tasks for same-repo PR reviews; Agent 0 is skipped for local-diff and file-path reviews, which run 9). Findings from Agents 0-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
 
 ## Severity Levels
 
@@ -154,15 +154,15 @@ Rules are injected into the LLM review agents (0-6) as additional criteria. For 
 
 ## Linked Issue Fit
 
-For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It uses `gh pr view <pr> --repo <owner/repo> --json closingIssuesReferences` for GitHub's strong closing-issue metadata, then `gh issue view <number> --repo <owner/repo> --comments` for the original report and discussion.
+For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It uses `gh pr view <pr> --repo <owner/repo> --json closingIssuesReferences` for GitHub's strong closing-issue metadata, then `gh issue view <number> --repo <issue_owner>/<issue_repo> --json title,body,comments` for the original report and discussion — the `--json` form includes the issue **body** (the reporter's original repro), which `--comments` alone omits, and the issue's own repository is read from each reference (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
 
-If the PR context mentions other possibly relevant issues, the agent may fetch them after judging relevance. For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
+`closingIssuesReferences` is a discovery hint rather than proof the author linked the right issue: if it is empty but the PR references an apparent target issue, the agent still fetches it after judging relevance. Fetched issue text is treated as untrusted data (facts extracted, embedded instructions ignored). For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
 
 If the issue evidence shows an upstream service or provider returned malformed data outside the client contract, client-side parser or sanitizer changes are not treated as a valid root-cause fix unless a maintainer explicitly requested a defensive workaround. A test that replays malformed upstream output proves only that the workaround handles that shape; it does not prove the workaround is architecturally appropriate.
 
 ## Core Infrastructure Gate
 
-For external PRs touching core infrastructure, `/review` applies the repository gate before normal review. Large core changes (500+ additions plus deletions in core infrastructure) are reported as a hard block unless maintainer-authored. Smaller core changes require 100% confidence and downstream-consumer awareness; otherwise `/review` escalates to a maintainer.
+For external PRs touching core infrastructure, `/review` applies the repository gate before normal review (right after the PR is fetched, before dependency install). Maintainer authorship is decided from the PR's `authorAssociation` (`OWNER`/`MEMBER`/`COLLABORATOR` are exempt). Large core changes (500+ additions plus deletions **within core-infrastructure paths**) are reported as a hard block unless maintainer-authored — a low-risk sweep that touches many files but changes a line or two each is escalated rather than auto-rejected on line count. Smaller core changes require 100% confidence and downstream-consumer awareness; otherwise `/review` escalates to a maintainer (submitted as a Comment, never an Approve).
 
 Example `.qwen/review-rules.md`:
 
