@@ -30,8 +30,5 @@ export function resolveConnectionErrorStatus(
   ) {
     return currentStatus;
   }
-  return (
-    nextStatus ??
-    (isMissingSessionHttpStatus(currentStatus) ? currentStatus : undefined)
-  );
+  return nextStatus;
 }

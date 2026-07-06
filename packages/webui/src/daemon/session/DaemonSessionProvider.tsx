@@ -153,6 +153,17 @@ const DaemonSessionNoticesContext = createContext<
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
+/**
+ * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
+ * failures** (vs session-not-found 404/410). Auth failures should NOT enter
+ * the reconnect loop even when `autoReconnect: true` — retrying with the
+ * same bad token loops forever, hammering the server with bad credentials
+ * and risking transcript wipes if reconnect later attaches a different
+ * session and hits the sessionId-change `store.reset()` branch.
+ *
+ * 404/410 (session-not-found) leave the requested session disconnected instead
+ * of silently creating a replacement empty session.
+ */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([
   ...AUTH_FAILURE_HTTP_STATUSES,
@@ -176,17 +187,6 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   authVersion: 0,
 };
 
-/**
- * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
- * failures** (vs session-not-found 404/410). Auth failures should NOT enter
- * the reconnect loop even when `autoReconnect: true` — retrying with the
- * same bad token loops forever, hammering the server with bad credentials
- * and risking transcript wipes if reconnect later attaches a different
- * session and hits the sessionId-change `store.reset()` branch.
- *
- * 404/410 (session-not-found) leave the requested session disconnected instead
- * of silently creating a replacement empty session.
- */
 const UNHANDLED_SESSION = Symbol('unhandled session');
 
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
@@ -1239,8 +1239,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((current) => ({
               ...current,
-              status: 'disconnected',
-              error: undefined,
+              status: current.status === 'error' ? 'error' : 'disconnected',
+              error: current.status === 'error' ? current.error : undefined,
               errorStatus: resolveConnectionErrorStatus(
                 undefined,
                 current.errorStatus,
@@ -1542,7 +1542,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     errorStatus,
                     current.errorStatus,
                   ),
-                  missingSession: false,
+                  missingSession,
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,

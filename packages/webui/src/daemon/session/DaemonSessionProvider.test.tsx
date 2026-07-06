@@ -5018,7 +5018,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'session gone',
       errorStatus: 410,
-      missingSession: false,
+      missingSession: true,
       capabilities: {
         workspaceCwd: '/mock-workspace',
         features: ['client_heartbeat'],
@@ -5070,7 +5070,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'session gone',
       errorStatus: 410,
-      missingSession: false,
+      missingSession: true,
     });
     expect(connection?.sessionId).toBeUndefined();
   });
