@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   mkdtempSync,
@@ -175,13 +175,19 @@ describe('qwen-autofix workflow', () => {
       '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
     );
     expect(workflow).toContain(
+      'if [[ "${EVENT_NAME}" == \'workflow_dispatch\' && ( -z "${PHASE}" || "${PHASE}" == \'auto\' ) ]]; then',
+    );
+    expect(routeStep).toContain(
+      '[[ -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false',
+    );
+    expect(routeStep).toContain(
+      '[[ -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true',
+    );
+    expect(routeStep).toContain(
+      '[[ -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true',
+    );
+    expect(routeStep).not.toContain(
       '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false',
-    );
-    expect(workflow).toContain(
-      '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true',
-    );
-    expect(workflow).toContain(
-      '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true',
     );
     expect(workflow).toContain(
       'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
@@ -931,5 +937,130 @@ describe('qwen-autofix workflow', () => {
 
     expect(runner).toContain('const QWEN_TIMEOUT_MS = 50 * 60 * 1000');
     expect(runner).toContain('timeout: QWEN_TIMEOUT_MS');
+  });
+
+  it('rejects invalid --conflict values', () => {
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--conflict',
+          'maybe',
+          '--print-prompt',
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      ),
+    ).toThrow(/--conflict must be true or false/);
+  });
+
+  it('requires --pr for address-review mode', () => {
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--issue',
+          '1234',
+          '--print-prompt',
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      ),
+    ).toThrow(/--pr is required/);
+  });
+
+  it('logs failure.md content when the agent writes it and exits 0', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(
+        stub,
+        [
+          '#!/usr/bin/env node',
+          "import { writeFileSync } from 'node:fs';",
+          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+          "writeFileSync(`${workdir}/failure.md`, 'cannot proceed\\n');",
+          '',
+        ].join('\n'),
+      );
+      chmodSync(stub, 0o755);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('failure.md:');
+      expect(result.stderr).toContain('cannot proceed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports only missing output files in the error message', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(stub, '#!/usr/bin/env node\n');
+      chmodSync(stub, 0o755);
+
+      let stderr = '';
+      try {
+        execFileSync(
+          process.execPath,
+          [
+            autofixRunnerScriptPath,
+            '--mode',
+            'develop-issue',
+            '--issue',
+            '1234',
+            '--workdir',
+            dir,
+            '--qwen-bin',
+            stub,
+          ],
+          { encoding: 'utf8', stdio: 'pipe' },
+        );
+      } catch (error) {
+        stderr = String(error.stderr);
+      }
+      expect(stderr).toContain('e2e-report.md');
+      expect(stderr).toContain('pr-title.txt');
+      expect(stderr).toContain('pr-body.md');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reference stale comment-trigger routing in the skill', () => {
+    const skill = readAutofixSkill();
+    expect(skill).not.toContain('label/comment trigger');
+    expect(skill).toContain('label event');
   });
 });

@@ -118,8 +118,11 @@ const result = spawnSync(options.qwenBin, ['--yolo', '--prompt', prompt], {
   timeout: QWEN_TIMEOUT_MS,
 });
 if (result.error || result.signal || result.status !== 0) {
-  const detail =
-    result.error?.message ?? result.signal ?? `status ${String(result.status)}`;
+  const detail = result.error
+    ? result.error.message
+    : result.signal === 'SIGTERM'
+      ? `timeout (SIGTERM after ${QWEN_TIMEOUT_MS}ms)`
+      : (result.signal ?? `status ${String(result.status)}`);
   if (!existsSync(file(options.workdir, 'failure.md'))) {
     writeFailure(
       options.workdir,
@@ -134,7 +137,8 @@ if (result.error || result.signal || result.status !== 0) {
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
-  console.error(`Autofix agent wrote ${file(options.workdir, 'failure.md')}`);
+  const content = readFileSync(file(options.workdir, 'failure.md'), 'utf8');
+  console.error(`Autofix agent wrote failure.md:\n${content}`);
   process.exit(0);
 }
 
@@ -143,9 +147,9 @@ const ok = spec.anyOutput
   ? missingOutputs.length < spec.outputs.length
   : missingOutputs.length === 0;
 if (!ok) {
-  const message = `Autofix agent finished without required output file(s): ${spec.outputs.join(
-    ', ',
-  )}.`;
+  const message = `Autofix agent finished without required output file(s): ${missingOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
   fail(message);
 }
+
+console.log(`Autofix agent completed ${options.mode} successfully.`);

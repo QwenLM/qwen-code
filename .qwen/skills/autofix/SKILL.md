@@ -34,7 +34,7 @@ model-driven decisions.
 Input: `<workdir>/candidates.json`.
 
 Pick at most one issue. Each candidate has `autofixTier`: `0` is a forced
-issue from manual dispatch or label/comment trigger, and `1` is a maintainer
+issue from manual dispatch or a label event, and `1` is a maintainer
 approved issue from the scheduled pool. Prefer forced tier-0 issues, then the
 highest confidence approved issue. It is valid to pick none.
 

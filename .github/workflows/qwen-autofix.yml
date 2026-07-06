@@ -174,9 +174,13 @@ jobs:
           # Forcing a specific issue/PR implies running that phase only for
           # explicit manual dispatch. Event payload numbers still flow to the
           # phase jobs after routing, but must not bypass the label/schedule gates.
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true
+          # Explicit phases (issue/review/both) take precedence over forced
+          # issue/PR overrides — only apply forced routing in auto/default mode.
+          if [[ "${EVENT_NAME}" == 'workflow_dispatch' && ( -z "${PHASE}" || "${PHASE}" == 'auto' ) ]]; then
+            [[ -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false
+            [[ -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true
+            [[ -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true
+          fi
           echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
           echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
