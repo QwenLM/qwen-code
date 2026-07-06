@@ -170,7 +170,8 @@ describe('<ModelDialog />', () => {
 
     const props = mockedSelect.mock.calls[0][0];
     expect(props.items).toHaveLength(12);
-    expect(props.maxItemsToShow).toBe(6);
+    expect(props.maxItemsToShow).toBe(4);
+    expect(props.showScrollArrows).toBe(true);
   });
 
   it('floors visible model options to 1 when the terminal is very short', () => {
@@ -212,7 +213,7 @@ describe('<ModelDialog />', () => {
     );
 
     const props = mockedSelect.mock.calls[0][0];
-    expect(props.maxItemsToShow).toBe(3);
+    expect(props.maxItemsToShow).toBe(2);
   });
 
   it('falls back to the default max item count when no terminal height is given', () => {
@@ -257,7 +258,7 @@ describe('<ModelDialog />', () => {
     );
 
     const initialProps = mockedSelect.mock.calls[0][0];
-    expect(initialProps.maxItemsToShow).toBe(6);
+    expect(initialProps.maxItemsToShow).toBe(4);
 
     await act(async () => {
       await initialProps.onSelect(initialProps.items[0].value);
@@ -267,7 +268,7 @@ describe('<ModelDialog />', () => {
       mockedSelect.mock.calls[mockedSelect.mock.calls.length - 1][0];
     // errorMessage = "Failed to switch model to 'model-1'.\n\nnetwork down"
     // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
-    // floor((20 - 14 - 5) / 1) = 1.
+    // max(1, floor((20 - 16 - 5) / 1)) = 1.
     expect(propsAfterError.maxItemsToShow).toBe(1);
   });
 

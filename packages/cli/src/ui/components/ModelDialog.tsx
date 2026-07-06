@@ -119,7 +119,13 @@ interface ModelDialogProps {
 }
 
 const MAX_MODEL_ITEMS_TO_SHOW = 10;
-const MODEL_DIALOG_FIXED_ROWS = 14;
+// Non-list dialog chrome to reserve when capping visible model rows: outer
+// round border (2) + outer padding (2) + title (1) + gap before the list (1)
+// + highlighted-entry detail panel (divider + up to 4 detail rows, ~6) +
+// scroll-arrow rows shown above/below a capped list (2) + footer gap and
+// hint text (2). Adjust this whenever that surrounding layout changes, and
+// re-verify with an E2E height sweep rather than guessing.
+const MODEL_DIALOG_FIXED_ROWS = 16;
 const MODEL_OPTION_ROW_HEIGHT = 1;
 const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
 
@@ -837,6 +843,7 @@ export function ModelDialog({
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
+            showScrollArrows={true}
             maxItemsToShow={maxModelItemsToShow}
           />
         </Box>
