@@ -336,7 +336,7 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 
-  it('drops persisted client ids during restore normalization', () => {
+  it('preserves persisted client ids during restore normalization', () => {
     const restored = {
       ...artifact('s1', 'https://example.com/client-owned'),
       clientId: 'client-a',
@@ -354,7 +354,7 @@ describe('session artifact persistence records', () => {
       }),
     ]);
 
-    expect(snapshot?.artifacts[0]).not.toHaveProperty('clientId');
+    expect(snapshot?.artifacts[0]).toMatchObject({ clientId: 'client-a' });
   });
 
   it('remaps forked payloads to the new session without carrying pinned content', () => {

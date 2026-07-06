@@ -637,11 +637,15 @@ export function registerSessionRoutes(
     if (sessionId === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
-    if (!requireSessionArtifactClientId(clientId, res)) return;
     try {
       res
         .status(200)
-        .json(await bridge.getSessionArtifacts(sessionId, { clientId }));
+        .json(
+          await bridge.getSessionArtifacts(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/artifacts',

@@ -15,10 +15,11 @@ import {
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
-import type {
-  RebuiltSessionArtifactSnapshot,
-  SessionArtifactEventRecordPayload,
-  SessionArtifactSnapshotRecordPayload,
+import {
+  stableSessionArtifactId,
+  type RebuiltSessionArtifactSnapshot,
+  type SessionArtifactEventRecordPayload,
+  type SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
 
 describe('SessionArtifactStore', () => {
@@ -212,7 +213,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('does not write live client ids into durable artifact records', async () => {
+  it('writes client ids into durable artifact records', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's1-client-id-durable',
@@ -240,11 +241,61 @@ describe('SessionArtifactStore', () => {
     expect(created.changes[0]?.artifact).toMatchObject({
       clientId: 'client-a',
     });
-    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
+    expect(events[0]?.changes[0]?.artifact).toMatchObject({
+      clientId: 'client-a',
+    });
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
       'persistenceWarning',
     );
+  });
+
+  it('restores client ownership from durable artifact records', async () => {
+    const owner = 'client-a';
+    const sessionId = 's1-restored-client-owner';
+    const url = 'https://example.com/owned-restored-artifact';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        {
+          id: artifactId,
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Owned restored artifact',
+          url,
+          retention: 'restorable',
+          clientRetained: true,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+          clientId: owner,
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    } satisfies RebuiltSessionArtifactSnapshot);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId, clientId: owner }],
+    });
+    await expect(
+      store.remove(artifactId, { clientId: 'client-b' }),
+    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+    await expect(
+      store.remove(artifactId, { clientId: owner }),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId }],
+    });
   });
 
   it('rolls back received sequence when strict upsert persistence fails', async () => {
