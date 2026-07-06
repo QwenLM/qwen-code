@@ -2188,7 +2188,7 @@ describe('GeminiChat', async () => {
       //   cheap-gate (real estimate via getHistory + userMessage) →
       //   splitter (real) → runSideQuery (mocked at baseLlmClient) →
       //   persistence.
-      const largeChars = 'x'.repeat(400_000); // ~100K estimated tokens
+      const largeChars = 'x'.repeat(520_000); // ~130K estimated tokens
       const inheritedHistory: Content[] = [
         { role: 'user', parts: [{ text: largeChars }] },
         { role: 'model', parts: [{ text: 'ack' }] },
@@ -2198,8 +2198,9 @@ describe('GeminiChat', async () => {
       chat.setHistory(inheritedHistory);
       expect(chat.getLastPromptTokenCount()).toBe(0);
 
-      // Default DEFAULT_TOKEN_LIMIT = 128K → auto ≈ 95K. 100K estimate
-      // crosses, so cheap-gate must let compaction proceed.
+      // Default DEFAULT_TOKEN_LIMIT = 200K minus the 64K output reservation
+      // leaves a 136K effective window; 130K crosses the auto threshold, so
+      // cheap-gate must let compaction proceed.
       const generateText = vi.fn().mockResolvedValue({
         text: '<state_snapshot>compressed</state_snapshot>',
         usage: {
