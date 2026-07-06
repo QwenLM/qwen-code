@@ -496,6 +496,25 @@ export function registerScheduledTasksRoutes(
       res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
       return;
     }
+    // Keep the bound session's display name in sync with the task's effective
+    // label (its name, or its prompt when unnamed) — the session was named
+    // after the task at create, so a rename (or a prompt edit while unnamed)
+    // should follow. Only when the effective label actually changed, so a bare
+    // cron/enabled edit doesn't touch the session. Best-effort: a metadata
+    // failure must not fail the PATCH the schedule already committed.
+    const effectiveLabelChanged =
+      patch.name !== undefined ||
+      clearName ||
+      (patch.prompt !== undefined && updated.name === undefined);
+    if (bridge && updated.sessionId && effectiveLabelChanged) {
+      try {
+        bridge.updateSessionMetadata(updated.sessionId, {
+          displayName: scheduledTaskSessionName(updated.name ?? updated.prompt),
+        });
+      } catch {
+        // non-critical — the schedule change already persisted
+      }
+    }
     res.status(200).json(toView(updated));
   });
 

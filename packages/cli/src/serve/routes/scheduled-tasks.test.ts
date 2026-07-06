@@ -344,6 +344,41 @@ describe('scheduled-tasks routes', () => {
     });
   });
 
+  it('renames the bound session to follow the task name via PATCH', async () => {
+    const created = await create({
+      name: 'Old',
+      cron: '0 9 * * *',
+      prompt: 'p',
+    });
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+    expect(h.bridge.named).toEqual([{ sessionId: sid, displayName: '⏰ Old' }]);
+
+    // Renaming the task re-labels its session.
+    const rename = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ name: 'New' });
+    expect(rename.status).toBe(200);
+    expect(h.bridge.named).toContainEqual({
+      sessionId: sid,
+      displayName: '⏰ New',
+    });
+
+    // A bare cron edit does NOT re-touch the session name.
+    const count = h.bridge.named.length;
+    await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ cron: '0 10 * * *' });
+    expect(h.bridge.named).toHaveLength(count);
+
+    // Clearing the name falls the session label back to the prompt.
+    await request(h.app).patch(`/scheduled-tasks/${id}`).send({ name: '' });
+    expect(h.bridge.named).toContainEqual({
+      sessionId: sid,
+      displayName: '⏰ p',
+    });
+  });
+
   it('rejects an invalid cron via PATCH', async () => {
     const created = await create({ cron: '0 9 * * *', prompt: 'x' });
     const id = created.body.id as string;
