@@ -1053,7 +1053,6 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-
   it('executes only the first request for duplicate callIds in one batch', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'first result',
@@ -7777,6 +7776,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     experimentalZedIntegration?: boolean;
     args?: Record<string, unknown>;
     abortController?: AbortController;
+    tools?: MockTool[];
   }): Promise<{
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -8030,8 +8030,8 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
     const bExecute = vi.fn().mockReturnValue(bDone);
     const tools = [
-      new MockTool({ name: 'toolA', execute: aExecute }),
-      new MockTool({ name: 'toolB', execute: bExecute }),
+      new MockTool({ name: 'toolA', kind: Kind.Read, execute: aExecute }),
+      new MockTool({ name: 'toolB', kind: Kind.Read, execute: bExecute }),
     ];
     const messageBus = {
       request: vi
@@ -8157,8 +8157,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       returnDisplay: 'B',
     });
     const tools = [
-      new MockTool({ name: 'toolA', execute: aExecute }),
-      new MockTool({ name: 'toolB', execute: bExecute }),
+      new MockTool({ name: 'toolA', kind: Kind.Read, execute: aExecute }),
+      new MockTool({ name: 'toolB', kind: Kind.Read, execute: bExecute }),
     ];
     const messageBus = {
       request: vi
@@ -8229,6 +8229,239 @@ describe('CoreToolScheduler telemetry spans', () => {
       .filter((tc) => tc.request.callId === 'a')
       .at(-1);
     expect(latestA?.status).toBe('awaiting_approval');
+  });
+
+  it('ignores ModifyWithEditor for a bounced ask info confirmation', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const getModifyContext = vi.fn(() => {
+      throw new Error('info confirmation must not enter editor modify flow');
+    });
+    const tool = Object.assign(
+      new MockTool({
+        name: 'mockTool',
+        kind: Kind.Edit,
+        execute,
+      }),
+      { getModifyContext },
+    );
+    const messageBus = askMessageBus();
+    const { onToolCallsUpdate } = await scheduleWithAsk({
+      messageBus,
+      execute,
+      tools: [tool],
+    });
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await expect(
+      waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ModifyWithEditor,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(getModifyContext).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    const latest = onToolCallsUpdate.mock.calls
+      .flatMap((c) => c[0] as ToolCall[])
+      .filter((tc) => tc.request.callId === 'ask-call')
+      .at(-1);
+    expect(latest?.status).toBe('awaiting_approval');
+  });
+
+  it('pauses later unsafe batches while a bounced ask awaits approval', async () => {
+    const aExecute = vi.fn().mockResolvedValue({
+      llmContent: 'A ok',
+      returnDisplay: 'A ok',
+    });
+    const bExecute = vi.fn().mockResolvedValue({
+      llmContent: 'B ok',
+      returnDisplay: 'B ok',
+    });
+    const tools = [
+      new MockTool({ name: 'toolA', kind: Kind.Edit, execute: aExecute }),
+      new MockTool({ name: 'toolB', kind: Kind.Edit, execute: bExecute }),
+    ];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (req: {
+            eventName?: string;
+            input?: { tool_name?: string };
+          }) => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: 'pre-hook',
+            success: true,
+            output:
+              req.eventName === 'PreToolUse' && req.input?.tool_name === 'toolA'
+                ? { decision: 'ask', reason: 'confirm A' }
+                : {},
+          }),
+        ),
+    };
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildScheduler({ tools, messageBus, disableHooks: false });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'a',
+          name: 'toolA',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'b',
+          name: 'toolB',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(aExecute).not.toHaveBeenCalled();
+    expect(bExecute).not.toHaveBeenCalled();
+
+    const waiting = onToolCallsUpdate.mock.calls
+      .flatMap((c) => c[0] as ToolCall[])
+      .find(
+        (tc) => tc.request.callId === 'a' && tc.status === 'awaiting_approval',
+      ) as WaitingToolCall;
+    expect(waiting).toBeDefined();
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(aExecute).toHaveBeenCalledTimes(1);
+    expect(bExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it('abort drain leaves executing siblings to finish their own abort path', async () => {
+    let resolveB!: (r: ToolResult) => void;
+    const bDone = new Promise<ToolResult>((resolve) => {
+      resolveB = resolve;
+    });
+    const bExecute = vi.fn().mockReturnValue(bDone);
+    const tools = [
+      new MockTool({
+        name: 'toolA',
+        kind: Kind.Read,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'A ok',
+          returnDisplay: 'A ok',
+        }),
+      }),
+      new MockTool({ name: 'toolB', kind: Kind.Read, execute: bExecute }),
+    ];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (req: {
+            eventName?: string;
+            input?: { tool_name?: string };
+          }) => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: 'pre-hook',
+            success: true,
+            output:
+              req.eventName === 'PreToolUse' && req.input?.tool_name === 'toolA'
+                ? { decision: 'ask', reason: 'confirm A' }
+                : {},
+          }),
+        ),
+    };
+    const abortController = new AbortController();
+    const { scheduler, onToolCallsUpdate } = buildScheduler({
+      tools,
+      messageBus,
+      disableHooks: false,
+    });
+
+    const schedulePromise = scheduler.schedule(
+      [
+        {
+          callId: 'a',
+          name: 'toolA',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'b',
+          name: 'toolB',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    await vi.waitFor(() => {
+      expect(bExecute).toHaveBeenCalled();
+    });
+
+    abortController.abort();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const latestB = onToolCallsUpdate.mock.calls
+      .flatMap((c) => c[0] as ToolCall[])
+      .filter((tc) => tc.request.callId === 'b')
+      .at(-1);
+    expect(latestB?.status).toBe('executing');
+
+    resolveB({ llmContent: 'B done', returnDisplay: 'B done' });
+    await schedulePromise;
+  });
+
+  it('cleans bounce markers when post-ask re-execution fails before body runs', async () => {
+    const tracing = await import('../telemetry/session-tracing.js');
+    const runInToolSpanContext = vi.mocked(tracing.runInToolSpanContext);
+    const messageBus = askMessageBus();
+    const { scheduler, onToolCallsUpdate } = await scheduleWithAsk({
+      messageBus,
+    });
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    runInToolSpanContext.mockImplementationOnce(() => {
+      throw new Error('context failed before callback');
+    });
+
+    await expect(
+      waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ).rejects.toThrow('context failed before callback');
+
+    expect(
+      (scheduler as unknown as { bouncedAwaitingApproval: Set<string> })
+        .bouncedAwaitingApproval.size,
+    ).toBe(0);
+    expect(
+      (scheduler as unknown as { bouncedToolUseId: Map<string, string> })
+        .bouncedToolUseId.size,
+    ).toBe(0);
+    expect(
+      (scheduler as unknown as { toolSpans: Map<string, unknown> }).toolSpans
+        .size,
+    ).toBe(0);
   });
 
   it('blocked_on_user span ends with cancel when the user rejects (#3731 Phase 2)', async () => {

@@ -222,7 +222,6 @@ const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 
-
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
 const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
@@ -1607,13 +1606,14 @@ export class CoreToolScheduler {
         // remaining entries — the timer callback would otherwise surface
         // an unhandled exception (#4321 review-3 wenshao Suggestion).
         try {
-          // Safety-net for a tool still non-terminal at abort time — e.g.
-          // one bounced to awaiting_approval by a PreToolUse 'ask' the user
-          // never answered. The spans are cancelled below, but without a
-          // terminal tool-call status checkAndNotifyCompletion never
-          // completes the batch and the turn hangs. setStatusInternal
-          // no-ops on already-terminal/cleared calls, so this only affects
-          // a genuine walk-away-then-abort.
+          const call = this.toolCalls.find((c) => c.request.callId === callId);
+          if (call?.status !== 'awaiting_approval') {
+            continue;
+          }
+          // Safety-net for a tool stuck awaiting approval at abort time — e.g.
+          // one bounced by a PreToolUse 'ask' the user never answered. Do not
+          // force-terminalize executing siblings; their own abort path owns
+          // live output, failure hooks, and final status.
           this.setStatusInternal(
             callId,
             'cancelled',
@@ -2914,7 +2914,10 @@ export class CoreToolScheduler {
       this.finalizeToolSpan(callId);
     } else if (outcome === ToolConfirmationOutcome.ModifyWithEditor) {
       const waitingToolCall = toolCall as WaitingToolCall;
-      if (isModifiableDeclarativeTool(waitingToolCall.tool)) {
+      if (
+        waitingToolCall.confirmationDetails.type === 'edit' &&
+        isModifiableDeclarativeTool(waitingToolCall.tool)
+      ) {
         const modifyContext = waitingToolCall.tool.getModifyContext(signal);
         const editorType = this.getPreferredEditor();
         if (!editorType) {
@@ -3200,13 +3203,26 @@ export class CoreToolScheduler {
       for (const batch of batches) {
         if (batch.concurrent && batch.calls.length > 1) {
           await this.runConcurrently(batch.calls, signal);
+          if (this.hasExecutingOrAwaitingApprovalCall()) {
+            return;
+          }
         } else {
           for (const call of batch.calls) {
             await this.executeSingleToolCall(call, signal);
+            if (this.hasExecutingOrAwaitingApprovalCall()) {
+              return;
+            }
           }
         }
       }
     }
+  }
+
+  private hasExecutingOrAwaitingApprovalCall(): boolean {
+    return this.toolCalls.some(
+      (call) =>
+        call.status === 'executing' || call.status === 'awaiting_approval',
+    );
   }
 
   /**
@@ -3265,6 +3281,8 @@ export class CoreToolScheduler {
         this._executeToolCallBody(scheduledCall, signal, toolSpan),
       );
     } catch (error) {
+      this.bouncedAwaitingApproval.delete(callId);
+      this.bouncedToolUseId.delete(callId);
       // _executeToolCallBody pre-sets span status (OK / FAILURE /
       // CANCELLED) only AFTER its main try/catch is entered. Throws
       // from the prelude — getMessageBus,
