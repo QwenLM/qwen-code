@@ -106,8 +106,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
 
-    // SYNC: Keep these roots and the auto-memory check below aligned with
-    // AcpAgent.setupFileSystem's localReadRoots.
+    // SYNC: Keep these base roots and the auto-memory check below aligned with
+    // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
+    // append fallback-only roots after that group.
     const allowedRoots = [
       this.config.storage.getProjectTempDir(),
       // Background subagent transcripts live under <projectDir>/subagents/ and
