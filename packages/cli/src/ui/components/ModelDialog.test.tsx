@@ -239,6 +239,28 @@ describe('<ModelDialog />', () => {
     expect(props.maxItemsToShow).toBe(10);
   });
 
+  it('clamps visible model options to the default max when the terminal is tall', () => {
+    renderComponent(
+      { availableTerminalHeight: 100 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    // floor((100 - 14) / 1) = 86 rows of budget, clamped to the 10-item max.
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(10);
+  });
+
   it('shrinks visible model options to leave room for a displayed error message', async () => {
     const switchModel = vi.fn().mockRejectedValue(new Error('network down'));
 
