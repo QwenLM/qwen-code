@@ -88,6 +88,7 @@ export class WeComChannel extends ChannelBase {
   private readonly seenMessages = new Map<string, number>();
   private readonly inFlightMessages = new Set<string>();
   private readonly attachmentDirsByMessage = new Map<string, string[]>();
+  private readonly attachmentMessageByDir = new Map<string, string>();
   private readonly attachmentDirsBySession = new Map<string, string[]>();
   private readonly attachmentDirsWithoutMessageByRoute = new Map<
     string,
@@ -408,7 +409,6 @@ export class WeComChannel extends ChannelBase {
         process.stderr.write(
           `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
         );
-        if (messageId) this.seenMessages.set(messageId, Date.now());
         return;
       }
       attachments = await this.downloadAttachments(
@@ -603,6 +603,7 @@ export class WeComChannel extends ChannelBase {
       const messageDirs = this.attachmentDirsByMessage.get(messageId) ?? [];
       messageDirs.push(dir);
       this.attachmentDirsByMessage.set(messageId, messageDirs);
+      this.attachmentMessageByDir.set(dir, messageId);
     } else if (routeKey) {
       const dirs = this.attachmentDirsWithoutMessageByRoute.get(routeKey) ?? [];
       dirs.push(dir);
@@ -628,6 +629,9 @@ export class WeComChannel extends ChannelBase {
     const dirs = this.attachmentDirsByMessage.get(messageId);
     if (!dirs) return;
     this.attachmentDirsByMessage.delete(messageId);
+    for (const dir of dirs) {
+      this.attachmentMessageByDir.delete(dir);
+    }
     this.removeAttachmentDirsFromSessions(dirs);
     cleanupAttachmentDirs(dirs);
   }
@@ -637,19 +641,22 @@ export class WeComChannel extends ChannelBase {
     if (!dirs) return;
     this.attachmentDirsBySession.delete(sessionId);
     this.removeAttachmentDirsFromMessages(dirs);
+    for (const dir of dirs) {
+      this.attachmentMessageByDir.delete(dir);
+    }
     cleanupAttachmentDirs(dirs);
   }
 
   private cleanupUntrackedAttachmentDirsForSession(sessionId: string): void {
     const dirs = this.attachmentDirsBySession.get(sessionId);
     if (!dirs) return;
-    const trackedDirs = new Set<string>();
-    for (const messageDirs of this.attachmentDirsByMessage.values()) {
-      for (const dir of messageDirs) trackedDirs.add(dir);
-    }
-    const untrackedDirs = dirs.filter((dir) => !trackedDirs.has(dir));
+    const untrackedDirs = dirs.filter(
+      (dir) => !this.attachmentMessageByDir.has(dir),
+    );
     if (untrackedDirs.length === 0) return;
-    const remainingDirs = dirs.filter((dir) => trackedDirs.has(dir));
+    const remainingDirs = dirs.filter((dir) =>
+      this.attachmentMessageByDir.has(dir),
+    );
     if (remainingDirs.length > 0) {
       this.attachmentDirsBySession.set(sessionId, remainingDirs);
     } else {
@@ -701,6 +708,9 @@ export class WeComChannel extends ChannelBase {
         this.bufferedAttachmentMessages.delete(messageId);
       }
     }
+    for (const dir of dirs) {
+      this.attachmentMessageByDir.delete(dir);
+    }
   }
 
   private cleanupAllAttachmentDirs(): void {
@@ -713,6 +723,7 @@ export class WeComChannel extends ChannelBase {
     );
     this.attachmentDirsBySession.clear();
     this.attachmentDirsByMessage.clear();
+    this.attachmentMessageByDir.clear();
     this.attachmentDirsWithoutMessageByRoute.clear();
     this.bufferedAttachmentMessages.clear();
     this.coalescedAttachmentMessages.clear();
@@ -802,6 +813,7 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectRetryCycles = 0;
       this.startKickReconnect(reason, 'SDK disconnect');
     }, DISCONNECT_RECONNECT_FALLBACK_MS);
+    this.disconnectReconnectFallback.unref?.();
   }
 
   private async reconnectAfterKick(
@@ -922,6 +934,7 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectAttempts = 0;
       this.startKickReconnect(reason, reconnectReason);
     }, delayMs);
+    this.kickReconnectRetry.unref?.();
   }
 
   private startKickReconnect(
@@ -1365,11 +1378,14 @@ function splitMarkdownChunks(text: string): string[] {
 
     let needsLineBreak = Boolean(current);
     for (let index = 0; index < line.length; ) {
+      const codePoint = line.codePointAt(index);
       const token = line.startsWith('```', index)
         ? '```'
         : line.startsWith('~~~', index)
           ? '~~~'
-          : (Array.from(line.slice(index))[0] ?? '');
+          : codePoint === undefined
+            ? ''
+            : String.fromCodePoint(codePoint);
       if (!token) break;
       const nextCodeFence =
         token === codeFence
@@ -1931,7 +1947,7 @@ function mediaTypeToMime(type: WeComMediaType): string {
 
 function sanitizeFileName(name: string | undefined): string {
   const base = basename(name || '').replace(/\0/g, '');
-  return base.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_');
+  return base.replace(/[^\p{L}\p{N}._-]/gu, '_').replace(/^\.+/, '_');
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

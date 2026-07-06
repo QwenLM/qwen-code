@@ -645,7 +645,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('keeps the delayed kick reconnect retry alive', () => {
+  it('does not keep the delayed kick reconnect retry alive', () => {
     const unref = vi.fn();
     const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
     const setTimeoutSpy = vi
@@ -663,11 +663,11 @@ describe('WeComChannel', () => {
     inspectable.scheduleKickReconnectRetry('kicked', 0);
 
     expect(inspectable.kickReconnectRetry).toBe(timeout);
-    expect(unref).not.toHaveBeenCalled();
+    expect(unref).toHaveBeenCalledTimes(1);
     setTimeoutSpy.mockRestore();
   });
 
-  it('keeps the SDK disconnect fallback reconnect alive', () => {
+  it('does not keep the SDK disconnect fallback reconnect alive', () => {
     const unref = vi.fn();
     const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
     const setTimeoutSpy = vi
@@ -687,7 +687,7 @@ describe('WeComChannel', () => {
     inspectable.scheduleDisconnectReconnectFallback('closed', client, 0);
 
     expect(inspectable.disconnectReconnectFallback).toBe(timeout);
-    expect(unref).not.toHaveBeenCalled();
+    expect(unref).toHaveBeenCalledTimes(1);
     setTimeoutSpy.mockRestore();
   });
 
@@ -1294,6 +1294,47 @@ describe('WeComChannel', () => {
     expect(file.attachments?.[0]?.filePath).toContain('report.pdf');
   });
 
+  it('preserves distinct unicode inbound filenames', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.mixed', {
+      msgid: 'msg-unicode-files',
+      msgtype: 'mixed',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      mixed: {
+        msg_item: [
+          {
+            msgtype: 'file',
+            file: {
+              url: 'https://example.invalid/report',
+              filename: '報告.pdf',
+            },
+          },
+          {
+            msgtype: 'file',
+            file: {
+              url: 'https://example.invalid/photo',
+              filename: '写真.pdf',
+            },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    const attachments = channel.envelopes[0]?.attachments ?? [];
+    expect(attachments.map((attachment) => attachment.fileName)).toEqual([
+      '報告.pdf',
+      '写真.pdf',
+    ]);
+    expect(
+      new Set(attachments.map((attachment) => attachment.filePath)).size,
+    ).toBe(2);
+  });
+
   it('allows group replies to the bot without an explicit mention', async () => {
     const channel = new TestWeComChannel(
       'bot',
@@ -1589,7 +1630,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('deduplicates messages rejected by preflight', async () => {
+  it('allows retries for messages rejected by preflight', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -1620,12 +1661,8 @@ describe('WeComChannel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     client.emit('message.text', payload);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(channel.preflights).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
     expect(bridge.newSession).not.toHaveBeenCalled();
-    expect(stderr).toHaveBeenCalledWith(
-      '[WeCom:bot] dropping duplicate message msg-preflight-rejected (already seen).\n',
-    );
     stderr.mockRestore();
   });
 
@@ -3078,6 +3115,33 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('cleans untracked session dirs without scanning every message dir', () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    const untrackedDir = mkdtempSync(join(tmpdir(), 'wecom-untracked-'));
+    const trackedDir = mkdtempSync(join(tmpdir(), 'wecom-tracked-'));
+    const inspectable = channel as unknown as {
+      attachmentDirsBySession: Map<string, string[]>;
+      attachmentDirsByMessage: Map<string, string[]>;
+      attachmentMessageByDir: Map<string, string>;
+      cleanupUntrackedAttachmentDirsForSession(sessionId: string): void;
+    };
+    const messageDirs = new Map<string, string[]>([['msg-1', [trackedDir]]]);
+    messageDirs.values = vi.fn(() => {
+      throw new Error('full message-dir scan');
+    });
+    inspectable.attachmentDirsBySession.set('session-1', [
+      trackedDir,
+      untrackedDir,
+    ]);
+    inspectable.attachmentDirsByMessage = messageDirs;
+    inspectable.attachmentMessageByDir = new Map([[trackedDir, 'msg-1']]);
+
+    inspectable.cleanupUntrackedAttachmentDirsForSession('session-1');
+
+    expect(existsSync(untrackedDir)).toBe(false);
+    expect(existsSync(trackedDir)).toBe(true);
+  });
+
   it('removes downloaded file attachments when no prompt starts', async () => {
     const bridge = makeBridge();
     const channel = new WeComChannel('bot', makeConfig(), bridge);
@@ -3550,6 +3614,21 @@ describe('WeComChannel', () => {
     expect(first.markdown.content + second.markdown.content).toBe(
       'a'.repeat(3900),
     );
+  });
+
+  it('splits long markdown responses without array-copying the remaining line', async () => {
+    const arrayFrom = vi.spyOn(Array, 'from');
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+
+    await channel.sendMessage('chat-1', 'a'.repeat(3900));
+
+    expect(
+      arrayFrom.mock.calls.some(
+        ([value]) => typeof value === 'string' && value.length > 100,
+      ),
+    ).toBe(false);
+    arrayFrom.mockRestore();
   });
 
   it('keeps fenced code blocks balanced across markdown chunks', async () => {

@@ -5868,6 +5868,35 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('pairing code');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
+
+    it('treats pairing notification failures as preflight rejection', async () => {
+      class PairingFailureChannel extends TestChannel {
+        override async sendMessage(): Promise<void> {
+          throw new Error('send failed');
+        }
+      }
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new PairingFailureChannel(
+        'test',
+        defaultConfig({
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        }),
+        bridge,
+      );
+
+      await expect(
+        ch.handleInbound(envelope({ senderId: 'stranger' })),
+      ).resolves.toBeUndefined();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('pairing notification failed'),
+      );
+      stderr.mockRestore();
+    });
   });
 
   describe('setBridge', () => {

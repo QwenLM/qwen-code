@@ -158,6 +158,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
       name,
       channelsConfig[name] as Record<string, unknown>,
       process.cwd(),
+      { resolveEnvVars: 'available' },
     );
   } catch (err) {
     writeStderrLine(

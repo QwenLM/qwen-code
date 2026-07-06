@@ -28,6 +28,11 @@ vi.mock('./channel-registry.js', () => ({
         channelType: 'numeric',
         requiredConfigFields: ['port'],
       },
+      overlap: {
+        channelType: 'overlap',
+        requiredConfigFields: ['endpoint'],
+        envResolvableConfigFields: ['endpoint'],
+      },
       bare: { channelType: 'bare' }, // no requiredConfigFields
     };
     return plugins[type];
@@ -37,6 +42,7 @@ vi.mock('./channel-registry.js', () => ({
     'dingtalk',
     'wecom',
     'numeric',
+    'overlap',
     'bare',
   ],
 }));
@@ -188,6 +194,24 @@ describe('parseChannelConfig', () => {
     expect(result['wsUrl']).toBe('wss://example.invalid/ws');
 
     delete process.env['TEST_WECOM_WS_URL'];
+  });
+
+  it('does not resolve plugin fields twice when declarations overlap', async () => {
+    process.env['TEST_OVERLAP_ENDPOINT'] = '$ENDPOINT_LITERAL';
+
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'overlap',
+        endpoint: '$TEST_OVERLAP_ENDPOINT',
+      },
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
+
+    expect(result['endpoint']).toBe('$ENDPOINT_LITERAL');
+
+    delete process.env['TEST_OVERLAP_ENDPOINT'];
   });
 
   it('does not resolve known credential fields twice', async () => {

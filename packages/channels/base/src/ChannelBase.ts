@@ -2216,9 +2216,17 @@ export abstract class ChannelBase {
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
-        return this.onPairingRequired(envelope.chatId, result.pairingCode).then(
-          () => false,
-        );
+        return this.onPairingRequired(envelope.chatId, result.pairingCode)
+          .then(() => false)
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[Channel:${this.name}] pairing notification failed: ${sanitizeLogText(
+                err instanceof Error ? err.message : String(err),
+                200,
+              )}\n`,
+            );
+            return false;
+          });
       }
       return false;
     }
@@ -2233,6 +2241,13 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
+  /**
+   * Process an inbound message after preflight gates have passed.
+   *
+   * This method does not run group gating, sender allowlisting, or pairing
+   * checks. Callers must run preflightInbound() first unless the envelope was
+   * already preflighted, such as during collect-buffer drain.
+   */
   protected async processInbound(envelope: Envelope): Promise<void> {
     // 3. Slash command handling — before session/agent routing
     const parsed = this.parseCommand(envelope.text);

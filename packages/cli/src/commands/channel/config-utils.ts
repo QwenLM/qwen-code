@@ -136,6 +136,7 @@ export async function parseChannelConfig(
 
   const resolvedRawConfig = { ...rawConfig };
   const envResolution = options.resolveEnvVars ?? true;
+  const resolvedPluginFields = new Set<string>();
 
   // Validate plugin-required fields
   for (const field of plugin.requiredConfigFields ?? []) {
@@ -147,9 +148,11 @@ export async function parseChannelConfig(
     }
     if (typeof value === 'string' && !KNOWN_CREDENTIAL_FIELDS.has(field)) {
       resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
+      resolvedPluginFields.add(field);
     }
   }
   for (const field of plugin.envResolvableConfigFields ?? []) {
+    if (resolvedPluginFields.has(field)) continue;
     const value = rawConfig[field];
     if (typeof value === 'string' && value !== '') {
       resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
