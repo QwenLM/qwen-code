@@ -683,6 +683,7 @@ export const useSlashCommandProcessor = (
       const stackedResult = parseStackedSlashCommands(trimmed, commands);
       if (stackedResult.skills.length >= 2) {
         const combinedContent: PartListUnion[] = [];
+        let firstModelOverride: string | undefined;
 
         for (const skill of stackedResult.skills) {
           if (!skill.action) continue;
@@ -698,6 +699,23 @@ export const useSlashCommandProcessor = (
           const skillResult = await skill.action(skillContext, '');
           if (skillResult?.type === 'submit_prompt') {
             combinedContent.push(skillResult.content);
+            firstModelOverride ??= skillResult.modelOverride;
+          } else if (
+            skillResult?.type === 'message' &&
+            skillResult.messageType === 'error'
+          ) {
+            addMessage({
+              type: MessageType.ERROR,
+              content: `Skill "/${skill.name}" error: ${skillResult.content}`,
+              timestamp: new Date(),
+            });
+          }
+
+          if (config) {
+            recordSkillInvocation(config, {
+              skillName: getSkillCommandName(skill),
+              success: skillResult?.type === 'submit_prompt',
+            });
           }
         }
 
@@ -714,21 +732,12 @@ export const useSlashCommandProcessor = (
           });
         }
 
-        // Record skill invocations for telemetry
-        if (config) {
-          for (const skill of stackedResult.skills) {
-            recordSkillInvocation(config, {
-              skillName: getSkillCommandName(skill),
-              success: true,
-            });
-          }
-        }
-
         // Combine all content into a single submit_prompt
         const mergedContent: PartListUnion = combinedContent.flat();
         return {
           type: 'submit_prompt',
           content: mergedContent,
+          ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
         };
       }
 

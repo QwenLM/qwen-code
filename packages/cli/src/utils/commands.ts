@@ -117,15 +117,15 @@ export const parseStackedSlashCommands = (
   let exceededMax = false;
 
   while (pos < commandText.length) {
-    // Skip whitespace between tokens.
-    while (pos < commandText.length && commandText[pos] === ' ') pos++;
+    // Skip whitespace between tokens (matches spaces, tabs, etc.).
+    while (pos < commandText.length && /\s/.test(commandText[pos]!)) pos++;
     if (pos >= commandText.length) {
       restPos = pos;
       break;
     }
 
     const tokenStart = pos;
-    while (pos < commandText.length && commandText[pos] !== ' ') pos++;
+    while (pos < commandText.length && !/\s/.test(commandText[pos]!)) pos++;
     const token = commandText.slice(tokenStart, pos);
 
     if (skills.length === 0) {

@@ -381,4 +381,24 @@ describe('parseStackedSlashCommands', () => {
     expect(result.exceededMax).toBe(true);
     expect(result.remainingText).toBe('/structured-debugging extra text');
   });
+
+  it('should handle tabs between skill tokens', () => {
+    const result = parseStackedSlashCommands(
+      '/feat-dev\t/e2e-testing\timplement X',
+      mockCommandsWithSkills,
+    );
+    expect(result.skills).toHaveLength(2);
+    expect(result.skills[0]?.name).toBe('feat-dev');
+    expect(result.skills[1]?.name).toBe('e2e-testing');
+    expect(result.remainingText).toBe('implement X');
+  });
+
+  it('should handle mixed whitespace (spaces and tabs) between tokens', () => {
+    const result = parseStackedSlashCommands(
+      '/feat-dev \t /e2e-testing \t implement X',
+      mockCommandsWithSkills,
+    );
+    expect(result.skills).toHaveLength(2);
+    expect(result.remainingText).toBe('implement X');
+  });
 });

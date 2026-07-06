@@ -2432,7 +2432,8 @@ describe('useSlashCommandProcessor', () => {
         );
       });
 
-      const content = (actionResult as { content: Array<{ text: string }> }).content;
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
       const texts = content.map((c) => c.text);
       // Remaining text should be the last element
       expect(texts[texts.length - 1]).toBe('please review the auth module');
@@ -2475,7 +2476,8 @@ describe('useSlashCommandProcessor', () => {
         );
       });
 
-      const content = (actionResult as { content: Array<{ text: string }> }).content;
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
       const texts = content.map((c) => c.text);
       expect(texts).toContain('SKILL_BODY:feat-dev:a');
       expect(texts).toContain('SKILL_BODY:e2e-testing:b');
@@ -2507,10 +2509,117 @@ describe('useSlashCommandProcessor', () => {
 
       // All three skills should be in the result, but the one without action
       // simply doesn't contribute content
-      const content = (actionResult as { content: Array<{ text: string }> }).content;
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
       const texts = content.map((c) => c.text);
       expect(texts).toContain('SKILL_BODY:feat-dev:a');
       expect(texts).toContain('SKILL_BODY:review:c');
+    });
+
+    it('excludes non-submit_prompt results from combined content', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB: SlashCommand = createTestCommand(
+        {
+          name: 'error-skill',
+          description: 'Skill that returns error',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'error',
+            content: 'Something went wrong',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillC = createSkillCommand('review', 'c');
+      const result = setupProcessorHook([skillA, skillB, skillC]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(3));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /error-skill /review do it',
+        );
+      });
+
+      // Error message should be surfaced via addMessage
+      const errorCalls = mockAddItem.mock.calls.filter(
+        (call: unknown[]) =>
+          (call[0] as { type: number }).type === MessageType.ERROR,
+      );
+      expect(errorCalls.length).toBeGreaterThan(0);
+      expect((errorCalls[0][0] as { text: string }).text).toContain(
+        'Something went wrong',
+      );
+
+      // Combined content should only contain submit_prompt results
+      const content = (actionResult as { content: Array<{ text: string }> })
+        .content;
+      const texts = content.map((c) => c.text);
+      expect(texts).toContain('SKILL_BODY:feat-dev:a');
+      expect(texts).toContain('SKILL_BODY:review:c');
+      expect(texts).not.toContain('Something went wrong');
+    });
+
+    it('records telemetry success=false for non-submit_prompt skill results', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB: SlashCommand = createTestCommand(
+        {
+          name: 'error-skill',
+          description: 'Skill that returns error',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'error',
+            content: 'fail',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      recordSkillInvocationMock.mockClear();
+      await act(async () => {
+        await result.current.handleSlashCommand('/feat-dev /error-skill do it');
+      });
+
+      const records = recordSkillInvocationMock.mock.calls.map(
+        (call: unknown[]) => call[1] as { skillName: string; success: boolean },
+      );
+      const featRecord = records.find((r) => r.skillName === 'feat-dev');
+      const errorRecord = records.find((r) => r.skillName === 'error-skill');
+      expect(featRecord?.success).toBe(true);
+      expect(errorRecord?.success).toBe(false);
+    });
+
+    it('propagates modelOverride from first submit_prompt skill', async () => {
+      const skillA: SlashCommand = createTestCommand(
+        {
+          name: 'feat-dev',
+          description: 'Skill with model override',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'SKILL_BODY:feat-dev' }],
+            modelOverride: 'gemini-2.5-pro',
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillB = createSkillCommand('review', 'b');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/feat-dev /review do it',
+        );
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: expect.anything(),
+        modelOverride: 'gemini-2.5-pro',
+      });
     });
   });
 });

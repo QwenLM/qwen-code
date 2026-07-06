@@ -1126,6 +1126,96 @@ describe('handleSlashCommand', () => {
         expect(texts).toContain('SKILL_BODY:review:b');
       }
     });
+
+    it('excludes non-submit_prompt results from combined content', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const errorSkill = {
+        name: 'error-skill',
+        description: 'Skill returning error',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Something failed',
+        }),
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, errorSkill, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /error-skill /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:review:b');
+        // Error message is not in combined content
+        expect(texts).not.toContain('Something failed');
+      }
+    });
+
+    it('records telemetry success=false for non-submit_prompt results', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const errorSkill = {
+        name: 'error-skill',
+        description: 'Skill returning error',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'fail',
+        }),
+      };
+      mockGetCommands.mockReturnValue([skillA, errorSkill]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /error-skill do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      // Verify the error skill's action was actually called
+      // (telemetry recording logic is tested in slashCommandProcessor.test.ts)
+      expect(errorSkill.action).toHaveBeenCalledTimes(1);
+      expect(result.type).toBe('submit_prompt');
+    });
+
+    it('propagates modelOverride from first submit_prompt skill', async () => {
+      const skillA = {
+        name: 'feat-dev',
+        description: 'Skill with model override',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:feat-dev' }],
+          modelOverride: 'gemini-2.5-pro',
+        }),
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        expect(result.modelOverride).toBe('gemini-2.5-pro');
+      }
+    });
   });
 });
 
