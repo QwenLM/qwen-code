@@ -61,17 +61,23 @@ Default posture: **skepticism**. Burden of proof is on the author. Distinguish *
 
 Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
 
-**Tier 1 — Large-scope changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path change totals **500+ lines** (additions + deletions combined) → reject immediately. No evaluation, no Stage 1.
+**Size calculation — exclude test code.** When computing line counts for this gate, exclude files matching `*.test.ts`, `*.spec.ts`, `__tests__/**`, and auto-generated schema declarations. Only **production logic lines** (additions + deletions) count toward the thresholds below. When reporting size in comments, show the breakdown: production lines vs. test lines vs. config/schema.
+
+**Tier 1 — Large-scope `refactor` changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path `refactor`-type PR (title starts with `refactor` — `refactor:`, `refactor(scope):`, `refactor(scope)!:`, case-insensitive) totals **500+ production logic lines** (additions + deletions, excluding tests) → reject immediately. No evaluation, no Stage 1.
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first."
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This refactor touches core infrastructure at scale (N production lines). Core refactors of this size must be maintainer-initiated — please open an issue to discuss the design first."
 ```
 
 Then **stop**. This is a wall, not a guideline.
 
+**`feat`-type PRs touching core are NOT hard-blocked on size.** A feature addition (title starts with `feat` — `feat:`, `feat(scope):`, `feat(scope)!:`, case-insensitive) that touches core paths should proceed to Stage 1 regardless of line count. If production logic lines exceed 500, **escalate to the maintainer for awareness** (flag it in the Stage 1 comment) but do not block or request changes based on size alone. Features add new code; refactors restructure existing code — the risk profiles are different.
+
 **Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **flag it for the maintainer's awareness**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
 
 **Tier 2 — Changes to core below the 500-line threshold → evaluate with 100% confidence.** If the PR hits core paths but stays under Tier 1 (either few files, or a breadth-sweep flagged above), you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
+
+**Large PR advisory (non-blocking).** If production logic changes (excluding tests and schema) exceed 1000 lines on any PR type, mention in the Stage 1 comment that the PR is large and suggest the author consider splitting if feasible. This is informational only — do not block or request changes based on size alone.
 
 **Why two tiers:** A one-line bugfix in `packages/core/src/providers/install.ts` with a clear reproduction is different from a 75-file refactor of the provider system. The gate can handle the former; the latter requires maintainer architectural context. But for any core change, **when in doubt, escalate. Better to wrongly escalate than to wrongly approve.**
 
