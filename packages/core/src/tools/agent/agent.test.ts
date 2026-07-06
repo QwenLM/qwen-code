@@ -132,6 +132,14 @@ describe('AgentTool', () => {
     // enough for these tests — they don't assert on registry behavior.
     const stubRegistry = {
       assertCanStartBackgroundAgent: vi.fn(),
+      canStartBackgroundAgent: vi.fn().mockReturnValue(true),
+      tryReserveBackgroundSlot: vi
+        .fn()
+        .mockReturnValue({ id: Symbol('background-slot') }),
+      waitForBackgroundSlot: vi
+        .fn()
+        .mockResolvedValue({ id: Symbol('background-slot') }),
+      releaseBackgroundSlot: vi.fn(),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
       complete: vi.fn(),
@@ -2920,6 +2928,11 @@ describe('AgentTool', () => {
     let mockContextState: ContextState;
     let mockRegistry: {
       assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
+      canStartBackgroundAgent: ReturnType<typeof vi.fn>;
+      tryReserveBackgroundSlot: ReturnType<typeof vi.fn>;
+      waitForBackgroundSlot: ReturnType<typeof vi.fn>;
+      releaseBackgroundSlot: ReturnType<typeof vi.fn>;
+      getQueuedCount: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
@@ -2961,6 +2974,15 @@ describe('AgentTool', () => {
 
       mockRegistry = {
         assertCanStartBackgroundAgent: vi.fn(),
+        canStartBackgroundAgent: vi.fn().mockReturnValue(true),
+        tryReserveBackgroundSlot: vi
+          .fn()
+          .mockReturnValue({ id: Symbol('background-slot') }),
+        waitForBackgroundSlot: vi
+          .fn()
+          .mockResolvedValue({ id: Symbol('background-slot') }),
+        releaseBackgroundSlot: vi.fn(),
+        getQueuedCount: vi.fn().mockReturnValue(0),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
@@ -3025,6 +3047,11 @@ describe('AgentTool', () => {
           description: 'Start monitor',
           subagentType: 'monitor',
           status: 'running',
+        }),
+        expect.objectContaining({
+          slotReservation: expect.objectContaining({
+            id: expect.any(Symbol),
+          }),
         }),
       );
       expect(
@@ -3300,13 +3327,19 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).not.toHaveBeenCalled();
     });
 
-    it('preflights the background cap before hooks and subagent setup', async () => {
-      const errorMessage =
-        'Cannot start background agent: maximum concurrent background agents ' +
-        '(1) reached. Stop an existing agent first.';
-      mockRegistry.assertCanStartBackgroundAgent.mockImplementation(() => {
-        throw new Error(errorMessage);
-      });
+    it('waits for a background slot before hooks and subagent setup', async () => {
+      let releaseSlot:
+        | ((reservation: { readonly id: symbol }) => void)
+        | undefined;
+      const slotReservation = { id: Symbol('background-slot') };
+      mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
+      mockRegistry.tryReserveBackgroundSlot.mockReturnValue(undefined);
+      mockRegistry.getQueuedCount.mockReturnValue(1);
+      mockRegistry.waitForBackgroundSlot.mockReturnValue(
+        new Promise((resolve) => {
+          releaseSlot = resolve;
+        }),
+      );
       const mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
         fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
@@ -3324,12 +3357,34 @@ describe('AgentTool', () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      const result = await invocation.execute();
+      const updates: ToolResultDisplay[] = [];
+      const executePromise = invocation.execute(undefined, (output) => {
+        updates.push(output);
+      });
+      await Promise.resolve();
 
-      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalled();
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       expect(mockRegistry.register).not.toHaveBeenCalled();
+      expect(
+        updates.some(
+          (update) =>
+            (update as AgentResultDisplay).terminateReason ===
+            'Waiting for a background agent slot (1 already queued).',
+        ),
+      ).toBe(true);
+
+      releaseSlot?.(slotReservation);
+      const result = await executePromise;
+
+      expect(partToString(result.llmContent)).toContain(
+        'Background agent launched',
+      );
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'running' }),
+        expect.objectContaining({ slotReservation }),
+      );
     });
 
     it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {
@@ -3728,6 +3783,9 @@ describe('AgentTool', () => {
 
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ toolUseId: 'call-xyz-789' }),
+        expect.objectContaining({
+          slotReservation: expect.anything(),
+        }),
       );
     });
 

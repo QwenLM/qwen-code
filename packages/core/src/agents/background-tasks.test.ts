@@ -511,24 +511,26 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-1')?.prompt).toBe('resumed continuation');
     });
 
-    it('counts foreground agents toward the cap but not paused or terminal entries', () => {
+    it('does not count foreground agents toward the background cap', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,
       });
 
-      // A foreground agent occupies a slot.
       registry.register(
         makeRegistration('fg-1', {
           isBackgrounded: false,
         }),
       );
 
-      expect(() => registry.register(makeRegistration('bg-1'))).toThrow(
-        'maximum concurrent background agents (1) reached',
-      );
+      registry.register(makeRegistration('bg-1'));
+      expect(registry.get('bg-1')?.status).toBe('running');
+    });
 
-      // Paused entries do not occupy a slot.
-      registry.unregisterForeground('fg-1');
+    it('does not count paused or terminal entries toward the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
       registry.register(
         makeRegistration('paused-1', {
           status: 'paused',
@@ -545,6 +547,103 @@ describe('BackgroundTaskRegistry', () => {
 
       expect(registry.get('paused-1')).toBeDefined();
       expect(registry.get('bg-2')?.status).toBe('running');
+    });
+
+    it('queues waiters until a background slot is released', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.complete('bg-1', 'done');
+      const reservation = await reservationPromise;
+
+      expect(registry.getQueuedCount()).toBe(0);
+      registry.register(makeRegistration('bg-2'), {
+        slotReservation: reservation,
+      });
+      expect(registry.get('bg-2')?.status).toBe('running');
+    });
+
+    it('reserves a drained slot until registration consumes it', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const first = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      const second = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      let secondResolved = false;
+      void second.then(() => {
+        secondResolved = true;
+      });
+
+      registry.complete('bg-1', 'done');
+      const firstReservation = await first;
+      await Promise.resolve();
+
+      expect(secondResolved).toBe(false);
+      expect(registry.getQueuedCount()).toBe(1);
+      expect(() => registry.register(makeRegistration('racer'))).toThrow(
+        'maximum concurrent background agents (1) reached',
+      );
+
+      registry.register(makeRegistration('bg-2'), {
+        slotReservation: firstReservation,
+      });
+      expect(secondResolved).toBe(false);
+
+      registry.complete('bg-2', 'done');
+      const secondReservation = await second;
+      registry.register(makeRegistration('bg-3'), {
+        slotReservation: secondReservation,
+      });
+      expect(registry.get('bg-3')?.status).toBe('running');
+    });
+
+    it('removes an aborted waiter from the queue', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+      const abortController = new AbortController();
+
+      const reservation = registry.waitForBackgroundSlot(
+        abortController.signal,
+      );
+      abortController.abort();
+
+      await expect(reservation).rejects.toThrow(
+        'Agent launch cancelled while waiting for a background slot.',
+      );
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
+    it('rejects queued waiters on reset', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const reservation = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      registry.reset();
+
+      await expect(reservation).rejects.toThrow(
+        'Agent launch cancelled while waiting for a background slot.',
+      );
+      expect(registry.getQueuedCount()).toBe(0);
     });
   });
 

@@ -106,6 +106,7 @@ import {
   writeAgentMeta,
   type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
+import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
@@ -2036,6 +2037,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // or `createAgentHeadless` throw). Assigned only after the override
     // is created; stays a no-op for any earlier failure.
     let restoreParentPM: () => void = () => {};
+    let backgroundSlotReservation: BackgroundSlotReservation | undefined;
+    let backgroundSlotReservationConsumed = false;
+    const releaseBackgroundSlotReservation = () => {
+      if (backgroundSlotReservation && !backgroundSlotReservationConsumed) {
+        this.config
+          .getBackgroundTaskRegistry()
+          .releaseBackgroundSlot(backgroundSlotReservation);
+        backgroundSlotReservation = undefined;
+      }
+    };
 
     try {
       // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
@@ -2131,26 +2142,39 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
 
-      // Preflight: fast-fail before expensive worktree/subagent setup.
-      // This is not redundant with registry.register() below — that call
-      // remains the authoritative race guard, but by then the launch path
-      // has already run hooks and created a child agent.
-      try {
-        this.config.getBackgroundTaskRegistry().assertCanStartBackgroundAgent();
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+      if (shouldRunInBackground) {
+        const registry = this.config.getBackgroundTaskRegistry();
+        if (signal?.aborted) {
+          backgroundSlotReservation =
+            await registry.waitForBackgroundSlot(signal);
+        } else {
+          backgroundSlotReservation = registry.tryReserveBackgroundSlot();
+        }
+        if (!backgroundSlotReservation) {
+          const queuedCount = registry.getQueuedCount();
+          const queueText =
+            queuedCount === 0
+              ? 'no agents ahead'
+              : queuedCount === 1
+                ? '1 already queued'
+                : `${queuedCount} already queued`;
+          this.updateDisplay(
+            {
+              status: 'running',
+              terminateReason: `Waiting for a background agent slot (${queueText}).`,
+            },
+            updateOutput,
+          );
+          backgroundSlotReservation =
+            await registry.waitForBackgroundSlot(signal);
+        }
         this.updateDisplay(
           {
-            status: 'failed',
-            terminateReason: errorMessage,
+            status: 'running',
+            terminateReason: undefined,
           },
           updateOutput,
         );
-        return {
-          llmContent: errorMessage,
-          returnDisplay: this.currentDisplay!,
-        };
       }
 
       // ── Optional worktree isolation (Phase 1: provision) ──────────
@@ -2163,6 +2187,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // tree and the cleanup helper would then see a "clean" worktree
       // and remove it — destroying any evidence of the leak.
       const failWorktreeProvisioning = (reason: string): ToolResult => {
+        releaseBackgroundSlotReservation();
         debugLogger.warn(`[Agent] worktree isolation failed: ${reason}`);
         this.currentDisplay = {
           ...this.currentDisplay!,
@@ -2532,26 +2557,35 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // foreground call below for the full rationale. Keeping the
           // order symmetric here guards the background path against the
           // same orphaned-meta hazard if register() throws.
-          registry.register({
-            agentId: hookOpts.agentId,
-            description: this.params.description,
-            subagentType: subagentConfig.name,
-            isBackgrounded: true,
-            status: 'running',
-            startTime: Date.now(),
-            abortController: bgAbortController,
-            toolUseId: this.callId,
-            prompt: this.params.prompt,
-            outputFile: jsonlPath,
-            metaPath,
-            // Nested-agent lineage (mirrors the meta sidecar); register()
-            // resolves the parent's display name from parentAgentId.
-            parentAgentId: getCurrentAgentId(),
-            depth: childLaunchDepth(),
-          });
+          const registerOptions = backgroundSlotReservation
+            ? { slotReservation: backgroundSlotReservation }
+            : {};
+          registry.register(
+            {
+              agentId: hookOpts.agentId,
+              description: this.params.description,
+              subagentType: subagentConfig.name,
+              isBackgrounded: true,
+              status: 'running',
+              startTime: Date.now(),
+              abortController: bgAbortController,
+              toolUseId: this.callId,
+              prompt: this.params.prompt,
+              outputFile: jsonlPath,
+              metaPath,
+              // Nested-agent lineage (mirrors the meta sidecar); register()
+              // resolves the parent's display name from parentAgentId.
+              parentAgentId: getCurrentAgentId(),
+              depth: childLaunchDepth(),
+            },
+            registerOptions,
+          );
+          backgroundSlotReservationConsumed = true;
+          backgroundSlotReservation = undefined;
         } catch (error) {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
+          releaseBackgroundSlotReservation();
           bgAbortController.abort();
 
           if (hookSystem && subagentStartHookCompleted) {
@@ -3331,6 +3365,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         restoreParentPM();
       }
     } catch (error) {
+      releaseBackgroundSlotReservation();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);

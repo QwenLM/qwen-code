@@ -1046,6 +1046,17 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['settings-a', 'settings-b']);
   });
 
+  it('passes agents.maxParallelAgents from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { maxParallelAgents: 2 } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
+  });
+
   it('should ignore blank settings fallback models', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
