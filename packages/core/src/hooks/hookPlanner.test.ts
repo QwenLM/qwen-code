@@ -352,6 +352,23 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it('matches built-in tool display names against runtime tool ids', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'WriteFile',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'write_file',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
     it('should not match tool name with different exact string', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },

@@ -287,6 +287,26 @@ describe('SessionHooksManager', () => {
       ).toBe(0);
     });
 
+    it('matches built-in tool display names against runtime tool ids', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'WriteFile',
+        callback,
+        'Test error',
+      );
+
+      const matching = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'write_file',
+      );
+
+      expect(matching.length).toBe(1);
+    });
+
     it('should not match different tool name', () => {
       const callback = vi.fn().mockResolvedValue({ continue: true });
 

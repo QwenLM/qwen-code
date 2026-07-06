@@ -6,7 +6,6 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
-  HookEventName,
   CommandHookConfig,
   HttpHookConfig,
   FunctionHookConfig,
@@ -14,9 +13,23 @@ import type {
   HookConfig,
   HookExecutionResult,
 } from './types.js';
-import { HookType } from './types.js';
+import { HookEventName, HookType } from './types.js';
+import { getToolMatcherTargets } from './hookPlanner.js';
 
 const debugLogger = createDebugLogger('SESSION_HOOKS_MANAGER');
+
+function isToolMatcherEvent(event: HookEventName): boolean {
+  switch (event) {
+    case HookEventName.PreToolUse:
+    case HookEventName.PostToolUse:
+    case HookEventName.PostToolUseFailure:
+    case HookEventName.PermissionRequest:
+    case HookEventName.PermissionDenied:
+      return true;
+    default:
+      return false;
+  }
+}
 
 /**
  * Generate a unique hook ID
@@ -271,7 +284,15 @@ export class SessionHooksManager {
     target: string,
   ): SessionHookEntry[] {
     const hooks = this.getHooksForEvent(sessionId, event);
-    return hooks.filter((entry) => this.matchesPattern(entry.matcher, target));
+    const targets = isToolMatcherEvent(event)
+      ? getToolMatcherTargets(target)
+      : [target];
+
+    return hooks.filter((entry) =>
+      targets.some((candidate) =>
+        this.matchesPattern(entry.matcher, candidate),
+      ),
+    );
   }
 
   /**

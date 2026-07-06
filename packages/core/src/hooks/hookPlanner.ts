@@ -8,8 +8,40 @@ import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  ToolDisplayNames,
+  ToolDisplayNamesMigration,
+  ToolNames,
+} from '../tools/tool-names.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+const toolNameKeys = Object.keys(ToolNames) as Array<keyof typeof ToolNames>;
+
+export function getToolMatcherTargets(toolName: string): string[] {
+  const targets = new Set([toolName]);
+
+  for (const key of toolNameKeys) {
+    if (ToolNames[key] !== toolName) {
+      continue;
+    }
+
+    const displayName = ToolDisplayNames[key];
+    targets.add(displayName);
+
+    for (const [legacyDisplayName, migratedDisplayName] of Object.entries(
+      ToolDisplayNamesMigration,
+    )) {
+      if (migratedDisplayName === displayName) {
+        targets.add(legacyDisplayName);
+      }
+    }
+
+    break;
+  }
+
+  return [...targets];
+}
 
 type HookMatcherTargetKind =
   | 'toolName'
@@ -240,16 +272,18 @@ export class HookPlanner {
    * Match tool name against matcher pattern
    */
   private matchesToolName(matcher: string, toolName: string): boolean {
+    const targets = getToolMatcherTargets(toolName);
+
     try {
       // Attempt to treat the matcher as a regular expression.
       const regex = new RegExp(matcher);
-      return regex.test(toolName);
+      return targets.some((target) => regex.test(target));
     } catch (error) {
       // If it's not a valid regex, treat it as a literal string for an exact match.
       debugLogger.warn(
         `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
       );
-      return matcher === toolName;
+      return targets.includes(matcher);
     }
   }
 
