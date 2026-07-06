@@ -618,7 +618,10 @@ export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
 export type DaemonSessionArtifactSource =
   OpenStringUnion<KnownDaemonSessionArtifactSource>;
 
-export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
+export type KnownDaemonSessionArtifactStatus =
+  | 'available'
+  | 'missing'
+  | 'changed';
 
 export type DaemonSessionArtifactStatus =
   OpenStringUnion<KnownDaemonSessionArtifactStatus>;

@@ -45,7 +45,10 @@ export type PersistedSessionArtifactStorage =
 
 export type PersistedSessionArtifactSource = 'tool' | 'hook' | 'client';
 
-export type PersistedSessionArtifactStatus = 'available' | 'missing';
+export type PersistedSessionArtifactStatus =
+  | 'available'
+  | 'missing'
+  | 'changed';
 
 export interface SessionArtifactContentRef {
   kind: 'managed_copy';
@@ -432,6 +435,7 @@ function normalizePersistedArtifact(
     normalizeLiteral<PersistedSessionArtifactStatus>(value['status'], [
       'available',
       'missing',
+      'changed',
     ]) ?? 'missing';
   const retention =
     normalizeLiteral<SessionArtifactRetention>(value['retention'], [

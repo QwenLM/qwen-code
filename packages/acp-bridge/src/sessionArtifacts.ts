@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -14,7 +14,6 @@ import {
 import type {
   PersistedSessionArtifact,
   RebuiltSessionArtifactSnapshot,
-  SessionArtifactContentRef,
   SessionArtifactEventRecordPayload,
   SessionArtifactPersistenceWarning,
   SessionArtifactRestoreState,
@@ -42,13 +41,18 @@ export type DaemonSessionArtifactStorage =
 
 export type DaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
 
-export type DaemonSessionArtifactStatus = 'available' | 'missing';
+export type DaemonSessionArtifactStatus = 'available' | 'missing' | 'changed';
+export type DaemonSessionArtifactRetention = Exclude<
+  SessionArtifactRetention,
+  'pinned'
+>;
 
 const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
   tool: 100,
   client: 50,
   hook: 50,
 };
+const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
@@ -69,13 +73,17 @@ export interface ToolArtifactLike {
 
 export interface SessionArtifactInput extends ToolArtifactLike {
   source?: DaemonSessionArtifactSource;
-  retention?: SessionArtifactRetention;
+  retention?: DaemonSessionArtifactRetention;
   clientRetained?: boolean;
   toolCallId?: string;
   toolName?: string;
   hookEventName?: string;
   clientId?: string;
 }
+
+type LegacySessionArtifactInput = Omit<SessionArtifactInput, 'retention'> & {
+  retention?: SessionArtifactRetention;
+};
 
 export interface DaemonSessionArtifact {
   id: string;
@@ -91,12 +99,10 @@ export interface DaemonSessionArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
-  retention: SessionArtifactRetention;
+  retention: DaemonSessionArtifactRetention;
   restoreState?: SessionArtifactRestoreState;
   persistenceWarning?: SessionArtifactPersistenceWarning;
-  contentRef?: SessionArtifactContentRef;
   persistedAt?: string;
-  expiresAt?: string;
   clientRetained: boolean;
   createdAt: string;
   updatedAt: string;
@@ -136,21 +142,7 @@ export interface SessionArtifactMutationResult {
   warnings?: string[];
 }
 
-export interface SessionArtifactPinOptions {
-  retention?: Extract<SessionArtifactRetention, 'pinned' | 'restorable'>;
-  contentRef?: SessionArtifactContentRef;
-  expiresAt?: string;
-  clientRetained?: boolean;
-}
-
-export interface SessionArtifactUnpinOptions {
-  retention?: Extract<SessionArtifactRetention, 'ephemeral' | 'restorable'>;
-}
-
 export interface SessionArtifactRestoreOptions {
-  verifyContentRef?: (
-    artifact: PersistedSessionArtifact,
-  ) => Promise<SessionArtifactPersistenceWarning | undefined>;
   preserveLiveEphemeral?: boolean;
 }
 
@@ -259,16 +251,6 @@ export class SessionArtifactStore {
       }
       return toPublicArtifact(artifact);
     });
-  }
-
-  // Content-retention helpers are intentionally not exposed by #6259.
-  // The stacked #6346 PR wires these to pin/unpin/content-GC surfaces.
-  async contentRefs(): Promise<SessionArtifactContentRef[]> {
-    return this.enqueue(async () =>
-      Array.from(this.artifacts.values())
-        .map((artifact) => artifact.contentRef)
-        .filter((ref): ref is SessionArtifactContentRef => ref !== undefined),
-    );
   }
 
   async upsertMany(
@@ -471,217 +453,6 @@ export class SessionArtifactStore {
     });
   }
 
-  async pin(
-    artifactId: string,
-    options: SessionArtifactPinOptions & { clientId?: string } = {},
-  ): Promise<SessionArtifactMutationResult> {
-    return this.enqueue(async () => {
-      const existing = this.artifacts.get(artifactId);
-      if (!existing) {
-        return { v: 1, sessionId: this.sessionId, changes: [] };
-      }
-      this.denyCrossClientMutation('pin', artifactId, existing, options);
-      if (existing.retention === 'pinned' && !hasPinOptions(options)) {
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes: [],
-        };
-      }
-      const before = this.cloneState();
-      const targetRetention =
-        options.retention ??
-        (options.contentRef
-          ? 'pinned'
-          : existing.retention === 'pinned'
-            ? 'pinned'
-            : 'restorable');
-      const contentRef =
-        targetRetention === 'pinned'
-          ? (options.contentRef ?? existing.contentRef)
-          : undefined;
-      const updated: StoredArtifact = {
-        ...existing,
-        retention: targetRetention,
-        clientRetained:
-          options.clientRetained ??
-          (existing.retention === 'pinned' ? existing.clientRetained : true),
-        restoreState: 'live',
-        updatedAt: new Date().toISOString(),
-      };
-      if (targetRetention === 'pinned' && contentRef) {
-        updated.contentRef = contentRef;
-        delete updated.persistenceWarning;
-        if (Object.hasOwn(options, 'expiresAt')) {
-          if (options.expiresAt) {
-            updated.expiresAt = options.expiresAt;
-          } else {
-            delete updated.expiresAt;
-          }
-        }
-      } else {
-        updated.persistenceWarning = 'metadata_only_restore';
-        delete updated.contentRef;
-        delete updated.expiresAt;
-      }
-      this.artifacts.set(artifactId, updated);
-      const changes: SessionArtifactChange[] = [
-        {
-          action: 'updated',
-          artifactId,
-          artifact: toPublicArtifact(updated),
-        },
-      ];
-      try {
-        const warnings = await this.persistChanges(changes, true);
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes,
-          ...(warnings.length > 0 ? { warnings } : {}),
-        };
-      } catch (error) {
-        this.restoreState(before);
-        throw error;
-      }
-    });
-  }
-
-  async unpin(
-    artifactId: string,
-    options: SessionArtifactUnpinOptions & { clientId?: string } = {},
-  ): Promise<SessionArtifactMutationResult> {
-    return this.enqueue(async () => {
-      const existing = this.artifacts.get(artifactId);
-      if (!existing) {
-        return { v: 1, sessionId: this.sessionId, changes: [] };
-      }
-      this.denyCrossClientMutation('unpin', artifactId, existing, options);
-      const targetRetention = options.retention ?? 'restorable';
-      const before = this.cloneState();
-      const updated: StoredArtifact = {
-        ...existing,
-        retention: targetRetention,
-        restoreState: 'live',
-        persistenceWarning:
-          targetRetention === 'ephemeral'
-            ? 'sticky_override_active'
-            : 'metadata_only_restore',
-        clientRetained: false,
-        updatedAt: new Date().toISOString(),
-      };
-      delete updated.contentRef;
-      delete updated.expiresAt;
-      if (targetRetention === 'ephemeral') {
-        delete updated.persistedAt;
-      }
-      const changes: SessionArtifactChange[] = [
-        {
-          action: 'updated',
-          artifactId,
-          artifact: toPublicArtifact(updated),
-        },
-      ];
-      // Journal records the durable side effect while the API returns the live
-      // in-memory state that remains available as ephemeral.
-      const durableChanges =
-        targetRetention === 'ephemeral'
-          ? [
-              {
-                action: 'removed' as const,
-                artifactId,
-                artifact: toPublicArtifact(existing),
-                reason: 'unpin_to_ephemeral' as const,
-              },
-            ]
-          : changes;
-      this.artifacts.set(artifactId, updated);
-      try {
-        const warnings = await this.persistChanges(durableChanges, true);
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes,
-          ...(warnings.length > 0 ? { warnings } : {}),
-        };
-      } catch (error) {
-        this.restoreState(before);
-        throw error;
-      }
-    });
-  }
-
-  async pruneExpiredPins(
-    now = new Date(),
-  ): Promise<SessionArtifactMutationResult> {
-    return this.enqueue(async () => {
-      const before = this.cloneState();
-      const changes: SessionArtifactChange[] = [];
-      const expiredIds: string[] = [];
-      for (const [artifactId, existing] of this.artifacts) {
-        if (
-          existing.retention !== 'pinned' ||
-          !existing.expiresAt ||
-          Date.parse(existing.expiresAt) > now.getTime()
-        ) {
-          continue;
-        }
-        expiredIds.push(artifactId);
-        const updated: StoredArtifact = {
-          ...existing,
-          retention: 'restorable',
-          restoreState: 'live',
-          persistenceWarning: 'content_expired',
-          updatedAt: now.toISOString(),
-        };
-        delete updated.contentRef;
-        delete updated.expiresAt;
-        this.artifacts.set(artifactId, updated);
-        changes.push({
-          action: 'updated',
-          artifactId,
-          artifact: toPublicArtifact(updated),
-        });
-      }
-      if (changes.length === 0) {
-        return { v: 1, sessionId: this.sessionId, changes: [] };
-      }
-      try {
-        const warnings = await this.persistChanges(changes, true);
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes,
-          ...(warnings.length > 0 ? { warnings } : {}),
-        };
-      } catch (error) {
-        this.restoreState(before);
-        for (const artifactId of expiredIds) {
-          const restored = this.artifacts.get(artifactId);
-          if (restored?.retention === 'pinned') {
-            this.artifacts.set(artifactId, {
-              ...restored,
-              persistenceWarning: 'persistence_unavailable',
-            });
-          }
-        }
-        writeStderrLine(
-          `[artifacts] session=${this.sessionId} action=ttl_prune_failed reason=${JSON.stringify(
-            error instanceof Error ? error.message : String(error),
-          )}`,
-        );
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes: [],
-          warnings: [
-            'expired pinned artifacts retained because persistence failed',
-          ],
-        };
-      }
-    });
-  }
-
   async restore(
     snapshot: RebuiltSessionArtifactSnapshot | undefined,
     options: SessionArtifactRestoreOptions = {},
@@ -738,36 +509,12 @@ export class SessionArtifactStore {
             warnings.push(`skipped artifact with mismatched id ${artifact.id}`);
             continue;
           }
-          let contentRef = artifact.contentRef;
-          let expiresAt = artifact.expiresAt;
-          let retention = normalized.retention;
-          let status = normalized.status;
+          const retention = normalized.retention;
           let persistenceWarning:
             | SessionArtifactPersistenceWarning
-            | undefined = contentRef ? undefined : 'metadata_only_restore';
+            | undefined = 'metadata_only_restore';
           if (retention === 'ephemeral') {
-            contentRef = undefined;
-            expiresAt = undefined;
             persistenceWarning = 'sticky_override_active';
-          } else if (expiresAt) {
-            const expiresAtMs = Date.parse(expiresAt);
-            if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
-              contentRef = undefined;
-              expiresAt = undefined;
-              retention = 'restorable';
-              status = 'missing';
-              persistenceWarning = 'content_expired';
-            }
-          }
-          if (contentRef && options.verifyContentRef) {
-            const warning = await options.verifyContentRef(artifact);
-            if (warning) {
-              contentRef = undefined;
-              expiresAt = undefined;
-              retention = 'restorable';
-              status = 'missing';
-              persistenceWarning = warning;
-            }
           }
           const stored: StoredArtifact = {
             ...normalized,
@@ -776,11 +523,9 @@ export class SessionArtifactStore {
             createdAt: artifact.createdAt,
             updatedAt: artifact.updatedAt,
             persistedAt: artifact.persistedAt,
-            expiresAt,
-            status,
+            status: normalized.status,
             restoreState: 'restored',
             persistenceWarning,
-            contentRef,
             insertSeq: ++this.insertSeq,
           };
           this.artifacts.set(stored.id, stored);
@@ -933,9 +678,6 @@ export class SessionArtifactStore {
         ...toPublicArtifact(stored),
         persistedAt: recordedAt,
       };
-      if (artifact.contentRef) {
-        delete artifact.persistenceWarning;
-      }
       change.artifact = artifact;
     }
 
@@ -956,9 +698,6 @@ export class SessionArtifactStore {
         const stored = this.artifacts.get(change.artifactId);
         if (!stored) continue;
         stored.persistedAt = recordedAt;
-        if (stored.contentRef) {
-          delete stored.persistenceWarning;
-        }
         change.artifact = toPublicArtifact(stored);
       }
       this.applyDurableMarkers(durableChanges);
@@ -1045,7 +784,6 @@ export class SessionArtifactStore {
       stored.retention = 'ephemeral';
       stored.persistenceWarning = 'persistence_unavailable';
       delete stored.persistedAt;
-      delete stored.contentRef;
       change.artifact = toPublicArtifact(stored);
       downgraded = true;
     }
@@ -1115,7 +853,7 @@ export class SessionArtifactStore {
   }
 
   private async normalizeInput(
-    input: SessionArtifactInput,
+    input: LegacySessionArtifactInput,
     receivedSeq: number,
     trustedPublisherFromCaller: boolean,
   ): Promise<NormalizedArtifact> {
@@ -1160,10 +898,8 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
 
-    const metadata = normalizeMetadata(input.metadata);
     const retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
-      strictPinnedAllowed: false,
     });
     const workspaceStatus = workspacePath
       ? await this.getInitialWorkspaceStatus(workspacePath)
@@ -1174,6 +910,10 @@ export class SessionArtifactStore {
         'workspacePath',
       );
     }
+    const metadata = withWorkspaceContentHashMetadata(
+      normalizeMetadata(input.metadata),
+      workspaceStatus,
+    );
     const kind = normalizeKind(
       input.kind ?? inferKind({ storage, workspacePath, url }),
     );
@@ -1278,6 +1018,7 @@ export class SessionArtifactStore {
   private async getInitialWorkspaceStatus(workspacePath: string): Promise<{
     status: DaemonSessionArtifactStatus;
     sizeBytes?: number;
+    sha256?: string;
     escaped?: boolean;
   }> {
     try {
@@ -1308,8 +1049,11 @@ export class SessionArtifactStore {
         artifact.workspacePath,
         this.getRealWorkspaceCwd(),
       );
-      artifact.status = status.status;
-      artifact.sizeBytes = status.sizeBytes;
+      const changed = isWorkspaceContentChanged(artifact, status);
+      artifact.status = changed ? 'changed' : status.status;
+      if (!changed) {
+        artifact.sizeBytes = status.sizeBytes;
+      }
       if (status.escaped) {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
@@ -1462,9 +1206,7 @@ function mergeBatchArtifact(
       restoreState: 'live',
       persistenceWarning:
         existing.persistenceWarning ?? next.persistenceWarning,
-      contentRef: existing.contentRef ?? next.contentRef,
       persistedAt: existing.persistedAt ?? next.persistedAt,
-      expiresAt: existing.expiresAt ?? next.expiresAt,
       clientRetained: existing.clientRetained || next.clientRetained,
       lastStatAt: undefined,
     };
@@ -1535,9 +1277,7 @@ function mergeArtifact(
       incoming.retentionExplicit && incoming.retention !== 'ephemeral'
         ? incoming.persistenceWarning
         : (existing.persistenceWarning ?? incoming.persistenceWarning),
-    contentRef: existing.contentRef ?? incoming.contentRef,
     persistedAt: existing.persistedAt ?? incoming.persistedAt,
-    expiresAt: existing.expiresAt ?? incoming.expiresAt,
     source: existing.source,
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
@@ -1586,30 +1326,13 @@ export function publicArtifactsEqual(
     a.retention === b.retention &&
     a.restoreState === b.restoreState &&
     a.persistenceWarning === b.persistenceWarning &&
-    contentRefEqual(a.contentRef, b.contentRef) &&
     a.persistedAt === b.persistedAt &&
-    a.expiresAt === b.expiresAt &&
     a.clientRetained === b.clientRetained &&
     a.createdAt === b.createdAt &&
     a.toolCallId === b.toolCallId &&
     a.toolName === b.toolName &&
     a.hookEventName === b.hookEventName &&
     a.clientId === b.clientId
-  );
-}
-
-function contentRefEqual(
-  a: SessionArtifactContentRef | undefined,
-  b: SessionArtifactContentRef | undefined,
-): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.kind === b.kind &&
-    a.contentId === b.contentId &&
-    a.sha256 === b.sha256 &&
-    a.sizeBytes === b.sizeBytes &&
-    a.createdAt === b.createdAt
   );
 }
 
@@ -1639,13 +1362,12 @@ function mergeSizeBytes(
 }
 
 function strongestRetention(
-  a: SessionArtifactRetention,
-  b: SessionArtifactRetention,
-): SessionArtifactRetention {
-  const rank: Record<SessionArtifactRetention, number> = {
+  a: DaemonSessionArtifactRetention,
+  b: DaemonSessionArtifactRetention,
+): DaemonSessionArtifactRetention {
+  const rank: Record<DaemonSessionArtifactRetention, number> = {
     ephemeral: 0,
     restorable: 1,
-    pinned: 2,
   };
   return rank[b] > rank[a] ? b : a;
 }
@@ -1664,7 +1386,13 @@ function mergeMetadata(
   const merged = { ...(existing.metadata ?? {}) };
   let changed = false;
   for (const [key, value] of Object.entries(incoming.metadata)) {
-    if (!Object.hasOwn(merged, key)) {
+    if (
+      key === WORKSPACE_CONTENT_SHA256_METADATA_KEY &&
+      merged[key] !== value
+    ) {
+      merged[key] = value;
+      changed = true;
+    } else if (!Object.hasOwn(merged, key)) {
       merged[key] = value;
       changed = true;
     }
@@ -1728,7 +1456,7 @@ function selectEvictionCandidate(
           SOURCE_RESERVATIONS[artifact.retentionSource],
     ) ??
     oldest(candidates, (artifact) => !artifact.clientRetained) ??
-    oldest(candidates, (artifact) => artifact.retention !== 'pinned')
+    oldest(candidates)
   );
 }
 
@@ -1784,9 +1512,7 @@ function toPublicArtifact(
     retention,
     restoreState,
     persistenceWarning,
-    contentRef,
     persistedAt,
-    expiresAt,
     clientRetained,
     createdAt,
     updatedAt,
@@ -1812,9 +1538,7 @@ function toPublicArtifact(
     retention,
     ...(restoreState ? { restoreState } : {}),
     ...(persistenceWarning ? { persistenceWarning } : {}),
-    ...(contentRef ? { contentRef } : {}),
     ...(persistedAt ? { persistedAt } : {}),
-    ...(expiresAt ? { expiresAt } : {}),
     clientRetained,
     createdAt,
     updatedAt,
@@ -1827,7 +1551,7 @@ function toPublicArtifact(
 
 function persistedArtifactToInput(
   artifact: PersistedSessionArtifact,
-): SessionArtifactInput {
+): LegacySessionArtifactInput {
   return {
     title: artifact.title,
     kind: artifact.kind,
@@ -1871,7 +1595,7 @@ function toPersistedArtifact(
     kind: artifact.kind,
     storage: artifact.storage,
     source: artifact.source,
-    status: artifact.status,
+    status: artifact.status === 'changed' ? 'available' : artifact.status,
     title: artifact.title,
     ...(artifact.description ? { description: artifact.description } : {}),
     ...(artifact.workspacePath
@@ -1889,8 +1613,6 @@ function toPersistedArtifact(
     createdAt: artifact.createdAt,
     updatedAt: artifact.updatedAt,
     persistedAt: artifact.persistedAt ?? recordedAt,
-    ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt } : {}),
-    ...(artifact.contentRef ? { contentRef: artifact.contentRef } : {}),
     ...(artifact.toolCallId ? { toolCallId: artifact.toolCallId } : {}),
     ...(artifact.toolName ? { toolName: artifact.toolName } : {}),
     ...(artifact.hookEventName
@@ -1913,20 +1635,10 @@ function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
   return change.artifact.retention !== 'ephemeral';
 }
 
-function hasPinOptions(options: SessionArtifactPinOptions): boolean {
-  return (
-    options.retention !== undefined ||
-    options.contentRef !== undefined ||
-    Object.hasOwn(options, 'expiresAt') ||
-    options.clientRetained !== undefined
-  );
-}
-
 function cloneStoredArtifact(artifact: StoredArtifact): StoredArtifact {
   return {
     ...artifact,
     ...(artifact.metadata ? { metadata: { ...artifact.metadata } } : {}),
-    ...(artifact.contentRef ? { contentRef: { ...artifact.contentRef } } : {}),
   };
 }
 
@@ -2318,25 +2030,22 @@ function normalizeMetadata(
 
 function normalizeRetention(
   value: unknown,
-  options: { persistenceAvailable: boolean; strictPinnedAllowed: boolean },
-): SessionArtifactRetention {
+  options: { persistenceAvailable: boolean },
+): DaemonSessionArtifactRetention {
   if (value === undefined) {
     return options.persistenceAvailable ? 'restorable' : 'ephemeral';
   }
   if (value === 'ephemeral' || value === 'restorable') {
     return value;
   }
-  if (value === 'pinned' && options.strictPinnedAllowed) {
-    return 'pinned';
-  }
   if (value === 'pinned') {
     throw new SessionArtifactValidationError(
-      'pinned retention requires the pin API',
+      'pinned retention is not supported by session_artifacts_persistence',
       'retention',
     );
   }
   throw new SessionArtifactValidationError(
-    'retention must be ephemeral, restorable, or pinned',
+    'retention must be ephemeral or restorable',
     'retention',
   );
 }
@@ -2379,6 +2088,7 @@ async function getWorkspaceStatus(
 ): Promise<{
   status: DaemonSessionArtifactStatus;
   sizeBytes?: number;
+  sha256?: string;
   escaped?: boolean;
 }> {
   const absolutePath = path.resolve(workspaceCwd, workspacePath);
@@ -2390,9 +2100,15 @@ async function getWorkspaceStatus(
       return { status: 'missing', escaped: true };
     }
     const stat = await fs.stat(realPath);
+    if (stat.isFile()) {
+      return {
+        status: 'available',
+        sizeBytes: stat.size,
+        sha256: await hashFile(realPath),
+      };
+    }
     return {
       status: 'available',
-      ...(stat.isFile() ? { sizeBytes: stat.size } : {}),
     };
   } catch (error) {
     if (!isNotFoundError(error)) {
@@ -2403,6 +2119,66 @@ async function getWorkspaceStatus(
     }
     return { status: 'missing' };
   }
+}
+
+async function hashFile(absolutePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(absolutePath)) {
+    hash.update(chunk as Buffer);
+  }
+  return hash.digest('hex');
+}
+
+function withWorkspaceContentHashMetadata(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+  workspaceStatus:
+    | {
+        status: DaemonSessionArtifactStatus;
+        sha256?: string;
+      }
+    | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (workspaceStatus?.status !== 'available' || !workspaceStatus.sha256) {
+    return metadata;
+  }
+  const next = {
+    ...(metadata ?? {}),
+    [WORKSPACE_CONTENT_SHA256_METADATA_KEY]: workspaceStatus.sha256,
+  };
+  if (Buffer.byteLength(JSON.stringify(next), 'utf8') > 4096) {
+    throw new SessionArtifactValidationError(
+      'metadata must be 4096 bytes or fewer',
+      'metadata',
+    );
+  }
+  return next;
+}
+
+function isWorkspaceContentChanged(
+  artifact: StoredArtifact,
+  status: {
+    status: DaemonSessionArtifactStatus;
+    sizeBytes?: number;
+    sha256?: string;
+  },
+): boolean {
+  if (status.status !== 'available') {
+    return false;
+  }
+  const expectedSha256 =
+    artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
+  if (
+    typeof expectedSha256 === 'string' &&
+    status.sha256 &&
+    status.sha256 !== expectedSha256
+  ) {
+    return true;
+  }
+  return (
+    artifact.sizeBytes !== undefined &&
+    status.sizeBytes !== undefined &&
+    status.sizeBytes !== artifact.sizeBytes
+  );
 }
 
 async function danglingSymlinkEscapesWorkspace(
