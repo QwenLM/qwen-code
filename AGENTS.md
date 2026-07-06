@@ -34,9 +34,9 @@ PRs are exempt):
    excluding test files) → hard block.**
    Skip evaluation entirely — the maintainer exemption above is the sole
    exception. Large-scale core refactors must be maintainer-initiated.
-   When counting lines, exclude test files (`*.test.ts`, `*.spec.ts`,
-   `__tests__/`) and auto-generated schema declarations — only production
-   logic counts. `feat`-type and other non-`refactor` PRs are NOT
+   When counting lines, exclude files matching `*.test.ts`, `*.spec.ts`,
+   `__tests__/**`, `*.schema.ts`, `*.generated.ts`, and `**/generated/**` —
+   only production logic counts. `feat`-type and other non-`refactor` PRs are NOT
    hard-blocked on size; they escalate to the maintainer for awareness
    instead. Breadth alone is not size — a low-risk sweep that touches 10+
    files but changes a line or two each is escalated to a maintainer for

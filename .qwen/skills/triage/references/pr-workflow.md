@@ -61,7 +61,7 @@ Default posture: **skepticism**. Burden of proof is on the author. Distinguish *
 
 Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
 
-**Size calculation — exclude test code.** When computing line counts for this gate, exclude files matching `*.test.ts`, `*.spec.ts`, `__tests__/**`, and auto-generated schema declarations. Only **production logic lines** (additions + deletions) count toward the thresholds below. When reporting size in comments, show the breakdown: production lines vs. test lines vs. config/schema.
+**Size calculation — exclude test code.** When computing line counts for this gate, exclude files matching `*.test.ts`, `*.spec.ts`, `__tests__/**`, `*.schema.ts`, `*.generated.ts`, and `**/generated/**`. Only **production logic lines** (additions + deletions) count toward the thresholds below. When reporting size in comments, show the breakdown: production lines vs. test lines vs. generated/schema lines.
 
 **Tier 1 — Large-scope `refactor` changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path `refactor`-type PR (title starts with `refactor` — `refactor:`, `refactor(scope):`, `refactor(scope)!:`, case-insensitive) totals **500+ production logic lines** (additions + deletions, excluding tests) → reject immediately. No evaluation, no Stage 1.
 
@@ -79,7 +79,7 @@ Then **stop**. This is a wall, not a guideline.
 
 **Tier 2 — Changes to core below the 500-line threshold → evaluate with 100% confidence.** If the PR hits core paths but stays under Tier 1 (either few files, or a breadth-sweep flagged above), you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
 
-**Large PR advisory (non-blocking).** If production logic changes (excluding tests and schema) exceed 1000 lines on any PR type, mention in the Stage 1 comment that the PR is large and suggest the author consider splitting if feasible. This is informational only — do not block or request changes based on size alone.
+**Large PR advisory (non-blocking).** If production logic changes (excluding test and generated/schema files matched above) exceed 1000 lines on any PR type, mention in the Stage 1 comment that the PR is large and suggest the author consider splitting if feasible. This is informational only — do not block or request changes based on size alone.
 
 **Why two tiers:** A one-line bugfix in `packages/core/src/providers/install.ts` with a clear reproduction is different from a 75-file refactor of the provider system. The gate can handle the former; the latter requires maintainer architectural context. But for any core change, **when in doubt, escalate. Better to wrongly escalate than to wrongly approve.**
 
