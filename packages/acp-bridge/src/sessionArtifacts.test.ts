@@ -2709,6 +2709,45 @@ describe('SessionArtifactStore', () => {
     expect(explicitClient.changes).toMatchObject([{ action: 'created' }]);
   });
 
+  it('clears durable artifacts but preserves live ephemerals for rewind without a snapshot', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-empty-rewind',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const durable = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/durable-rewind' }],
+      { strict: true },
+    );
+    const ephemeral = await store.upsertMany([
+      {
+        title: 'Live only',
+        url: 'https://example.com/live-only-rewind',
+        retention: 'ephemeral',
+      },
+    ]);
+
+    await expect(
+      store.restore(undefined, { preserveLiveEphemeral: true }),
+    ).resolves.toEqual([]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: ephemeral.changes[0]?.artifactId,
+          title: 'Live only',
+          retention: 'ephemeral',
+        },
+      ],
+    });
+    await expect(store.get(durable.changes[0]!.artifactId)).resolves.toBe(
+      undefined,
+    );
+  });
+
   it('resets durable event snapshot cadence after restore', async () => {
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
@@ -3009,10 +3048,10 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('rolls back live removal when explicit tombstone persistence fails', async () => {
+  it('keeps live removal when explicit tombstone persistence fails', async () => {
     let calls = 0;
     const store = new SessionArtifactStore({
-      sessionId: 's11-remove-rollback',
+      sessionId: 's11-remove-live-first',
       workspaceCwd: workspace,
       persistence: {
         recordEvent: async () => {
@@ -3029,16 +3068,19 @@ describe('SessionArtifactStore', () => {
       { strict: true },
     );
 
-    await expect(store.remove(created.changes[0]!.artifactId)).rejects.toThrow(
-      'disk full',
+    await expect(store.remove(created.changes[0]!.artifactId)).resolves.toEqual(
+      expect.objectContaining({
+        changes: [
+          expect.objectContaining({
+            action: 'removed',
+            artifactId: created.changes[0]?.artifactId,
+          }),
+        ],
+        warnings: ['artifact removal not persisted; live removal kept'],
+      }),
     );
     await expect(store.list()).resolves.toMatchObject({
-      artifacts: [
-        {
-          id: created.changes[0]?.artifactId,
-          title: 'Sensitive',
-        },
-      ],
+      artifacts: [],
     });
   });
 

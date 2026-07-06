@@ -31,6 +31,7 @@ V2 是一个完整设计 phase，但对外能力仍按 capability gate 暴露。
 当前 PR 的重要收窄：
 
 - Content retention public API、managed content store、pin/unpin、deleteContent、quota/hash/manifest/fsck/gc 和 `session_artifacts_content_retention` capability 不在 PR #6259 中交付；这些安全面拆到后续 PR。当前 PR 只保留对旧 `pinned` / `contentRef` journal payload 的 downgrade/strip 兼容路径，避免旧记录破坏 metadata restore。
+- 下文保留的 pin/save、content quota、managed content GC/fsck 细节是后续 content-retention PR 的安全边界说明，不是 PR #6259 的 wire contract 或验收项；除非小节明确标注为 PR #6259 HTTP mapping / metadata behavior，否则实现不得在 #6259 中暴露这些 API 或 capability。
 - 当前 live view 与 persisted metadata 使用同一个 200 条可见集合。为了避免重启后 over-restore，超过上限时的 durable/restorable eviction 会写入 `reason: "eviction"` remove event；这等价于本实现的 metadata prune，不是纯 V1 live-only hiding。
 - 显式 DELETE 当前采用 live-first：先从 live store 移除，tombstone 写入失败时返回 warning。这样可优先隐藏敏感项；失败窗口内 daemon 重启仍可能从旧 journal 恢复该 artifact，client 应把 warning 作为“删除未 durable”的信号。
 - Fork 当前通过一次性 exclusive-create 写入目标 JSONL 文件；不会逐条 streaming fork artifact records，因此不需要 `session_artifact_fork_marker` 才能检测当前写入路径的 partial batch。若未来改成流式 fork，再引入 begin/complete marker。
@@ -53,7 +54,7 @@ backfill 不能逐条向 JSONL streaming 写入 artifact event。实现必须先
 
 ### 2.2 retention 分层
 
-新增 optional field：
+新增 optional field。PR #6259 的 public mutation path 只接受 `ephemeral` 和 `restorable`；`pinned` 只作为旧 journal 兼容字段和后续 content-retention 设计目标出现，当前 restore 会把旧 `pinned` 记录降级为 metadata-only `restorable`：
 
 ```ts
 type ArtifactRetention = 'ephemeral' | 'restorable' | 'pinned';
@@ -127,7 +128,7 @@ interface DaemonSessionArtifact {
 - `expiresAt`：可被 GC 的时间。`pinned` 默认不设置，但 `ttlDays` pin 会转换成绝对 `expiresAt`。
 - `restoreState`：恢复来源提示；不替代 `status`。
 - `persistenceWarning`：非阻塞持久化/恢复风险，前端可用它提示“此 artifact 不会跨重启保留”等状态。当前 wire shape 是固定字符串，避免把 host 绝对路径、credential、token、内部 storage path 或 connection id 写入 response。更结构化的 `{ code, message }` 可作为后续兼容扩展。
-- `contentRef`：当前只在 `mode: "content"` pin workspace regular file 成功后出现，不暴露宿主机绝对路径。published / workspace-reference contentRef 是后续增强，不属于本 PR 发布承诺。
+- `contentRef`：PR #6259 不产生新的 `contentRef`。该字段只为读取旧 journal payload 和后续 content-retention PR 的 `mode: "content"` pin 预留；当前 metadata restore 会校验、strip 或 downgrade 旧 `contentRef`，不会把它作为可打开内容承诺暴露。
 
 ### 3.2 Status 与 restoreState 的关系
 

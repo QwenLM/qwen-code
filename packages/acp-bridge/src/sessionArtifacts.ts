@@ -151,6 +151,7 @@ export interface SessionArtifactRestoreOptions {
   verifyContentRef?: (
     artifact: PersistedSessionArtifact,
   ) => Promise<SessionArtifactPersistenceWarning | undefined>;
+  preserveLiveEphemeral?: boolean;
 }
 
 export interface SessionArtifactPersistence {
@@ -260,6 +261,8 @@ export class SessionArtifactStore {
     });
   }
 
+  // Content-retention helpers are intentionally not exposed by #6259.
+  // The stacked #6346 PR wires these to pin/unpin/content-GC surfaces.
   async contentRefs(): Promise<SessionArtifactContentRef[]> {
     return this.enqueue(async () =>
       Array.from(this.artifacts.values())
@@ -449,7 +452,6 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
-      const before = this.cloneState();
       this.artifacts.delete(artifactId);
       const changes: SessionArtifactChange[] = [
         {
@@ -459,21 +461,13 @@ export class SessionArtifactStore {
           reason: 'explicit',
         },
       ];
-      try {
-        const warnings = await this.persistChanges(
-          changes,
-          this.persistence !== undefined,
-        );
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes,
-          ...(warnings.length > 0 ? { warnings } : {}),
-        };
-      } catch (error) {
-        this.restoreState(before);
-        throw error;
-      }
+      const warnings = await this.persistChanges(changes, false);
+      return {
+        v: 1,
+        sessionId: this.sessionId,
+        changes,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     });
   }
 
@@ -692,26 +686,33 @@ export class SessionArtifactStore {
     snapshot: RebuiltSessionArtifactSnapshot | undefined,
     options: SessionArtifactRestoreOptions = {},
   ): Promise<string[]> {
-    if (!snapshot) return [];
+    if (!snapshot && !options.preserveLiveEphemeral) return [];
     return this.enqueue(async () => {
-      const warnings = [...snapshot.warnings];
+      const warnings = [...(snapshot?.warnings ?? [])];
       const previousState = this.cloneState();
       const warningCountBeforeRestore = warnings.length;
+      const preservedLiveEphemeralArtifacts = options.preserveLiveEphemeral
+        ? Array.from(this.artifacts.values())
+            .filter((artifact) => artifact.retention === 'ephemeral')
+            .map(cloneStoredArtifact)
+        : [];
       let restoredCount = 0;
       this.artifacts.clear();
       this.tombstonedIds.clear();
       this.stickyEphemeralIds.clear();
-      this.insertSeq = 0;
-      this.persistenceSeq = snapshot.sequence;
-      this.durableEventsSinceSnapshot = 0;
-      this.consecutiveSnapshotFailures = 0;
-      for (const id of snapshot.tombstonedIds) {
-        this.tombstonedIds.add(id);
+      if (snapshot) {
+        this.insertSeq = 0;
+        this.persistenceSeq = snapshot.sequence;
+        this.durableEventsSinceSnapshot = 0;
+        this.consecutiveSnapshotFailures = 0;
+        for (const id of snapshot.tombstonedIds) {
+          this.tombstonedIds.add(id);
+        }
+        for (const id of snapshot.stickyEphemeralIds) {
+          this.stickyEphemeralIds.add(id);
+        }
       }
-      for (const id of snapshot.stickyEphemeralIds) {
-        this.stickyEphemeralIds.add(id);
-      }
-      for (const artifact of snapshot.artifacts) {
+      for (const artifact of snapshot?.artifacts ?? []) {
         try {
           const input = persistedArtifactToInput(artifact);
           if (input.retention === 'pinned') {
@@ -793,7 +794,7 @@ export class SessionArtifactStore {
         }
       }
       if (
-        snapshot.artifacts.length > 0 &&
+        (snapshot?.artifacts.length ?? 0) > 0 &&
         restoredCount === 0 &&
         warnings.length > warningCountBeforeRestore
       ) {
@@ -802,6 +803,18 @@ export class SessionArtifactStore {
           'artifact snapshot restore failed; kept existing live artifacts',
         );
         return warnings;
+      }
+      for (const artifact of preservedLiveEphemeralArtifacts) {
+        if (
+          this.artifacts.has(artifact.id) ||
+          this.tombstonedIds.has(artifact.id)
+        ) {
+          continue;
+        }
+        this.artifacts.set(artifact.id, {
+          ...artifact,
+          insertSeq: ++this.insertSeq,
+        });
       }
       const evicted = await this.evictOverflow(new Set(), []);
       if (evicted.length > 0) {

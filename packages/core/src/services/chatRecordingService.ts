@@ -773,8 +773,12 @@ export class ChatRecordingService {
     this.updateTitleAnchorTracking(record);
   }
 
-  private async appendRecordStrict(record: ChatRecord): Promise<void> {
+  private async appendRecordStrict(
+    record: ChatRecord,
+    options?: { updateActiveTail?: boolean },
+  ): Promise<void> {
     const previousLastRecordUuid = this.lastRecordUuid;
+    const updateActiveTail = options?.updateActiveTail !== false;
     let conversationFile: string;
     try {
       conversationFile = this.ensureConversationFile();
@@ -783,7 +787,9 @@ export class ChatRecordingService {
       throw error;
     }
 
-    this.lastRecordUuid = record.uuid;
+    if (updateActiveTail) {
+      this.lastRecordUuid = record.uuid;
+    }
     this.writeChain = this.writeChain
       .catch(() => {})
       .then(() => jsonl.writeLine(conversationFile, record));
@@ -792,7 +798,7 @@ export class ChatRecordingService {
       await this.writeChain;
       this.updateTitleAnchorTracking(record);
     } catch (error) {
-      if (this.lastRecordUuid === record.uuid) {
+      if (updateActiveTail && this.lastRecordUuid === record.uuid) {
         this.lastRecordUuid = previousLastRecordUuid;
       }
       debugLogger.error('Error appending record (async):', error);
@@ -1516,7 +1522,7 @@ export class ChatRecordingService {
       subtype: 'session_artifact_event',
       systemPayload: payload,
     };
-    await this.appendRecordStrict(record);
+    await this.appendRecordStrict(record, { updateActiveTail: false });
   }
 
   async recordSessionArtifactSnapshot(
@@ -1528,6 +1534,6 @@ export class ChatRecordingService {
       subtype: 'session_artifact_snapshot',
       systemPayload: payload,
     };
-    await this.appendRecordStrict(record);
+    await this.appendRecordStrict(record, { updateActiveTail: false });
   }
 }

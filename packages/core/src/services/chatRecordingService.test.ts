@@ -1138,9 +1138,35 @@ describe('ChatRecordingService', () => {
       chatRecordingService.recordUserMessage([{ text: 'next message' }]);
       await chatRecordingService.flush();
 
+      const first = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
       const third = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
+      expect(second.parentUuid).not.toBe(first.uuid);
       expect(third.parentUuid).toBe(second.uuid);
+    });
+
+    it('keeps artifact journal records out of the active conversation chain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'before artifact' }]);
+      await chatRecordingService.flush();
+
+      await chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [],
+      });
+
+      chatRecordingService.recordUserMessage([{ text: 'after artifact' }]);
+      await chatRecordingService.flush();
+
+      const before = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const artifact = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      const after = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
+      expect(artifact.parentUuid).toBe(before.uuid);
+      expect(after.parentUuid).toBe(before.uuid);
+      expect(after.parentUuid).not.toBe(artifact.uuid);
     });
 
     // appendRecord can throw SYNCHRONOUSLY before returning a promise

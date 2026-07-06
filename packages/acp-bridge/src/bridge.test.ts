@@ -1327,11 +1327,18 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('keeps live artifacts when rewind returns no artifact snapshot', async () => {
+  it('clears durable artifacts but keeps live ephemerals when rewind returns no artifact snapshot', async () => {
+    const persistedSnapshots: unknown[] = [];
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
-          extMethodImpl: (method) => {
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/artifacts/persist') {
+              if (params['kind'] === 'snapshot') {
+                persistedSnapshots.push(params['payload']);
+              }
+              return {};
+            }
             expect(method).toBe('qwen/control/session/rewind');
             return {
               targetTurnIndex: 0,
@@ -1342,15 +1349,25 @@ describe('createAcpSessionBridge', () => {
         }).channel,
     });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const created = await bridge.addSessionArtifact(
+    const durable = await bridge.addSessionArtifact(
       session.sessionId,
       {
-        title: 'Later artifact',
-        url: 'https://example.com/later',
+        title: 'Abandoned durable artifact',
+        url: 'https://example.com/later-durable',
       },
       { clientId: session.clientId },
     );
-    expect(created.changes).toHaveLength(1);
+    const ephemeral = await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Live ephemeral artifact',
+        url: 'https://example.com/later-ephemeral',
+        retention: 'ephemeral',
+      },
+      { clientId: session.clientId },
+    );
+    expect(durable.changes).toHaveLength(1);
+    expect(ephemeral.changes).toHaveLength(1);
 
     await expect(
       bridge.rewindSession(
@@ -1360,15 +1377,28 @@ describe('createAcpSessionBridge', () => {
       ),
     ).resolves.toMatchObject({ targetTurnIndex: 0 });
 
-    await expect(
-      bridge.getSessionArtifacts(session.sessionId),
-    ).resolves.toMatchObject({
-      artifacts: [
+    const artifacts = (await bridge.getSessionArtifacts(session.sessionId))
+      .artifacts;
+    expect(artifacts).toEqual(
+      expect.arrayContaining([
         expect.objectContaining({
-          title: 'Later artifact',
+          title: 'Live ephemeral artifact',
+          retention: 'ephemeral',
         }),
-      ],
-    });
+      ]),
+    );
+    expect(
+      artifacts.some(
+        (artifact) => artifact.id === durable.changes[0]?.artifactId,
+      ),
+    ).toBe(false);
+    expect(persistedSnapshots).toEqual([
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        artifacts: [],
+        tombstonedIds: [],
+      }),
+    ]);
 
     await bridge.shutdown();
   });
@@ -1432,6 +1462,15 @@ describe('createAcpSessionBridge', () => {
       },
       { clientId: session.clientId },
     );
+    const ephemeral = await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Live ephemeral artifact',
+        url: 'https://example.com/live-ephemeral-during-rewind',
+        retention: 'ephemeral',
+      },
+      { clientId: session.clientId },
+    );
 
     const abort = new AbortController();
     const iter = bridge.subscribeEvents(session.sessionId, {
@@ -1465,17 +1504,22 @@ describe('createAcpSessionBridge', () => {
       ]),
     );
     abort.abort();
-    await expect(
-      bridge.getSessionArtifacts(session.sessionId),
-    ).resolves.toMatchObject({
-      artifacts: [
-        {
+    const artifacts = (await bridge.getSessionArtifacts(session.sessionId))
+      .artifacts;
+    expect(artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
           id: rewoundArtifactId,
           title: 'Rewound artifact',
           restoreState: 'restored',
-        },
-      ],
-    });
+        }),
+        expect.objectContaining({
+          id: ephemeral.changes[0]?.artifactId,
+          title: 'Live ephemeral artifact',
+          retention: 'ephemeral',
+        }),
+      ]),
+    );
     expect(persistedSnapshots).toEqual([
       expect.objectContaining({
         sessionId: session.sessionId,
@@ -1487,6 +1531,9 @@ describe('createAcpSessionBridge', () => {
         ],
       }),
     ]);
+    expect(
+      (persistedSnapshots[0] as { artifacts?: unknown[] }).artifacts,
+    ).toHaveLength(1);
 
     await bridge.shutdown();
   });
