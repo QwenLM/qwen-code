@@ -959,4 +959,23 @@ describe('modelConfigResolver', () => {
       expect(result.sources['modalities'].kind).toBe('settings');
     });
   });
+
+  describe('[Regression] env-var-only path must apply model context defaults', () => {
+    it('env-var-only path: contextWindowSize auto-detected for claude-opus-4-6', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'claude-opus-4-6',
+        },
+      });
+
+      expect(result.config.model).toBe('claude-opus-4-6');
+      expect(result.config.contextWindowSize).toBe(200_000);
+      expect(result.sources['contextWindowSize'].kind).toBe('computed');
+    });
+  });
 });

@@ -22,6 +22,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -398,6 +399,11 @@ function resolveGenerationConfig(
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
     }
+  }
+
+  if (result.contextWindowSize === undefined && modelId) {
+    result.contextWindowSize = tokenLimit(modelId, 'input');
+    sources['contextWindowSize'] = computedSource('auto-detected from model');
   }
 
   // modalities fallback: auto-detect from model when neither modelProvider nor
