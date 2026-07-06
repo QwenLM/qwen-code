@@ -100,11 +100,17 @@ describe('SessionArtifactStore', () => {
         'qwen.workspace.sha256': createHash('sha256')
           .update('hello')
           .digest('hex'),
+        'qwen.workspace.mtimeMs': expect.any(Number),
       },
     });
     await expect(store.get('missing')).resolves.toBeUndefined();
 
     await fs.writeFile(path.join(workspace, 'report.txt'), 'HELLO');
+    await fs.utimes(
+      path.join(workspace, 'report.txt'),
+      new Date('2026-07-06T00:00:00.000Z'),
+      new Date('2026-07-06T00:00:00.000Z'),
+    );
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6_000));
     const changed = await store.get(artifactId);

@@ -2,7 +2,7 @@
 
 本文延续 PR #5895 的 V1 session artifact API，设计 V2 持久化能力。V1 设计见同目录下的 [session-artifacts-daemon-api-implementation-design.md](./session-artifacts-daemon-api-implementation-design.md)。
 
-V2 的目标是在不破坏 V1 live session 语义的前提下，让 artifact metadata 可以在 daemon 重启、session load/replay 后恢复。当前 PR 不复制、不冻结、不托管 artifact 内容；workspace 文件只保存路径、size 和 sha256 作为恢复后的完整性校验。
+V2 的目标是在不破坏 V1 live session 语义的前提下，让 artifact metadata 可以在 daemon 重启、session load/replay 后恢复。当前 PR 不复制、不冻结、不托管 artifact 内容；workspace 文件只保存路径、size、mtimeMs 和 sha256 作为恢复后的完整性校验。
 
 ## 1. 设计结论
 
@@ -11,7 +11,7 @@ V2 是一个 metadata persistence phase。PR #6259 的实现范围收敛为 meta
 当前能力：
 
 1. Metadata restore：默认恢复 artifact 的结构化 metadata 和资源引用，不复制实际内容。
-2. Workspace integrity check：workspace artifact 登记时记录 size + sha256；restore / GET 时按实时文件返回 `available` / `missing` / `changed`。
+2. Workspace integrity check：workspace artifact 登记时记录 size + mtimeMs + sha256；restore / GET 时按实时文件返回 `available` / `missing` / `changed`。
 
 对应 capability：
 
@@ -81,7 +81,7 @@ type ArtifactRetention = 'ephemeral' | 'restorable';
 恢复后的结果按资源状态区分：
 
 - `external_url`：恢复 title、description、url、metadata。daemon 不访问远端 URL；URL 是否仍可打开由 client 点击时决定。
-- `workspace`：恢复 workspacePath 和 metadata；如果文件仍在 workspace 内且 size + sha256 与登记时一致，`status: "available"`；如果文件已删除、移动或 symlink 逃逸，`status: "missing"`；如果文件仍在但 size 或 sha256 与登记时不同，`status: "changed"`。
+- `workspace`：恢复 workspacePath 和 metadata；如果文件仍在 workspace 内且 size + mtimeMs 未变，或 mtime 变化后 sha256 仍与登记时一致，`status: "available"`；如果文件已删除、移动或 symlink 逃逸，`status: "missing"`；如果文件仍在但 size 或 sha256 与登记时不同，`status: "changed"`。
 - `managed`：恢复 managedId；只有 managed storage manifest 仍能解析时才 `available`。
 - `published`：恢复 published locator；只有仍满足 trusted publisher manifest 校验时才保留 published trust。
 
@@ -109,6 +109,7 @@ interface DaemonSessionArtifact {
     | 'sticky_override_active';
   metadata?: {
     'qwen.workspace.sha256'?: string;
+    'qwen.workspace.mtimeMs'?: number;
     [key: string]: string | number | boolean | null | undefined;
   };
 }
@@ -120,7 +121,7 @@ interface DaemonSessionArtifact {
 - `persistedAt`：metadata 最近成功落盘时间。
 - `restoreState`：恢复来源提示；不替代 `status`。
 - `persistenceWarning`：非阻塞持久化/恢复风险，前端可用它提示“此 artifact 不会跨重启保留”等状态。当前 wire shape 是固定字符串，避免把 host 绝对路径、credential、token、内部 storage path 或 connection id 写入 response。更结构化的 `{ code, message }` 可作为后续兼容扩展。
-- `status: "changed"`：仅用于 workspace artifact。daemon 在登记时写入 `metadata["qwen.workspace.sha256"]` 和 `sizeBytes`；GET/list/restore 后 refresh 时重新 stat/hash 当前文件，如果文件存在但 size 或 sha256 不一致，则返回 `changed`。
+- `status: "changed"`：仅用于 workspace artifact。daemon 在登记时写入 `sizeBytes`、`metadata["qwen.workspace.sha256"]` 和 `metadata["qwen.workspace.mtimeMs"]`；GET/list/restore 后 refresh 先 stat 当前文件，size 变化直接返回 `changed`，size/mtime 均未变化则不重读文件，只有 mtime 变化但 size 相同时才重新计算 sha256 兜底。
 
 ### 3.2 Status 与 restoreState 的关系
 
@@ -130,7 +131,7 @@ V1 `status` 继续表示当前资源是否可用：
 - `missing`
 - `changed`
 
-V2 只新增 `changed` 这一种 workspace integrity 状态。它表示路径仍可访问，但实时文件的 size 或 sha256 与登记时的 metadata 不一致。`blocked` 不是 `status`，只属于 `restoreState`：
+V2 只新增 `changed` 这一种 workspace integrity 状态。它表示路径仍可访问，但实时文件的 size 已变化，或 mtime 变化后 sha256 与登记时的 metadata 不一致。`blocked` 不是 `status`，只属于 `restoreState`：
 
 - `restored`：从持久化 metadata 恢复。
 - `unverified`：恢复了 metadata，但尚未完成 workspace/managed 校验。
@@ -702,22 +703,22 @@ CPU 成本边界：
 
 - Metadata restore 只 parse JSON 和做字段校验，复杂度 O(artifact 数量 + 最新 snapshot 后事件数)。
 - `external_url` 恢复不发网络请求。
-- `workspace` load/replay 只恢复 metadata；GET/list refresh 在 TTL/batch 限制下重新 stat/hash 单个或一批 workspace 文件，用于区分 `available` / `missing` / `changed`。
+- `workspace` load/replay 只恢复 metadata；GET/list refresh 在 TTL/batch 限制下重新 stat 单个或一批 workspace 文件，必要时才 hash，用于区分 `available` / `missing` / `changed`。
 - `managed` / `published` 恢复只查 manifest，不读取大文件内容。
-- workspace content hash 不在 `loadSession()` 的 JSONL parse 阶段全量执行。
+- workspace content hash 不在 `loadSession()` 的 JSONL parse 阶段全量执行。GET/list refresh 先用 size + mtimeMs 做 cheap stat gate；只有 stat 显示可能同尺寸改写时才读取文件流计算 sha256。
 
 I/O 成本边界：
 
 - V2 不额外读 sidecar 文件。
 - workspace 状态校验复用 V1 的 TTL/batch 策略，不在 GET 热路径对所有 artifact 做无限制 stat。
-- 对大 workspace 文件，不在恢复阶段读内容；登记和后续 refresh 读取实时文件流计算 sha256，不复制到 daemon-managed storage。
+- 对大 workspace 文件，不在恢复阶段读内容；登记时读取实时文件流计算 sha256，后续 refresh 只有 size/mtimeMs 显示可能变更时才重新读取文件流，不复制到 daemon-managed storage。
 
 推荐默认：
 
 - artifact snapshot 上限 200 条。
 - workspace status restore batch size 20，与 V1 保持一致。
 - artifact journal snapshot 阈值 100 mutations 或 256 KB。
-- workspace sha256 在登记时同步完成；恢复后的状态校验按 TTL/batch lazy refresh。
+- workspace sha256 在登记时同步完成；恢复后的状态校验按 TTL/batch lazy refresh，并通过 size + mtimeMs 避免对未变化文件重复做全量 hash。
 
 ### 8.6 Observability
 
@@ -840,7 +841,7 @@ PR #6259 当前必须覆盖：
 - restore seed 与 concurrent POST 串行，不丢写、不重复。
 - quota 边界：200 条、201 条 prune、clientRetained/non-clientRetained 两层排序、全部 clientRetained restorable 仍可按确定性规则裁剪。
 - clientRetained setter：Add artifact request 能设置 boolean hint；后台自动 ingest 不能伪造用户保留。
-- workspace 三态：登记时写入 size + `metadata["qwen.workspace.sha256"]`；GET/list refresh 能区分 `available`、`missing` 和 `changed`。
+- workspace 三态：登记时写入 size + `metadata["qwen.workspace.sha256"]` + `metadata["qwen.workspace.mtimeMs"]`；GET/list refresh 能区分 `available`、`missing` 和 `changed`，且未变化文件只走 stat 快路径。
 - authorization：token-holder/principal 审计路径允许和拒绝情况；V1 live same-principal guard 仅作为 live UX/audit hint，不作为 durable security boundary。
 - JSONL snapshot baseline advance：threshold 触发、post-snapshot replay 有界、snapshot payload 不再携带已被覆盖的 explicit tombstones、superseded sticky tombstone 允许显式同 id 重新出现、`stickyEphemeralIds` 保留 sticky state；JSONL 文件本身不被 artifact 子系统重写。
 - corrupt latest snapshot fallback：回退到较旧 valid snapshot 或一次顺序 artifact replay。
@@ -879,7 +880,7 @@ V2 建议作为一个完整 design phase 发布，但能力按 capability 暴露
 - `session_artifacts_content_retention` 当前不发布；future content archive 需要重新设计并独立声明 capability。
 - 默认恢复显式登记的 artifact metadata。
 - 用户手动注册的 artifact 默认 `restorable`，session load/replay 后继续出现在列表中。
-- 用户文档明确：metadata restore 恢复的是“产物索引”，不是“产物内容备份”；workspace 的 `changed` 状态只说明实时文件和登记时 hash/size 不一致。
+- 用户文档明确：metadata restore 恢复的是“产物索引”，不是“产物内容备份”；workspace 的 `changed` 状态只说明实时文件和登记时 size 不一致，或 mtime 变化后 hash 不一致。
 
 Rollback procedure：
 
@@ -889,4 +890,4 @@ Rollback procedure：
 - 发布前 CI 必须用最低支持旧 daemon 版本加载包含 `session_artifact_event` 和 `session_artifact_snapshot` 的 JSONL，断言 session load 成功且 unknown subtype 被忽略。V2 writer 首次初始化前也要检查版本/feature gate；失败时拒绝写 V2 records，记录 `v2_writer_version_gate_failed`，保持 V1 行为。如果未来加入 fork marker，再把该 subtype 纳入 rollback fixture。
 - rollback 后 client 不能依赖 `session_artifacts_persistence` / `session_artifacts_content_retention`，因为旧 daemon 不声明这些 capability。
 
-这样可以讲清楚当前 V2 的完整语义：默认恢复列表，不保存内容，用 workspace size/hash 避免静默打开错误版本。
+这样可以讲清楚当前 V2 的完整语义：默认恢复列表，不保存内容，用 workspace size/mtime/hash 避免静默打开错误版本，同时避免对未变化文件重复做全量 hash。

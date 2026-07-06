@@ -53,6 +53,7 @@ const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
   hook: 50,
 };
 const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
+const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
@@ -1019,6 +1020,7 @@ export class SessionArtifactStore {
     status: DaemonSessionArtifactStatus;
     sizeBytes?: number;
     sha256?: string;
+    mtimeMs?: number;
     escaped?: boolean;
   }> {
     try {
@@ -1048,6 +1050,10 @@ export class SessionArtifactStore {
         this.workspaceCwd,
         artifact.workspacePath,
         this.getRealWorkspaceCwd(),
+        {
+          sizeBytes: artifact.sizeBytes,
+          mtimeMs: artifact.metadata?.[WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY],
+        },
       );
       const changed = isWorkspaceContentChanged(artifact, status);
       artifact.status = changed ? 'changed' : status.status;
@@ -1387,7 +1393,8 @@ function mergeMetadata(
   let changed = false;
   for (const [key, value] of Object.entries(incoming.metadata)) {
     if (
-      key === WORKSPACE_CONTENT_SHA256_METADATA_KEY &&
+      (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
+        key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) &&
       merged[key] !== value
     ) {
       merged[key] = value;
@@ -2085,10 +2092,15 @@ async function getWorkspaceStatus(
   workspaceCwd: string,
   workspacePath: string,
   realWorkspaceCwd: Promise<string>,
+  expected?: {
+    sizeBytes?: number;
+    mtimeMs?: string | number | boolean | null;
+  },
 ): Promise<{
   status: DaemonSessionArtifactStatus;
   sizeBytes?: number;
   sha256?: string;
+  mtimeMs?: number;
   escaped?: boolean;
 }> {
   const absolutePath = path.resolve(workspaceCwd, workspacePath);
@@ -2101,10 +2113,17 @@ async function getWorkspaceStatus(
     }
     const stat = await fs.stat(realPath);
     if (stat.isFile()) {
+      const unchanged =
+        expected?.sizeBytes === stat.size && expected.mtimeMs === stat.mtimeMs;
+      const sizeChanged =
+        expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
       return {
         status: 'available',
         sizeBytes: stat.size,
-        sha256: await hashFile(realPath),
+        mtimeMs: stat.mtimeMs,
+        ...(unchanged || sizeChanged
+          ? {}
+          : { sha256: await hashFile(realPath) }),
       };
     }
     return {
@@ -2135,6 +2154,7 @@ function withWorkspaceContentHashMetadata(
     | {
         status: DaemonSessionArtifactStatus;
         sha256?: string;
+        mtimeMs?: number;
       }
     | undefined,
 ): Record<string, string | number | boolean | null> | undefined {
@@ -2144,6 +2164,9 @@ function withWorkspaceContentHashMetadata(
   const next = {
     ...(metadata ?? {}),
     [WORKSPACE_CONTENT_SHA256_METADATA_KEY]: workspaceStatus.sha256,
+    ...(workspaceStatus.mtimeMs !== undefined
+      ? { [WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY]: workspaceStatus.mtimeMs }
+      : {}),
   };
   if (Buffer.byteLength(JSON.stringify(next), 'utf8') > 4096) {
     throw new SessionArtifactValidationError(
@@ -2168,16 +2191,16 @@ function isWorkspaceContentChanged(
   const expectedSha256 =
     artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
   if (
-    typeof expectedSha256 === 'string' &&
-    status.sha256 &&
-    status.sha256 !== expectedSha256
+    artifact.sizeBytes !== undefined &&
+    status.sizeBytes !== undefined &&
+    status.sizeBytes !== artifact.sizeBytes
   ) {
     return true;
   }
   return (
-    artifact.sizeBytes !== undefined &&
-    status.sizeBytes !== undefined &&
-    status.sizeBytes !== artifact.sizeBytes
+    typeof expectedSha256 === 'string' &&
+    status.sha256 !== undefined &&
+    status.sha256 !== expectedSha256
   );
 }
 
