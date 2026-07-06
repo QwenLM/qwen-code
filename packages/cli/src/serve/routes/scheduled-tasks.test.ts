@@ -23,13 +23,17 @@ function safeBody(req: Request): Record<string, unknown> {
 /** Stub session bridge: mints sequential fake session ids and records spawns /
  * closes so tests can assert binding and rollback without a real child. */
 interface StubBridge {
-  spawnOrAttach(req: { workspaceCwd: string }): Promise<{ sessionId: string }>;
+  spawnOrAttach(req: {
+    workspaceCwd: string;
+    sessionScope?: 'single' | 'thread';
+  }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
   ): unknown;
   spawned: string[];
+  spawnScopes: Array<'single' | 'thread' | undefined>;
   closed: string[];
   named: Array<{ sessionId: string; displayName?: string }>;
   failNext: boolean;
@@ -39,16 +43,18 @@ function makeStubBridge(): StubBridge {
   let seq = 0;
   const bridge: StubBridge = {
     spawned: [],
+    spawnScopes: [],
     closed: [],
     named: [],
     failNext: false,
-    async spawnOrAttach() {
+    async spawnOrAttach(req) {
       if (bridge.failNext) {
         bridge.failNext = false;
         throw new Error('spawn failed');
       }
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
+      bridge.spawnScopes.push(req.sessionScope);
       return { sessionId };
     },
     async closeSession(sessionId: string) {
@@ -148,6 +154,17 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].sessionId).toBe(h.bridge.spawned[0]);
     // No teardown on the happy path.
     expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('mints the task session with thread scope (never reuses the shared session)', async () => {
+    // The daemon default scope is 'single' (attach to the shared workspace
+    // session). A task MUST get its own isolated session, so the route forces
+    // 'thread' — otherwise two tasks / a task + open chat would collide.
+    await create({ cron: '0 9 * * *', prompt: 'p' });
+    await create({ cron: '0 10 * * *', prompt: 'q' });
+    expect(h.bridge.spawnScopes).toEqual(['thread', 'thread']);
+    // Distinct sessions — no attach/reuse.
+    expect(new Set(h.bridge.spawned).size).toBe(2);
   });
 
   it('names the bound session after the task (name preferred over prompt)', async () => {
@@ -533,5 +550,73 @@ describe('scheduled-tasks routes', () => {
       .send({ enabled: true });
     expect(patch.status).toBe(200);
     expect(patch.body.lastFiredAt).toBe(lastFiredAt); // unchanged (not recurring)
+  });
+
+  it('editing an enabled recurring task cron re-seats the anchor to now (no catch-up on save)', async () => {
+    // A bare cron edit must not let the next file-watch reload retroactively
+    // fire an already-past slot of the NEW expression — critical for a bound
+    // task, whose catch-up runs on every reload, not just initial load.
+    const createdAt = 1_700_000_000_000;
+    const firedAt = createdAt + 3 * 86_400_000; // a genuine past fire
+    await seedTask({
+      id: 'c1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt,
+      lastFiredAt: firedAt,
+      enabled: true,
+      sessionId: 'sess-x',
+    });
+    const now = Date.now();
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/c1')
+      .send({ cron: '30 8 * * *' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.cron).toBe('30 8 * * *');
+    expect(patch.body.lastFiredAt).toBeGreaterThan(firedAt);
+    expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
+  });
+
+  it('editing only the prompt of an enabled recurring task leaves the anchor untouched', async () => {
+    // A non-schedule edit must NOT disturb the firing anchor.
+    const createdAt = 1_700_000_000_000;
+    const firedAt = createdAt + 3 * 86_400_000;
+    await seedTask({
+      id: 'p2',
+      cron: '0 9 * * *',
+      prompt: 'orig',
+      recurring: true,
+      createdAt,
+      lastFiredAt: firedAt,
+      enabled: true,
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/p2')
+      .send({ prompt: 'updated' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.prompt).toBe('updated');
+    expect(patch.body.lastFiredAt).toBe(firedAt); // schedule untouched
+  });
+
+  it('flipping a one-shot task to recurring re-seats the anchor to now', async () => {
+    // The anchor source flips from createdAt to lastFiredAt, so re-seat it.
+    const createdAt = 1_700_000_000_000;
+    await seedTask({
+      id: 'x1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: false,
+      createdAt,
+      lastFiredAt: createdAt - (createdAt % 60_000),
+      enabled: true,
+    });
+    const now = Date.now();
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/x1')
+      .send({ recurring: true });
+    expect(patch.status).toBe(200);
+    expect(patch.body.recurring).toBe(true);
+    expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
   });
 });

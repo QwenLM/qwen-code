@@ -30,6 +30,7 @@ import {
   appendCronRun,
   parseCron,
   nextFireTime,
+  nextDurableFireMs,
   MAX_JOBS,
   type DurableCronTask,
   type CronTaskRun,
@@ -51,7 +52,10 @@ const MAX_CRON_LENGTH = 200;
  * to a structural type so tests can stub it without the full bridge.
  */
 export interface ScheduledTasksSessionBridge {
-  spawnOrAttach(req: { workspaceCwd: string }): Promise<{ sessionId: string }>;
+  spawnOrAttach(req: {
+    workspaceCwd: string;
+    sessionScope?: 'single' | 'thread';
+  }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Give the task's session a readable name so it's recognizable in the
    * session list (rather than a bare id). Best-effort. */
@@ -108,14 +112,13 @@ interface ScheduledTaskView {
  * is disabled (it won't fire) or its cron can't be projected. A GET-time
  * snapshot the client counts down against — kept server-side so every cron
  * shape (including hand-written ones) uses core's single next-fire authority,
- * with no cron parser shipped to the browser. */
+ * with no cron parser shipped to the browser. Uses the scheduler's jittered
+ * fire time (`nextDurableFireMs`), not the bare cron boundary, so the countdown
+ * matches when the task actually fires (the tick offsets each fire by a
+ * deterministic per-task jitter of up to the jitter window). */
 function computeNextRunAt(task: DurableCronTask): number | null {
   if (task.enabled === false) return null;
-  try {
-    return nextFireTime(task.cron, new Date()).getTime();
-  } catch {
-    return null;
-  }
+  return nextDurableFireMs(task);
 }
 
 function toView(task: DurableCronTask): ScheduledTaskView {
@@ -255,11 +258,19 @@ export function registerScheduledTasksRoutes(
     // archiving/deleting the session stops the task. Done before the write so a
     // task never lands on disk without its session; if the bridge is absent
     // (minimal embedding) the task is created unbound (shared-owner firing).
+    //
+    // `sessionScope: 'thread'` is REQUIRED: the daemon's default scope is
+    // 'single', which would attach to (and reuse) the shared workspace session
+    // instead of minting a fresh one. Two tasks — or a task and an open chat —
+    // would then bind to the same session: the task renames it, scheduled runs
+    // land in the wrong transcript, and deleting one task closes the shared
+    // session. Forcing 'thread' guarantees each task gets an isolated session.
     let boundSessionId: string | undefined;
     if (bridge) {
       try {
         const session = await bridge.spawnOrAttach({
           workspaceCwd: boundWorkspace,
+          sessionScope: 'thread',
         });
         boundSessionId = session.sessionId;
         // Name the session after the task so it's recognizable in the session
@@ -438,17 +449,32 @@ export function registerScheduledTasksRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
-        // Re-enabling a recurring task resumes it from now instead of catching
-        // up the fires it "missed" while disabled — which would run prompts the
-        // user intentionally paused. Applied to every false→true transition,
-        // including a task disabled before it ever ran, so its paused slot is
-        // not treated as overdue on the next scheduler load. (The trade-off is
-        // a re-enabled never-run task reads "last run: now" rather than "never
-        // run" — a cosmetic edge, preferred over an unwanted real fire.)
+        // Re-seat a recurring task's schedule anchor to "now" whenever an edit
+        // would otherwise let the NEXT reload retroactively fire an already-past
+        // slot. Three cases, all only when the task ends up ENABLED + recurring:
+        //  - false→true re-enable: don't run fires the task "missed" while the
+        //    user had it paused (applies even to a task disabled before it ever
+        //    ran, so its paused slot isn't treated as overdue on next load).
+        //  - cron changed: a new expression whose last matching slot is in the
+        //    past must not fire immediately on save. This matters especially for
+        //    a session-bound task, whose catch-up runs on every file-watch
+        //    reload (not just initial load), so a bare cron edit would fire it.
+        //  - one-shot→recurring: the anchor source flips from createdAt to
+        //    lastFiredAt, so re-seat it rather than inherit a stale value.
+        // Skipped when the task ends up disabled (it won't fire) — the eventual
+        // re-enable re-seats it then. (Trade-off: a re-seated never-run task
+        // reads "last run: now" not "never run" — cosmetic, preferred over an
+        // unwanted real fire.)
+        const justReEnabled =
+          current.enabled === false && patch.enabled === true;
+        const cronChanged =
+          patch.cron !== undefined && patch.cron !== current.cron;
+        const becameRecurring =
+          patch.recurring === true && current.recurring !== true;
         if (
-          current.enabled === false &&
-          patch.enabled === true &&
-          next.recurring
+          next.enabled !== false &&
+          next.recurring &&
+          (justReEnabled || cronChanged || becameRecurring)
         ) {
           const now = Date.now();
           next.lastFiredAt = now - (now % 60_000);

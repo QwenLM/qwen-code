@@ -17,19 +17,35 @@
  *
  * This is a periodic heartbeat: it reads the durable-tasks file, collects the
  * distinct bound session ids, and calls `bridge.recordHeartbeat` on each so the
- * reaper's "idle since" clock never crosses the timeout. It only keeps ALREADY
- * LIVE sessions alive — reloading a session that died (e.g. across a daemon
- * restart) is a separate concern.
+ * reaper's "idle since" clock never crosses the timeout. When a heartbeat fails
+ * because the session is no longer resident — the common case being a task that
+ * was disabled/archived (its session let go by the reaper) and then re-enabled/
+ * unarchived — it best-effort RELOADS the session so its in-child scheduler
+ * resumes ticking. Without that, a re-enabled bound task would show enabled with
+ * a live countdown yet never fire until the user opened it or the daemon
+ * restarted. This revive covers the unarchive path and the PATCH false→true
+ * path uniformly, and retries every interval; a slot missed during the revive
+ * gap is caught up when the session loads.
  */
 
 import { readCronTasks, createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
 
-/** The slice of the bridge the keepalive needs — narrowed for testability. */
+/** The slice of the bridge the keepalive needs — narrowed for testability.
+ * `recordHeartbeat` keeps a live session resident; `loadSession` revives one
+ * the reaper already let go (a re-enabled task's session). */
 export interface KeepaliveBridge {
   recordHeartbeat(sessionId: string): unknown;
+  loadSession(req: {
+    sessionId: string;
+    workspaceCwd: string;
+    historyReplay?: 'stream' | 'response';
+  }): Promise<unknown>;
 }
+
+/** Per-session revive-load timeout: a hung reload must not stall the sweep. */
+const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
 
 export interface ScheduledTaskKeepalive {
   /** Stops the periodic heartbeat. Idempotent. */
@@ -77,11 +93,26 @@ export function startScheduledTaskKeepalive(
       try {
         bridge.recordHeartbeat(sessionId);
       } catch (err) {
-        // The bound session is already gone (task deleted, or session closed
-        // out from under us) — its heartbeat is moot. Reloading a dead
-        // session is not this component's job. Debug-only: an expected,
-        // frequent case, so it must not spam stderr.
+        // Heartbeat failed → the session isn't resident. For an ENABLED bound
+        // task that means the reaper let it go while the task was disabled/
+        // archived and it's now re-enabled: revive it so its in-child scheduler
+        // resumes. Best-effort and debug-only (an expected, recoverable case);
+        // a persistent failure (transcript truly gone) just retries next pass.
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
+        try {
+          await withTimeout(
+            bridge.loadSession({
+              sessionId,
+              workspaceCwd: boundWorkspace,
+              historyReplay: 'response',
+            }),
+            KEEPALIVE_REVIVE_TIMEOUT_MS,
+            sessionId,
+          );
+          log.debug('keepalive: revived non-resident session', sessionId);
+        } catch (loadErr) {
+          log.debug('keepalive: failed to revive session', sessionId, loadErr);
+        }
       }
     }
   };

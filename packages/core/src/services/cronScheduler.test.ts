@@ -5,8 +5,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildMissedCronNotification,
   CronScheduler,
+  nextDurableFireMs,
   type CronJob,
 } from './cronScheduler.js';
+import { nextFireTime } from '../utils/cronParser.js';
 import { getLockFilePath } from './cronTasksLock.js';
 import {
   getCronFilePath,
@@ -2180,5 +2182,76 @@ describe('buildMissedCronNotification', () => {
     expect(text).toContain('whether to run each one now');
     expect(text).toContain('first prompt');
     expect(text).toContain('second prompt');
+  });
+});
+
+describe('nextDurableFireMs', () => {
+  const anchor = 1_700_000_000_000;
+  const recurring = (over: Partial<DurableCronTask> = {}): DurableCronTask => ({
+    id: 'job',
+    cron: '0 9 * * *',
+    prompt: 'p',
+    recurring: true,
+    createdAt: anchor,
+    lastFiredAt: anchor,
+    ...over,
+  });
+
+  it('adds the tick jitter on top of the cron boundary (never before it)', () => {
+    // Ground truth: the tick fires at boundary + jitter. The helper must land
+    // in [boundary, boundary + recurring jitter cap], anchored on lastFiredAt.
+    const boundary = nextFireTime('0 9 * * *', new Date(anchor)).getTime();
+    const fire = nextDurableFireMs(recurring());
+    expect(fire).not.toBeNull();
+    expect(fire!).toBeGreaterThanOrEqual(boundary); // jitter is non-negative
+    expect(fire! - boundary).toBeLessThanOrEqual(15 * 60_000); // capped at 15m
+  });
+
+  it('is deterministic for a given task', () => {
+    expect(nextDurableFireMs(recurring())).toBe(nextDurableFireMs(recurring()));
+  });
+
+  it('actually applies a per-task jitter (not the bare boundary)', () => {
+    // The bug being fixed returned the bare boundary for every task. With jitter
+    // wired, distinct ids offset differently, so across a batch at least one
+    // lands strictly after the boundary — and none before it.
+    const boundary = nextFireTime('0 9 * * *', new Date(anchor)).getTime();
+    const fires = Array.from({ length: 40 }, (_, i) =>
+      nextDurableFireMs(recurring({ id: `job-${i}` })),
+    );
+    expect(fires.every((f) => f !== null && f >= boundary)).toBe(true);
+    expect(fires.some((f) => f! > boundary)).toBe(true);
+  });
+
+  it('anchors a recurring task on lastFiredAt (different fire → different result)', () => {
+    const early = nextDurableFireMs(recurring({ lastFiredAt: anchor }));
+    const later = nextDurableFireMs(
+      recurring({ lastFiredAt: anchor + 5 * 86_400_000 }),
+    );
+    expect(early).not.toBe(later);
+  });
+
+  it('anchors a one-shot task on createdAt, ignoring lastFiredAt', () => {
+    const base = {
+      id: 'os',
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      createdAt: anchor,
+    };
+    const a = nextDurableFireMs({
+      ...base,
+      recurring: false,
+      lastFiredAt: anchor,
+    });
+    const b = nextDurableFireMs({
+      ...base,
+      recurring: false,
+      lastFiredAt: anchor + 5 * 86_400_000,
+    });
+    expect(a).toBe(b); // lastFiredAt does not move a one-shot's projection
+  });
+
+  it('returns null for a cron that cannot be projected', () => {
+    expect(nextDurableFireMs(recurring({ cron: 'not a cron' }))).toBeNull();
   });
 });

@@ -34,9 +34,13 @@ describe('scheduled-task keepalive', () => {
   let scratch: string;
   let workspace: string;
   let beats: string[];
+  let loads: string[];
   const bridge = {
     recordHeartbeat: (id: string) => {
       beats.push(id);
+    },
+    loadSession: async (req: { sessionId: string }) => {
+      loads.push(req.sessionId);
     },
   };
 
@@ -46,6 +50,7 @@ describe('scheduled-task keepalive', () => {
     await fsp.mkdir(workspace, { recursive: true });
     Storage.setRuntimeBaseDir(scratch);
     beats = [];
+    loads = [];
   });
 
   afterEach(async () => {
@@ -82,26 +87,57 @@ describe('scheduled-task keepalive', () => {
     expect(beats).toEqual([]);
   });
 
-  it('keeps heartbeating siblings when one session is already gone', async () => {
+  it('revives a non-resident session and keeps heartbeating siblings', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'a', sessionId: 'sess-1' }),
       task({ id: 'b', sessionId: 'sess-2' }),
     ]);
-    const throwing = {
+    const reviving = {
       recordHeartbeat: (id: string) => {
-        if (id === 'sess-1') throw new Error('session gone');
+        if (id === 'sess-1') throw new Error('not resident');
         beats.push(id);
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
       },
     };
     const ka = startScheduledTaskKeepalive({
-      bridge: throwing,
+      bridge: reviving,
       boundWorkspace: workspace,
       intervalMs: 60_000,
     });
     await ka.tick();
     ka.stop();
-    // sess-1 threw (already closed) but sess-2 still got its heartbeat.
+    // sess-1's heartbeat failed (reaper let it go) → reloaded to resume its
+    // scheduler; sess-2 was resident and still got its heartbeat.
+    expect(loads).toEqual(['sess-1']);
     expect(beats).toEqual(['sess-2']);
+  });
+
+  it('a failed revive is swallowed and does not block siblings', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+      task({ id: 'b', sessionId: 'sess-2' }),
+    ]);
+    const reviving = {
+      recordHeartbeat: (id: string) => {
+        if (id === 'sess-1') throw new Error('not resident');
+        beats.push(id);
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
+        if (req.sessionId === 'sess-1') throw new Error('transcript gone');
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: reviving,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await expect(ka.tick()).resolves.toBeUndefined();
+    ka.stop();
+    expect(loads).toEqual(['sess-1']); // revive attempted despite failing
+    expect(beats).toEqual(['sess-2']); // sibling unaffected
   });
 
   it('stop() is idempotent', async () => {

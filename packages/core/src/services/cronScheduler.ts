@@ -1461,3 +1461,27 @@ function computeNextFireMs(
     return null;
   }
 }
+
+/**
+ * The effective next fire time (epoch ms) the tick will ACTUALLY produce for a
+ * durable task — the same authority the scheduler's catch-up detection uses —
+ * so a UI countdown lines up with the real fire instead of the bare cron
+ * boundary. The tick fires a boundary slot at `slot + jitterMs` (see
+ * {@link processJob}); bare `nextFireTime` omits that jitter and would read up
+ * to the jitter window (≤15 min for recurring) early. Anchored on the last fire
+ * (recurring) / creation (one-shot), not on `now`, so a slot pending only its
+ * jitter isn't skipped to the following period. Returns null when the cron
+ * can't be projected. Callers should treat a disabled task as "no next fire".
+ */
+export function nextDurableFireMs(
+  task: Pick<
+    DurableCronTask,
+    'id' | 'cron' | 'recurring' | 'lastFiredAt' | 'createdAt'
+  >,
+): number | null {
+  const jitter = computeJitter(task.id, task.cron, task.recurring);
+  const anchor = task.recurring
+    ? (task.lastFiredAt ?? task.createdAt)
+    : task.createdAt;
+  return computeNextFireMs(task.cron, anchor, jitter);
+}
