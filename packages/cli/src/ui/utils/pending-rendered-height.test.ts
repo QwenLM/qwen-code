@@ -280,6 +280,26 @@ describe('fitPendingSlice', () => {
     expect(clipped).toBe(false);
   });
 
+  it('anchors the vertical trigger to the first row (a tall LATER row stays horizontal)', () => {
+    // Mirrors TableRenderer: the format is decided from the header + FIRST data
+    // row only, so a short first row keeps the table horizontal even when a
+    // later row wraps past MAX_ROW_LINES. Horizontal height sums every row:
+    // header(1)+row1(1)+row2(ceil(180/34)=6) + 1 sep + chrome 5 = 14. intro(1)+14
+    // = 15 > budget 12 → clipped. If the trigger looked at all rows it would
+    // charge the shorter vertical height (~9) and wrongly keep it.
+    const tall = 'z'.repeat(180);
+    const lines = [
+      'intro',
+      '| A | B |',
+      '| - | - |',
+      '| x | y |',
+      `| ${tall} | y |`,
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 12, CLAMP);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1);
+  });
+
   it('accounts for wrapping of non-table lines', () => {
     // Each line is 30 cols at width 10 → 3 rows. Budget 6 → 2 lines fit.
     const lines = Array.from({ length: 5 }, () => 'a'.repeat(30));

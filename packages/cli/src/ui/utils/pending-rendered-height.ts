@@ -255,11 +255,16 @@ export function fitPendingSlice(
           }
         }
         contentRows += rowMax;
-        maxRowLines = Math.max(maxRowLines, rowMax);
+        // Vertical trigger mirrors TableRenderer, which anchors the format choice
+        // to the header + FIRST data row only (r === i or i+2) so appending rows
+        // never flips the format mid-stream. Heights above still sum every row.
+        if (r === i || r === i + 2) {
+          maxRowLines = Math.max(maxRowLines, rowMax);
+        }
       }
-      // `maxRowLines` is an upper bound on the renderer's real wrap count (the
-      // equal column share never widens a cell), so a table the renderer lays out
-      // vertically is never missed here — the fix for the wide-terminal lock.
+      // `maxRowLines` (header + first row) is an upper bound on the renderer's
+      // real first-row wrap count — the equal column share never widens a cell —
+      // so it agrees with TableRenderer on which format is chosen.
       const usesVertical =
         contentWidth < minHorizontalWidth || maxRowLines > TABLE_MAX_ROW_LINES;
       const rows = usesVertical
