@@ -173,52 +173,56 @@ async function readLargeUtf8Range(
     }
   }
 
-  for await (const rawChunk of stream) {
-    request.signal?.throwIfAborted();
-    let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
-    if (firstChunk) {
-      firstChunk = false;
-      if (chunk.charCodeAt(0) === 0xfeff) {
-        chunk = chunk.slice(1);
-        bom = true;
-      }
-    }
-
-    if (
-      (previousChunkEndedWithCR && chunk.startsWith('\n')) ||
-      chunk.includes('\r\n')
-    ) {
-      lineEnding = 'crlf';
-    }
-    previousChunkEndedWithCR = chunk.endsWith('\r');
-
-    let start = 0;
-    let newline = chunk.indexOf('\n', start);
-    while (newline !== -1) {
-      if (isSelectedLine()) {
-        appendSelected(chunk.slice(start, newline));
-        if (currentLine + 1 < endLine) {
-          appendSelected('\n');
+  try {
+    for await (const rawChunk of stream) {
+      request.signal?.throwIfAborted();
+      let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
+      if (firstChunk) {
+        firstChunk = false;
+        if (chunk.charCodeAt(0) === 0xfeff) {
+          chunk = chunk.slice(1);
+          bom = true;
         }
       }
-      currentLine++;
-      start = newline + 1;
+
+      if (
+        (previousChunkEndedWithCR && chunk.startsWith('\n')) ||
+        chunk.includes('\r\n')
+      ) {
+        lineEnding = 'crlf';
+      }
+      previousChunkEndedWithCR = chunk.endsWith('\r');
+
+      let start = 0;
+      let newline = chunk.indexOf('\n', start);
+      while (newline !== -1) {
+        if (isSelectedLine()) {
+          appendSelected(chunk.slice(start, newline));
+          if (currentLine + 1 < endLine) {
+            appendSelected('\n');
+          }
+        }
+        currentLine++;
+        start = newline + 1;
+        if (currentLine >= endLine || truncatedByBytes) {
+          originalLineCountExact = false;
+          stoppedEarly = true;
+          break;
+        }
+        newline = chunk.indexOf('\n', start);
+      }
+
+      if (start < chunk.length && isSelectedLine()) {
+        appendSelected(chunk.slice(start));
+      }
       if (currentLine >= endLine || truncatedByBytes) {
         originalLineCountExact = false;
         stoppedEarly = true;
         break;
       }
-      newline = chunk.indexOf('\n', start);
     }
-
-    if (start < chunk.length && isSelectedLine()) {
-      appendSelected(chunk.slice(start));
-    }
-    if (currentLine >= endLine || truncatedByBytes) {
-      originalLineCountExact = false;
-      stoppedEarly = true;
-      break;
-    }
+  } finally {
+    stream.destroy();
   }
 
   if (!stoppedEarly) {

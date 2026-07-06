@@ -309,7 +309,13 @@ export async function readFileWithLineAndLimit(params: {
   truncatedByBytes?: boolean;
 }> {
   const { path: filePath, limit, line, maxOutputBytes, signal } = params;
-  if (Number.isFinite(limit)) {
+  const stats = await fs.promises.stat(filePath);
+  if (
+    Number.isFinite(limit) ||
+    (stats.isFile() &&
+      stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE &&
+      maxOutputBytes !== undefined)
+  ) {
     return readTextRange({
       path: filePath,
       offset: line || 0,
@@ -319,7 +325,6 @@ export async function readFileWithLineAndLimit(params: {
     });
   }
 
-  const stats = await fs.promises.stat(filePath);
   if (stats.isFile() && stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE) {
     throw new Error(
       `File too large for full read (${stats.size} bytes). Use offset/limit to read a range.`,
@@ -1129,10 +1134,18 @@ export async function processSingleFileContent(
             maxOutputBytes: getRangeReadByteLimit(config),
             ...(signal !== undefined ? { signal } : {}),
           });
-        const originalLineCount =
-          _meta?.originalLineCount ?? (await countFileLines(filePath));
-        const originalLineCountExact = _meta?.originalLineCountExact !== false;
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
+        const hasOriginalLineCount = _meta?.originalLineCount !== undefined;
+        const originalLineCount =
+          _meta?.originalLineCount ??
+          (stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE
+            ? selectedLines.length
+            : await countFileLines(filePath));
+        const originalLineCountExact =
+          _meta?.originalLineCountExact === false
+            ? false
+            : hasOriginalLineCount ||
+              stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE;
         const startLine = offset || 0;
         const configCharLimit = config.getTruncateToolOutputThreshold();
 

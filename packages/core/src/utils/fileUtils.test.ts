@@ -1614,6 +1614,31 @@ describe('fileUtils', () => {
       expect(result.linesShown?.[0]).toBe(1);
     });
 
+    it('should stream large text files when line truncation is disabled', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+      const noLineLimitConfig = {
+        ...mockConfig,
+        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        noLineLimitConfig,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('... [truncated]');
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from test.txt (truncated)',
+      );
+      expect(result.isTruncated).toBe(true);
+      expect(result.originalLineCountExact).toBe(false);
+    });
+
     it('should mark byte truncation metadata without character truncation', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'visible');
       const byteTruncatedConfig = {
@@ -1644,6 +1669,32 @@ describe('fileUtils', () => {
         'Read lines 1-1 of at least 1 from test.txt (truncated)',
       );
       expect(result.isTruncated).toBe(true);
+    });
+
+    it('should avoid full line counting when large file metadata is missing', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+      const missingMetadataConfig = {
+        ...mockConfig,
+        getFileSystemService: () => ({
+          readTextFile: vi.fn().mockResolvedValue({
+            content: 'visible',
+          }),
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        missingMetadataConfig,
+      );
+
+      expect(result.originalLineCount).toBe(1);
+      expect(result.originalLineCountExact).toBe(false);
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from test.txt',
+      );
     });
 
     it('should preserve disabled output truncation for large text files', async () => {
