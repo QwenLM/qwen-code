@@ -1,194 +1,601 @@
-# Extension File Reload
+# Extension File Reload Design
 
-## Summary
+## Background
 
-This change makes extension runtime updates visible without requiring a full CLI restart. It preserves the existing immediate UI mutation path for extension enablement and installation, adds a file watcher for out-of-band extension edits, and introduces `/reload-plugins` for package-level changes that cannot be safely applied as content-only updates.
+Extension changes currently enter the runtime from two different directions.
+User-initiated UI mutations, such as enable, disable, install, uninstall, and
+update, already go through `ExtensionManager` and can refresh runtime state
+directly. Out-of-band filesystem changes, such as editing an installed
+extension's `skills/`, `commands/`, `hooks/`, or `qwen-extension.json`, are not
+owned by a single UI action and therefore need a watcher-driven path.
 
-The design separates extension changes into two classes:
+This design adds that missing watcher path while preserving the direct mutation
+path. It follows the same layering used by the MCP and LSP hot-reload designs:
 
-- Content-level changes can be refreshed automatically because they only rebuild already-loaded runtime consumers. These include `commands/`, `skills/`, and `agents/`.
-- Package-level changes mark the extension set stale and ask the user to run `/reload-plugins`. These include extension manifests, install metadata, enablement and preference files, hooks, context files, extension directory creation/removal, and linked extension package-level edits.
+- the CLI decides when filesystem changes should trigger a reload or a user
+  notification;
+- Core owns how extension runtime state is refreshed;
+- UI components consume a small event/state object instead of polling extension
+  files directly.
 
-This split keeps common authoring workflows fast while avoiding silent partial reloads for changes that affect package identity, hook execution, context injection, or installed extension topology.
+The key constraint is that not every extension file can be safely hot-applied in
+the same way. Content-like capability files can be refreshed automatically, but
+package-level changes should ask the user to run `/reload-plugins` so the
+extension cache, runtime tools, hooks, context files, and slash command list are
+rebuilt from one coherent snapshot.
+
+## Current Code Assessment
+
+- `ExtensionManager` already loads extension manifests, convention directories,
+  install metadata, enablement state, marketplace source state, commands,
+  skills, agents, hooks, MCP declarations, and LSP declarations.
+- UI extension operations already call `ExtensionManager.refreshTools()` after
+  changing runtime-relevant state. That path refreshes MCP, skills, subagents,
+  hooks, and hierarchical memory through Core.
+- Slash command completion is built by `CommandService.create()` from loaders.
+  Extension commands and skill-backed slash commands do not automatically
+  appear unless `reloadCommands()` rebuilds that command service.
+- Skill and subagent managers have cache refresh APIs, but those caches are
+  separate from slash command completion.
+- Hooks are owned by `HookSystem` and `HookRegistry`. Recreating the whole hook
+  system would lose agent-scoped temporary hooks, so reload must target
+  configured hooks only.
+- `SettingsWatcher` and existing MCP/LSP watchers do not cover installed
+  extension package content. Extension-specific files need their own watcher.
+- Linked extensions can live outside the user extension directory, so watching
+  only `~/.qwen/extensions` misses active development workflows.
 
 ## Goals
 
-- Keep UI extension mutations immediately effective.
-- Detect manual edits, additions, and removals under the user extension directory.
-- Detect edits in linked extension source directories.
-- Auto-refresh extension commands, skills, and agents when their content files change.
-- Prompt for `/reload-plugins` when extension package state changes.
-- Refresh hooks as part of runtime reload.
-- Keep slash command completion in sync after command and skill changes.
-- Avoid noisy notifications for changes made by Qwen's own extension mutation operations.
-- Surface MCP and hook reload failures instead of reporting a misleading successful reload.
+Make extension changes take effect in the current interactive session without a
+full CLI restart:
 
-## Non-Goals
+- keep UI extension mutations immediately effective;
+- detect manual extension edits, additions, and removals under the user
+  extension directory;
+- detect edits in linked extension source directories;
+- auto-refresh content-level capability files under `commands/`, `skills/`,
+  and `agents/`;
+- prompt the user to run `/reload-plugins` for package-level changes;
+- refresh hooks as part of runtime reload without losing agent-scoped hooks;
+- keep slash command completion in sync with command and skill changes;
+- suppress watcher notifications for changes written by Qwen's own extension
+  mutations;
+- surface MCP and hook reload failures instead of reporting a misleading
+  successful reload summary.
 
-- This does not make hook changes content-auto-refreshable. Hooks can affect command execution and security-sensitive behavior, so they remain package-level stale changes.
-- This does not hot-reload arbitrary files under an extension. Unknown files are ignored unless they are context files resolved from the extension configuration.
-- This does not add per-extension incremental MCP restart. Runtime refresh still delegates to the existing MCP reinitialization entry point.
-- This does not change extension discovery or install source semantics.
+## Non-goals
 
-## Main Components
+- Do not make hook file edits content-auto-refreshable. Hook behavior can affect
+  command execution and security-sensitive workflows, so hook edits are treated
+  as package-level changes.
+- Do not hot-reload arbitrary extension files. Unknown files are ignored unless
+  they are resolved context files.
+- Do not add per-extension incremental MCP restart. This design continues to use
+  the existing MCP reinitialization entry point.
+- Do not change extension discovery, conversion, installation source parsing, or
+  marketplace semantics.
+- Do not support runtime toggling of bare mode. The watcher is simply not
+  started in bare mode.
 
-### ExtensionRefreshState
+## Code Structure
 
-`ExtensionRefreshState` is the shared event and state object between the filesystem watcher, slash command processor, and `/reload-plugins`.
+The implementation is intentionally split by layer.
 
-It owns four user-visible events:
+```text
+packages/core/src/extension/
+  extensionManager.ts
+    Extension mutation lifecycle events.
+    UI mutation methods still own direct runtime refresh.
 
-- `ExtensionContentChanged`: content-only files changed and can be auto-refreshed.
-- `ExtensionRefreshNeeded`: package-level extension state changed and the user should run `/reload-plugins`.
-- `ExtensionsReloadStarted`: a manual reload started, so pending content refresh work should be canceled.
-- `ExtensionsReloaded`: a reload completed or was canceled from the UI state perspective, so stale flags and pending timers can be cleared.
+  extension-runtime-refresh.ts
+    Core runtime refresh contract for extension mutations.
 
-It also has a short suppression window used during Qwen-initiated extension mutations. That window prevents the watcher from reporting changes caused by the mutation itself, such as install, uninstall, enable, disable, or update writing extension metadata.
+packages/core/src/hooks/
+  hookRegistry.ts
+    Reload configured hooks while preserving agent-scoped hooks.
 
-### ExtensionFileWatcher
+  hookSystem.ts
+    Public hook reload facade used by extension runtime refresh.
 
-`ExtensionFileWatcher` watches the user extension directory and linked extension source roots. It is created during interactive CLI startup unless bare mode is enabled.
+packages/cli/src/config/
+  extension-refresh-state.ts
+    Shared event/state object for watcher, slash processor, and reload command.
 
-The watcher observes:
+  extension-file-watcher.ts
+    Filesystem watcher and path classifier.
 
-- the user extension root;
-- linked extension source roots from active extension metadata;
-- the parent directory of the extension root when the extension root does not exist yet.
+  extension-runtime-reload.ts
+    CLI reload helpers for /reload-plugins and content auto-refresh.
 
-It ignores `node_modules`, `.git`, editor backup files, temporary files, swap files, and `.DS_Store`. Symlink following is disabled so an extension cannot cause chokidar to watch arbitrary external trees through a symlink inside the extension directory.
+packages/cli/src/ui/commands/
+  reload-plugins-command.ts
+    Interactive slash command for package-level extension reload.
 
-The watcher classifies paths into either `auto`, `stale`, or ignored:
+packages/cli/src/ui/hooks/
+  slashCommandProcessor.ts
+    Event consumers for stale notifications and content auto-refresh.
 
-- `commands/`, `skills/`, and `agents/` are `auto`.
-- `hooks/`, `qwen-extension.json`, `.qwen-extension-install.json`, context files, top-level enablement/preference/marketplace files, extension directory add/remove, and linked package-level edits are `stale`.
-- Unknown paths are ignored.
+packages/cli/src/
+  gemini.tsx
+  ui/AppContainer.tsx
+  ui/startInteractiveUI.tsx
+    Startup and dependency injection for ExtensionRefreshState and watcher.
+```
 
-When the user extension directory is created after startup, the bootstrap watcher marks extensions stale and restarts the main watcher on the next microtask. This avoids closing the bootstrap watcher synchronously while chokidar is dispatching the current event.
+## Design
 
-### ExtensionManager Mutation Events
+### 1. Classify Filesystem Changes
 
-`ExtensionManager` now exposes `addMutationListener()`. Mutating methods emit paired `start` and `end` events with a stable mutation id.
+`ExtensionFileWatcher` maps a chokidar event to one of three outcomes:
 
-The watcher uses those events to suppress filesystem notifications while Qwen is intentionally writing extension files, then restarts watching after the outer mutation settles. The id-based pairing handles nested or overlapping mutations, such as install triggering enable internally.
+```ts
+type RefreshAction = 'auto' | 'stale' | false;
+```
 
-Mutation events are reserved for runtime-relevant extension changes:
+The classification is deliberately conservative.
 
-- enable and disable;
-- install, uninstall, and update;
-- source add/remove;
-- scope changes;
-- per-extension MCP server disablement.
+| Path class                       | Action  | Reason                                                                                           |
+| -------------------------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `commands/**`                    | `auto`  | Slash command loaders can rebuild from the existing extension cache.                             |
+| `skills/**`                      | `auto`  | Skill cache and slash command loaders can rebuild without changing package identity.             |
+| `agents/**`                      | `auto`  | Subagent cache can rebuild without changing package identity.                                    |
+| `hooks/**`                       | `stale` | Hook execution behavior should be reloaded from a coherent package snapshot.                     |
+| `qwen-extension.json`            | `stale` | Manifest can change commands, skills, agents, hooks, MCP, LSP, context file names, and metadata. |
+| `.qwen-extension-install.json`   | `stale` | Install metadata affects linked source roots and package identity.                               |
+| configured context files         | `stale` | Model context can change and should be reloaded explicitly.                                      |
+| extension directory add/remove   | `stale` | Installed extension topology changed.                                                            |
+| top-level extension config files | `stale` | Enablement, preferences, or marketplaces changed outside UI mutation path.                       |
+| unknown files                    | ignored | Avoid refreshing for build artifacts or unrelated data.                                          |
 
-Preference-only operations do not emit runtime mutation events. In particular, toggling favorites and recording a marketplace source update timestamp do not suppress watcher events because they do not change extension runtime capabilities or watched extension contents.
+The same classifier is used for user-installed extensions and linked extension
+source roots. For linked roots, the watcher first finds the owning linked
+extension and then classifies the path relative to that source root.
 
-### Runtime Refresh
+### 2. Watch User and Linked Extension Roots
 
-There are two runtime refresh entry points.
+`ExtensionFileWatcher.startWatching()` builds watch roots from:
 
-`refreshExtensionRuntime()` lives in core and is used by extension UI mutations. It refreshes runtime subsystems in this order:
+1. `Storage.getUserExtensionsDir()`, when it exists;
+2. active linked extension source paths from install metadata;
+3. the parent of the user extension directory, only when the extension
+   directory does not exist yet.
 
-1. Reinitialize MCP servers.
-2. Refresh skills, subagents, and hooks.
-3. Refresh hierarchical memory.
+The parent bootstrap watcher covers first extension installation or manual
+creation of the extension directory after startup. When the directory appears,
+the watcher marks extension state stale and schedules `restartWatching()` in a
+microtask. Scheduling the restart avoids closing the bootstrap watcher while
+chokidar is still dispatching the event.
 
-MCP reinitialization is fatal for the operation. If it fails, callers should surface the error because extension MCP tools will not be available. Hook reload failures are also surfaced after the parallel refresh leg settles, because otherwise `/reload-plugins` could report hooks as available when the hook registry did not reload.
+Watcher options:
 
-Skill, subagent, and memory refresh failures are logged and treated as best effort. Those caches can be refreshed again later, and they should not roll back extension enablement or installation metadata that has already been written.
+```ts
+watchFs(roots, {
+  ignoreInitial: true,
+  followSymlinks: false,
+  awaitWriteFinish: {
+    stabilityThreshold: 200,
+    pollInterval: 50,
+  },
+  ignored: (filePath) => this.isIgnored(filePath),
+});
+```
 
-`reloadPluginsRuntime()` lives in the CLI layer and is used by `/reload-plugins`. It refreshes extension cache, refreshes runtime tools, reloads slash commands, and returns a summary of active extension capabilities.
+`followSymlinks: false` keeps an extension from causing Qwen to watch arbitrary
+external paths through symlinks. The ignore filter skips `node_modules`, `.git`,
+common editor backup files, swap files, temporary files, and `.DS_Store`.
 
-### Content Auto-Refresh
+### 3. Share Reload State Through ExtensionRefreshState
 
-Content-level file changes call `refreshExtensionContentRuntime()`. It refreshes extension cache, skill cache, subagent cache, and slash commands. It aggregates failures and reports them through the slash command processor, which tells the user to run `/reload-plugins` if auto-refresh fails.
+`ExtensionRefreshState` is the small event/state primitive shared by the
+watcher, the slash command processor, and `/reload-plugins`.
 
-The slash command processor serializes content refreshes. If a second content event arrives while a refresh is running, it marks another pass as pending and runs it after the current pass finishes. The loop has a small upper bound so noisy editors or build processes cannot keep one refresh task alive indefinitely.
+Key methods:
 
-If package-level stale state is pending, content auto-refresh exits early. The user should run `/reload-plugins` so the package-level reload and content-level refresh happen from the same extension cache snapshot.
+```ts
+markExtensionsChanged(reason?: string): boolean;
+markExtensionContentChanged(reason?: string): boolean;
+clearExtensionsChanged(): void;
+notifyExtensionsReloadStarted(): void;
+needsExtensionRefresh(): boolean;
+beginSuppression(onSettle?: () => void): () => void;
+suppressNotifications<T>(fn: () => T, onSettle?: () => void): T;
+```
 
-### Slash Commands
+Events:
 
-`/reload-plugins` is registered as a built-in slash command. It is only supported in interactive mode.
+| Event                     | Producer                                | Consumer                    | Meaning                                                              |
+| ------------------------- | --------------------------------------- | --------------------------- | -------------------------------------------------------------------- |
+| `ExtensionContentChanged` | `ExtensionFileWatcher`                  | `useSlashCommandProcessor`  | Content-level files changed; schedule auto-refresh.                  |
+| `ExtensionRefreshNeeded`  | `ExtensionFileWatcher`                  | `useSlashCommandProcessor`  | Package-level state changed; tell the user to run `/reload-plugins`. |
+| `ExtensionsReloadStarted` | `/reload-plugins`                       | `useSlashCommandProcessor`  | Cancel pending content refresh timers before manual reload.          |
+| `ExtensionsReloaded`      | `/reload-plugins`, watcher restart path | watcher and slash processor | Clear stale flags and restart/cancel pending work.                   |
 
-The command:
+`markExtensionsChanged()` deduplicates stale notifications until the state is
+cleared. Content-change notifications are not deduplicated by this state object,
+because the slash command processor owns debounce and serialization.
 
-1. emits `ExtensionsReloadStarted`;
-2. runs `reloadPluginsRuntime()`;
-3. clears stale extension state on success or failure;
-4. returns either a localized summary or an error message.
+### 4. Suppress Watcher Noise During Programmatic Mutations
 
-Clearing stale state on failure is intentional. Without it, a failed manual reload can leave `ExtensionRefreshState` stuck in a stale state where future filesystem notifications are deduplicated away and content auto-refresh remains bypassed.
+`ExtensionManager` exposes:
 
-Slash command completion is refreshed from two paths:
+```ts
+interface ExtensionMutationEvent {
+  id: number;
+  phase: 'start' | 'end';
+  operation: string;
+}
 
-- content auto-refresh calls `reloadCommands()` after command/skill/agent content changes;
-- `/reload-plugins` calls `reloadCommands()` after package-level reload.
+addMutationListener(listener: ExtensionMutationListener): () => void;
+```
 
-The skill change listener in the slash command processor still bridges `SkillManager` cache changes into slash command reloads, so skill-backed slash commands stay visible after skill cache rebuilds.
+Runtime-relevant mutation methods call `beginMutation()` and always emit a
+matching end event in `finally`.
 
-### Hooks
+Methods that emit mutation events:
 
-`HookRegistry.reloadConfiguredHooks()` rebuilds configured hooks while preserving agent-scoped temporary hooks. If reloading configured hooks fails, the previous registry entries are restored and the error is rethrown.
+- `enableExtension()`
+- `disableExtension()`
+- `installExtension()`
+- `uninstallExtension()`
+- `updateExtension()`
+- `addSource()`
+- `removeSource()`
+- `setExtensionScope()`
+- `setMcpServerDisabled()`
 
-`HookSystem.reload()` delegates to the registry reload method. This lets extension runtime refresh update hooks without recreating the whole hook system or losing agent-scoped hooks registered during subagent execution.
+Methods that do not emit mutation events:
 
-### UI Wiring
+- `toggleFavorite()`
+- `markSourceUpdated()`
 
-Interactive startup creates a shared `ExtensionRefreshState` and an `ExtensionFileWatcher`. The state object is passed into `AppContainer`, then into `useSlashCommandProcessor` and slash command contexts.
+The watcher keeps `mutation id -> end suppression callback` in a `Map`. This is
+important because install can trigger enable internally, and separate mutations
+can overlap. Pairing by id avoids relying on stack order.
 
-`useSlashCommandProcessor` listens for extension refresh events:
+When the outer suppression depth reaches zero, the watcher restarts. That
+refreshes linked source roots, context file names, and active extension
+metadata after the mutation has settled.
 
-- `ExtensionRefreshNeeded` cancels pending content refresh and prints a system message telling the user to run `/reload-plugins`.
-- `ExtensionContentChanged` schedules debounced auto-refresh.
-- `ExtensionsReloadStarted` and `ExtensionsReloaded` cancel pending content refresh work.
+### 5. Refresh Runtime State From Core
 
-The watcher is stopped during CLI cleanup.
+`refreshExtensionRuntime()` is the Core-side runtime refresh entry point used by
+extension UI mutations.
+
+It refreshes in this order:
+
+1. `config.reinitializeMcpServers(config.getSettingsMcpServers())`
+2. `config.getSkillManager()?.refreshCache()`
+3. `config.getSubagentManager().refreshCache()`
+4. `config.getHookSystem()?.reload()`
+5. `config.refreshHierarchicalMemory()`
+
+MCP reinitialization runs first because skill and subagent tool descriptions can
+depend on the updated MCP tool list.
+
+Skills, subagents, and hooks run through `Promise.allSettled()` so one rejected
+leg does not prevent the others from applying. Hook reload failure is stored and
+rethrown after hierarchical memory has had a chance to refresh. This keeps hook
+failures visible while still applying best-effort cache refreshes.
+
+Failure contract:
+
+- MCP failure propagates immediately and later runtime legs do not run.
+- Hook reload failure propagates after parallel refresh legs and memory refresh
+  settle.
+- Skill refresh failure is logged and best-effort.
+- Subagent refresh failure is logged and best-effort.
+- Hierarchical memory refresh failure is logged and best-effort.
+
+### 6. Reload Package-Level Changes With /reload-plugins
+
+`reloadPluginsRuntime()` is the CLI-side runtime reload helper used by the
+slash command:
+
+```ts
+async function reloadPluginsRuntime(options: {
+  config: Config;
+  reloadCommands?: () => void | Promise<void>;
+}): Promise<ReloadPluginsSummary>;
+```
+
+Flow:
+
+1. `config.getExtensionManager().refreshCache()`
+2. `config.getExtensionManager().refreshTools()`
+3. `reloadCommands()`
+4. summarize active extension capabilities
+
+The summary counts active extension declarations for:
+
+- extensions;
+- commands;
+- skills;
+- agents;
+- hooks;
+- extension MCP servers;
+- extension LSP servers.
+
+`/reload-plugins` owns the user-facing command behavior:
+
+1. require `config`;
+2. emit `ExtensionsReloadStarted`;
+3. call `reloadPluginsRuntime()`;
+4. call `clearExtensionsChanged()` on success or failure;
+5. return either a localized info summary or an error message.
+
+Clearing stale state on failure is intentional. If a failed reload left
+`extensionRefreshNeeded = true`, future file watcher notifications would be
+deduplicated away and content auto-refresh would keep bypassing itself.
+
+### 7. Auto-Refresh Content-Level Changes
+
+`refreshExtensionContentRuntime()` is used for content-only filesystem changes.
+
+Flow:
+
+1. refresh extension cache;
+2. refresh skill cache;
+3. refresh subagent cache;
+4. reload slash commands;
+5. aggregate errors and throw a single message if any leg failed.
+
+The slash command processor listens for `ExtensionContentChanged` and debounces
+the refresh by 250 ms. It serializes refreshes with:
+
+```ts
+extensionContentRefreshRunningRef;
+extensionContentRefreshPendingRef;
+```
+
+If a content event arrives while a refresh is running, the processor marks
+another pass as pending and runs that pass after the current one finishes. A
+small upper bound prevents a noisy editor or build process from keeping the
+same refresh task alive indefinitely.
+
+If `ExtensionRefreshState.needsExtensionRefresh()` is true, content
+auto-refresh exits early. The package-level reload must run first so command,
+skill, agent, hook, MCP, LSP, and context state are rebuilt from one extension
+cache snapshot.
+
+### 8. Reload Hooks Without Dropping Agent-Scoped Hooks
+
+`HookRegistry.reloadConfiguredHooks()` replaces only configured hook entries.
+It preserves entries with `agentScope !== undefined`, because those are
+temporary hooks registered for subagent execution.
+
+Flow:
+
+1. save `previousEntries`;
+2. keep `agentEntries`;
+3. set registry entries to `agentEntries`;
+4. run `processHooksFromConfig()`;
+5. on failure, restore `previousEntries` and rethrow.
+
+`HookSystem.reload()` is a narrow facade that delegates to
+`hookRegistry.reloadConfiguredHooks()`. Runtime reload therefore does not need
+to recreate the whole hook system.
+
+### 9. Wire State Into Interactive UI
+
+Interactive startup creates one shared `ExtensionRefreshState`:
+
+```ts
+const extensionRefreshState = new ExtensionRefreshState();
+const extensionFileWatcher = isBareMode(argv.bare)
+  ? undefined
+  : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
+```
+
+That state is passed through:
+
+```text
+gemini.tsx
+  -> startInteractiveUI(...)
+    -> AppContainer
+      -> useSlashCommandProcessor
+      -> CommandContext.services.extensionRefreshState
+```
+
+`AppContainer` creates a fallback `ExtensionRefreshState` only when one was not
+provided. This keeps tests and alternate UI entry points simple while the main
+interactive path shares state between watcher and slash command processing.
+
+Cleanup unregisters the reload listener and stops the watcher.
+
+## Event Flows
+
+### Content File Edit
+
+```text
+edit extension commands/skills/agents file
+  -> ExtensionFileWatcher classifies as auto
+  -> ExtensionRefreshState.markExtensionContentChanged()
+  -> useSlashCommandProcessor schedules debounced refresh
+  -> refreshExtensionContentRuntime()
+      -> ExtensionManager.refreshCache()
+      -> SkillManager.refreshCache()
+      -> SubagentManager.refreshCache()
+      -> reloadCommands()
+```
+
+### Package-Level File Edit
+
+```text
+edit qwen-extension.json/hooks/context/install metadata/topology
+  -> ExtensionFileWatcher classifies as stale
+  -> ExtensionRefreshState.markExtensionsChanged()
+  -> useSlashCommandProcessor prints:
+       "Extensions changed on disk. Run /reload-plugins to apply updates."
+  -> user runs /reload-plugins
+  -> reloadPluginsRuntime()
+      -> ExtensionManager.refreshCache()
+      -> ExtensionManager.refreshTools()
+      -> reloadCommands()
+```
+
+### UI Mutation
+
+```text
+user enables/disables/installs/uninstalls/updates extension
+  -> ExtensionManager emits mutation start
+  -> ExtensionRefreshState begins suppression
+  -> ExtensionManager writes disk/runtime state
+  -> ExtensionManager.refreshTools()
+      -> refreshExtensionRuntime()
+  -> ExtensionManager emits mutation end
+  -> suppression settles
+  -> ExtensionFileWatcher restarts with fresh roots/context files
+```
+
+## Concurrency and Ordering
+
+- Watcher restarts are generation-guarded. Events from an old watcher instance
+  are ignored after `watchGeneration` changes.
+- Mutation suppression is paired by mutation id, not stack order.
+- `stopWatching()` ends all pending suppressions before dropping watcher
+  references, so suppression depth cannot leak when the watcher is stopped
+  while a mutation is in flight.
+- Content auto-refresh is serialized in the slash command processor. Concurrent
+  events coalesce into at most one pending rerun.
+- `/reload-plugins` emits `ExtensionsReloadStarted` and `ExtensionsReloaded` so
+  pending content refresh timers are canceled around manual reload.
+- Package-level stale state wins over content auto-refresh. If a stale reload is
+  needed, content auto-refresh exits and waits for `/reload-plugins`.
 
 ## Failure Semantics
 
-| Path                        | Failure behavior                                                                                                                              |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| MCP reinitialization        | Propagates to caller. A successful summary would be misleading because MCP tools may be unavailable.                                          |
-| Hook reload                 | Propagates after other parallel refresh legs settle. A successful summary would be misleading because configured hooks may not be registered. |
-| Skill cache refresh         | Logged and best-effort for mutation refresh; aggregated and shown for content auto-refresh.                                                   |
-| Subagent cache refresh      | Logged and best-effort for mutation refresh; aggregated and shown for content auto-refresh.                                                   |
-| Hierarchical memory refresh | Logged and best-effort. It should not roll back extension mutations that already wrote state.                                                 |
-| `/reload-plugins` failure   | Returns an error message and clears stale UI state so future file changes can notify again.                                                   |
+| Path                                                  | Behavior                                                                                                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| MCP reinitialization in mutation or `/reload-plugins` | Propagates. A success message would be misleading because extension MCP tools may be unavailable.                                          |
+| Hook reload in mutation or `/reload-plugins`          | Propagates after other parallel refresh legs settle. A success summary would be misleading because configured hooks may not be registered. |
+| Skill cache refresh during mutation                   | Logged and best-effort.                                                                                                                    |
+| Subagent cache refresh during mutation                | Logged and best-effort.                                                                                                                    |
+| Hierarchical memory refresh during mutation           | Logged and best-effort. It should not roll back already-written extension state.                                                           |
+| Content auto-refresh failure                          | Aggregated and shown in the UI with a `/reload-plugins` fallback.                                                                          |
+| `/reload-plugins` failure                             | Returns an error message and clears stale state so future watcher notifications can fire again.                                            |
+| Hook registry reload failure                          | Restores previous hook entries and rethrows.                                                                                               |
+| Watcher error                                         | Logged through debug logger; the session continues.                                                                                        |
 
-## Test Coverage
+## Tests
 
-The PR adds and updates focused tests for:
+### Core Tests
 
-- filesystem watcher path classification;
-- watcher suppression during extension mutations;
-- bootstrap watcher behavior when the extension directory is created after startup;
-- refresh state events and suppression;
-- content runtime reload success and error aggregation;
-- `/reload-plugins` command registration and behavior;
-- runtime refresh order and failure semantics;
-- mutation lifecycle events around enable, disable, install, uninstall, and update failure;
-- preference-only operations not emitting runtime mutation events;
-- hook registry reload preserving agent-scoped hooks and restoring previous entries on failure;
-- hook system reload delegation.
+`packages/core/src/extension/extension-runtime-refresh.test.ts`
+
+- returns early without config;
+- refreshes MCP before skills/subagents/hooks/memory;
+- propagates MCP reconcile failures;
+- keeps skill refresh failure best-effort;
+- propagates hook reload failures after other refresh legs settle;
+- keeps hierarchical memory failure best-effort.
+
+`packages/core/src/extension/extensionManager.test.ts`
+
+- emits mutation start/end around disable;
+- emits mutation end when disable fails;
+- emits mutation start/end around install, including nested enable events;
+- emits mutation start/end around uninstall;
+- emits mutation start/end around update temp directory failure;
+- does not emit mutation events for favorite changes or source timestamp
+  updates;
+- preserves existing extension loading, command discovery, hook loading, and
+  refreshTools coverage.
+
+`packages/core/src/hooks/hookRegistry.test.ts`
+
+- reloads configured hooks;
+- preserves agent-scoped hooks during reload;
+- restores previous entries when configured hook reload fails.
+
+`packages/core/src/hooks/hookSystem.test.ts`
+
+- delegates reload to the hook registry.
+
+### CLI Tests
+
+`packages/cli/src/config/extension-refresh-state.test.ts`
+
+- emits stale refresh events once until cleared;
+- emits content refresh events;
+- suppresses notifications during mutation suppression;
+- clears stale state and suppression windows correctly.
+
+`packages/cli/src/config/extension-file-watcher.test.ts`
+
+- classifies commands, skills, and agents as auto-refresh;
+- classifies manifests, install metadata, hooks, context files, and extension
+  topology changes as stale;
+- ignores unknown files and ignored directories;
+- watches linked extension sources;
+- suppresses notifications during programmatic mutation;
+- restarts watching after mutation settlement;
+- handles late creation of the extension directory.
+
+`packages/cli/src/config/extension-runtime-reload.test.ts`
+
+- reloads extension cache, runtime tools, and slash commands for
+  `/reload-plugins`;
+- summarizes active extension capabilities;
+- refreshes content runtime components;
+- aggregates content auto-refresh failures.
+
+`packages/cli/src/ui/commands/reload-plugins-command.test.ts`
+
+- registers the command as interactive-only behavior;
+- returns an error when config is missing;
+- reloads runtime and clears stale state on success;
+- clears stale state on failure and returns an error.
+
+`packages/cli/src/services/BuiltinCommandLoader.test.ts`
+
+- includes `/reload-plugins` in built-in command loading.
+
+### Manual Verification
 
 Manual verification should cover:
 
-- enabling and disabling an extension updates runtime capabilities without restart;
-- editing `commands/`, `skills/`, or `agents/` updates slash command/runtime lists automatically;
-- editing `hooks/`, manifests, install metadata, context files, or extension directory topology asks for `/reload-plugins`;
-- `/reload-plugins` refreshes extension commands, skills, agents, hooks, MCP declarations, and LSP declarations;
-- failed `/reload-plugins` does not leave the UI permanently stuck in stale state.
+1. Enable an extension from the UI and confirm commands, skills, agents, MCP,
+   hooks, and context are refreshed without restarting.
+2. Disable the same extension and confirm runtime capabilities are removed or no
+   longer offered.
+3. Edit a command file under `commands/` and confirm slash command completion
+   updates automatically.
+4. Edit a skill file under `skills/` and confirm skill-backed slash command
+   completion updates automatically.
+5. Edit an agent file under `agents/` and confirm agent cache behavior reflects
+   the change.
+6. Edit `hooks/hooks.json`, `qwen-extension.json`, install metadata, context
+   files, or extension directory topology and confirm the UI asks for
+   `/reload-plugins`.
+7. Run `/reload-plugins` and confirm the summary reports extensions, commands,
+   skills, agents, hooks, extension MCP servers, and extension LSP servers.
+8. Force a reload failure and confirm the UI reports the error, then a later
+   filesystem change can still trigger another notification.
 
 ## Tradeoffs
 
-The watcher uses package-level stale prompts for hooks and context files rather than trying to hot-apply them silently. This is more conservative, but it keeps model context and hook execution changes explicit.
-
-MCP refresh remains full-runtime refresh through the existing core entry point. That keeps this PR scoped to extension reload behavior instead of introducing a separate incremental MCP reconciliation layer.
-
-Linked extension source roots are watched directly so extension authors get the same behavior when developing through linked installs. The watcher disables symlink following and ignores build-heavy folders to limit accidental watch scope.
+- Hooks are treated as package-level stale changes even though a configured hook
+  reload API exists. This avoids silently changing hook execution behavior from
+  a background filesystem event.
+- MCP refresh remains full runtime reinitialization. Per-extension incremental
+  MCP restart would reduce cost but would expand this PR into MCP ownership and
+  reconciliation logic.
+- The watcher classifies unknown files as ignored instead of stale. This reduces
+  noise for build artifacts but means extension authors must put runtime
+  capability files in the supported convention directories.
+- Linked extension roots are watched directly. This improves authoring
+  ergonomics but can increase watcher count for users with many linked
+  extensions.
 
 ## Future Work
 
-- Add incremental MCP restart keyed by extension MCP server changes.
-- Add richer user-visible diagnostics for watcher failures such as `ENOSPC` or `EMFILE`.
-- Consider content auto-refresh for hooks only if hook reload can be proven safe and observable enough for interactive users.
-- Optimize linked extension path lookup if many linked extensions become common.
+- Add per-extension incremental MCP reconciliation.
+- Add user-visible diagnostics for fatal watcher errors such as `ENOSPC` or
+  `EMFILE`.
+- Consider a typed reload result from `refreshExtensionRuntime()` if callers
+  need partial-success summaries.
+- Optimize linked extension source lookup with a precomputed root map if many
+  linked extensions become common.
+- Revisit hook content auto-refresh only if hook reload can be made explicit,
+  observable, and safe enough for background application.
