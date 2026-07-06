@@ -1549,6 +1549,7 @@ describe('loadCliConfig', () => {
 
 describe('loadCliConfig telemetry', () => {
   const originalArgv = process.argv;
+  const originalIsTTY = process.stdin.isTTY;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1558,6 +1559,7 @@ describe('loadCliConfig telemetry', () => {
 
   afterEach(() => {
     process.argv = originalArgv;
+    process.stdin.isTTY = originalIsTTY;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
@@ -1594,6 +1596,21 @@ describe('loadCliConfig telemetry', () => {
       expect.objectContaining({
         question: 'hello from prompt-interactive',
         deferTelemetryInitialization: false,
+      }),
+    );
+  });
+
+  it('should defer telemetry for ordinary interactive startup', async () => {
+    process.argv = ['node', 'script.js', '--telemetry'];
+    process.stdin.isTTY = true;
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: '',
+        deferTelemetryInitialization: true,
       }),
     );
   });

@@ -4052,6 +4052,7 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(false);
     expect(initializeTelemetry).toHaveBeenCalledWith(config);
   });
 
@@ -4064,6 +4065,7 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithTelemetry);
 
     expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(true);
     expect(initializeTelemetry).not.toHaveBeenCalled();
   });
 

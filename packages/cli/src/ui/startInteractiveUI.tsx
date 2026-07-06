@@ -202,7 +202,9 @@ export async function startInteractiveUI(
   profileCheckpoint('first_paint');
   startPostRenderPrefetches(config, settings, {
     connectIde: options.postRenderConnectIde ?? true,
-    initializeTelemetry: options.postRenderInitializeTelemetry ?? true,
+    initializeTelemetry:
+      options.postRenderInitializeTelemetry ??
+      config.isTelemetryInitializationDeferred(),
   });
 
   registerCleanup(async () => {

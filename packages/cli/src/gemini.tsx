@@ -752,10 +752,12 @@ export async function main() {
     // For other modes, initialize normally
     const { initializeApp } = await import('./core/initializer.js');
     let input = config.getQuestion();
+    const hasRemoteInput = Boolean(config.getInputFile?.());
     const deferIdeConnection =
       config.isInteractive() &&
       !config.getExperimentalZedIntegration() &&
-      !input;
+      !input &&
+      !hasRemoteInput;
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
     });
@@ -848,7 +850,6 @@ export async function main() {
         initializationResult!,
         {
           postRenderConnectIde: deferIdeConnection,
-          postRenderInitializeTelemetry: !input,
         },
       );
       // Clean up corruption env vars so subsequent relaunch children

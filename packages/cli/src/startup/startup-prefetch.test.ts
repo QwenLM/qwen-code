@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import {
@@ -83,8 +83,13 @@ function makeSettings(
 describe('startupPrefetch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
     mockCheckForUpdates.mockResolvedValue(null);
     mockConnectIdeForStartup.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('starts API preconnect with resolved auth config', () => {
@@ -178,6 +183,29 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
+  });
+
+  it('fails deferred IDE connection when the startup connect hangs', async () => {
+    vi.useFakeTimers();
+    const config = makeConfig();
+    const hangingConnect = new Promise<void>(() => {});
+    mockConnectIdeForStartup.mockReturnValue(hangingConnect);
+
+    startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
+
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(mockRecordStartupEvent).toHaveBeenCalledWith(
+      'startup_prefetch_failed',
+      { name: 'ide_connect' },
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      'ide_connect failed:',
+      expect.objectContaining({
+        message: 'ide_connect timed out after 10000ms',
+      }),
+    );
   });
 
   it('initializes telemetry when requested', async () => {

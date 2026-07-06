@@ -15,8 +15,30 @@ import { recordStartupEvent } from '../utils/startupProfiler.js';
 
 const debugLogger = createDebugLogger('STARTUP_PREFETCH');
 
+const DEFERRED_IDE_CONNECT_TIMEOUT_MS = 10_000;
+
 const earlyStarted = new WeakSet<Config>();
 const postRenderStarted = new WeakSet<Config>();
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  name: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${name} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timeoutId.unref?.();
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  });
+}
 
 /**
  * Starts a best-effort startup task without adding it to the caller's
@@ -90,7 +112,11 @@ export function startPostRenderPrefetches(
   if (options.connectIde && config.getIdeMode()) {
     runDeferredTask('ide_connect', async () => {
       const { connectIdeForStartup } = await import('../core/initializer.js');
-      await connectIdeForStartup(config);
+      await withTimeout(
+        connectIdeForStartup(config),
+        'ide_connect',
+        DEFERRED_IDE_CONNECT_TIMEOUT_MS,
+      );
     });
   }
 

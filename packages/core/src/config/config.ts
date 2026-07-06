@@ -1566,6 +1566,7 @@ export class Config {
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: ResolvedTelemetrySettings;
+  private readonly telemetryInitializationDeferred: boolean;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -1801,6 +1802,8 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.telemetryInitializationDeferred =
+      params.deferTelemetryInitialization ?? false;
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
@@ -1959,7 +1962,7 @@ export class Config {
 
     if (
       this.telemetrySettings.enabled &&
-      !params.deferTelemetryInitialization
+      !this.telemetryInitializationDeferred
     ) {
       initializeTelemetry(this);
     }
@@ -4962,6 +4965,10 @@ export class Config {
 
   getTelemetryEnabled(): boolean {
     return this.telemetrySettings.enabled ?? false;
+  }
+
+  isTelemetryInitializationDeferred(): boolean {
+    return this.telemetryInitializationDeferred;
   }
 
   getTelemetryLogPromptsEnabled(): boolean {
