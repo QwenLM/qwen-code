@@ -252,7 +252,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
         (t) =>
           t.shouldDefer &&
           !t.alwaysLoad &&
-          !registry.isDeferredToolRevealed(t.name),
+          !registry.isDeferredToolRevealed(t.name) &&
+          !this.config.getVisibleTools().has(t.name),
       );
   }
 
@@ -332,7 +333,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // list) and pulling them through setTools() would risk a spurious
       // "GeminiClient not initialised" failure for what is just a
       // schema-inspection call.
-      const isLoadable = tool.shouldDefer && !tool.alwaysLoad;
+      const isLoadable =
+        tool.shouldDefer &&
+        !tool.alwaysLoad &&
+        !this.config.getVisibleTools().has(tool.name);
       if (isLoadable) {
         const wasRevealed = registry.isDeferredToolRevealed(canonical);
         registry.revealDeferredTool(canonical);

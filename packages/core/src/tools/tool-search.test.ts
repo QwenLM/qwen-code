@@ -980,6 +980,91 @@ describe('ToolSearchTool', () => {
     // Reveal rolled back so subsequent ToolSearch can find the tool.
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
   });
+
+  it('excludes visibleTools from keyword-search candidates', async () => {
+    const { registry } = makeConfigWithRegistry();
+    registry.registerTool(
+      new MockTool({
+        name: 'web_fetch',
+        shouldDefer: true,
+        searchHint: 'fetch data from web',
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'monitor',
+        shouldDefer: true,
+        searchHint: 'fetch process output',
+      }),
+    );
+
+    // web_fetch is visible, monitor is not.
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(registry);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockResolvedValue(undefined),
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'fetch' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // monitor matches "fetch" via searchHint, but web_fetch is excluded
+    expect(content).toContain('monitor');
+    expect(content).not.toContain('web_fetch');
+  });
+
+  it('select: for a visibleTool does NOT trigger reveal/setTools', async () => {
+    const { registry } = makeConfigWithRegistry();
+    registry.registerTool(
+      new MockTool({ name: 'web_fetch', shouldDefer: true }),
+    );
+
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(registry);
+
+    const mockSetTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: mockSetTools,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'select:web_fetch' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // Schema returned (model can inspect it)
+    expect(content).toContain('"name":"web_fetch"');
+    // But no reveal happened — tool is already visible
+    expect(registry.isDeferredToolRevealed('web_fetch')).toBe(false);
+    // And setTools was NOT called — no KV-cache invalidation
+    expect(mockSetTools).not.toHaveBeenCalled();
+  });
+
+  it('select: for a non-visible deferred tool still triggers reveal', async () => {
+    const { config, registry } = makeConfigWithRegistry();
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    await tool
+      .build({ query: 'select:cron_create' })
+      .execute(new AbortController().signal);
+
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+  });
 });
 
 describe('ToolRegistry.clearRevealedDeferredTools', () => {
