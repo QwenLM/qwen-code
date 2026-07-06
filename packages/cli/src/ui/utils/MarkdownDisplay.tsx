@@ -230,14 +230,28 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         headerCells = splitMarkdownTableRow(hdr).length;
       }
       if (headerCells >= 2) {
-        const hasMatchingSeparator = lines.slice(start + 1).some((l) => {
+        const rest = lines.slice(start + 1);
+        const hasMatchingSeparator = rest.some((l) => {
           if (!tableSeparatorRegex.test(l)) return false;
           const cols = splitMarkdownTableRow(l).filter(
             (c) => c.length > 0,
           ).length;
           return cols === headerCells;
         });
-        if (!hasMatchingSeparator) {
+        // A markdown table's separator is the line IMMEDIATELY after the header.
+        // So once a line follows the header and it does not even begin like a
+        // separator (optional pipe, optional colon, then a dash), this pipe run
+        // is decided: NOT a forming table — a multi-cell shell pipeline
+        // (`| grep foo | wc -l`), a log excerpt (`| 200 | OK | GET /x`) or an
+        // ASCII-art border. Release it rather than hiding it for the whole
+        // stream. While only the header exists (still typing, no line after it
+        // yet) keep holding, so a real multi-column header does not flash in cell
+        // by cell before its separator arrives.
+        const lineAfterHeader = rest[0];
+        const couldStillBeTable =
+          lineAfterHeader === undefined ||
+          /^\s*\|?\s*:?-/.test(lineAfterHeader);
+        if (!hasMatchingSeparator && couldStillBeTable) {
           lines = lines.slice(0, start);
         }
       }

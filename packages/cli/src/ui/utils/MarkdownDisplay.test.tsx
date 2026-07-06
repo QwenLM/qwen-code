@@ -480,6 +480,22 @@ Done.`.replace(/\n/g, eol);
       expect(lastFrame() ?? '').toContain('grep foo');
     });
 
+    it('releases multi-cell non-table pipe content once a non-separator line follows', () => {
+      // A log excerpt / multi-pipe shell output has ≥2 cells per line, so the
+      // header heuristic alone would hold it for the whole stream. But the line
+      // after the "header" is not a separator, so it is not a forming table and
+      // must render live, not vanish until commit.
+      const text = `logs:
+| 200 | OK | GET /a
+| 500 | ERR | GET /b`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('200');
+      expect(output).toContain('500');
+    });
+
     it('does not hold back a header with an empty-named column once its separator matches', () => {
       // `| A || B |` is a 3-column table to the renderer (the empty middle cell
       // counts). The hold-back must count columns the same way, or it never
