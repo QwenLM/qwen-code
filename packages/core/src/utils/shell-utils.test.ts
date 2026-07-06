@@ -658,6 +658,25 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill -9 $(pgrep vite)')).toBe(false);
   });
 
+  it('detects pgrep command substitution with prefix tokens', () => {
+    expect(detectSelfKillCommand('kill -9 $(command pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(sudo pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(LC_ALL=C pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 `command pgrep node`')).toBe(true);
+  });
+
+  it('detects pgrep command substitution with multiple self-names', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep node qwen)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep vite node)')).toBe(true);
+  });
+
+  it('detects pgrep command substitution with redirections and operators', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep node 2>/dev/null)')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('kill -9 $(pgrep node 2>&1)')).toBe(true);
+  });
+
   it('detects pgrep targeting self processes (piped to xargs kill)', () => {
     expect(detectSelfKillCommand('pgrep node | xargs kill')).toBe(true);
     expect(detectSelfKillCommand('pgrep -f qwen-code | xargs kill -9')).toBe(

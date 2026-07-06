@@ -390,8 +390,12 @@ export function stripShellWrapper(command: string): string {
   }
 }
 
-const SELF_KILL_PROCESS_PATTERN =
-  /(^|[^a-z0-9_-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?=$|[^a-z0-9_-])/i;
+const SELF_PROCESS_NAMES = 'node(?:\\.exe)?|qwen(?:-code)?(?:\\.exe)?';
+
+const SELF_KILL_PROCESS_PATTERN = new RegExp(
+  `(^|[^a-z0-9_-])(${SELF_PROCESS_NAMES})(?=$|[^a-z0-9_-])`,
+  'i',
+);
 const QWEN_PROCESS_PATTERN =
   /(^|[^a-z0-9_-])qwen(?:-code)?(?:\.exe)?(?=$|[^a-z0-9_-])/i;
 const TASKKILL_IMAGE_FILTER_PATTERN = /\bimagename\s+eq\s+(.+)$/i;
@@ -736,36 +740,36 @@ function pkillTargetsSelf(tokens: string[]): boolean {
   return args.some((arg) => matchesSelfProcessPattern(arg));
 }
 
-// Matches a bare self-process name (node/qwen/qwen-code, with optional .exe
-// suffix) in a pgrep argument string. Path components (`/`) are excluded so
-// that `pgrep /usr/bin/node` (targeting a specific binary path) is allowed.
-// The negative lookahead also excludes names followed by identifier, hyphen,
-// or slash characters (e.g. `nodejs`, `node-server`, `node/script`).
-const PGREP_BARE_SELF_TARGET =
-  /(?<![a-z0-9_/-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?![a-z0-9_-])/i;
+const PGREP_BARE_SELF_TARGET = new RegExp(
+  `(?<![a-z0-9_/-])(${SELF_PROCESS_NAMES})(?![a-z0-9_-])`,
+  'gi',
+);
 
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*pgrep\b([^)]*)\)|`\s*pgrep\b([^`]*)`/gi;
+  /\$\(\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*pgrep\b([^)]*)\)|`\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*pgrep\b([^`]*)`/gi;
 
 function killCommandTargetsSelf(segment: string): boolean {
-  let match: RegExpExecArray | null;
-  KILL_COMMAND_SUBSTITUTION_PGREP.lastIndex = 0;
-  while ((match = KILL_COMMAND_SUBSTITUTION_PGREP.exec(segment)) !== null) {
-    const pgrepArgs = match[1] ?? match[2] ?? '';
-    const bareMatch = pgrepArgs.match(PGREP_BARE_SELF_TARGET);
-    if (!bareMatch) {
-      continue;
+  for (const match of segment.matchAll(KILL_COMMAND_SUBSTITUTION_PGREP)) {
+    const rawArgs = match[1] ?? match[2] ?? '';
+    // Strip quoted segments so self-names inside quotes (e.g.
+    // `pgrep -f "node server.js"`) are not mistaken for bare targets.
+    const pgrepArgs = rawArgs.replace(/"[^"]*"|'[^']*'/g, (s) =>
+      ' '.repeat(s.length),
+    );
+    PGREP_BARE_SELF_TARGET.lastIndex = 0;
+    let bareMatch: RegExpExecArray | null;
+    while ((bareMatch = PGREP_BARE_SELF_TARGET.exec(pgrepArgs)) !== null) {
+      const after = pgrepArgs.slice(bareMatch.index + bareMatch[0].length);
+      // Strip redirections (2>/dev/null, 2>&1, >file, etc.)
+      // so they are not mistaken for extra pgrep arguments.
+      const stripped = after
+        .replace(/\d*>[>&]?[^\s)]*/g, '')
+        .replace(/\d*<[^\s)]*/g, '')
+        .trim();
+      if (stripped === '' || /^[;&|)]/.test(stripped)) {
+        return true;
+      }
     }
-    // When pgrep is invoked with `-f`, the non-option argument is a full
-    // command-line pattern rather than a bare process name. If the self-name
-    // is followed by a space and then a non-whitespace, non-quote character,
-    // it is part of a broader command pattern (e.g. `node server.js`) and
-    // should not be treated as a broad self-kill.
-    const after = pgrepArgs.slice(bareMatch.index! + bareMatch[0]!.length);
-    if (/^\s+[^"'\s]/.test(after)) {
-      continue;
-    }
-    return true;
   }
   return false;
 }
@@ -779,6 +783,9 @@ export function detectSelfKillCommand(command: string): boolean {
   for (const segment of segments) {
     const parsed = parseShellSegment(segment);
     if (!parsed) {
+      if (killCommandTargetsSelf(segment)) {
+        return true;
+      }
       continue;
     }
 
