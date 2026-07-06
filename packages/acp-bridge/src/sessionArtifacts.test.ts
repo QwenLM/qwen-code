@@ -1102,6 +1102,43 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('does not count injected workspace hash metadata against the merge limit', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-workspace-metadata-merge-budget',
+      workspaceCwd: workspace,
+    });
+    const workspacePath = 'merge-budget.txt';
+    const metadata = { payload: 'x'.repeat(4096) };
+    while (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 4096) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+    await fs.writeFile(path.join(workspace, workspacePath), 'before');
+    const oldSha = createHash('sha256').update('before').digest('hex');
+
+    await store.upsertMany([{ title: 'Budget', workspacePath, metadata }], {
+      strict: true,
+    });
+    await fs.writeFile(path.join(workspace, workspacePath), 'after');
+    const newSha = createHash('sha256').update('after').digest('hex');
+
+    const updated = await store.upsertMany(
+      [{ title: 'Budget update', workspacePath }],
+      { strict: true },
+    );
+
+    expect(updated.changes[0]?.artifact).toMatchObject({
+      metadata: {
+        payload: metadata.payload,
+        'qwen.workspace.sha256': newSha,
+        'qwen.workspace.mtimeMs': expect.any(Number),
+      },
+      status: 'available',
+    });
+    expect(updated.changes[0]?.artifact?.metadata).not.toMatchObject({
+      'qwen.workspace.sha256': oldSha,
+    });
+  });
+
   it('does not merge client metadata into a published tool artifact', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-published-metadata-source',

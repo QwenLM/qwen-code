@@ -1510,7 +1510,7 @@ function mergeMetadata(
 function isMetadataWithinLimit(
   metadata: Record<string, string | number | boolean | null>,
 ): boolean {
-  return Buffer.byteLength(JSON.stringify(metadata), 'utf8') <= 4096;
+  return metadataBudgetBytes(metadata, 'persisted') <= 4096;
 }
 
 function countByRetentionSource(
