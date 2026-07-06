@@ -2142,7 +2142,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
 
-      if (shouldRunInBackground) {
+      if (!isFork) {
         const registry = this.config.getBackgroundTaskRegistry();
         if (signal?.aborted) {
           backgroundSlotReservation =
@@ -2161,7 +2161,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           this.updateDisplay(
             {
               status: 'running',
-              terminateReason: `Waiting for a background agent slot (${queueText}).`,
+              terminateReason: `Waiting for a sub-agent slot (${queueText}).`,
             },
             updateOutput,
           );
@@ -3340,6 +3340,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // this in finally guarantees we clean up on success, failure,
         // cancel, AND any unexpected throw inside runFramed.
         registry.unregisterForeground(hookOpts.agentId);
+        releaseBackgroundSlotReservation();
         // Release the per-subagent ToolRegistry so any AgentTool /
         // SkillTool the model instantiated during execution disposes
         // its change-listeners on shared SubagentManager / SkillManager.
