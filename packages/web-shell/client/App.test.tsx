@@ -322,6 +322,10 @@ mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
+mockComponent(
+  './components/dialogs/ScheduledTasksDialog',
+  'ScheduledTasksDialog',
+);
 mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
@@ -757,6 +761,29 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('dismisses the Scheduled Tasks page when an approval becomes pending', async () => {
+    // The scheduled-tasks fullPage overlay covers the chat footer where the
+    // approval renders, so an approval must close it too (like the panel).
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).toBeNull();
   });
 
   it('keeps the panel open when transcript blocks carry no actionable approval', async () => {

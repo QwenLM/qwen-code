@@ -208,6 +208,13 @@ export {
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export type { DurableCronTask } from './services/cronTasksFile.js';
+export {
+  readCronTasks,
+  updateCronTasks,
+  removeCronTasks,
+  getCronFilePath,
+  generateCronTaskId,
+} from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';

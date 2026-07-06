@@ -8,6 +8,7 @@ import {
   SessionService,
   SessionOrganizationError,
   type SessionArchiveState,
+  type SessionGroupColor,
 } from '@qwen-code/qwen-code-core';
 import type {
   AcpSessionBridge,
@@ -211,6 +212,7 @@ function applyOrganization(
   organization:
     | {
         groupId: string | null;
+        color?: SessionGroupColor | null;
         isPinned: boolean;
         pinnedAt?: string;
       }
@@ -219,6 +221,7 @@ function applyOrganization(
   return {
     ...session,
     groupId: organization?.groupId ?? null,
+    color: organization?.color ?? null,
     isPinned: organization?.isPinned === true,
     ...(organization?.pinnedAt !== undefined
       ? { pinnedAt: organization.pinnedAt }
@@ -321,8 +324,13 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const filtered = [...bySessionId.values()].filter((session) => {
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
-    if (group === 'ungrouped') return session.groupId == null;
-    return session.groupId === group;
+    if (group === 'ungrouped')
+      return session.groupId == null && session.color == null;
+    // Color takes precedence over a named group in the sidebar's bucketing, so
+    // a session carrying a color tag is never shown under its group. Keep the
+    // named-group filter consistent for REST/ACP consumers (the store allows
+    // both fields even though the UI keeps them mutually exclusive).
+    return session.color == null && session.groupId === group;
   });
   const activityTimeById = new Map(
     filtered.map((session) => [

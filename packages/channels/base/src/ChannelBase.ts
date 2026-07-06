@@ -31,6 +31,8 @@ import {
 import type {
   AvailableCommand,
   ChannelAgentBridge,
+  ChannelLoopToolCreateInput,
+  ChannelLoopToolResult,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -107,6 +109,8 @@ type ActivePrompt = {
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
   messageId?: string;
+  senderId?: string;
+  senderName?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -200,6 +204,15 @@ export abstract class ChannelBase {
   ): void => {
     this.onSessionDied(event.sessionId);
   };
+  private readonly channelLoopToolHandler = {
+    canHandle: (sessionId: string) =>
+      this.router.getTarget(sessionId)?.channelName === this.name,
+    create: (sessionId: string, input: ChannelLoopToolCreateInput) =>
+      this.createLoopFromTool(sessionId, input),
+    list: (sessionId: string) => this.listLoopsFromTool(sessionId),
+    cancel: (sessionId: string, id: string) =>
+      this.cancelLoopFromTool(sessionId, id),
+  };
 
   dispatchToolCall(event: ToolCallEvent): void {
     const target = this.router.getTarget(event.sessionId);
@@ -264,6 +277,9 @@ export abstract class ChannelBase {
       new SessionRouter(bridge, config.cwd, config.sessionScope);
 
     this.registerSharedCommands();
+    if (this.loopController) {
+      bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
+    }
 
     // When running standalone, register bridge listeners directly.
     // In gateway mode, the ChannelManager dispatches events instead.
@@ -435,6 +451,9 @@ export abstract class ChannelBase {
     }
     this.router.setBridge(bridge);
     this.bridge = bridge;
+    if (this.loopController) {
+      bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
+    }
     if (this.registerBridgeEvents) {
       this.attachBridgeEvents(bridge);
     }
@@ -474,6 +493,7 @@ export abstract class ChannelBase {
       job.target.chatId,
       job.target.threadId,
       job.cwd,
+      job.target.isGroup,
     );
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
@@ -566,6 +586,8 @@ export abstract class ChannelBase {
         resolve: doneResolve,
         chatId: job.target.chatId,
         messageId: job.id,
+        senderId: job.target.senderId,
+        senderName: job.createdBy,
         loopPrompt: true,
       };
       this.activePrompts.set(sessionId, promptState);
@@ -1561,6 +1583,121 @@ export abstract class ChannelBase {
     return true;
   }
 
+  private async createLoopFromTool(
+    sessionId: string,
+    input: ChannelLoopToolCreateInput,
+  ): Promise<string | ChannelLoopToolResult> {
+    if (!this.loopController) {
+      return { text: 'Channel loops are not configured.', isError: true };
+    }
+    if (!this.supportsProactiveSend()) {
+      return {
+        text: 'This channel does not support proactive loop messages.',
+        isError: true,
+      };
+    }
+    if (this.config.sessionScope === 'single') {
+      return {
+        text: 'Loops are not supported when sessionScope is single.',
+        isError: true,
+      };
+    }
+    const target = this.loopToolTarget(sessionId);
+    if (typeof target === 'string') return { text: target, isError: true };
+    if (!this.supportsProactiveTarget(target)) {
+      return {
+        text: 'This channel does not support proactive loop messages for this chat target.',
+        isError: true,
+      };
+    }
+
+    const cron = input.cron.trim();
+    try {
+      this.loopController.validateCron(cron);
+    } catch (err) {
+      return {
+        text: `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`,
+        isError: true,
+      };
+    }
+
+    const prompt = sanitizePromptText(input.prompt.trim());
+    if (Array.from(prompt).length > MAX_LOOP_PROMPT_CHARS) {
+      return {
+        text: `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`,
+        isError: true,
+      };
+    }
+
+    const loopInput: ChannelLoopInput = {
+      channelName: this.name,
+      target,
+      cwd: this.config.cwd,
+      cron,
+      prompt,
+      label: truncateLoopLabel(prompt),
+      recurring: input.recurring !== false,
+      createdBy: sanitizeSenderName(this.toolCallerName(sessionId, target)),
+    };
+    let job: ChannelLoop | undefined;
+    if (this.loopController.createForTarget) {
+      job = await this.loopController.createForTarget(
+        loopInput,
+        MAX_LOOP_JOBS_PER_TARGET,
+      );
+    } else {
+      const existingJobs = await this.loopController.listForTarget(
+        this.name,
+        target,
+      );
+      if (
+        existingJobs.filter((existingJob) => existingJob.enabled).length <
+        MAX_LOOP_JOBS_PER_TARGET
+      ) {
+        job = await this.loopController.create(loopInput);
+      }
+    }
+    if (!job) {
+      return {
+        text: 'Too many loops for this chat. Cancel an existing loop before adding another.',
+        isError: true,
+      };
+    }
+
+    return `Loop ${job.id}: ${job.cron}`;
+  }
+
+  private async listLoopsFromTool(
+    sessionId: string,
+  ): Promise<string | ChannelLoopToolResult> {
+    if (!this.loopController) {
+      return { text: 'Channel loops are not configured.', isError: true };
+    }
+    const target = this.loopToolTarget(sessionId);
+    if (typeof target === 'string') return { text: target, isError: true };
+    const jobs = await this.loopController.listForTarget(this.name, target);
+    if (jobs.length === 0) return 'No loops.';
+    return jobs.map((job) => this.formatLoopListLine(job)).join('\n');
+  }
+
+  private async cancelLoopFromTool(
+    sessionId: string,
+    id: string,
+  ): Promise<string | ChannelLoopToolResult> {
+    if (!this.loopController) {
+      return { text: 'Channel loops are not configured.', isError: true };
+    }
+    const target = this.loopToolTarget(sessionId);
+    if (typeof target === 'string') return { text: target, isError: true };
+    const jobs = await this.loopController.listForTarget(this.name, target);
+    const match = jobs.find((job) => job.id === id);
+    if (!match) return { text: `No loop ${id}.`, isError: true };
+    const disabled = await this.loopController.disable(id);
+    return disabled
+      ? `Cancelled loop ${id}.`
+      : { text: `Failed to cancel loop ${id}.`, isError: true };
+  }
+
   private async handleLoopList(envelope: Envelope): Promise<boolean> {
     if (!this.loopController) return true;
     const jobs = await this.loopController.listForTarget(
@@ -1660,45 +1797,70 @@ export abstract class ChannelBase {
       this.loopTargetFromEnvelope(envelope),
     );
     const match = jobs.find((job) => job.id === id);
-    const disabled = match ? await this.loopController.disable(id) : false;
+    if (!match) {
+      await this.sendMessage(envelope.chatId, `No loop ${id}.`);
+      return true;
+    }
+    const disabled = await this.loopController.disable(id);
     await this.sendMessage(
       envelope.chatId,
-      disabled ? `Cancelled loop ${id}.` : `No loop ${id}.`,
+      disabled ? `Cancelled loop ${id}.` : `Failed to cancel loop ${id}.`,
     );
     return true;
   }
 
   private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
-    return {
+    return this.normalizeLoopTarget({
       channelName: this.name,
       senderId: envelope.senderId,
       chatId: envelope.chatId,
       threadId: envelope.threadId,
       isGroup: envelope.isGroup === true,
-    };
+    });
+  }
+
+  private normalizeLoopTarget(
+    target: SessionTarget,
+  ): SessionTarget & { isGroup: boolean } {
+    // Older persisted loop targets may not have isGroup; treat them as one-to-one chats.
+    return { ...target, isGroup: target.isGroup === true };
+  }
+
+  private loopToolTarget(sessionId: string): SessionTarget | string {
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) {
+      return 'No channel target is bound to this session.';
+    }
+    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
+      return 'Only authorized members can use loops in this shared session.';
+    }
+    const senderId = this.activePrompts.get(sessionId)?.senderId;
+    const normalizedTarget = this.normalizeLoopTarget(target);
+    if (senderId && this.isSharedSessionTarget(normalizedTarget)) {
+      return { ...normalizedTarget, senderId };
+    }
+    return normalizedTarget;
   }
 
   private isStoredLoopTargetAuthorized(
     target: SessionTarget,
     senderName: string,
   ): boolean {
-    if (target.isGroup === undefined) {
-      return false;
-    }
+    const normalizedTarget = this.normalizeLoopTarget(target);
     const envelope: Envelope = {
       channelName: this.name,
-      senderId: target.senderId,
+      senderId: normalizedTarget.senderId,
       senderName,
-      chatId: target.chatId,
+      chatId: normalizedTarget.chatId,
       text: '',
-      threadId: target.threadId,
-      isGroup: target.isGroup === true,
+      threadId: normalizedTarget.threadId,
+      isGroup: normalizedTarget.isGroup,
       isMentioned: true,
       isReplyToBot: true,
     };
     return (
       this.groupGate.check(envelope).allowed &&
-      this.gate.isAllowed(target.senderId) &&
+      this.gate.isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -1854,9 +2016,32 @@ export abstract class ChannelBase {
    * gate can't drift; each caller sends its own rejection wording.
    */
   private isAuthorizedForSharedSession(envelope: Envelope): boolean {
-    if (!this.isSharedSession(envelope)) return true;
+    return this.isAuthorizedForSharedSessionTarget(envelope);
+  }
+
+  private isAuthorizedForSharedSessionTarget(target: {
+    isGroup?: boolean;
+    senderId: string;
+  }): boolean {
+    if (!this.isSharedSessionTarget(target)) return true;
     const authorized = this.config.allowedUsers;
-    return authorized.length === 0 || authorized.includes(envelope.senderId);
+    return authorized.length === 0 || authorized.includes(target.senderId);
+  }
+
+  private isAuthorizedForSharedSessionToolCall(
+    target: SessionTarget,
+    sessionId: string,
+  ): boolean {
+    if (!this.isSharedSessionTarget(target)) return true;
+    const authorized = this.config.allowedUsers;
+    if (authorized.length === 0) return true;
+    const senderId = this.activePrompts.get(sessionId)?.senderId;
+    return senderId !== undefined && authorized.includes(senderId);
+  }
+
+  private toolCallerName(sessionId: string, target: SessionTarget): string {
+    const active = this.activePrompts.get(sessionId);
+    return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
   private stopActiveStreaming(
@@ -2218,6 +2403,7 @@ export abstract class ChannelBase {
       envelope.chatId,
       envelope.threadId,
       this.config.cwd,
+      envelope.isGroup,
     );
 
     // Bang (!) execution — a private 1:1 session has a single operator, so
@@ -2557,6 +2743,8 @@ export abstract class ChannelBase {
         resolve: doneResolve,
         chatId: envelope.chatId,
         messageId: envelope.messageId,
+        senderId: envelope.senderId,
+        senderName: envelope.senderName,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only
