@@ -10,6 +10,16 @@ export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
+const MAX_PERSISTED_ARTIFACTS = 500;
+const MAX_PERSISTED_IDS = 500;
+const MAX_PERSISTED_ID_CHARS = 200;
+const MAX_PERSISTED_TITLE_CHARS = 200;
+const MAX_PERSISTED_DESCRIPTION_CHARS = 1000;
+const MAX_PERSISTED_PATH_CHARS = 500;
+const MAX_PERSISTED_URL_CHARS = 2048;
+const MAX_PERSISTED_MIME_CHARS = 120;
+const MAX_PERSISTED_FIELD_CHARS = 200;
+const MAX_PERSISTED_TIMESTAMP_CHARS = 64;
 
 export type SessionArtifactRetention = 'ephemeral' | 'restorable' | 'pinned';
 
@@ -337,7 +347,7 @@ function remapSessionArtifactForFork(
   return next;
 }
 
-function normalizeSnapshotPayload(
+export function normalizeSnapshotPayload(
   value: unknown,
   warnings: string[],
 ): SessionArtifactSnapshotRecordPayload | undefined {
@@ -353,21 +363,34 @@ function normalizeSnapshotPayload(
   if (!Array.isArray(value['artifacts'])) return undefined;
   const sessionId = getString(value, 'sessionId');
   if (!sessionId) return undefined;
-  const artifacts = value['artifacts']
+  const rawArtifacts = value['artifacts'];
+  if (rawArtifacts.length > MAX_PERSISTED_ARTIFACTS) {
+    warnings.push(
+      `snapshot artifact list truncated to ${MAX_PERSISTED_ARTIFACTS}`,
+    );
+  }
+  const artifacts = rawArtifacts
+    .slice(0, MAX_PERSISTED_ARTIFACTS)
     .map((artifact) => normalizePersistedArtifact(artifact, warnings))
     .filter((artifact) => artifact !== undefined);
   return {
     v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
     sessionId,
     sequence: getNonNegativeInteger(value, 'sequence') ?? 0,
-    recordedAt: getString(value, 'recordedAt') ?? new Date(0).toISOString(),
+    recordedAt:
+      getString(value, 'recordedAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
+      new Date(0).toISOString(),
     artifacts,
-    tombstonedIds: getStringArray(value, 'tombstonedIds'),
-    stickyEphemeralIds: getStringArray(value, 'stickyEphemeralIds'),
+    tombstonedIds: getStringArray(value, 'tombstonedIds', MAX_PERSISTED_IDS),
+    stickyEphemeralIds: getStringArray(
+      value,
+      'stickyEphemeralIds',
+      MAX_PERSISTED_IDS,
+    ),
   };
 }
 
-function normalizeEventPayload(
+export function normalizeEventPayload(
   value: unknown,
   warnings: string[],
 ): SessionArtifactEventRecordPayload | undefined {
@@ -381,13 +404,15 @@ function normalizeEventPayload(
     return undefined;
   }
   if (!Array.isArray(value['changes'])) return undefined;
-  const sessionId = getString(value, 'sessionId');
+  const sessionId = getString(value, 'sessionId', MAX_PERSISTED_ID_CHARS);
   if (!sessionId) return undefined;
   return {
     v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
     sessionId,
     sequence: getNonNegativeInteger(value, 'sequence') ?? 0,
-    recordedAt: getString(value, 'recordedAt') ?? new Date(0).toISOString(),
+    recordedAt:
+      getString(value, 'recordedAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
+      new Date(0).toISOString(),
     changes: value['changes']
       .map((change) => normalizePersistedChange(change, warnings))
       .filter((change) => change !== undefined),
@@ -404,7 +429,8 @@ function normalizePersistedChange(
     return undefined;
   }
   const artifact = normalizePersistedArtifact(value['artifact'], warnings);
-  const artifactId = getString(value, 'artifactId') ?? artifact?.id;
+  const artifactId =
+    getString(value, 'artifactId', MAX_PERSISTED_ID_CHARS) ?? artifact?.id;
   if (!artifactId) return undefined;
   const reason = value['reason'];
   return {
@@ -424,8 +450,8 @@ function normalizePersistedArtifact(
   warnings: string[],
 ): PersistedSessionArtifact | undefined {
   if (!isRecord(value)) return undefined;
-  const id = getString(value, 'id');
-  const title = getString(value, 'title');
+  const id = getString(value, 'id', MAX_PERSISTED_ID_CHARS);
+  const title = getString(value, 'title', MAX_PERSISTED_TITLE_CHARS);
   if (!id || !title) {
     warnings.push('skipped artifact without id/title');
     return undefined;
@@ -468,19 +494,39 @@ function normalizePersistedArtifact(
   }
 
   const metadata = normalizeMetadata(value['metadata'], warnings, id);
-  const description = getString(value, 'description');
-  const workspacePath = getString(value, 'workspacePath');
-  const managedId = getString(value, 'managedId');
-  const url = getString(value, 'url');
-  const mimeType = getString(value, 'mimeType');
+  const description = getString(
+    value,
+    'description',
+    MAX_PERSISTED_DESCRIPTION_CHARS,
+  );
+  const workspacePath = getString(
+    value,
+    'workspacePath',
+    MAX_PERSISTED_PATH_CHARS,
+  );
+  const managedId = getString(value, 'managedId', MAX_PERSISTED_FIELD_CHARS);
+  const url = getString(value, 'url', MAX_PERSISTED_URL_CHARS);
+  const mimeType = getString(value, 'mimeType', MAX_PERSISTED_MIME_CHARS);
   const sizeBytes = getNonNegativeInteger(value, 'sizeBytes');
-  const persistedAt = getString(value, 'persistedAt');
-  const expiresAt = getString(value, 'expiresAt');
+  const persistedAt = getString(
+    value,
+    'persistedAt',
+    MAX_PERSISTED_TIMESTAMP_CHARS,
+  );
+  const expiresAt = getString(
+    value,
+    'expiresAt',
+    MAX_PERSISTED_TIMESTAMP_CHARS,
+  );
   const contentRef = normalizeContentRef(value['contentRef']);
-  const toolCallId = getString(value, 'toolCallId');
-  const toolName = getString(value, 'toolName');
-  const hookEventName = getString(value, 'hookEventName');
-  const clientId = getString(value, 'clientId');
+  const toolCallId = getString(value, 'toolCallId', MAX_PERSISTED_FIELD_CHARS);
+  const toolName = getString(value, 'toolName', MAX_PERSISTED_FIELD_CHARS);
+  const hookEventName = getString(
+    value,
+    'hookEventName',
+    MAX_PERSISTED_FIELD_CHARS,
+  );
+  const clientId = getString(value, 'clientId', MAX_PERSISTED_FIELD_CHARS);
   return {
     id,
     kind,
@@ -497,8 +543,12 @@ function normalizePersistedArtifact(
     ...(metadata ? { metadata } : {}),
     retention,
     clientRetained: value['clientRetained'] === true,
-    createdAt: getString(value, 'createdAt') ?? new Date(0).toISOString(),
-    updatedAt: getString(value, 'updatedAt') ?? new Date(0).toISOString(),
+    createdAt:
+      getString(value, 'createdAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
+      new Date(0).toISOString(),
+    updatedAt:
+      getString(value, 'updatedAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
+      new Date(0).toISOString(),
     ...(persistedAt ? { persistedAt } : {}),
     ...(expiresAt ? { expiresAt } : {}),
     ...(contentRef ? { contentRef } : {}),
@@ -513,10 +563,14 @@ function normalizeContentRef(
   value: unknown,
 ): SessionArtifactContentRef | undefined {
   if (!isRecord(value) || value['kind'] !== 'managed_copy') return undefined;
-  const contentId = getString(value, 'contentId');
-  const sha256 = getString(value, 'sha256');
+  const contentId = getString(value, 'contentId', MAX_PERSISTED_FIELD_CHARS);
+  const sha256 = getString(value, 'sha256', 64);
   const sizeBytes = getNonNegativeInteger(value, 'sizeBytes');
-  const createdAt = getString(value, 'createdAt');
+  const createdAt = getString(
+    value,
+    'createdAt',
+    MAX_PERSISTED_TIMESTAMP_CHARS,
+  );
   if (
     !contentId ||
     !CONTENT_ID_PATTERN.test(contentId) ||
@@ -539,12 +593,19 @@ function normalizeMetadata(
   const normalized: Record<string, string | number | boolean | null> = {};
   for (const [key, item] of Object.entries(value)) {
     if (isPrototypeMetadataKey(key)) continue;
+    if (key.length > 120) continue;
     if (
       item === null ||
       typeof item === 'string' ||
       typeof item === 'number' ||
       typeof item === 'boolean'
     ) {
+      if (
+        isReservedWorkspaceMetadataKey(key) &&
+        !isWorkspaceContentMetadataEntry(key, item)
+      ) {
+        continue;
+      }
       normalized[key] = item;
     }
   }
@@ -558,6 +619,13 @@ function normalizeMetadata(
 
 function isPrototypeMetadataKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+function isReservedWorkspaceMetadataKey(key: string): boolean {
+  return (
+    key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
+    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
+  );
 }
 
 function metadataBudgetBytes(
@@ -600,20 +668,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function getString(
   record: Record<string, unknown>,
   key: string,
+  maxLength = MAX_PERSISTED_FIELD_CHARS,
 ): string | undefined {
   const value = record[key];
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string' || value.length > maxLength) {
+    return undefined;
+  }
+  return value;
 }
 
 function getStringArray(
   record: Record<string, unknown>,
   key: string,
+  maxItems = MAX_PERSISTED_IDS,
 ): string[] | undefined {
   const value = record[key];
   if (!Array.isArray(value)) return undefined;
-  const items = value.filter(
-    (item): item is string => typeof item === 'string',
-  );
+  const items = value
+    .filter((item): item is string => typeof item === 'string')
+    .slice(-maxItems);
   return items.length > 0 ? items : undefined;
 }
 

@@ -120,6 +120,22 @@ vi.mock('node:stream', async (importOriginal) => {
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', () => ({
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
+  normalizeEventPayload: vi.fn((payload: unknown) =>
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    Array.isArray((payload as { changes?: unknown }).changes)
+      ? payload
+      : undefined,
+  ),
+  normalizeSnapshotPayload: vi.fn((payload: unknown) =>
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    Array.isArray((payload as { artifacts?: unknown }).artifacts)
+      ? payload
+      : undefined,
+  ),
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
@@ -1969,6 +1985,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(recording.recordSessionArtifactEvent).not.toHaveBeenCalled();
     expect(recording.recordSessionArtifactSnapshot).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects payloads for a different session', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactEvent: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 'session-B',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    expect(recording.recordSessionArtifactEvent).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

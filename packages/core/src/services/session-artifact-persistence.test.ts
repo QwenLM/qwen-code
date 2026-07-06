@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  normalizeSnapshotPayload,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
   stableSessionArtifactId,
@@ -648,5 +649,62 @@ describe('session artifact persistence records', () => {
     expect(remapped.artifacts[0]).not.toHaveProperty('expiresAt');
     expect(remapped.artifacts[0]).not.toHaveProperty('restoreState');
     expect(remapped.artifacts[0]).not.toHaveProperty('persistenceWarning');
+  });
+
+  it('normalizes inbound snapshot payloads with bounded artifacts and sticky ids', () => {
+    const warnings: string[] = [];
+    const artifacts = Array.from({ length: 501 }, (_, index) =>
+      artifact('session-A', `https://example.com/${index}`),
+    );
+    const snapshot = normalizeSnapshotPayload(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'session-A',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts,
+        stickyEphemeralIds: Array.from(
+          { length: 501 },
+          (_, index) => `sticky-${index}`,
+        ),
+      },
+      warnings,
+    );
+
+    expect(snapshot?.artifacts).toHaveLength(500);
+    expect(snapshot?.stickyEphemeralIds).toHaveLength(500);
+    expect(snapshot?.stickyEphemeralIds?.[0]).toBe('sticky-1');
+    expect(warnings).toContain('snapshot artifact list truncated to 500');
+  });
+
+  it('drops unsafe persisted metadata and overlong string fields', () => {
+    const warnings: string[] = [];
+    const normalized = normalizeSnapshotPayload(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'session-A',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts: [
+          {
+            ...artifact('session-A', 'https://example.com/metadata'),
+            title: 'x'.repeat(201),
+          },
+          {
+            ...artifact('session-A', 'https://example.com/metadata-2'),
+            metadata: {
+              'qwen.workspace.sha256': 'not-a-sha',
+              'qwen.workspace.mtimeMs': '123',
+              keep: true,
+            },
+          },
+        ],
+      },
+      warnings,
+    );
+
+    expect(normalized?.artifacts).toHaveLength(1);
+    expect(normalized?.artifacts[0]?.metadata).toEqual({ keep: true });
+    expect(warnings).toContain('skipped artifact without id/title');
   });
 });

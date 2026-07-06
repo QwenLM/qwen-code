@@ -67,6 +67,8 @@ import {
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  normalizeEventPayload,
+  normalizeSnapshotPayload,
   startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
@@ -278,34 +280,48 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 
 function parseSessionArtifactEventPayload(
   payload: unknown,
+  expectedSessionId: string,
 ): SessionArtifactEventRecordPayload {
-  const record = parseSessionArtifactBasePayload(payload);
-  if (!Array.isArray(record['changes'])) {
+  const record = parseSessionArtifactBasePayload(payload, expectedSessionId);
+  const warnings: string[] = [];
+  const normalized = normalizeEventPayload(record, warnings);
+  if (
+    !normalized ||
+    warnings.length > 0 ||
+    normalized.changes.length !== (record['changes'] as unknown[]).length
+  ) {
     throw invalidArtifactPersistPayload();
   }
-  return record as unknown as SessionArtifactEventRecordPayload;
+  return normalized;
 }
 
 function parseSessionArtifactSnapshotPayload(
   payload: unknown,
+  expectedSessionId: string,
 ): SessionArtifactSnapshotRecordPayload {
-  const record = parseSessionArtifactBasePayload(payload);
-  if (!Array.isArray(record['artifacts'])) {
+  const record = parseSessionArtifactBasePayload(payload, expectedSessionId);
+  const warnings: string[] = [];
+  const normalized = normalizeSnapshotPayload(record, warnings);
+  if (
+    !normalized ||
+    warnings.length > 0 ||
+    normalized.artifacts.length !== (record['artifacts'] as unknown[]).length
+  ) {
     throw invalidArtifactPersistPayload();
   }
-  return record as unknown as SessionArtifactSnapshotRecordPayload;
+  return normalized;
 }
 
 function parseSessionArtifactBasePayload(
   payload: unknown,
+  expectedSessionId: string,
 ): Record<string, unknown> {
   if (!isObjectRecord(payload)) {
     throw invalidArtifactPersistPayload();
   }
   if (
     payload['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION ||
-    typeof payload['sessionId'] !== 'string' ||
-    payload['sessionId'].length === 0 ||
+    payload['sessionId'] !== expectedSessionId ||
     !Number.isSafeInteger(payload['sequence']) ||
     (payload['sequence'] as number) < 0 ||
     typeof payload['recordedAt'] !== 'string' ||
@@ -6387,11 +6403,11 @@ class QwenAgent implements Agent {
         }
         if (kind === 'event') {
           await recording.recordSessionArtifactEvent(
-            parseSessionArtifactEventPayload(payload),
+            parseSessionArtifactEventPayload(payload, sessionId),
           );
         } else {
           await recording.recordSessionArtifactSnapshot(
-            parseSessionArtifactSnapshotPayload(payload),
+            parseSessionArtifactSnapshotPayload(payload, sessionId),
           );
         }
         return { sessionId, persisted: true, kind };

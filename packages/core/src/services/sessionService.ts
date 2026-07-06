@@ -1974,19 +1974,26 @@ function includeActiveSideArtifactRecords(
     activeRecords.map((record) => [record.uuid, record]),
   );
   const activeUuids = new Set(activeByUuid.keys());
+  const firstActiveUuid = activeRecords[0]?.uuid;
+  const firstActiveIndex =
+    firstActiveUuid === undefined
+      ? -1
+      : records.findIndex((record) => record.uuid === firstActiveUuid);
   const selected: ChatRecord[] = [];
-  for (const record of records) {
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
     const activeRecord = activeByUuid.get(record.uuid);
     if (activeRecord) {
       selected.push(activeRecord);
       activeByUuid.delete(record.uuid);
       continue;
     }
-    if (
-      isSessionArtifactRecord(record) &&
-      record.parentUuid !== null &&
-      activeUuids.has(record.parentUuid)
-    ) {
+    if (!isSessionArtifactRecord(record)) {
+      continue;
+    }
+    if (record.parentUuid !== null && activeUuids.has(record.parentUuid)) {
+      selected.push(record);
+    } else if (record.parentUuid === null && index < firstActiveIndex) {
       selected.push(record);
     }
   }

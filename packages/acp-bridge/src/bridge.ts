@@ -3107,8 +3107,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.restoreReplayError = replayError;
       }
       seedSnapshotCaches(entry, state);
+      const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
       const artifactRestoreWarnings = await entry.artifacts.restore(
-        restoredArtifactSnapshotFromState(state),
+        restoredArtifactSnapshot,
       );
       for (const warning of artifactRestoreWarnings) {
         writeStderrLine(
@@ -3118,7 +3119,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       }
       if (replayUpdates.length > 0) {
-        await ci.client.seedSessionUpdates(entry, replayUpdates);
+        await ci.client.seedSessionUpdates(entry, replayUpdates, {
+          ingestArtifacts: restoredArtifactSnapshot === undefined,
+        });
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
       const clientId = registerClient(entry, req.clientId);
@@ -5955,8 +5958,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           warning.includes('artifact snapshot restore partially failed'),
       );
       const shouldRecordArtifactSnapshot =
-        artifactSnapshotUnavailable !== undefined ||
-        (shouldRestoreArtifactSnapshot && !artifactRestoreFailed);
+        shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
       const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
         ? await entry.artifacts.recordSnapshot()
         : [];

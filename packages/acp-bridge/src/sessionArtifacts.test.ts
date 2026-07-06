@@ -157,6 +157,28 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('strips user-supplied reserved workspace metadata when the file is missing', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-reserved-metadata',
+      workspaceCwd: workspace,
+    });
+
+    const result = await store.upsertMany([
+      {
+        title: 'Missing workspace artifact',
+        workspacePath: 'missing.txt',
+        metadata: {
+          'qwen.workspace.sha256': 'a'.repeat(64),
+          'qwen.workspace.mtimeMs': 123,
+          keep: true,
+        },
+      },
+    ]);
+
+    expect(result.changes[0]?.artifact?.metadata).toEqual({ keep: true });
+    expect(result.changes[0]?.artifact?.status).toBe('missing');
+  });
+
   it('prevents one client from removing another client retained artifact', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-client-owner',
@@ -2775,7 +2797,6 @@ describe('SessionArtifactStore', () => {
           title: 'Restored',
           retention: 'restorable',
           restoreState: 'restored',
-          persistenceWarning: 'metadata_only_restore',
         }),
       ],
     });
@@ -3043,7 +3064,6 @@ describe('SessionArtifactStore', () => {
           retention: 'restorable',
           restoreState: 'restored',
           status: 'available',
-          persistenceWarning: 'metadata_only_restore',
         }),
       ],
     });

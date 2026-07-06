@@ -5,7 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { createReadStream, promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -59,6 +60,8 @@ const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
 const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
 const MAX_TOMBSTONED_IDS = 500;
+const MAX_STICKY_EPHEMERAL_IDS = 500;
+const MAX_WORKSPACE_HASH_BYTES = 100 * 1024 * 1024;
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -510,7 +513,9 @@ export class SessionArtifactStore {
         for (const id of snapshot.tombstonedIds) {
           this.tombstonedIds.add(id);
         }
-        for (const id of snapshot.stickyEphemeralIds) {
+        for (const id of snapshot.stickyEphemeralIds.slice(
+          -MAX_STICKY_EPHEMERAL_IDS,
+        )) {
           this.stickyEphemeralIds.add(id);
         }
       }
@@ -545,11 +550,11 @@ export class SessionArtifactStore {
             continue;
           }
           const retention = normalized.retention;
-          let persistenceWarning:
-            | SessionArtifactPersistenceWarning
-            | undefined = 'metadata_only_restore';
+          let persistenceWarning: SessionArtifactPersistenceWarning | undefined;
           if (retention === 'ephemeral') {
             persistenceWarning = 'sticky_override_active';
+          } else if (normalized.status !== 'available') {
+            persistenceWarning = 'metadata_only_restore';
           }
           const stored: StoredArtifact = {
             ...normalized,
@@ -1030,7 +1035,7 @@ export class SessionArtifactStore {
           ? workspaceStatus.sizeBytes
           : input.sizeBytes !== undefined
             ? normalizeSizeBytes(input.sizeBytes)
-            : workspaceStatus?.sizeBytes,
+            : undefined,
       metadata,
       retention,
       restoreState: 'live',
@@ -1428,6 +1433,7 @@ export function publicArtifactsEqual(
     a.persistedAt === b.persistedAt &&
     a.clientRetained === b.clientRetained &&
     a.createdAt === b.createdAt &&
+    a.updatedAt === b.updatedAt &&
     a.toolCallId === b.toolCallId &&
     a.toolName === b.toolName &&
     a.hookEventName === b.hookEventName &&
@@ -2089,6 +2095,9 @@ function normalizeMetadata(
     if (isPrototypeMetadataKey(key)) {
       continue;
     }
+    if (options.budget !== 'persisted' && isReservedWorkspaceMetadataKey(key)) {
+      continue;
+    }
     if (!key) {
       throw new SessionArtifactValidationError(
         'metadata keys must not be empty',
@@ -2149,6 +2158,13 @@ function normalizeMetadata(
 
 function isPrototypeMetadataKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+function isReservedWorkspaceMetadataKey(key: string): boolean {
+  return (
+    key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
+    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
+  );
 }
 
 function metadataBudgetBytes(
@@ -2252,49 +2268,67 @@ async function getWorkspaceStatus(
     if (!relative || isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
-    const stat = await fs.stat(realPath);
-    if (stat.isFile()) {
-      const expectedMtimeMs =
-        typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
-      const expectedSha256 =
-        typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
-      const unchanged =
-        expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
-      const sizeChanged =
-        expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
-      if (sizeChanged) {
-        return {
-          status: 'changed',
-          sizeBytes: stat.size,
-          mtimeMs: stat.mtimeMs,
-        };
-      }
-      if (unchanged) {
+    const handle = await fs.open(
+      realPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    try {
+      const stat = await handle.stat();
+      if (stat.isFile()) {
+        const expectedMtimeMs =
+          typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
+        const expectedSha256 =
+          typeof expected?.sha256 === 'string' ? expected.sha256 : undefined;
+        const unchanged =
+          expected?.sizeBytes === stat.size && expectedMtimeMs === stat.mtimeMs;
+        const sizeChanged =
+          expected?.sizeBytes !== undefined && expected.sizeBytes !== stat.size;
+        if (sizeChanged) {
+          return {
+            status: 'changed',
+            sizeBytes: stat.size,
+            mtimeMs: stat.mtimeMs,
+          };
+        }
+        if (unchanged) {
+          return {
+            status: 'available',
+            sizeBytes: stat.size,
+            mtimeMs: stat.mtimeMs,
+          };
+        }
+        if (stat.size > MAX_WORKSPACE_HASH_BYTES) {
+          return {
+            status: expectedSha256 ? 'changed' : 'available',
+            sizeBytes: stat.size,
+            mtimeMs: stat.mtimeMs,
+          };
+        }
+        const sha256 = await hashFile(handle);
+        if (expectedSha256 && sha256 !== expectedSha256) {
+          return {
+            status: 'changed',
+            sizeBytes: stat.size,
+            mtimeMs: stat.mtimeMs,
+          };
+        }
         return {
           status: 'available',
           sizeBytes: stat.size,
           mtimeMs: stat.mtimeMs,
-        };
-      }
-      const sha256 = await hashFile(realPath);
-      if (expectedSha256 && sha256 !== expectedSha256) {
-        return {
-          status: 'changed',
-          sizeBytes: stat.size,
-          mtimeMs: stat.mtimeMs,
+          sha256,
         };
       }
       return {
         status: 'available',
-        sizeBytes: stat.size,
-        mtimeMs: stat.mtimeMs,
-        sha256,
       };
+    } finally {
+      await handle.close();
     }
-    return {
-      status: 'available',
-    };
   } catch (error) {
+    if (isNoFollowSymlinkError(error)) {
+      return { status: 'missing', escaped: true };
+    }
     if (!isNotFoundError(error)) {
       throw error;
     }
@@ -2305,9 +2339,9 @@ async function getWorkspaceStatus(
   }
 }
 
-async function hashFile(absolutePath: string): Promise<string> {
+async function hashFile(handle: FileHandle): Promise<string> {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(absolutePath)) {
+  for await (const chunk of handle.createReadStream({ start: 0 })) {
     hash.update(chunk as Buffer);
   }
   return hash.digest('hex');
@@ -2400,6 +2434,13 @@ function isNotFoundError(error: unknown): boolean {
   }
   const code = (error as { code?: unknown }).code;
   return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function isNoFollowSymlinkError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return false;
+  }
+  return (error as { code?: unknown }).code === 'ELOOP';
 }
 
 function isOutsidePath(relative: string): boolean {
