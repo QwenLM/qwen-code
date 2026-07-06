@@ -117,18 +117,9 @@
   gap: 12px;
 }
 
-/* Fullscreen: fewer, wider chart cards so the extra viewport actually enlarges
-   the charts (paired with a taller SVG in SvgLineChart) instead of just packing
-   in more small ones. The DialogShell body carries `data-dialog-fullscreen`. */
-:global([data-dialog-fullscreen]) .grid {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr));
-  gap: 16px;
-}
-
 /* The metrics tab renders in a full-height, extra-wide panel (not the old 70vh
    dialog), so give the 11 time-series charts a wider track than the dense
-   overview cards — legible ~2–3-column trends instead of a squeezed 4-up. Same
-   intent as the fullscreen rule above, which the panel layout can't trigger. */
+   overview cards — legible ~2–3-column trends instead of a squeezed 4-up. */
 .chartsGrid {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr));
   gap: 16px;

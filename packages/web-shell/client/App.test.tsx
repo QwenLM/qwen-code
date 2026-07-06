@@ -41,6 +41,8 @@ const {
   rawEnqueuePrompt,
   editorClear,
   editorCommit,
+  editorFocus,
+  settingsReload,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -102,6 +104,8 @@ const {
     rawEnqueuePrompt: vi.fn(() => true),
     editorClear: vi.fn(),
     editorCommit: vi.fn(),
+    editorFocus: vi.fn(),
+    settingsReload: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -119,7 +123,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useSettings: () => ({
     settings: [],
     setValue: vi.fn().mockResolvedValue(undefined),
-    reload: vi.fn().mockResolvedValue(undefined),
+    reload: settingsReload,
     loading: false,
   }),
   useStreamingState: () => testState.streamingState,
@@ -176,7 +180,7 @@ vi.mock('./components/ChatEditor', async () => {
         insertText: vi.fn(),
         // The panel focus effect calls editorRef.current?.focus() when a panel
         // closes with no pending approval (e.g. resuming a session).
-        focus: vi.fn(),
+        focus: editorFocus,
       }));
       return React.createElement(
         'button',
@@ -217,6 +221,45 @@ vi.mock('./components/MessageList', async () => {
           : null,
       );
     }),
+  };
+});
+
+// SettingsMessage / ModelDialog expose their callbacks as buttons so tests can
+// walk the fast-model path: open Settings -> onSubDialog('fastModel') opens the
+// model picker -> onSelect fires handleFastModelSelect.
+vi.mock('./components/messages/SettingsMessage', async () => {
+  const React = await import('react');
+  return {
+    SettingsMessage: (props: { onSubDialog?: (key: string) => void }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'settings-message' },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-fast-model',
+            type: 'button',
+            onClick: () => props.onSubDialog?.('fastModel'),
+          },
+          'fast model',
+        ),
+      ),
+  };
+});
+
+vi.mock('./components/dialogs/ModelDialog', async () => {
+  const React = await import('react');
+  return {
+    ModelDialog: (props: { onSelect?: (id: string) => void }) =>
+      React.createElement(
+        'button',
+        {
+          'data-testid': 'model-select',
+          type: 'button',
+          onClick: () => props.onSelect?.('fast-model-x'),
+        },
+        'select model',
+      ),
   };
 });
 
@@ -277,7 +320,6 @@ mockComponent('./components/panels/TodoPanel', 'TodoPanel');
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
-mockComponent('./components/dialogs/ModelDialog', 'ModelDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
 mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
@@ -295,7 +337,6 @@ mockComponent('./components/dialogs/McpDialog', 'McpDialog');
 mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
-mockComponent('./components/messages/SettingsMessage', 'SettingsMessage');
 mockComponent('./components/messages/ToolApproval', 'ToolApproval');
 mockComponent('./components/messages/AskUserQuestion', 'AskUserQuestion');
 mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
@@ -395,6 +436,9 @@ beforeEach(() => {
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
   editorCommit.mockClear();
+  editorFocus.mockClear();
+  settingsReload.mockClear();
+  settingsReload.mockResolvedValue(undefined);
   mockFollowup.clear.mockClear();
   for (const value of Object.values(mockSessionActions)) {
     if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
@@ -834,6 +878,103 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+  });
+
+  it('restores composer focus after an approval resolves following a panel auto-close', async () => {
+    // Regression: on panel auto-close the editor focus is intentionally skipped
+    // (the approval owns the keyboard); when the approval later resolves with no
+    // panel to return to, focus must come back to the composer rather than being
+    // orphaned on <body>.
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    editorFocus.mockClear();
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('closes the panel and restores composer focus on Back button click', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('closes the panel, sends /model --fast, and reloads settings on fast-model pick', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    // Open the fast-model picker from Settings, then pick a model.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/model --fast fast-model-x',
+      ),
+    ).toBe(true);
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('marks the chat view aria-hidden while a panel is shown', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="submit"]')
+        ?.closest('[aria-hidden="true"]'),
+    ).toBeNull();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="submit"]')
+        ?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
   });
 
   it('closes an open panel when resuming a session via /resume', async () => {

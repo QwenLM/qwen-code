@@ -1216,9 +1216,12 @@ export function App({
   // about to be hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
+  const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
     const prev = prevActivePanelRef.current;
+    const wasApprovalActive = prevApprovalOverlayRef.current;
     prevActivePanelRef.current = activePanel;
+    prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
       // Covers null→panel and panel→panel: the Back button lives outside the
       // keyed panel body so it survives a switch, but refocus explicitly rather
@@ -1233,6 +1236,13 @@ export function App({
       if (!approvalOverlayActive) {
         editorRef.current?.focus();
       }
+    } else if (wasApprovalActive && !approvalOverlayActive) {
+      // The panel was auto-closed for an approval (prev was consumed to null on
+      // that render, editor focus skipped). Now the approval has resolved with
+      // no panel to return to, so restore the composer here. (useComposerCore's
+      // dialogOpen effect also refocuses on this transition; this keeps the
+      // panel focus effect self-contained instead of relying on that.)
+      editorRef.current?.focus();
     }
   }, [activePanel, approvalOverlayActive]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
@@ -3751,8 +3761,14 @@ export function App({
           // one. It keeps the workspace-settings state fresh for the next time
           // Settings is opened (the command path, unlike setWorkspaceSetting,
           // doesn't bump the settingsVersion signal). Guard its own rejection —
-          // the .catch below only covers sendPrompt.
-          reloadWorkspaceSettings().catch(() => {});
+          // the .catch below only covers sendPrompt — and log it so a failed
+          // reload (leaving stale settings on next open) leaves a trace.
+          reloadWorkspaceSettings().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload workspace settings after fast-model switch',
+              err,
+            );
+          });
         })
         .catch((error: unknown) => {
           reportError(error, 'Failed to switch fast model');
@@ -4251,6 +4267,7 @@ export function App({
                       ref={panelBackRef}
                       type="button"
                       className={styles.panelBack}
+                      data-testid="panel-back"
                       onClick={closePanel}
                       aria-label={t('common.back')}
                       title={t('common.back')}
