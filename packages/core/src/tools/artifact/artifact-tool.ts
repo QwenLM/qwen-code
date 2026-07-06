@@ -130,9 +130,17 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     // Read the fragment the model wrote.
     let fragment: string;
     try {
-      const { content } = await this.config
+      const { content, _meta } = await this.config
         .getFileSystemService()
-        .readTextFile({ path: file_path });
+        .readTextFile({ path: file_path, maxOutputBytes: MAX_ARTIFACT_BYTES });
+      if (_meta?.truncatedByBytes === true) {
+        const message = `Artifact is too large (source exceeds the ${MAX_ARTIFACT_BYTES} byte limit). Trim the content or split it across multiple artifacts.`;
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message, type: ToolErrorType.FILE_TOO_LARGE },
+        };
+      }
       fragment = content;
     } catch (err) {
       const notFound = isNodeError(err) && err.code === 'ENOENT';
