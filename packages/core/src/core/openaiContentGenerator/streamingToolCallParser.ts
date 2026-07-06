@@ -154,15 +154,31 @@ export class StreamingToolCallParser {
 
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
-    if (isKnownId && currentBuffer.trim() && currentDepth === 0) {
-      try {
-        JSON.parse(currentBuffer);
+    if (isKnownId && currentDepth === 0) {
+      if (currentBuffer.trim()) {
+        try {
+          JSON.parse(currentBuffer);
+          debugLogger.debug(
+            `Ignoring replay chunk for completed toolCall id=${id}`,
+          );
+          return { complete: false };
+        } catch {
+          // Not complete yet; append the incoming chunk below.
+        }
+      } else if (
+        this.toolCallMeta.get(actualIndex)?.name &&
+        name &&
+        !chunk.trim()
+      ) {
+        // The call at this index may be a completed no-argument call. An
+        // incoming chunk that carries a name but no argument content is an
+        // opener-shaped replay (duplicate ID) and must not mutate the
+        // surviving call; a chunk with argument content is a continuation
+        // for a call whose opener streamed empty arguments and must append.
         debugLogger.debug(
-          `Ignoring replay chunk for completed toolCall id=${id}`,
+          `Ignoring replayed opener for no-argument toolCall id=${id}`,
         );
         return { complete: false };
-      } catch {
-        // Not complete yet; append the incoming chunk below.
       }
     }
 

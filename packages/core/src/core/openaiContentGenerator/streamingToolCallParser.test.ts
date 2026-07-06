@@ -653,6 +653,31 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
     });
 
+    it('should ignore replayed openers for a completed no-argument tool call', () => {
+      parser.addChunk(0, '', 'call_1', 'list_sessions');
+      // Provider replays the same ID's opener with a different name; the
+      // surviving call must not be mutated
+      parser.addChunk(0, '', 'call_1', 'different_function');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].name).toBe('list_sessions');
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should append ID-bearing argument fragments after an empty opener', () => {
+      // Some providers repeat the tool call ID on argument fragments. A
+      // known-ID chunk carrying argument content is a continuation, not a
+      // replay, and must not be swallowed by the replay guard.
+      parser.addChunk(0, '', 'call_1', 'function1');
+      const result = parser.addChunk(0, '{"x":1}', 'call_1');
+
+      expect(result.complete).toBe(true);
+      expect(parser.getCompletedToolCalls()).toEqual([
+        { id: 'call_1', name: 'function1', args: { x: 1 }, index: 0 },
+      ]);
+    });
+
     it('should ignore metadata-only replay chunks after a tool call ID completes', () => {
       parser.addChunk(0, '{"file_path": "a.ts"}', 'call_1', 'read_file');
 
