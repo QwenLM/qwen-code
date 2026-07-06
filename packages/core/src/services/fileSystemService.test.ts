@@ -87,7 +87,6 @@ describe('StandardFileSystemService', () => {
       expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
         path: '/test/file.txt',
         limit: Infinity,
-        line: 0,
       });
       expect(result.content).toBe('Hello, World!');
       expect(result._meta?.bom).toBe(false);
@@ -114,6 +113,26 @@ describe('StandardFileSystemService', () => {
         line: 5,
       });
       expect(result._meta?.originalLineCount).toBe(100);
+    });
+
+    it('should preserve explicit line zero for offset reads', async () => {
+      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
+        content: 'line 1',
+        bom: false,
+        encoding: 'utf-8',
+        originalLineCount: 100,
+      });
+
+      await fileSystem.readTextFile({
+        path: '/test/file.txt',
+        line: 0,
+      });
+
+      expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
+        path: '/test/file.txt',
+        limit: Infinity,
+        line: 0,
+      });
     });
 
     it('should pass maxOutputBytes and return byte-truncation metadata', async () => {

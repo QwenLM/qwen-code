@@ -36,7 +36,7 @@ export interface ReadTextRangeResult {
 export class LargeNonUtf8TextError extends Error {
   constructor(
     readonly encoding: string,
-    reason?: 'invalid-utf8',
+    readonly reason?: 'invalid-utf8',
   ) {
     super(
       reason === 'invalid-utf8'

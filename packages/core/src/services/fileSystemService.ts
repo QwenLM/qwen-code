@@ -280,7 +280,7 @@ export class StandardFileSystemService implements FileSystemService {
     const readResult = await readFileWithLineAndLimit({
       path,
       limit: limit ?? Number.POSITIVE_INFINITY,
-      line: line || 0,
+      ...(line !== undefined && line !== null ? { line } : {}),
       ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
       ...(signal !== undefined ? { signal } : {}),
     });

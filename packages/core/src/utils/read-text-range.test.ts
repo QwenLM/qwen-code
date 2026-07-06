@@ -197,14 +197,16 @@ describe('readTextRange', () => {
     ]);
     const filePath = await writeFile('late-gbk.log', mostlyAsciiThenGbk);
 
-    await expect(
-      readTextRange({
-        path: filePath,
-        offset: 0,
-        limit: 500,
-        maxOutputBytes: 20_000,
-      }),
-    ).rejects.toThrow(/invalid UTF-8 byte sequence/);
+    const promise = readTextRange({
+      path: filePath,
+      offset: 0,
+      limit: 500,
+      maxOutputBytes: 20_000,
+    });
+
+    await expect(promise).rejects.toThrow(LargeNonUtf8TextError);
+    await expect(promise).rejects.toThrow(/invalid UTF-8 byte sequence/);
+    await expect(promise).rejects.toMatchObject({ reason: 'invalid-utf8' });
   });
 
   it('bounds selected output for a large single-line file', async () => {

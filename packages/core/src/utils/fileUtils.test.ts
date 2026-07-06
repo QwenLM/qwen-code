@@ -34,7 +34,8 @@ import {
   detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
-import { DEFAULT_RANGE_READ_BYTES } from './text-range-constants.js';
+import { iconvEncode } from './iconvHelper.js';
+import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 
@@ -1469,17 +1470,30 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([1, 2]);
     });
 
-    it('should stream default file-system reads for large text files', async () => {
+    it('should reject default full file-system reads for large text files', async () => {
       actualNodeFs.writeFileSync(
         testTextFilePath,
         'x'.repeat(11 * 1024 * 1024),
       );
 
-      const result = await fsService.readTextFile({ path: testTextFilePath });
+      await expect(
+        fsService.readTextFile({ path: testTextFilePath }),
+      ).rejects.toThrow(/File too large for full read/);
+    });
 
-      expect(result.content).toHaveLength(DEFAULT_RANGE_READ_BYTES);
-      expect(result.content).toBe('x'.repeat(DEFAULT_RANGE_READ_BYTES));
-      expect(result._meta?.originalLineCount).toBe(1);
+    it('should stream explicit offset reads for large text files', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        `skip\n${'line\n'.repeat(3 * 1024 * 1024)}`,
+      );
+
+      const result = await fsService.readTextFile({
+        path: testTextFilePath,
+        line: 1,
+      });
+
+      expect(result.content.startsWith('line\n')).toBe(true);
+      expect(result.content.startsWith('skip\n')).toBe(false);
       expect(result._meta?.originalLineCountExact).toBe(false);
       expect(result._meta?.truncatedByBytes).toBe(true);
     });
@@ -1496,6 +1510,26 @@ describe('fileUtils', () => {
       expect(result._meta?.originalLineCount).toBe(1);
       expect(result._meta?.originalLineCountExact).toBe(true);
       expect(result._meta?.truncatedByBytes).toBe(true);
+    });
+
+    it('should propagate large non-UTF-8 errors through bounded reads', async () => {
+      const gbkLine = iconvEncode('中文日志行\n', 'gbk');
+      const gbkChunk = Buffer.concat(
+        Array.from({ length: 1024 }, () => gbkLine),
+      );
+      const repeatCount = Math.ceil((11 * 1024 * 1024) / gbkChunk.length);
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        Buffer.concat(Array.from({ length: repeatCount }, () => gbkChunk)),
+      );
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: 10,
+          maxOutputBytes: 10_000,
+        }),
+      ).rejects.toThrow(LargeNonUtf8TextError);
     });
 
     it('should propagate aborts from unbounded full reads', async () => {
