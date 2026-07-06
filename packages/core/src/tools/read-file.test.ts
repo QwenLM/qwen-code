@@ -24,6 +24,14 @@ vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
 }));
 
+vi.mock('../utils/pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/pdf.js')>();
+  return {
+    ...actual,
+    isPdftotextAvailable: async () => true,
+  };
+});
+
 describe('ReadFileTool', () => {
   let tempRootDir: string;
   let tool: ReadFileTool;
