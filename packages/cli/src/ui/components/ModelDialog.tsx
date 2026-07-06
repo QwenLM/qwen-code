@@ -122,15 +122,13 @@ const MAX_MODEL_ITEMS_TO_SHOW = 10;
 // Non-list dialog chrome to reserve when capping visible model rows: outer
 // round border (2) + outer padding (2) + title (1) + gap before the list (1)
 // + highlighted-entry detail panel (divider + up to 4 detail rows, ~6) +
-// scroll-arrow rows shown above/below a capped list (2) + footer gap and
-// hint text (2). Adjust this whenever that surrounding layout changes, and
+// footer gap and hint text (2). The list intentionally omits the ▲/▼ scroll
+// indicators other list dialogs enable: they are two always-rendered chrome
+// rows, and in a height-capped dialog those rows are better spent on two
+// more entries — the entry numbering already shows where the visible window
+// sits in the list. Adjust this whenever the surrounding layout changes, and
 // re-verify with an E2E height sweep rather than guessing.
-const MODEL_DIALOG_FIXED_ROWS = 16;
-// The ▲/▼ scroll indicators are two chrome rows that BaseSelectionList
-// renders unconditionally while enabled (it dims rather than hides them).
-// Included in MODEL_DIALOG_FIXED_ROWS; subtracted back out on dialogs too
-// short to afford them.
-const MODEL_DIALOG_SCROLL_ARROW_ROWS = 2;
+const MODEL_DIALOG_FIXED_ROWS = 14;
 const MODEL_OPTION_ROW_HEIGHT = 1;
 const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
 
@@ -410,17 +408,6 @@ export function ModelDialog({
   const errorMessageRows = errorMessage
     ? 2 + errorMessage.split('\n').length
     : 0;
-  // Drop the scroll arrows when reserving their rows would leave no room for
-  // even one option row: on such short dialogs the always-rendered arrows
-  // would push the option rows past the dialog's clipped height, leaving the
-  // picker with arrows but no visible entries.
-  const showScrollArrows =
-    availableTerminalHeight === undefined ||
-    availableTerminalHeight - MODEL_DIALOG_FIXED_ROWS - errorMessageRows >=
-      modelOptionRowHeight;
-  const modelDialogFixedRows = showScrollArrows
-    ? MODEL_DIALOG_FIXED_ROWS
-    : MODEL_DIALOG_FIXED_ROWS - MODEL_DIALOG_SCROLL_ARROW_ROWS;
   const maxModelItemsToShow =
     availableTerminalHeight === undefined
       ? MAX_MODEL_ITEMS_TO_SHOW
@@ -430,7 +417,7 @@ export function ModelDialog({
             MAX_MODEL_ITEMS_TO_SHOW,
             Math.floor(
               (availableTerminalHeight -
-                modelDialogFixedRows -
+                MODEL_DIALOG_FIXED_ROWS -
                 errorMessageRows) /
                 modelOptionRowHeight,
             ),
@@ -859,7 +846,6 @@ export function ModelDialog({
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
-            showScrollArrows={showScrollArrows}
             maxItemsToShow={maxModelItemsToShow}
           />
         </Box>
