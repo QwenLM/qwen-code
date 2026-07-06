@@ -4,6 +4,7 @@ import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
 import { I18nProvider } from '../i18n';
+import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 // Mock the App context and the heavy row children so this test exercises only
@@ -40,9 +41,13 @@ vi.mock('./MessageItem', async () => {
       ),
   };
 });
-vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
-  ParallelAgentsGroup: () => null,
-}));
+vi.mock('./messages/tools/ParallelAgentsGroup', async () => {
+  const React = await import('react');
+  return {
+    ParallelAgentsGroup: () =>
+      React.createElement('div', { 'data-testid': 'parallel-agents' }),
+  };
+});
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
 vi.mock('@tanstack/react-virtual', () => ({
@@ -135,6 +140,18 @@ const toolMsg = (id: string): ToolGroupMessage => ({
   id,
   role: 'tool_group',
   tools: [{ callId: `call-${id}`, toolName: 'Read', status: 'completed' }],
+});
+const agentMsg = (id: string): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [
+    {
+      callId: `call-${id}`,
+      toolName: 'Task',
+      status: 'completed',
+      args: { subagent_type: 'explore' },
+    },
+  ],
 });
 const asstMsg = (id: string): AssistantMessage => ({
   id,
@@ -468,6 +485,34 @@ describe('MessageList — turn collapse (DOM)', () => {
     );
     scrollIntoView.mockRestore();
     rectSpy.mockRestore();
+  });
+
+  it('flashes grouped parallel agents inside the row when locating a tool', async () => {
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    const ref = createRef<MessageListHandle>();
+    const c = mount(
+      [userMsg('u1'), agentMsg('g1'), agentMsg('g2'), asstMsg('a1')],
+      ref,
+    );
+
+    let found = false;
+    act(() => {
+      found = ref.current!.scrollToMessage('g1', 'call-g1');
+    });
+    await nextFrame();
+
+    expect(found).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    const parallelAgents = c.querySelector('[data-testid="parallel-agents"]');
+    expect(parallelAgents?.parentElement?.className).toContain(
+      flashStyles.flash,
+    );
+    expect(parallelAgents?.closest('[data-index]')?.className).not.toMatch(
+      /flash/i,
+    );
+    scrollIntoView.mockRestore();
   });
 
   it('hides the session timeline when the message list is narrow', async () => {

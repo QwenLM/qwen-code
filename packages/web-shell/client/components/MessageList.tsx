@@ -29,6 +29,7 @@ import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
+import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
@@ -2664,10 +2665,18 @@ export const MessageList = memo(
           if (displayItem.type === 'parallel_agents') {
             return (
               <MessageTimestamp timestamp={displayItem.timestamp}>
-                <ParallelAgentsGroup
-                  agents={displayItem.agents}
-                  pendingApproval={pendingApproval}
-                />
+                <div
+                  className={
+                    displayItemMatchesLocateTarget(displayItem, flashTarget)
+                      ? flashStyles.flash
+                      : undefined
+                  }
+                >
+                  <ParallelAgentsGroup
+                    agents={displayItem.agents}
+                    pendingApproval={pendingApproval}
+                  />
+                </div>
               </MessageTimestamp>
             );
           }
