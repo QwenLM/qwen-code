@@ -160,4 +160,28 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       workspaceHash: 'hash:/workspace/two',
     });
   });
+
+  it('memoizes workspace hashes by resolved workspace cwd', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/one');
+    const firstRes = mockRes(200);
+    const secondRes = mockRes(200);
+
+    mw(
+      mockReq('POST', '/session'),
+      firstRes,
+      vi.fn() as unknown as NextFunction,
+    );
+    firstRes.emit('finish');
+    mw(
+      mockReq('POST', '/session/abc/prompt'),
+      secondRes,
+      vi.fn() as unknown as NextFunction,
+    );
+    secondRes.emit('finish');
+
+    expect(coreMocks.hashDaemonWorkspace).toHaveBeenCalledTimes(1);
+    expect(coreMocks.hashDaemonWorkspace).toHaveBeenCalledWith(
+      '/workspace/one',
+    );
+  });
 });

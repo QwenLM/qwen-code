@@ -424,7 +424,7 @@ describe('runQwenServe telemetry validation', () => {
         mode: 'http-bridge',
         workspace: [primary, secondary],
         maxSessions: 1,
-      } as unknown as Parameters<typeof runQwenServe>[0]),
+      }),
     ).rejects.toThrow(/Multiple --workspace values are not supported yet/);
   });
 
@@ -445,7 +445,7 @@ describe('runQwenServe telemetry validation', () => {
         workspace: [primary],
         maxSessions: 1,
         serveWebShell: false,
-      } as unknown as Parameters<typeof runQwenServe>[0],
+      },
       {
         bridge: makeRuntimeBridge(),
         daemonLogBaseDir: path.join(tmpDir, 'debug'),

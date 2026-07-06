@@ -181,13 +181,22 @@ export function daemonTelemetryMiddleware(
   // traffic rather than static-asset or unrouted noise.
   recordRequest?: (durationMs: number, statusCode: number) => void,
 ): (req: Request, res: Response, next: NextFunction) => void {
+  const workspaceHashByCwd = new Map<string, string>();
+  const resolveWorkspaceHash = (workspaceCwd: string): string => {
+    const existing = workspaceHashByCwd.get(workspaceCwd);
+    if (existing !== undefined) return existing;
+    const workspaceHash = hashDaemonWorkspace(workspaceCwd);
+    workspaceHashByCwd.set(workspaceCwd, workspaceHash);
+    return workspaceHash;
+  };
+
   return (req, res, next) => {
     const route = resolveDaemonTelemetryRoute(req);
     if (!route) {
       next();
       return;
     }
-    const workspaceHash = hashDaemonWorkspace(resolveWorkspaceCwd(req));
+    const workspaceHash = resolveWorkspaceHash(resolveWorkspaceCwd(req));
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&
