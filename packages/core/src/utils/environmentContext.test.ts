@@ -653,6 +653,32 @@ describe('getStartupContextLength', () => {
     expect(getStartupContextLength(history)).toBe(0);
   });
 
+  it('is 0 for rewind when summary text lacks the resume sentinel', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'unrelated summary text' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      0,
+    );
+  });
+
+  it('is 0 for rewind when the compression ack text does not match', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      { role: 'model', parts: [{ text: 'Understood, resuming now.' }] },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      0,
+    );
+  });
+
   it('is 2 for rewind when a real prompt follows a compressed prefix', () => {
     const history: Content[] = [
       {
