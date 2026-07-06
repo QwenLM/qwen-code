@@ -27,7 +27,7 @@
   padding-right: env(safe-area-inset-right);
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   overflow: hidden;
@@ -562,6 +562,11 @@
   left: 20px;
   z-index: 6;
   pointer-events: auto;
+}
+
+.approvalOverlay:focus,
+.approvalOverlay:focus-visible {
+  outline: none;
 }
 
 .scrollToBottomLayer {

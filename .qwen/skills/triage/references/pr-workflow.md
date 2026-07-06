@@ -61,17 +61,25 @@ Default posture: **skepticism**. Burden of proof is on the author. Distinguish *
 
 Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
 
-**Tier 1 — Large-scope changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path change totals **500+ lines** (additions + deletions combined) → reject immediately. No evaluation, no Stage 1.
+**Size calculation — exclude non-production code.** When computing line counts for this gate, use per-file stats from `gh pr view --json files`, then exclude files matching `*.test.ts`, `*.test.tsx`, `*.spec.ts`, `*.spec.tsx`, `__tests__/**`, `*.schema.ts`, `*.schema.json`, `*.generated.ts`, and `**/generated/**`. Only **production logic lines** (additions + deletions) count toward the thresholds below. When reporting size in comments, show the breakdown: production lines vs. test lines vs. generated/schema lines.
+
+**Tier 1 — Large-scope `refactor` changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path `refactor`-type PR (title starts with `refactor` — `refactor:`, `refactor(scope):`, `refactor(scope)!:`, case-insensitive) totals **500+ production logic lines** (additions + deletions, using the size calculation above) → reject immediately. No evaluation, no Stage 1.
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first."
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This refactor touches core infrastructure at scale (N production lines). Core refactors of this size must be maintainer-initiated — please open an issue to discuss the design first."
 ```
 
 Then **stop**. This is a wall, not a guideline.
 
-**Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **flag it for the maintainer's awareness**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
+**`feat`-type PRs touching core are NOT hard-blocked on size.** A feature addition (title starts with `feat` — `feat:`, `feat(scope):`, `feat(scope)!:`, case-insensitive) that touches core paths should proceed to Stage 1 regardless of line count, subject to Tier 2's confidence requirement. If production logic lines reach 500+, **escalate to the maintainer for awareness** (flag it in the Stage 1 comment) but do not block or request changes based on size alone. Features add new code; refactors restructure existing code — the risk profiles are different.
 
-**Tier 2 — Changes to core below the 500-line threshold → evaluate with 100% confidence.** If the PR hits core paths but stays under Tier 1 (either few files, or a breadth-sweep flagged above), you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
+**Other PR types touching core are NOT hard-blocked on size.** A `fix`, `perf`, `chore`, `docs`, `ci`, or other conventional commit type, or an untyped PR (title does not follow conventional commit format), with 500+ production logic lines should follow the same path as `feat`: proceed to Stage 1 with maintainer awareness, but do not block or request changes based on size alone. If the diff appears to be a structural refactor despite a different title, raise that mismatch in Stage 1, use maintainer escalation, and do not approve automatically; do not invent a new hard block.
+
+**Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **flag it for the maintainer's awareness**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still triggers the 500-line hard block for `refactor` PRs, or maintainer escalation for other types, so depth isn't ignored.)
+
+**Tier 2 — Changes to core not blocked by Tier 1 → evaluate with 100% confidence.** If the PR hits core paths but is not blocked by Tier 1, you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
+
+**Large PR advisory (non-blocking).** If production logic changes (excluding test and generated/schema files matched above) reach 1000+ lines on any PR type, mention in the Stage 1 comment that the PR is large and suggest the author consider splitting if feasible. This is informational only — do not block or request changes based on size alone.
 
 **Why two tiers:** A one-line bugfix in `packages/core/src/providers/install.ts` with a clear reproduction is different from a 75-file refactor of the provider system. The gate can handle the former; the latter requires maintainer architectural context. But for any core change, **when in doubt, escalate. Better to wrongly escalate than to wrongly approve.**
 
@@ -130,6 +138,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
 ```
 
 If the author cannot provide a reproduction on re-run, escalate to the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set) and stop — do not proceed to Stage 2.
+
 - **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
 
 **"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
@@ -177,6 +186,8 @@ Problem: <state whether the problem is an observed bug with evidence, or theoret
 
 Direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
 
+Size: <if core paths are touched, report production lines vs. test lines vs. generated/schema lines; mention maintainer awareness for 500+ production lines or the 1000+ advisory when applicable. Otherwise say "not applicable".>
+
 Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
 <If passing:> Moving on to code review. 🔍
@@ -192,6 +203,8 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 问题：<说明问题是已观测到的 bug（有证据）还是理论性加固（无复现）。如果没有复现，直接说明："未提供 before/after 复现。什么场景会触发这个问题？">
 
 方向：<直接说判断——对齐的原因/担心的原因>。
+
+规模：<如果触及核心路径，报告生产行数、测试行数、生成/schema 行数；适用时说明 500+ 生产行需维护者关注，或 1000+ 大 PR 建议。否则写"不适用"。>
 
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
 
@@ -333,7 +346,9 @@ GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
 
 If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how clean every stage looked. Escalate to the maintainer instead (the "Genuinely unsure" path below, using `$QWEN_MAINTAINER_HANDLE` if set), and only `--request-changes` if you actually found blocking issues. This overrides the "approve" path.
 
-All stages genuinely clean **and** `GUARD` is `ok` — approve:
+If Stage 0 escalated the PR for maintainer awareness, do **not** approve automatically; use the "Genuinely unsure" path below.
+
+All stages genuinely clean, `GUARD` is `ok`, and no Stage 0 maintainer escalation remains — approve:
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body "LGTM, looks ready to ship. ✅"

@@ -112,6 +112,7 @@ import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
@@ -14015,6 +14016,38 @@ describe('runQwenServe SIGINT handler', () => {
 });
 
 describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const locals = app.locals as {
+      boundWorkspace?: string;
+      workspaceRegistry?: WorkspaceRegistry;
+    };
+
+    expect(locals.workspaceRegistry).toBeDefined();
+    expect(locals.workspaceRegistry!.primary.workspaceCwd).toBe(
+      locals.boundWorkspace,
+    );
+    expect(locals.workspaceRegistry!.list()).toEqual([
+      locals.workspaceRegistry!.primary,
+    ]);
+
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', '127.0.0.1:0')
+      .expect(200);
+    expect(res.body.workspaceCwd).toBe(
+      locals.workspaceRegistry!.primary.workspaceCwd,
+    );
+  });
+
   it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
     const { createServeApp } = await import('./server.js');
     const app = createServeApp(
@@ -14050,7 +14083,14 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       { fsFactory: sentinel as any },
     );
-    expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+    const locals = app.locals as {
+      fsFactory?: unknown;
+      workspaceRegistry?: WorkspaceRegistry;
+    };
+    expect(locals.fsFactory).toBe(sentinel);
+    expect(locals.workspaceRegistry!.primary.routeFileSystemFactory).toBe(
+      sentinel,
+    );
   });
 
   it('passes custom ignore files through resolveBridgeFsFactory', async () => {

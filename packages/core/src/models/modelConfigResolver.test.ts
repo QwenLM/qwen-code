@@ -959,4 +959,83 @@ describe('modelConfigResolver', () => {
       expect(result.sources['modalities'].kind).toBe('settings');
     });
   });
+
+  describe('[Regression] env-var-only path must apply model context defaults', () => {
+    it('env-var-only path: contextWindowSize auto-detected for claude-opus-4-6', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'claude-opus-4-6',
+        },
+      });
+
+      expect(result.config.model).toBe('claude-opus-4-6');
+      expect(result.config.contextWindowSize).toBe(200_000);
+      expect(result.sources['contextWindowSize'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: contextWindowSize auto-detected for a model whose limit differs from the global default', () => {
+      // gpt-4o resolves to 131,072 ≠ DEFAULT_TOKEN_LIMIT (200,000), so this
+      // assertion fails if the fallback applies the generic default instead
+      // of the model-specific limit.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'gpt-4o',
+        },
+      });
+
+      expect(result.config.model).toBe('gpt-4o');
+      expect(result.config.contextWindowSize).toBe(131_072);
+      expect(result.sources['contextWindowSize'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: unknown model keeps contextWindowSize undefined', () => {
+      // Unknown models must not be stamped with an explicit window and an
+      // 'auto-detected' source — downstream `?? DEFAULT_TOKEN_LIMIT`
+      // consumers apply the generic default instead.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'totally-unknown-model-xyz',
+        },
+      });
+
+      expect(result.config.model).toBe('totally-unknown-model-xyz');
+      expect(result.config.contextWindowSize).toBeUndefined();
+      expect(result.sources['contextWindowSize']).toBeUndefined();
+    });
+
+    it('env-var-only path: explicit settings contextWindowSize is not overridden by fallback', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          generationConfig: {
+            contextWindowSize: 32_000,
+          },
+        },
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'claude-opus-4-6',
+        },
+      });
+
+      expect(result.config.contextWindowSize).toBe(32_000);
+      expect(result.sources['contextWindowSize'].kind).toBe('settings');
+    });
+  });
 });
