@@ -30,15 +30,16 @@ import {
   generateCronTaskId,
   parseCron,
   nextFireTime,
+  MAX_JOBS,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
-// Mirrors the scheduler's own MAX_JOBS (cronScheduler.ts): durable tasks share
-// that in-memory job map and loadFileTasks silently caps installs at this
-// number, so a file with more entries would persist tasks that never load.
-// Rejecting past the cap here turns that silent drop into a clean 409.
-const MAX_SCHEDULED_TASKS = 50;
+// The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
+// caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
+// session-only jobs), so a task accepted here is always loadable — no silent
+// "created but never fires". Rejecting past the cap returns a clean 409.
+const MAX_SCHEDULED_TASKS = MAX_JOBS;
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_NAME_LENGTH = 200;
 const MAX_CRON_LENGTH = 200;
