@@ -256,7 +256,13 @@ function SessionOverviewPanelInner({
     // authenticate on token-auth deployments.
     const url = buildSplitUrl(splitIds, window.location.href, getDaemonToken());
     const win = window.open(url, '_blank');
-    win?.focus();
+    if (win) {
+      // The split tab carries a daemon token in its URL fragment; sever the
+      // opener link so it can't script the shell that spawned it during an
+      // authenticated session (reverse tabnabbing). Mirrors the bug-report path.
+      win.opener = null;
+      win.focus();
+    }
     setPopupBlocked(!win);
   }, [splitIds]);
 

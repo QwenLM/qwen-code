@@ -264,6 +264,20 @@ describe('SessionOverviewPanel', () => {
     expect(decodeURIComponent(String(url))).toContain('split=s-appr,s-idle');
   });
 
+  it('severs window.opener on the new split tab (token is in its URL)', () => {
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    const opened = { focus: vi.fn(), opener: {} as unknown };
+    openSpy.mockReturnValue(opened);
+    render();
+    act(() => selectAllCheckbox().click());
+    act(() =>
+      tabButton().dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    // The opener link is cut so the authenticated split tab can't script us.
+    expect(opened.opener).toBeNull();
+    expect(opened.focus).toHaveBeenCalledTimes(1);
+  });
+
   it('opens the selected sessions in split, in ranked order', () => {
     sessionsState.sessions = [
       session('s-idle', { displayName: 'Bravo' }),
