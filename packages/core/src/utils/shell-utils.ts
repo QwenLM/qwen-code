@@ -740,35 +740,89 @@ function pkillTargetsSelf(tokens: string[]): boolean {
   return args.some((arg) => matchesSelfProcessPattern(arg));
 }
 
-const PGREP_BARE_SELF_TARGET = new RegExp(
-  `(?<![a-z0-9_/-])(${SELF_PROCESS_NAMES})(?![a-z0-9_-])`,
-  'gi',
-);
-
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*pgrep\b([^)]*)\)|`\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*pgrep\b([^`]*)`/gi;
+  /\$\(\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*(?:pgrep|pidof)\b([^)]*)\)|`\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*(?:pgrep|pidof)\b([^`]*)`/gi;
+
+const BARE_SELF_PROCESS_PATTERN = new RegExp(`^(${SELF_PROCESS_NAMES})$`, 'i');
+
+function isBareSelfProcessName(value: string): boolean {
+  return BARE_SELF_PROCESS_PATTERN.test(value);
+}
+
+function pgrepTargetsSelf(tokens: string[]): boolean {
+  let usesFullCommandLine = false;
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (
+      normalized === '-f' ||
+      normalized === '--full' ||
+      shortOptionBundleHasFlag(token, '-f')
+    ) {
+      usesFullCommandLine = true;
+      continue;
+    }
+
+    if (isOptionToken(token)) {
+      if (
+        PKILL_OPTIONS_WITH_VALUES.has(normalized) &&
+        !optionHasInlineValue(token)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+
+  if (usesFullCommandLine) {
+    return args.some(
+      (arg) => matchesQwenProcessPattern(arg) || isBroadNodeFullPattern(arg),
+    );
+  }
+
+  return args.some((arg) => isBareSelfProcessName(arg));
+}
+
+function xargsInvokesKill(segment: string | undefined): boolean {
+  if (!segment) return false;
+  const parsed = parseShellSegment(segment);
+  if (!parsed) return /\bxargs\b.*\bkill\b/i.test(segment);
+  const tokens = unwrapExecutionPrefixes(parsed);
+  if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') return false;
+  return tokens
+    .slice(1)
+    .some((token) => normalizeExecutableName(token) === 'kill');
+}
 
 function killCommandTargetsSelf(segment: string): boolean {
   for (const match of segment.matchAll(KILL_COMMAND_SUBSTITUTION_PGREP)) {
     const rawArgs = match[1] ?? match[2] ?? '';
-    // Strip quoted segments so self-names inside quotes (e.g.
-    // `pgrep -f "node server.js"`) are not mistaken for bare targets.
-    const pgrepArgs = rawArgs.replace(/"[^"]*"|'[^']*'/g, (s) =>
-      ' '.repeat(s.length),
-    );
-    PGREP_BARE_SELF_TARGET.lastIndex = 0;
-    let bareMatch: RegExpExecArray | null;
-    while ((bareMatch = PGREP_BARE_SELF_TARGET.exec(pgrepArgs)) !== null) {
-      const after = pgrepArgs.slice(bareMatch.index + bareMatch[0].length);
-      // Strip redirections (2>/dev/null, 2>&1, >file, etc.)
-      // so they are not mistaken for extra pgrep arguments.
-      const stripped = after
-        .replace(/\d*>[>&]?[^\s)]*/g, '')
-        .replace(/\d*<[^\s)]*/g, '')
-        .trim();
-      if (stripped === '' || /^[;&|)]/.test(stripped)) {
+    const parsed = parseShellSegment(`pgrep ${rawArgs}`);
+    if (parsed) {
+      if (pgrepTargetsSelf(parsed)) {
         return true;
       }
+      continue;
+    }
+    const unquotedArgs = rawArgs.replace(
+      /"([^"]*)"|'([^']*)'/g,
+      (
+        _match,
+        doubleQuoted: string | undefined,
+        singleQuoted: string | undefined,
+      ) => doubleQuoted ?? singleQuoted ?? '',
+    );
+    const fallbackTokens = ['pgrep', ...unquotedArgs.trim().split(/\s+/)];
+    if (pgrepTargetsSelf(fallbackTokens)) {
+      return true;
     }
   }
   return false;
@@ -780,7 +834,8 @@ export function detectSelfKillCommand(command: string): boolean {
   }
 
   const segments = getCommandSegments(command);
-  for (const segment of segments) {
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
     const parsed = parseShellSegment(segment);
     if (!parsed) {
       if (killCommandTargetsSelf(segment)) {
@@ -804,7 +859,11 @@ export function detectSelfKillCommand(command: string): boolean {
     if (root === 'pkill' && pkillTargetsSelf(tokens)) {
       return true;
     }
-    if (root === 'pgrep' && pkillTargetsSelf(tokens)) {
+    if (
+      (root === 'pgrep' || root === 'pidof') &&
+      pgrepTargetsSelf(tokens) &&
+      xargsInvokesKill(segments[index + 1])
+    ) {
       return true;
     }
     if (root === 'kill' && killCommandTargetsSelf(segment)) {
