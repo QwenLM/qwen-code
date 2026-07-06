@@ -111,7 +111,8 @@ function resolveNumber(
 export const DEFAULT_MAX_RECENT_FILES = 5;
 export const DEFAULT_MAX_RECENT_IMAGES = 3;
 export const DEFAULT_SCREENSHOT_TRIGGER_ENABLED = true;
-export const DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD = 50;
+export const DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD = 20;
+export const DEFAULT_IMAGE_PAYLOAD_THRESHOLD = 20;
 
 export interface ResolvedCompactionTuning {
   /** Recent files restored after compaction (0 = restore none). */
@@ -122,6 +123,12 @@ export interface ResolvedCompactionTuning {
   enableScreenshotTrigger: boolean;
   /** Tool-image count at or above which the trigger fires (≥ 1). */
   screenshotTriggerThreshold: number;
+  /**
+   * Inline image count at or above which historical image payloads
+   * are replaced with text references and only recent images are
+   * reattached. Below this threshold images stay in-place untouched.
+   */
+  imagePayloadThreshold: number;
 }
 
 /**
@@ -162,6 +169,12 @@ export function resolveCompactionTuning(
       process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'],
       settings?.screenshotTriggerThreshold,
       DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+      { integer: true, minInclusive: 1 },
+    ),
+    imagePayloadThreshold: resolveNumber(
+      process.env['QWEN_IMAGE_PAYLOAD_THRESHOLD'],
+      settings?.imagePayloadThreshold,
+      DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
       { integer: true, minInclusive: 1 },
     ),
   };
