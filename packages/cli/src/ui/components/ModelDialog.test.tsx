@@ -151,6 +151,28 @@ describe('<ModelDialog />', () => {
     expect(props.showNumbers).toBe(true);
   });
 
+  it('caps visible model options to the available dialog height', () => {
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.items).toHaveLength(12);
+    expect(props.maxItemsToShow).toBe(6);
+  });
+
   it('hides discontinued qwen-oauth models for other auth types', () => {
     renderComponent(
       {},

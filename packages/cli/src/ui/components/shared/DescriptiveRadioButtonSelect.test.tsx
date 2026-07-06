@@ -94,4 +94,25 @@ describe('DescriptiveRadioButtonSelect', () => {
     });
     expect(lastFrame()).toMatchSnapshot();
   });
+
+  it('does not render empty description rows', () => {
+    const { lastFrame } = renderComponent({
+      items: [
+        {
+          title: 'Foo Title',
+          description: '',
+          value: 'foo',
+          key: 'foo',
+        },
+        {
+          title: 'Bar Title',
+          description: '   ',
+          value: 'bar',
+          key: 'bar',
+        },
+      ],
+    });
+
+    expect(lastFrame()).toBe('› Foo Title\n  Bar Title');
+  });
 });

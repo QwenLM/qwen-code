@@ -115,7 +115,13 @@ interface ModelDialogProps {
   isFastModelMode?: boolean;
   isVoiceModelMode?: boolean;
   isVisionModelMode?: boolean;
+  availableTerminalHeight?: number;
 }
+
+const MAX_MODEL_ITEMS_TO_SHOW = 10;
+const MODEL_DIALOG_FIXED_ROWS = 14;
+const MODEL_OPTION_ROW_HEIGHT = 1;
+const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
 
 function maskApiKey(apiKey: string | undefined): string {
   if (!apiKey) return `(${t('not set')})`;
@@ -239,6 +245,7 @@ export function ModelDialog({
   isFastModelMode,
   isVoiceModelMode,
   isVisionModelMode,
+  availableTerminalHeight,
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
@@ -379,12 +386,32 @@ export function ModelDialog({
       ),
     [availableModelEntries],
   );
+  const modelOptionRowHeight = MODEL_OPTIONS.some(
+    ({ description }) =>
+      typeof description !== 'string' || description.trim().length > 0,
+  )
+    ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
+    : MODEL_OPTION_ROW_HEIGHT;
+  const maxModelItemsToShow =
+    availableTerminalHeight === undefined
+      ? MAX_MODEL_ITEMS_TO_SHOW
+      : Math.max(
+          1,
+          Math.min(
+            MAX_MODEL_ITEMS_TO_SHOW,
+            Math.floor(
+              (availableTerminalHeight - MODEL_DIALOG_FIXED_ROWS) /
+                modelOptionRowHeight,
+            ),
+          ),
+        );
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const visionModelSetting = settings?.merged?.visionModel as
-    string | undefined;
+    | string
+    | undefined;
   const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
@@ -704,7 +731,8 @@ export function ModelDialog({
         }
 
         after = config.getContentGeneratorConfig?.() as
-          ContentGeneratorConfig | undefined;
+          | ContentGeneratorConfig
+          | undefined;
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
@@ -800,6 +828,7 @@ export function ModelDialog({
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
+            maxItemsToShow={maxModelItemsToShow}
           />
         </Box>
       )}
