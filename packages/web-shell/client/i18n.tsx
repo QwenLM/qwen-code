@@ -602,6 +602,8 @@ const EN: Messages = {
   'quickActions.shellMode': 'Shell mode',
   'quickActions.exitShellMode': 'Exit Shell',
   'quickActions.setGoal': 'Set goal',
+  'session.missing': 'Current session does not exist',
+  'session.new': 'New session',
   // Scheduled tasks page
   'scheduledTasks.title': 'Scheduled Tasks',
   'scheduledTasks.subtitle':
@@ -2200,6 +2202,8 @@ const ZH: Messages = {
   'quickActions.shellMode': 'Shell模式',
   'quickActions.exitShellMode': '退出Shell',
   'quickActions.setGoal': '设置目标',
+  'session.missing': '当前会话不存在',
+  'session.new': '新建会话',
   // 定时任务页面
   'scheduledTasks.title': '定时任务',
   'scheduledTasks.subtitle': '按计划自动执行任务，也可随时手动触发。',
