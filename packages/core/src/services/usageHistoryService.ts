@@ -485,9 +485,12 @@ export function aggregateUsage(
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
+  // Cap like topTools so the aggregate (and the dashboard payload) stays
+  // bounded when a range spans many distinct skills.
   const topSkills = [...skillCounts.entries()]
     .map(([name, s]) => ({ name, ...s }))
-    .sort((a, b) => b.count - a.count);
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 25);
 
   const projects = [...projectMap.entries()]
     .map(([p, stats]) => ({ path: p, ...stats }))

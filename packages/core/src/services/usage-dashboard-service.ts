@@ -11,6 +11,9 @@ import {
   type TimeRange,
   type UsageSummaryRecord,
 } from './usageHistoryService.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('USAGE_DASHBOARD');
 
 /** Trailing window for the heatmap, ~6 months. */
 const DEFAULT_HEATMAP_DAYS = 183;
@@ -81,9 +84,6 @@ export interface UsageDashboard {
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, UsageHeatmapDay>;
   heatmapDays: number;
-  /** Consecutive days with activity ending today (0 if today has a gap). */
-  currentStreak: number;
-  longestStreak: number;
 }
 
 export interface LoadUsageDashboardOptions {
@@ -186,62 +186,22 @@ function buildDaily(
   return out;
 }
 
-function calculateStreaks(dateKeys: string[]): {
-  currentStreak: number;
-  longestStreak: number;
-} {
-  if (dateKeys.length === 0) return { currentStreak: 0, longestStreak: 0 };
-
-  const days = dateKeys
-    .map((d) => {
-      const dt = new Date(`${d}T00:00:00`);
-      dt.setHours(0, 0, 0, 0);
-      return dt.getTime();
-    })
-    .sort((a, b) => a - b);
-
-  let currentStreak = 1;
-  let longestStreak = 1;
-  for (let i = 1; i < days.length; i++) {
-    const diff = Math.round((days[i]! - days[i - 1]!) / MS_PER_DAY);
-    if (diff === 1) {
-      currentStreak++;
-      if (currentStreak > longestStreak) longestStreak = currentStreak;
-    } else if (diff > 1) {
-      currentStreak = 1;
-    }
-  }
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const daysSinceLast = Math.round(
-    (today.getTime() - days[days.length - 1]!) / MS_PER_DAY,
-  );
-  if (daysSinceLast > 1) currentStreak = 0;
-
-  return { currentStreak, longestStreak };
-}
-
 /**
- * Read-only, workspace-agnostic snapshot of local token usage for the
- * daemon usage-dashboard API. Reuses {@link loadUsageHistory} (persisted
- * `usage_record.jsonl`, falling back to transcript replay) and
- * {@link aggregateUsage} so it stays consistent with the TUI `/stats` view.
- *
- * NOTE: history is global across all projects (`~/.qwen`), matching the
- * dashboard's cross-project intent. This can be I/O heavy on large histories
- * (transcript replay); callers should fetch on demand and cache.
+ * Build the dashboard from already-loaded usage records (pure — no I/O). Split
+ * out from {@link loadUsageDashboard} so a caller can load the history once and
+ * cheaply re-aggregate across ranges (the Today/7D/30D toggle) rather than
+ * re-reading the whole history per range.
  */
-export async function loadUsageDashboard(
+export function buildUsageDashboard(
+  records: UsageSummaryRecord[],
   options: LoadUsageDashboardOptions = {},
-): Promise<UsageDashboard> {
+): UsageDashboard {
   const range: TimeRange = options.range ?? 'today';
   const heatmapDays =
     options.heatmapDays && options.heatmapDays > 0
       ? Math.floor(options.heatmapDays)
       : DEFAULT_HEATMAP_DAYS;
 
-  const records = await loadUsageHistory();
   const report = aggregateUsage(records, range);
 
   let inputTokens = 0;
@@ -293,10 +253,12 @@ export async function loadUsageDashboard(
   );
   const daily = buildDaily(records, dailyStart, now);
 
-  // The heatmap always covers the trailing ~6 months, independent of `range`.
+  // The heatmap covers the trailing `heatmapDays` (~12 months in the UI),
+  // independent of `range`.
   const heatmap = buildHeatmap(records, now - heatmapDays * MS_PER_DAY, now);
-  const { currentStreak, longestStreak } = calculateStreaks(
-    Object.keys(heatmap),
+
+  debugLogger.debug(
+    `built dashboard range=${range} records=${records.length} models=${models.length} skills=${skills.length} dailyPoints=${daily.length}`,
   );
 
   return {
@@ -308,7 +270,19 @@ export async function loadUsageDashboard(
     daily,
     heatmap,
     heatmapDays,
-    currentStreak,
-    longestStreak,
   };
+}
+
+/**
+ * Read-only snapshot of local token usage for the daemon usage-dashboard API.
+ * Loads the global cross-project history (`~/.qwen`) via {@link loadUsageHistory}
+ * (persisted `usage_record.jsonl`, falling back to transcript replay) and builds
+ * the dashboard — consistent with the TUI `/stats` view. The load can be I/O
+ * heavy on large histories, so callers should cache (the daemon route caches the
+ * loaded records and re-runs {@link buildUsageDashboard} per range).
+ */
+export async function loadUsageDashboard(
+  options: LoadUsageDashboardOptions = {},
+): Promise<UsageDashboard> {
+  return buildUsageDashboard(await loadUsageHistory(), options);
 }

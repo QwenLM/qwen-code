@@ -79,8 +79,6 @@ function makeDashboard(overrides: Record<string, unknown> = {}) {
       '2026-05-01': { tokens: 120_000_000, cacheReadRate: 0.9 },
     },
     heatmapDays: 183,
-    currentStreak: 5,
-    longestStreak: 20,
     ...overrides,
   };
 }

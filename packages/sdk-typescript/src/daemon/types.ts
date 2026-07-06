@@ -1728,8 +1728,6 @@ export interface DaemonUsageDashboard {
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;
   heatmapDays: number;
-  currentStreak: number;
-  longestStreak: number;
 }
 
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */

@@ -20,7 +20,8 @@ import styles from './UsageDashboardTab.module.css';
 // count directly, and the day count (for the day-bucketed API) is derived from
 // it, so the label and the requested window can never drift.
 const HEATMAP_MONTHS = 12;
-const HEATMAP_DAYS = Math.round(HEATMAP_MONTHS * 30.44); // ≈ 365
+// 30.44 = average days per month, so 12 months ≈ 365 days.
+const HEATMAP_DAYS = Math.round(HEATMAP_MONTHS * 30.44);
 
 // The summary-period toggle (mockup: Today / 7D / 30D). `week`/`month` map to
 // core's trailing 7/30-day windows.

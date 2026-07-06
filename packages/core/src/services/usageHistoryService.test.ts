@@ -576,3 +576,88 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(totalTokens).toBe(1600);
   });
 });
+
+describe('aggregateUsage — skills', () => {
+  function skillRecord(
+    sessionId: string,
+    skills?: UsageSummaryRecord['skills'],
+  ): UsageSummaryRecord {
+    return {
+      version: 1,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now(),
+      project: '/p',
+      durationMs: 0,
+      totalLatencyMs: 0,
+      models: {
+        m: {
+          requests: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 0,
+          totalLatencyMs: 0,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+      ...(skills ? { skills } : {}),
+    };
+  }
+
+  it('sums skill counts across sessions, sorted by count desc', () => {
+    const report = aggregateUsage(
+      [
+        skillRecord('a', {
+          totalCalls: 3,
+          totalSuccess: 3,
+          totalFail: 0,
+          byName: {
+            qreview: { count: 2, success: 2, fail: 0 },
+            simplify: { count: 1, success: 1, fail: 0 },
+          },
+        }),
+        skillRecord('b', {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: { qreview: { count: 1, success: 1, fail: 0 } },
+        }),
+      ],
+      'all',
+    );
+    expect(report.skills.totalCalls).toBe(4);
+    expect(report.skills.topSkills).toEqual([
+      { name: 'qreview', count: 3, success: 3, fail: 0 },
+      { name: 'simplify', count: 1, success: 1, fail: 0 },
+    ]);
+  });
+
+  it('caps topSkills at 25, keeping the highest-count skills', () => {
+    const byName: NonNullable<UsageSummaryRecord['skills']>['byName'] = {};
+    for (let i = 0; i < 40; i++) {
+      byName[`skill-${i}`] = { count: i + 1, success: i + 1, fail: 0 };
+    }
+    const report = aggregateUsage(
+      [
+        skillRecord('a', {
+          totalCalls: 820,
+          totalSuccess: 820,
+          totalFail: 0,
+          byName,
+        }),
+      ],
+      'all',
+    );
+    expect(report.skills.topSkills.length).toBe(25);
+    expect(report.skills.topSkills[0]!.name).toBe('skill-39');
+  });
+
+  it('is inert for records without a skills field', () => {
+    const report = aggregateUsage([skillRecord('a')], 'all');
+    expect(report.skills.totalCalls).toBe(0);
+    expect(report.skills.topSkills).toEqual([]);
+  });
+});

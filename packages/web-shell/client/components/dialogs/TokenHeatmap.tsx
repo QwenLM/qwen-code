@@ -111,9 +111,11 @@ function buildModel(
   const rawCells: Array<Omit<Cell, 'level'>> = [];
   const values: number[] = [];
   const todayKey = localDateKey(today);
+  // Advance by calendar day (DST-safe); a fixed `i * MS_PER_DAY` offset drifts
+  // a date across a spring-forward / fall-back transition.
+  const cursor = new Date(gridStart.getTime());
   for (let i = 0; i < totalDays; i++) {
-    const date = new Date(gridStart.getTime() + i * MS_PER_DAY);
-    const key = localDateKey(date);
+    const key = localDateKey(cursor);
     const cell = heatmap[key];
     const tokens = cell?.tokens ?? 0;
     values.push(tokens);
@@ -125,6 +127,7 @@ function buildModel(
       weekday: i % 7,
       week: Math.floor(i / 7),
     });
+    cursor.setDate(cursor.getDate() + 1);
   }
 
   const thresholds = quartileThresholds(values);
@@ -135,18 +138,20 @@ function buildModel(
   const weeks = Math.ceil(totalDays / 7);
 
   // Label a month at the first week whose Monday falls in a new month.
+  // Advance the Monday cursor by 7 calendar days (DST-safe), same reason as above.
   const months: MonthLabel[] = [];
   let lastMonth = -1;
+  const monthCursor = new Date(gridStart.getTime());
   for (let w = 0; w < weeks; w++) {
-    const monday = new Date(gridStart.getTime() + w * 7 * MS_PER_DAY);
-    const m = monday.getMonth();
+    const m = monthCursor.getMonth();
     if (m !== lastMonth) {
       months.push({
         week: w,
-        text: monday.toLocaleDateString(locale, { month: 'short' }),
+        text: monthCursor.toLocaleDateString(locale, { month: 'short' }),
       });
       lastMonth = m;
     }
+    monthCursor.setDate(monthCursor.getDate() + 7);
   }
 
   return { cells, months, weeks };

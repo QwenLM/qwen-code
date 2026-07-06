@@ -318,34 +318,14 @@ describe('loadUsageDashboard', () => {
     expect(cell?.cacheReadRate).toBeCloseTo(0.9, 6);
   });
 
-  it('computes streaks over contiguous active days ending today', async () => {
-    const now = Date.now();
-    seed([
-      rec({ sessionId: 'd0', timestamp: now, model: { totalTokens: 1 } }),
-      rec({
-        sessionId: 'd1',
-        timestamp: now - 1 * MS_PER_DAY,
-        model: { totalTokens: 1 },
-      }),
-      rec({
-        sessionId: 'd2',
-        timestamp: now - 2 * MS_PER_DAY,
-        model: { totalTokens: 1 },
-      }),
-    ]);
-    const dash = await loadUsageDashboard();
-    expect(dash.currentStreak).toBe(3);
-    expect(dash.longestStreak).toBe(3);
-  });
-
   it('returns zeros for an empty history', async () => {
     const dash = await loadUsageDashboard();
     expect(dash.summary.totalTokens).toBe(0);
     expect(dash.summary.sessions).toBe(0);
     expect(dash.summary.cacheReadRate).toBe(0);
     expect(dash.heatmap).toEqual({});
-    expect(dash.currentStreak).toBe(0);
-    expect(dash.longestStreak).toBe(0);
+    expect(dash.models).toEqual([]);
+    expect(dash.skills).toEqual([]);
     expect(typeof dash.generatedAt).toBe('string');
   });
 });

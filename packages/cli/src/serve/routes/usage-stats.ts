@@ -8,22 +8,24 @@
  * Read-only usage-dashboard surface behind the Web Shell Daemon Status
  * "统计 / Usage" tab. Serves the selected range's (`today`/`week`/`month`)
  * flattened token totals plus a trailing per-day heatmap, computed by core's
- * `loadUsageDashboard` from the durable
- * local usage history (global `~/.qwen`, cross-project) — the same source the
- * TUI `/stats` command reads. No new instrumentation; nothing is written.
+ * `buildUsageDashboard` from the durable local usage history (global `~/.qwen`,
+ * cross-project) — the same source the TUI `/stats` command reads. No new
+ * instrumentation; nothing is written.
  *
  * Open GET (no `mutate` gate), consistent with `GET /daemon/status` and
  * `GET /scheduled-tasks`: it exposes only aggregate local usage counts.
  *
- * A short per-window TTL cache coalesces the heavy path — `loadUsageHistory`
- * can replay every project's transcripts — so rapid refreshes (and concurrent
- * requests) share a single load instead of stampeding the disk.
+ * The heavy step — `loadUsageHistory` can replay every project's transcripts —
+ * is cached once (range-independent), so toggling Today/7D/30D re-aggregates
+ * cheaply from a single disk read instead of re-loading per range, and
+ * concurrent requests coalesce onto the in-flight load.
  */
 
 import type { Application } from 'express';
 import {
-  loadUsageDashboard,
-  type UsageDashboard,
+  buildUsageDashboard,
+  loadUsageHistory,
+  type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -38,12 +40,9 @@ const USAGE_RANGES = ['today', 'week', 'month'] as const;
 type UsageRange = (typeof USAGE_RANGES)[number];
 
 export interface RegisterUsageStatsRoutesDeps {
-  /** Injectable for tests; defaults to core's disk-backed loader. */
-  loadDashboard?: (opts: {
-    range: UsageRange;
-    heatmapDays: number;
-  }) => Promise<UsageDashboard>;
-  /** Coalescing/refresh window. Defaults to 60s. */
+  /** Injectable for tests; defaults to core's disk-backed history loader. */
+  loadHistory?: () => Promise<UsageSummaryRecord[]>;
+  /** Coalescing/refresh window for the cached history. Defaults to 60s. */
   cacheTtlMs?: number;
 }
 
@@ -66,37 +65,36 @@ export function registerUsageStatsRoutes(
   app: Application,
   deps: RegisterUsageStatsRoutesDeps = {},
 ): void {
-  const load = deps.loadDashboard ?? ((opts) => loadUsageDashboard(opts));
+  const loadHistory = deps.loadHistory ?? (() => loadUsageHistory());
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 
-  // Closure-scoped cache: one per registration (one daemon per process), so
-  // tests get a fresh cache per mount with no global reset. Keyed by the
-  // clamped window; the in-flight promise is cached so concurrent requests
-  // coalesce onto a single load.
-  const cache = new Map<
-    string,
-    { at: number; promise: Promise<UsageDashboard> }
-  >();
+  // Closure-scoped, range-independent history cache (one daemon per process).
+  // The in-flight promise is cached so concurrent requests share one load.
+  let cache: { at: number; promise: Promise<UsageSummaryRecord[]> } | null =
+    null;
+
+  const getRecords = (): Promise<UsageSummaryRecord[]> => {
+    const now = Date.now();
+    if (!cache || now - cache.at >= ttlMs) {
+      const promise = loadHistory();
+      const entry = { at: now, promise };
+      cache = entry;
+      // Don't cache a rejection for the whole TTL window — drop it so the next
+      // request retries, and consume it so a failed load never surfaces as an
+      // unhandled rejection.
+      promise.catch(() => {
+        if (cache === entry) cache = null;
+      });
+    }
+    return cache.promise;
+  };
 
   app.get('/usage/dashboard', async (req, res) => {
     const range = parseRange(req.query['range']);
     const heatmapDays = parseHeatmapDays(req.query['heatmapDays']);
-    const key = `${range}:${heatmapDays}`;
     try {
-      const now = Date.now();
-      let entry = cache.get(key);
-      if (!entry || now - entry.at >= ttlMs) {
-        const promise = load({ range, heatmapDays });
-        entry = { at: now, promise };
-        cache.set(key, entry);
-        // Don't cache a rejection for the whole TTL window — drop the entry so
-        // the next request retries. Also consumes the rejection so a failed
-        // load never surfaces as an unhandled rejection.
-        promise.catch(() => {
-          if (cache.get(key) === entry) cache.delete(key);
-        });
-      }
-      const dashboard = await entry.promise;
+      const records = await getRecords();
+      const dashboard = buildUsageDashboard(records, { range, heatmapDays });
       res.status(200).json(dashboard);
     } catch (err) {
       writeStderrLine(
