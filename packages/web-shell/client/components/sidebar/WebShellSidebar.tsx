@@ -87,6 +87,16 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenSessions: () => void;
+  /**
+   * Whether to offer the Session Overview entry point. Gated to large screens
+   * by the app: below that there is no room to make managing several sessions
+   * side by side worthwhile.
+   */
+  canOpenSessionsOverview?: boolean;
+  onOpenSplitView: () => void;
+  /** Whether to offer the in-window split view (large screens only). */
+  canOpenSplitView?: boolean;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -239,6 +249,26 @@ function IconSchedule() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function IconGrid() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+function IconColumns() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="8" height="16" rx="1" />
+      <rect x="13" y="4" width="8" height="16" rx="1" />
     </svg>
   );
 }
@@ -433,6 +463,10 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenSessions,
+  canOpenSessionsOverview,
+  onOpenSplitView,
+  canOpenSplitView,
   onNewSession,
   onLoadSession,
   onError,
@@ -2471,6 +2505,28 @@ export function WebShellSidebar({
         >
           <IconSchedule />
         </button>
+        {canOpenSessionsOverview && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.sessionsOverview')}
+            aria-label={t('sidebar.sessionsOverview')}
+            onClick={onOpenSessions}
+          >
+            <IconGrid />
+          </button>
+        )}
+        {canOpenSplitView && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.splitView')}
+            aria-label={t('sidebar.splitView')}
+            onClick={onOpenSplitView}
+          >
+            <IconColumns />
+          </button>
+        )}
         <button
           className={styles.collapseButton}
           type="button"

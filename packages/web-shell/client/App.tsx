@@ -65,6 +65,10 @@ import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
+import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { SplitView } from './components/SplitView';
+import { useIsLargeScreen } from './hooks/useIsLargeScreen';
+import { parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -838,6 +842,10 @@ export function App({
   >(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+  // The Session Overview panel (mission control for managing many sessions at
+  // once) is only offered on large screens; below that there is no room for it
+  // to be useful.
+  const isLargeScreen = useIsLargeScreen();
 
   useEffect(() => {
     const mql = window.matchMedia('(max-width: 760px)');
@@ -1204,16 +1212,20 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks'>('chat');
+  const [mainView, setMainView] = useState<
+    'chat' | 'scheduledTasks' | 'split'
+  >('chat');
+  // Sessions to seed the split view with (e.g. the selection from the overview).
+  const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
-  const [activePanel, setActivePanel] = useState<'settings' | 'status' | null>(
-    null,
-  );
+  const [activePanel, setActivePanel] = useState<
+    'settings' | 'status' | 'sessions' | null
+  >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
   // (mainView) are mutually-exclusive full-pane views — the latter is a
@@ -1221,14 +1233,45 @@ export function App({
   // one closes the other. Without this, opening Scheduled Tasks then Daemon
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
-  const openPanel = useCallback((panel: 'settings' | 'status') => {
-    setMainView('chat');
-    setActivePanel(panel);
-  }, []);
+  const openPanel = useCallback(
+    (panel: 'settings' | 'status' | 'sessions') => {
+      setMainView('chat');
+      setActivePanel(panel);
+    },
+    [],
+  );
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
+  // Open the in-window split view showing 2+ sessions side by side. Seeds with
+  // the given sessions (e.g. the overview selection); SplitView falls back to
+  // the current session when the list is empty.
+  const openSplitView = useCallback((sessionIds?: string[]) => {
+    setActivePanel(null);
+    setSplitSessionIds(sessionIds ?? []);
+    setMainView('split');
+  }, []);
+  // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
+  // view with those sessions on load. Consume the param once so a later reload
+  // or exit doesn't force the split back on.
+  useEffect(() => {
+    const ids = parseSplitSessionIds(window.location.search);
+    if (ids.length === 0) return;
+    openSplitView(ids);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('split');
+    window.history.replaceState(null, '', url);
+  }, [openSplitView]);
+  // If the viewport shrinks below the large-screen breakpoint while the Session
+  // Overview panel is open, close it — its entry point is hidden on small
+  // screens, so leaving it open would strand the user in a view they can no
+  // longer reach.
+  useEffect(() => {
+    if (!isLargeScreen && activePanel === 'sessions') {
+      setActivePanel(null);
+    }
+  }, [isLargeScreen, activePanel]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus to the Back button when a panel
   // opens (or when switching directly between panels) and back to the composer
@@ -1285,8 +1328,11 @@ export function App({
     if (modelDialogMode) setModelDialogMode(null);
     if (showApprovalModeDialog) setShowApprovalModeDialog(false);
     // The Scheduled Tasks page is a full-pane overlay (position:absolute) that
-    // covers the chat footer too, so dismiss it for the same reason.
-    if (mainView !== 'chat') setMainView('chat');
+    // covers the chat footer too, so dismiss it for the same reason. The split
+    // view is deliberately NOT dismissed: each pane owns and renders its own
+    // session's approval, so an approval on the (outer) main session must not
+    // yank the user out of the panes they are working in.
+    if (mainView === 'scheduledTasks') setMainView('chat');
   }, [
     approvalOverlayActive,
     activePanel,
@@ -2422,6 +2468,19 @@ export function App({
       }
     },
     [closeMobileDrawer, closePanel, sessionActions],
+  );
+
+  // Clicking a card in the Session Overview panel switches the current window
+  // to that session. loadSidebarSession already closes the panel, so this just
+  // returns to the chat view and reports load failures.
+  const handleOpenSessionFromOverview = useCallback(
+    (sessionId: string) => {
+      setMainView('chat');
+      void loadSidebarSession(sessionId).catch((error: unknown) => {
+        reportError(error, 'Failed to open session');
+      });
+    },
+    [loadSidebarSession, reportError],
   );
 
   useEffect(() => {
@@ -4258,6 +4317,16 @@ export function App({
                     closeMobileDrawer();
                     openScheduledTasks();
                   }}
+                  onOpenSessions={() => {
+                    closeMobileDrawer();
+                    openPanel('sessions');
+                  }}
+                  canOpenSessionsOverview={isLargeScreen}
+                  onOpenSplitView={() => {
+                    closeMobileDrawer();
+                    openSplitView();
+                  }}
+                  canOpenSplitView={isLargeScreen}
                   onNewSession={() => {
                     setMainView('chat');
                     return createNewSession();
@@ -4274,7 +4343,7 @@ export function App({
             )}
             <div
               className={
-                mainView === 'scheduledTasks'
+                mainView !== 'chat'
                   ? `${styles.chatPane} ${styles.chatPaneShowingPage}`
                   : styles.chatPane
               }
@@ -4310,7 +4379,9 @@ export function App({
                   aria-label={
                     activePanel === 'settings'
                       ? t('settings.title')
-                      : t('daemon.title')
+                      : activePanel === 'status'
+                        ? t('daemon.title')
+                        : t('sessionsOverview.title')
                   }
                 >
                   <div className={styles.panelHeader}>
@@ -4337,7 +4408,9 @@ export function App({
                     <div className={styles.panelTitle}>
                       {activePanel === 'settings'
                         ? t('settings.title')
-                        : t('daemon.title')}
+                        : activePanel === 'status'
+                          ? t('daemon.title')
+                          : t('sessionsOverview.title')}
                     </div>
                   </div>
                   <div className={styles.panelBody} key={activePanel}>
@@ -4357,8 +4430,13 @@ export function App({
                             setShowApprovalModeDialog(true);
                         }}
                       />
-                    ) : (
+                    ) : activePanel === 'status' ? (
                       <DaemonStatusDialog />
+                    ) : (
+                      <SessionOverviewPanel
+                        onOpenSession={handleOpenSessionFromOverview}
+                        onOpenSplit={openSplitView}
+                      />
                     )}
                   </div>
                 </section>
@@ -4419,6 +4497,17 @@ export function App({
                       onError={reportError}
                     />
                   </div>
+                </div>
+              )}
+              {mainView === 'split' && (
+                <div className={styles.fullPage} data-testid="split-view-page">
+                  <SplitView
+                    initialSessionIds={splitSessionIds}
+                    // Back returns to the Session Overview (the hub the split is
+                    // launched from), not the single-session chat.
+                    onExit={() => openPanel('sessions')}
+                    onError={reportError}
+                  />
                 </div>
               )}
               <div

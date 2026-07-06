@@ -283,10 +283,12 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
       onOpenDaemonStatus?: () => void;
+      onOpenSessions?: () => void;
+      onOpenSplitView?: () => void;
     }) => {
       sidebarTokens.push(props.sessionListReloadToken);
-      // Expose the Daemon Status opener so tests can exercise the
-      // activePanel === 'status' branch (there is no slash command for it).
+      // Expose the Daemon Status / Session Overview openers so tests can
+      // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
         'div',
         { 'data-testid': 'sidebar' },
@@ -298,6 +300,24 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onOpenDaemonStatus,
           },
           'daemon status',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-sessions-overview',
+            type: 'button',
+            onClick: props.onOpenSessions,
+          },
+          'sessions overview',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-split-view',
+            type: 'button',
+            onClick: props.onOpenSplitView,
+          },
+          'split view',
         ),
       );
     },
@@ -322,6 +342,22 @@ mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
+mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
+vi.doMock('./components/SplitView', async () => {
+  const React = await import('react');
+  return {
+    SplitView: (props: { onExit?: () => void }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'split-view-mock' },
+        React.createElement(
+          'button',
+          { 'data-testid': 'split-back', type: 'button', onClick: props.onExit },
+          'back',
+        ),
+      ),
+  };
+});
 mockComponent(
   './components/dialogs/ScheduledTasksDialog',
   'ScheduledTasksDialog',
@@ -422,11 +458,15 @@ function makePendingPermissionBlock(
 beforeEach(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
-    value: vi.fn().mockReturnValue({
-      matches: false,
+    // Query-aware: report a large screen (min-width matches) so the Session
+    // Overview entry point is available, while keeping the mobile (max-width)
+    // query false as the other tests expect.
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: typeof query === 'string' && query.includes('min-width'),
+      media: query,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
-    }),
+    })),
   });
   mockConnection.sessionId = 'session-1';
   mockConnection.displayName = 'Session One';
@@ -758,6 +798,152 @@ describe('App session callbacks', () => {
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
       rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('opens the Session Overview panel from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    // The panelHost aria-label distinguishes which panel is up.
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('opens the split view from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('returns to the Session Overview when leaving the split view', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    // Split closed; the Session Overview panel is shown instead of the chat.
+    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('enters the split view from a ?split= URL and consumes the param', async () => {
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+      // The one-shot param is stripped so a reload/exit doesn't force it back.
+      expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('keeps the split view open when an approval becomes pending (unlike the scheduled-tasks page)', async () => {
+    // Each split pane owns its own session's approval, so an approval on the
+    // outer main session must NOT yank the user out of the split.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
+    // Drive isLargeScreen through a controllable media query: open the panel on
+    // a large screen, then flip below the breakpoint and confirm it closes.
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
       await Promise.resolve();
     });
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
