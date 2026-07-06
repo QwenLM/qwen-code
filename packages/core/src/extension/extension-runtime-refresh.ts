@@ -36,20 +36,23 @@ export async function refreshExtensionRuntime(
   // legs from applying or skip refreshHierarchicalMemory below. Hook reload
   // failures are surfaced after these best-effort legs settle.
   const skillManager = config.getSkillManager();
-  const settled = await Promise.allSettled([
-    skillManager?.refreshCache(),
-    config.getSubagentManager().refreshCache(),
-    config.getHookSystem()?.reload(),
-  ]);
+  const refreshLegs = [
+    { name: 'skills', promise: skillManager?.refreshCache() },
+    { name: 'subagents', promise: config.getSubagentManager().refreshCache() },
+    { name: 'hooks', promise: config.getHookSystem()?.reload() },
+  ] as const;
+  const settled = await Promise.allSettled(
+    refreshLegs.map((leg) => leg.promise),
+  );
   let hookReloadError: unknown;
 
   settled.forEach((result, index) => {
     if (result.status === 'rejected') {
       debugLogger.warn(
-        'refreshExtensionRuntime: a refresh leg failed:',
+        `refreshExtensionRuntime: ${refreshLegs[index].name} failed:`,
         result.reason,
       );
-      if (index === 2) {
+      if (refreshLegs[index].name === 'hooks') {
         hookReloadError = result.reason;
       }
     }
