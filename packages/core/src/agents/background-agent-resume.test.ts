@@ -816,7 +816,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagent.execute).toHaveBeenCalledTimes(1);
   });
 
-  it('waits for a background slot before resuming a paused agent', async () => {
+  it('keeps a paused agent paused when resume cannot claim a background slot', async () => {
     registry = new BackgroundTaskRegistry({
       maxConcurrentBackgroundAgents: 1,
     });
@@ -872,38 +872,16 @@ describe('BackgroundAgentResumeService', () => {
       metaPath,
     });
 
-    const subagent = {
-      execute: vi.fn(async () => undefined),
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        outputTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
-    };
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue({
-      subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
-    });
 
-    const resumed = service.resumeBackgroundAgent(agentId, 'continue');
-    await Promise.resolve();
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
-    expect(registry.getQueuedCount()).toBe(1);
+    expect(resumed).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.error).toContain(
+      'maximum concurrent background agents (1) reached',
+    );
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
-
-    registry.complete('already-running', 'done');
-
-    await expect(resumed).resolves.toBeDefined();
-    await vi.waitFor(() => {
-      expect(registry.get(agentId)?.status).toBe('completed');
-    });
-    expect(subagent.execute).toHaveBeenCalledTimes(1);
   });
 
   it('passes the sidechain transcript path to SubagentStop hooks on resume', async () => {
@@ -2705,7 +2683,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(started).toEqual(['running']);
   });
 
-  it('waits for a background slot before reviving a completed agent', async () => {
+  it('does not revive when the background concurrency cap is full', async () => {
     registry = new BackgroundTaskRegistry({ maxConcurrentBackgroundAgents: 1 });
     const sessionId = 'session-revive-cap';
     const agentId = 'agent-revive-cap';
@@ -2761,139 +2739,18 @@ describe('BackgroundAgentResumeService', () => {
       outputFile: path.join(tempDir, 'blocker.jsonl'),
     });
 
-    const subagent = {
-      execute: vi.fn(async () => undefined),
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        outputTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
-    };
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue({
-      subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
-    });
 
-    const revived = service.reviveCompletedBackgroundAgent(
+    const revived = await service.reviveCompletedBackgroundAgent(
       agentId,
       'keep going',
     );
 
-    await vi.waitFor(() => {
-      expect(registry.getQueuedCount()).toBe(1);
-    });
+    // At-capacity revive fails cleanly: the finished entry is NOT stranded as
+    // paused, and no agent run is started.
+    expect(revived).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('completed');
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
-
-    registry.complete('blocker', 'done');
-
-    await expect(revived).resolves.toBeDefined();
-    await vi.waitFor(() => {
-      expect(registry.get(agentId)?.status).toBe('completed');
-    });
-    expect(subagent.execute).toHaveBeenCalledTimes(1);
-  });
-
-  it('deduplicates queued completed-agent revive requests', async () => {
-    registry = new BackgroundTaskRegistry({ maxConcurrentBackgroundAgents: 1 });
-    const sessionId = 'session-revive-dedupes';
-    const agentId = 'agent-revive-dedupes';
-    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
-    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
-
-    writeAgentMeta(metaPath, {
-      agentId,
-      agentType: 'researcher',
-      description: 'Finished research',
-      parentSessionId: sessionId,
-      parentAgentId: null,
-      createdAt: '2026-04-20T00:00:00.000Z',
-      status: 'completed',
-      subagentName: 'researcher',
-      resolvedApprovalMode: 'default',
-    });
-    fs.writeFileSync(
-      outputFile,
-      JSON.stringify({
-        uuid: 'u1',
-        parentUuid: null,
-        sessionId,
-        timestamp: '2026-04-20T00:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'Finished research' }] },
-      }) + '\n',
-      'utf8',
-    );
-
-    registry.register({
-      agentId,
-      description: 'Finished research',
-      subagentType: 'researcher',
-      isBackgrounded: true,
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      outputFile,
-      metaPath,
-    });
-    registry.complete(agentId, 'All done');
-    registry.register({
-      agentId: 'blocker',
-      description: 'blocker',
-      subagentType: 'researcher',
-      isBackgrounded: true,
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      outputFile: path.join(tempDir, 'blocker.jsonl'),
-    });
-
-    const subagent = {
-      execute: vi.fn(async () => undefined),
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        outputTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
-    };
-    const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue({
-      subagent,
-      dispose: vi.fn().mockResolvedValue(undefined),
-    });
-
-    const first = service.reviveCompletedBackgroundAgent(
-      agentId,
-      'first message',
-    );
-    await vi.waitFor(() => {
-      expect(registry.getQueuedCount()).toBe(1);
-    });
-
-    const second = service.reviveCompletedBackgroundAgent(
-      agentId,
-      'second message',
-    );
-    await Promise.resolve();
-
-    try {
-      expect(registry.getQueuedCount()).toBe(1);
-      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
-    } finally {
-      registry.complete('blocker', 'done');
-      await Promise.allSettled([first, second]);
-    }
-
-    expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
   });
 });
 

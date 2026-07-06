@@ -2144,12 +2144,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       if (!isFork) {
         const registry = this.config.getBackgroundTaskRegistry();
-        if (signal?.aborted) {
-          backgroundSlotReservation =
-            await registry.waitForBackgroundSlot(signal);
-        } else {
-          backgroundSlotReservation = registry.tryReserveBackgroundSlot();
-        }
+        backgroundSlotReservation = registry.tryReserveBackgroundSlot();
         if (!backgroundSlotReservation) {
           const queuedCount = registry.getQueuedCount();
           const queueText =

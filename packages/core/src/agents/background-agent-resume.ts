@@ -46,7 +46,6 @@ import type {
   AgentCompletionStats,
   AgentTask,
   AgentTaskRegistration,
-  BackgroundSlotReservation,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
@@ -503,16 +502,17 @@ export class BackgroundAgentResumeService {
    * terminal notification) and hand it to `resumeBackgroundAgent`.
    *
    * Returns `undefined` (and logs why) when the agent can't be revived: not an
-   * in-registry, finished background agent with a persisted transcript, or a
-   * failed resume setup after the slot is claimed. Cross-session / evicted
-   * completed agents are out of scope (see QwenLM/qwen-code#5540).
+   * in-registry, finished background agent with a persisted transcript, or the
+   * background-agent concurrency cap is full. Cross-session / evicted completed
+   * agents are out of scope (see QwenLM/qwen-code#5540).
    */
   async reviveCompletedBackgroundAgent(
     agentId: string,
     initialMessage?: string,
   ): Promise<AgentTask | undefined> {
     // A resume/revive already in flight for this id owns the lifecycle — fold
-    // into it.
+    // into it. (The status flip below is await-free, so this guards a genuinely
+    // concurrent in-flight operation, not a same-tick re-entry.)
     if (this.resumeOperations.has(agentId)) {
       return this.resumeBackgroundAgent(agentId, initialMessage);
     }
@@ -531,6 +531,18 @@ export class BackgroundAgentResumeService {
           `backgrounded=${entry?.isBackgrounded ?? false}, ` +
           `status=${entry?.status ?? 'none'}, ` +
           `meta=${!!entry?.metaPath}, output=${!!entry?.outputFile}).`,
+      );
+      return undefined;
+    }
+    // Honor the background-agent concurrency cap before flipping the finished
+    // entry back to paused, so an at-capacity revive fails cleanly instead of
+    // stranding the entry as paused.
+    try {
+      registry.assertCanStartBackgroundAgent();
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
       );
       return undefined;
     }
@@ -572,114 +584,66 @@ export class BackgroundAgentResumeService {
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
-
+    try {
+      registry.assertCanStartBackgroundAgent();
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
     const completedEntry = {
       ...entry,
       pendingMessages: [...(entry.pendingMessages ?? [])],
       recentActivities: [...(entry.recentActivities ?? [])],
       pendingApprovals: [...(entry.pendingApprovals ?? [])],
     };
-    const trimmedMessage = initialMessage?.trim();
-    const operation: ResumeOperation = {
-      continuationMessages: trimmedMessage ? [trimmedMessage] : [],
-      promise: Promise.resolve(undefined),
-    };
-    this.resumeOperations.set(agentId, operation);
-    operation.promise = (async (): Promise<AgentTask | undefined> => {
-      let slotReservation: BackgroundSlotReservation | undefined;
-      try {
-        slotReservation =
-          registry.tryReserveBackgroundSlot() ??
-          (await registry.waitForBackgroundSlot());
-      } catch (error) {
-        debugLogger.warn(
-          `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-        );
-        return undefined;
-      }
-
-      if (
-        !this.restorePausedEntry(agentId, { suppressRegisterCallback: true })
-      ) {
-        registry.releaseBackgroundSlot(slotReservation);
-        return undefined;
-      }
-
-      const revived = await this.resumeBackgroundAgentInternal(
-        agentId,
-        operation,
-        slotReservation,
-      );
-      if (!revived) {
-        this.restoreCompletedEntry(completedEntry);
-      }
-      return revived;
-    })().finally(() => {
-      this.resumeOperations.delete(agentId);
-    });
-    const revived = await operation.promise;
+    this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
+    const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
+    if (!revived) {
+      this.restoreCompletedEntry(completedEntry);
+    }
     return revived;
   }
 
   private async resumeBackgroundAgentInternal(
     agentId: string,
     operation: ResumeOperation,
-    initialSlotReservation?: BackgroundSlotReservation,
   ): Promise<AgentTask | undefined> {
     const registry = this.config.getBackgroundTaskRegistry();
-    let slotReservation = initialSlotReservation;
-    let slotReservationConsumed = false;
-    const releaseSlotReservation = () => {
-      if (slotReservation && !slotReservationConsumed) {
-        registry.releaseBackgroundSlot(slotReservation);
-        slotReservation = undefined;
-      }
-    };
     const existing = registry.get(agentId);
     if (!existing || existing.status !== 'paused') {
-      releaseSlotReservation();
       return existing;
     }
 
     const metaPath = existing.metaPath;
     const outputFile = existing.outputFile;
     if (!metaPath || !outputFile) {
-      releaseSlotReservation();
       return undefined;
     }
 
     const meta = readAgentMeta(metaPath);
     if (!meta) {
-      releaseSlotReservation();
       return undefined;
     }
 
     const bgAbortController = new AbortController();
 
     try {
-      slotReservation ??=
-        registry.tryReserveBackgroundSlot() ??
-        (await registry.waitForBackgroundSlot());
-      registry.register(
-        {
-          ...existing,
-          status: 'running',
-          abortController: bgAbortController,
-          endTime: undefined,
-          result: undefined,
-          error: undefined,
-          resumeBlockedReason: undefined,
-          stats: undefined,
-          recentActivities: [],
-          pendingMessages: [...(existing.pendingMessages ?? [])],
-        },
-        { slotReservation },
-      );
-      slotReservationConsumed = true;
-      slotReservation = undefined;
+      registry.register({
+        ...existing,
+        status: 'running',
+        abortController: bgAbortController,
+        endTime: undefined,
+        result: undefined,
+        error: undefined,
+        resumeBlockedReason: undefined,
+        stats: undefined,
+        recentActivities: [],
+        pendingMessages: [...(existing.pendingMessages ?? [])],
+      });
     } catch (error) {
-      releaseSlotReservation();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.warn(
