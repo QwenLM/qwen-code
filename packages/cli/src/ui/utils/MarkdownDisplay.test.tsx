@@ -496,6 +496,19 @@ Done.`.replace(/\n/g, eol);
       expect(output).toContain('500');
     });
 
+    it('releases an options table whose first data cell starts with a dash', () => {
+      // `| --verbose | … |` after a header looks separator-ish to a naive
+      // "starts with a dash" check and would be held all stream. It is not a
+      // real separator (trailing letters), so it must render live.
+      const text = `flags:
+| Flag | Description |
+| --verbose | Enable verbose output |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      expect(lastFrame() ?? '').toContain('--verbose');
+    });
+
     it('does not hold back a header with an empty-named column once its separator matches', () => {
       // `| A || B |` is a 3-column table to the renderer (the empty middle cell
       // counts). The hold-back must count columns the same way, or it never

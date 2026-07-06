@@ -239,18 +239,22 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           return cols === headerCells;
         });
         // A markdown table's separator is the line IMMEDIATELY after the header.
-        // So once a line follows the header and it does not even begin like a
-        // separator (optional pipe, optional colon, then a dash), this pipe run
-        // is decided: NOT a forming table — a multi-cell shell pipeline
-        // (`| grep foo | wc -l`), a log excerpt (`| 200 | OK | GET /x`) or an
-        // ASCII-art border. Release it rather than hiding it for the whole
-        // stream. While only the header exists (still typing, no line after it
-        // yet) keep holding, so a real multi-column header does not flash in cell
-        // by cell before its separator arrives.
+        // So once a line follows the header and it is not a (possibly still
+        // forming) separator row, this pipe run is decided: NOT a forming table —
+        // a multi-cell shell pipeline (`| grep foo | wc -l`), a log excerpt
+        // (`| 200 | OK | GET /x`), an options table whose first cell starts with
+        // a dash (`| --verbose | … |`), or an ASCII-art border. Release it rather
+        // than hiding it for the whole stream. `tableSeparatorRegex` matches a
+        // partial separator (`|--`) so a real header whose separator is still
+        // being typed stays held; it rejects a dash-led data cell like
+        // `--verbose` (trailing letters), which a looser "starts with a dash"
+        // test would wrongly hold. While only the header exists (no line after it
+        // yet) keep holding so a multi-column header does not flash in cell by
+        // cell before its separator arrives.
         const lineAfterHeader = rest[0];
         const couldStillBeTable =
           lineAfterHeader === undefined ||
-          /^\s*\|?\s*:?-/.test(lineAfterHeader);
+          tableSeparatorRegex.test(lineAfterHeader);
         if (!hasMatchingSeparator && couldStillBeTable) {
           lines = lines.slice(0, start);
         }
