@@ -18,7 +18,12 @@ export function getShellPagerEnv(
   } = {},
 ): NodeJS.ProcessEnv {
   const effectivePager = pager ?? getDefaultShellPager(options.platform);
-  if (!effectivePager) return {};
+  if (!effectivePager) {
+    return {
+      PAGER: undefined,
+      ...(options.includeGitPager ? { GIT_PAGER: undefined } : {}),
+    };
+  }
 
   return {
     PAGER: effectivePager,
