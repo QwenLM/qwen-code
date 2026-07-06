@@ -21,6 +21,15 @@ on:
   issues:
     types:
       - 'labeled'
+  issue_comment:
+    types:
+      - 'created'
+  pull_request_review_comment:
+    types:
+      - 'created'
+  pull_request_review:
+    types:
+      - 'submitted'
   schedule:
     - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
     - cron: '0 4,8,16,20 * * *' # Review only between issue runs
@@ -72,6 +81,9 @@ env:
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human.
   MAX_ROUNDS: '3'
+  # Backpressure: do not create more scheduled autofix PRs while too many bot PRs
+  # are already waiting for review-address work.
+  MAX_OPEN_AUTOFIX_PRS_FOR_ISSUE: '10'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -84,6 +96,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: 'read'
+      pull-requests: 'read'
     outputs:
       do_issue: '${{ steps.decide.outputs.do_issue }}'
       do_review: '${{ steps.decide.outputs.do_review }}'
@@ -101,6 +114,11 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           GITHUB_TOKEN: '${{ github.token }}'
           BUG_LABEL: 'type/bug'
+          COMMENT_ASSOC: '${{ github.event.comment.author_association }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
+          EVENT_ISSUE_IS_PR: '${{ github.event.issue.pull_request.url }}'
+          EVENT_PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          EVENT_PR_STATE: '${{ github.event.pull_request.state || github.event.issue.state }}'
           ISSUE_LABEL: '${{ github.event.label.name }}'
           ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
@@ -108,6 +126,9 @@ jobs:
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           REPO: '${{ github.repository }}'
+          REVIEW_ASSOC: '${{ github.event.review.author_association }}'
+          REVIEW_EVENT_AUTHOR: '${{ github.event.sender.login }}'
+          REVIEW_STATE: '${{ github.event.review.state }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
         run: |-
@@ -175,6 +196,58 @@ jobs:
               fi
               ;;
           esac
+
+          review_event_assoc="${COMMENT_ASSOC:-${REVIEW_ASSOC:-}}"
+          review_event_trusted=false
+          case "${review_event_assoc}" in
+            OWNER|MEMBER|COLLABORATOR) review_event_trusted=true ;;
+          esac
+          [[ "${REVIEW_EVENT_AUTHOR}" == "${REVIEW_BOT}" ]] && review_event_trusted=true
+          [[ "${REVIEW_EVENT_AUTHOR}" == "${AUTOFIX_BOT}" ]] && review_event_trusted=false
+
+          if [[ "${EVENT_NAME}" == 'pull_request_review_comment' &&
+                "${EVENT_PR_STATE}" == 'open' &&
+                "${review_event_trusted}" == 'true' ]]; then
+            ROUTE_PR="$(sanitize_number "${EVENT_PR_NUMBER}")"
+            if [[ -n "${ROUTE_PR}" ]]; then
+              DO_ISSUE=false
+              DO_REVIEW=true
+              echo "🧭 pull_request_review_comment event accepted for PR #${ROUTE_PR}"
+            fi
+          fi
+
+          review_state_lower="$(tr '[:upper:]' '[:lower:]' <<< "${REVIEW_STATE:-}")"
+          if [[ "${EVENT_NAME}" == 'pull_request_review' &&
+                "${EVENT_PR_STATE}" == 'open' &&
+                "${review_event_trusted}" == 'true' &&
+                ( "${review_state_lower}" == 'changes_requested' || "${review_state_lower}" == 'commented' ) ]]; then
+            ROUTE_PR="$(sanitize_number "${EVENT_PR_NUMBER}")"
+            if [[ -n "${ROUTE_PR}" ]]; then
+              DO_ISSUE=false
+              DO_REVIEW=true
+              echo "🧭 pull_request_review event accepted for PR #${ROUTE_PR}"
+            fi
+          fi
+
+          address_review_command=false
+          if [[ "${COMMENT_BODY}" == '@qwen-code /address-review' ||
+                "${COMMENT_BODY}" == '@qwen-code /address-review '* ||
+                "${COMMENT_BODY}" == $'@qwen-code /address-review\n'* ]]; then
+            address_review_command=true
+          fi
+          if [[ "${EVENT_NAME}" == 'issue_comment' &&
+                -n "${EVENT_ISSUE_IS_PR}" &&
+                "${EVENT_PR_STATE}" == 'open' &&
+                "${review_event_trusted}" == 'true' &&
+                "${address_review_command}" == 'true' ]]; then
+            ROUTE_PR="$(sanitize_number "${EVENT_PR_NUMBER}")"
+            if [[ -n "${ROUTE_PR}" ]]; then
+              DO_ISSUE=false
+              DO_REVIEW=true
+              echo "🧭 address-review command accepted for PR #${ROUTE_PR}"
+            fi
+          fi
+
           # Forcing a specific issue/PR implies running that phase only for
           # explicit manual dispatch. Event payload numbers still flow to the
           # phase jobs after routing, but must not bypass the label/schedule gates.
@@ -185,11 +258,25 @@ jobs:
             [[ -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true
             [[ -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true
           fi
-          echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
-          echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
-          echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
-          echo "issue_number=${ROUTE_ISSUE}" >> "${GITHUB_OUTPUT}"
-          echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
+          if [[ "${EVENT_NAME}" == 'schedule' && "${DO_ISSUE}" == 'true' ]]; then
+            if BACKLOG_COUNT="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+              --limit 100 --json number,headRefName \
+              | jq --arg p "${BRANCH_PREFIX}" '[.[] | select(.headRefName | startswith($p))] | length')"; then
+              if [[ "${BACKLOG_COUNT}" -ge "${MAX_OPEN_AUTOFIX_PRS_FOR_ISSUE}" ]]; then
+                echo "🧭 Open autofix PR backlog ${BACKLOG_COUNT} is at or above ${MAX_OPEN_AUTOFIX_PRS_FOR_ISSUE}; pausing scheduled issue autofix."
+                DO_ISSUE=false
+              fi
+            else
+              echo "::warning::Failed to count open autofix PR backlog; leaving scheduled issue routing unchanged."
+            fi
+          fi
+          {
+            echo "do_issue=${DO_ISSUE}"
+            echo "do_review=${DO_REVIEW}"
+            echo "dry_run=${DRY_RUN}"
+            echo "issue_number=${ROUTE_ISSUE}"
+            echo "pr_number=${ROUTE_PR}"
+          } >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
@@ -978,7 +1065,7 @@ jobs:
       contents: 'read'
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 6
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
     concurrency:
@@ -1016,9 +1103,87 @@ jobs:
               ;;
           esac
 
+      - name: 'Live recheck review target'
+        id: 'live'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          finish_skip() {
+            echo "should_continue=false" >> "${GITHUB_OUTPUT}"
+            echo "🟰 PR #${PR}: $1"
+            exit 0
+          }
+
+          mkdir -p "${WORKDIR}"
+          pr_json="${WORKDIR}/live-pr.json"
+          if ! gh pr view "${PR}" --repo "${REPO}" \
+            --json state,isDraft,headRefName,headRefOid,mergeable \
+            > "${pr_json}"; then
+            finish_skip 'could not fetch live PR metadata.'
+          fi
+
+          state="$(jq -r '.state // ""' "${pr_json}")"
+          is_draft="$(jq -r '.isDraft // false' "${pr_json}")"
+          head_ref="$(jq -r '.headRefName // ""' "${pr_json}")"
+          head_sha="$(jq -r '.headRefOid // ""' "${pr_json}")"
+          if [[ "${state}" != 'OPEN' ]]; then
+            finish_skip "is ${state}."
+          fi
+          if [[ "${is_draft}" == 'true' ]]; then
+            finish_skip 'is draft.'
+          fi
+          if [[ "${head_ref}" != "${BRANCH}" || -z "${head_sha}" ]]; then
+            finish_skip "head branch changed from ${BRANCH} to ${head_ref:-unknown}."
+          fi
+
+          PUSH_WM="$(gh api "repos/${REPO}/commits/${head_sha}" --jq '.commit.committer.date')"
+          gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+          MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | (.body // "")
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
+              | {ts: .[0], round: (.[2] | tonumber)} ]' "${WORKDIR}/ic.json")"
+          EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
+          ROUND="$(jq -r '(sort_by(.ts) | last | .round) // 0' <<< "${MARKERS}")"
+          if [[ "${ROUND}" -ge "${MAX_ROUNDS}" ]]; then
+            finish_skip "hit MAX_ROUNDS (${ROUND}/${MAX_ROUNDS})."
+          fi
+
+          EFF_WM="${PUSH_WM}"
+          if [[ -n "${EVAL_WM}" && "${EVAL_WM}" > "${EFF_WM}" ]]; then EFF_WM="${EVAL_WM}"; fi
+
+          gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
+          gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
+          N_REVIEWS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+            --argjson trust "${TRUSTED_ASSOC}" '
+            [ .[]
+              | select((.submitted_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
+            "${WORKDIR}/rv.json")"
+          N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+            --argjson trust "${TRUSTED_ASSOC}" '
+            [ .[]
+              | select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
+            "${WORKDIR}/rc.json")"
+
+          HAS_CONFLICT='false'
+          MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' "${pr_json}")"
+          if [[ "${MERGEABLE}" == 'CONFLICTING' ]]; then HAS_CONFLICT='true'; fi
+          if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != 'true' ]]; then
+            finish_skip "nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})."
+          fi
+
+          echo "ROUND=${ROUND}" >> "${GITHUB_ENV}"
+          echo "WATERMARK=${EFF_WM}" >> "${GITHUB_ENV}"
+          echo "should_continue=true" >> "${GITHUB_OUTPUT}"
+          echo "🔎 PR #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} comment(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+
       - name: 'Set up Node.js (hosted)'
         if: |-
-          ${{ runner.environment == 'github-hosted' }}
+          ${{ steps.live.outputs.should_continue == 'true' && runner.environment == 'github-hosted' }}
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -1026,6 +1191,8 @@ jobs:
           cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
+        if: |-
+          ${{ steps.live.outputs.should_continue == 'true' }}
         run: |-
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
@@ -1038,6 +1205,8 @@ jobs:
           fi
 
       - name: 'Install dependencies and build'
+        if: |-
+          ${{ steps.live.outputs.should_continue == 'true' }}
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
@@ -1055,6 +1224,8 @@ jobs:
           npm run bundle
 
       - name: 'Prepare Qwen Code CLI'
+        if: |-
+          ${{ steps.live.outputs.should_continue == 'true' }}
         run: |-
           qwen_version="$(node -p "require('./package.json').version")"
           echo "Using checked-out Qwen Code bundle ${qwen_version}"
@@ -1070,12 +1241,16 @@ jobs:
           qwen --version
 
       - name: 'Resolve sandbox image'
+        if: |-
+          ${{ steps.live.outputs.should_continue == 'true' }}
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
 
       - name: 'Prepare branch and feedback'
         id: 'prepare'
+        if: |-
+          ${{ steps.live.outputs.should_continue == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
@@ -1149,6 +1324,8 @@ jobs:
 
       - name: 'Triage and address'
         id: 'address'
+        if: |-
+          ${{ steps.live.outputs.should_continue == 'true' }}
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
@@ -1205,7 +1382,7 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         if: |-
-          ${{ always() }}
+          ${{ always() && steps.live.outputs.should_continue == 'true' }}
         run: |-
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
@@ -1371,7 +1548,7 @@ jobs:
 
       - name: 'Report dry-run / failure'
         if: |-
-          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
+          ${{ always() && steps.live.outputs.should_continue == 'true' && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
