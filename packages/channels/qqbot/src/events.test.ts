@@ -755,11 +755,6 @@ describe('群管理事件', () => {
         timer: setTimeout(() => {}, 8888),
       });
 
-      const cronRetryCount = (ch as unknown as Record<string, unknown>)[
-        'cronRetryCount'
-      ] as Map<string, number>;
-      cronRetryCount.set('cron-sid-1', 2);
-
       const spy = vi.spyOn(globalThis, 'clearTimeout');
 
       const evt: GroupDelRobotEvent = {

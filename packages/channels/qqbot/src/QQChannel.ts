@@ -142,9 +142,6 @@ export class QQChannel extends ChannelBase {
     string,
     { buffer: string; timer: ReturnType<typeof setTimeout> | null }
   > = new Map();
-  /** Retry count per session for cron buffer flush. */
-  private cronRetryCount: Map<string, number> = new Map();
-  private static readonly MAX_CRON_RETRIES = 1;
 
   /** Named handler for permanent textChunk listener (cron/non-prompt). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
@@ -266,63 +263,18 @@ export class QQChannel extends ChannelBase {
               if (target) {
                 this.sendMessage(target.chatId, toFlushNow)
                   .then(() => {
-                    this.cronRetryCount.delete(sessionId);
                     if (!entry!.buffer) this.cronBuffer.delete(sessionId);
                   })
                   .catch((err) => {
                     process.stderr.write(
-                      `[QQ:${this.name}] Cron flush (size cap) send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+                      `[QQ:${this.name}] Cron flush (size cap) send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}
+`,
                     );
-                    const retries =
-                      (this.cronRetryCount.get(sessionId) ?? 0) + 1;
-                    this.cronRetryCount.set(sessionId, retries);
-                    if (retries > QQChannel.MAX_CRON_RETRIES) {
-                      process.stderr.write(
-                        `[QQ:${this.name}] Cron flush (size cap) exhausted retries (${QQChannel.MAX_CRON_RETRIES}) for ${sessionId}, discarding\n`,
-                      );
-                      this.cronRetryCount.delete(sessionId);
-                      this.cronBuffer.delete(sessionId);
-                      return;
-                    }
-                    entry!.buffer = toFlushNow + (entry!.buffer || '');
-                    if (this.cronBuffer.get(sessionId) !== entry) {
-                      this.cronBuffer.set(sessionId, entry!);
-                    }
-                    entry!.timer = setTimeout(() => {
-                      const retryEntry = this.cronBuffer.get(sessionId);
-                      if (!retryEntry || !retryEntry.buffer) return;
-                      const retryTarget = this.router.getTarget(sessionId);
-                      if (!retryTarget) {
-                        process.stderr.write(
-                          `[QQ:${this.name}] Cron flush (size cap) retry: no route for ${sanitizeLogText(sessionId, 64)}, discarding\n`,
-                        );
-                        this.cronRetryCount.delete(sessionId);
-                        this.cronBuffer.delete(sessionId);
-                        return;
-                      }
-                      const toFlush = retryEntry.buffer;
-                      retryEntry.buffer = '';
-                      this.sendMessage(retryTarget.chatId, toFlush)
-                        .then(() => {
-                          this.cronRetryCount.delete(sessionId);
-                          if (!retryEntry.buffer)
-                            this.cronBuffer.delete(sessionId);
-                        })
-                        .catch((retryErr) => {
-                          process.stderr.write(
-                            `[QQ:${this.name}] Cron flush (size cap) retry error: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
-                          );
-                          this.cronRetryCount.delete(sessionId);
-                          if (!retryEntry.buffer)
-                            this.cronBuffer.delete(sessionId);
-                        });
-                    }, 2000);
-                    entry!.timer.unref();
+                    this.cronBuffer.delete(sessionId);
                   });
                 return;
               }
             }
-            this.cronRetryCount.delete(sessionId);
             this.cronBuffer.delete(sessionId);
             return;
           }
@@ -335,64 +287,18 @@ export class QQChannel extends ChannelBase {
               if (target) {
                 this.sendMessage(target.chatId, toFlush)
                   .then(() => {
-                    this.cronRetryCount.delete(sessionId);
                     if (!entry!.buffer) this.cronBuffer.delete(sessionId);
                   })
                   .catch((err) => {
                     process.stderr.write(
-                      `[QQ:${this.name}] Cron flush send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-                    );
-                    const retries =
-                      (this.cronRetryCount.get(sessionId) ?? 0) + 1;
-                    this.cronRetryCount.set(sessionId, retries);
-                    if (retries > QQChannel.MAX_CRON_RETRIES) {
-                      process.stderr.write(
-                        `[QQ:${this.name}] Cron flush exhausted retries (${QQChannel.MAX_CRON_RETRIES}) for ${sessionId}, discarding\n`,
-                      );
-                      this.cronRetryCount.delete(sessionId);
-                      this.cronBuffer.delete(sessionId);
-                      return;
-                    }
-                    entry!.buffer = toFlush + (entry!.buffer || '');
-                    if (this.cronBuffer.get(sessionId) !== entry) {
-                      this.cronBuffer.set(sessionId, entry!);
-                    }
-                    entry!.timer = setTimeout(() => {
-                      const retryEntry = this.cronBuffer.get(sessionId);
-                      if (!retryEntry || !retryEntry.buffer) return;
-                      const retryTarget = this.router.getTarget(sessionId);
-                      if (!retryTarget) {
-                        process.stderr.write(
-                          `[QQ:${this.name}] Cron flush retry: no route for ${sanitizeLogText(sessionId, 64)}, discarding\n`,
-                        );
-                        this.cronRetryCount.delete(sessionId);
-                        this.cronBuffer.delete(sessionId);
-                        return;
-                      }
-                      const toFlush = retryEntry.buffer;
-                      retryEntry.buffer = '';
-                      this.sendMessage(retryTarget.chatId, toFlush)
-                        .then(() => {
-                          this.cronRetryCount.delete(sessionId);
-                          if (!retryEntry.buffer)
-                            this.cronBuffer.delete(sessionId);
-                        })
-                        .catch((retryErr) => {
-                          process.stderr.write(
-                            `[QQ:${this.name}] Cron flush retry error: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}
+                      `[QQ:${this.name}] Cron flush send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}
 `,
-                          );
-                          this.cronRetryCount.delete(sessionId);
-                          if (!retryEntry.buffer)
-                            this.cronBuffer.delete(sessionId);
-                        });
-                    }, 2000);
-                    entry!.timer.unref();
+                    );
+                    this.cronBuffer.delete(sessionId);
                   });
                 return;
               }
             }
-            this.cronRetryCount.delete(sessionId);
             this.cronBuffer.delete(sessionId);
           }, 2000).unref();
         });
@@ -789,7 +695,6 @@ export class QQChannel extends ChannelBase {
       }
       this.cronBuffer.clear();
     }
-    this.cronRetryCount.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.readyTimeout) {
@@ -2361,7 +2266,6 @@ export class QQChannel extends ChannelBase {
         if (target?.chatId === groupId) {
           if (entry.timer) clearTimeout(entry.timer);
           this.cronBuffer.delete(sid);
-          this.cronRetryCount.delete(sid);
         }
       }
     }
