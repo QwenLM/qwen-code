@@ -2467,6 +2467,42 @@ export function App({
       pendingBoundRunRef.current = null;
     }
   }, []);
+  // Enqueue the pending bound run once its session is the current, fully-loaded
+  // one — driven both by the effect below (when the session switch changes a
+  // dep) AND directly after loadSidebarSession resolves (when the session was
+  // ALREADY active, so no dep changes and the effect never re-runs — otherwise
+  // the run would hang until the switch timeout and falsely report a failure).
+  // Whoever fires first nulls the latch, so it runs exactly once.
+  const tryFireBoundRun = useCallback(() => {
+    const pending = pendingBoundRunRef.current;
+    const conn = connectionRef.current;
+    if (
+      !pending ||
+      conn.sessionId !== pending.sessionId ||
+      conn.loadingTranscript ||
+      conn.catchingUp
+    ) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    pendingBoundRunRef.current = null;
+    // Resolve the latch ONLY if the prompt was actually admitted: sendPrompt
+    // returns `undefined` when cancelled before admission (e.g. an embedder's
+    // onSubmitBefore rejected), in which case nothing reached the task session
+    // and the caller must NOT record a run. A throw (session-ensure/submit
+    // failure) rejects too. The switch-timeout was cleared above, so a long turn
+    // can't trip it. (Recording happens in the dialog once this resolves.)
+    sendPrompt(pending.prompt).then(
+      (result) => {
+        if (result === undefined) {
+          pending.reject(new Error('Run was cancelled before it started'));
+        } else {
+          pending.resolve();
+        }
+      },
+      (error: unknown) => pending.reject(error),
+    );
+  }, [sendPrompt]);
   const runTaskManually = useCallback(
     (prompt: string, sessionId: string | null): Promise<void> => {
       setMainView('chat');
@@ -2500,47 +2536,26 @@ export function App({
           reject,
           timer,
         };
-        loadSidebarSession(sessionId).catch((error: unknown) => {
-          clearPendingBoundRun(sessionId);
-          reject(error);
-        });
+        loadSidebarSession(sessionId)
+          // Fire immediately when the session was already active (no dep change
+          // to trigger the effect); a no-op if the load is still settling, in
+          // which case the effect picks it up.
+          .then(() => tryFireBoundRun())
+          .catch((error: unknown) => {
+            clearPendingBoundRun(sessionId);
+            reject(error);
+          });
       });
     },
-    [sendPrompt, loadSidebarSession, clearPendingBoundRun],
+    [sendPrompt, loadSidebarSession, clearPendingBoundRun, tryFireBoundRun],
   );
   useEffect(() => {
-    const pending = pendingBoundRunRef.current;
-    if (
-      pending &&
-      connection.sessionId === pending.sessionId &&
-      !connection.loadingTranscript &&
-      !connection.catchingUp
-    ) {
-      clearTimeout(pending.timer);
-      pendingBoundRunRef.current = null;
-      // The session is active — enqueue the prompt. Resolve the latch ONLY if
-      // the prompt was actually admitted: sendPrompt returns `undefined` when it
-      // was cancelled before admission (e.g. an embedder's onSubmitBefore
-      // rejected), in which case nothing reached the task session and the caller
-      // must NOT record a run. A throw (session-ensure/submit failure) rejects
-      // too. The switch-timeout was already cleared above, so a long turn can't
-      // trip it. (Recording happens in the dialog once this resolves.)
-      sendPrompt(pending.prompt).then(
-        (result) => {
-          if (result === undefined) {
-            pending.reject(new Error('Run was cancelled before it started'));
-          } else {
-            pending.resolve();
-          }
-        },
-        (error: unknown) => pending.reject(error),
-      );
-    }
+    tryFireBoundRun();
   }, [
     connection.sessionId,
     connection.loadingTranscript,
     connection.catchingUp,
-    sendPrompt,
+    tryFireBoundRun,
   ]);
 
   const openTasksPanel = useCallback(() => {

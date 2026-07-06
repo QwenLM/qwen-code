@@ -1260,6 +1260,51 @@ describe('CronScheduler', () => {
       await settle(schedB);
     });
 
+    it('does not re-fire a delivered bound catch-up on a reload racing its persist', async () => {
+      const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'boundOverdue',
+          cron: '0 * * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+          sessionId: 'sess-B',
+        },
+      ]);
+      const fired: CronJob[] = [];
+      scheduler.start((j) => fired.push(j));
+
+      // Park the catch-up's lastFiredAt persist in flight, so the on-disk stamp
+      // stays stale while a second reload runs.
+      let release!: () => void;
+      updateGate.block = new Promise((resolve) => {
+        release = resolve;
+      });
+      const hit = new Promise<void>((resolve) => {
+        updateGate.onHit = resolve;
+      });
+
+      // Reload A: detects + DELIVERS the overdue catch-up (fires once), then
+      // parks the persist on the gate.
+      await scheduler.enableDurable('sess-B');
+      await hit;
+      expect(fired.map((j) => j.id)).toEqual(['boundOverdue']);
+
+      // Reload B — a foreign write tripping the watcher (loadFileTasks(false)) —
+      // BEFORE the persist lands, so it reads the stale disk stamp. The
+      // deliveredCatchUp guard must stop it re-detecting and firing again.
+      await (
+        scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+      ).loadFileTasks(false);
+      expect(fired.map((j) => j.id)).toEqual(['boundOverdue']); // still ONE fire
+
+      updateGate.block = null;
+      release();
+      await settle(scheduler);
+    });
+
     it('skips a durable job the consumer cannot run: no fire, lastFiredAt left untouched', async () => {
       // A headless run can't expand a `<<loop.md>>` sentinel. Firing it would
       // stamp + persist lastFiredAt while the work is skipped downstream,

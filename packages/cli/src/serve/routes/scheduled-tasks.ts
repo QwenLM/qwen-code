@@ -160,6 +160,33 @@ function validateCron(cron: string): string | null {
   }
 }
 
+/**
+ * A canonical string for a cron expression's *effective* schedule, so two
+ * expressions that fire identically compare equal regardless of surface form
+ * (`0 9 * * *` vs `00 9 * * *`, extra whitespace, `7` vs `0` for Sunday). Used
+ * to decide whether a PATCH genuinely changed the schedule before re-seating
+ * the anchor. Returns null when the cron can't be parsed. The `*`-vs-full-range
+ * wildness flags are included because dom/dow wildness changes cron's firing
+ * semantics even when the expanded sets match.
+ */
+function canonicalCron(cron: string): string | null {
+  try {
+    const f = parseCron(cron);
+    const s = (set: Set<number>) => [...set].sort((a, b) => a - b).join(',');
+    return [
+      s(f.minute),
+      s(f.hour),
+      s(f.dayOfMonth),
+      s(f.month),
+      s(f.dayOfWeek),
+      f.domIsWild ? 'W' : '',
+      f.dowIsWild ? 'W' : '',
+    ].join('|');
+  } catch {
+    return null;
+  }
+}
+
 export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
@@ -497,8 +524,12 @@ export function registerScheduledTasksRoutes(
         // unwanted real fire.)
         const justReEnabled =
           current.enabled === false && patch.enabled === true;
+        // Compare the EFFECTIVE schedule, not the raw string: a cosmetic edit
+        // (`0 9 * * *` → `00 9 * * *`, whitespace) must not re-seat the anchor
+        // and drop a legitimately-pending catch-up fire.
         const cronChanged =
-          patch.cron !== undefined && patch.cron !== current.cron;
+          patch.cron !== undefined &&
+          canonicalCron(patch.cron) !== canonicalCron(current.cron);
         const becameRecurring =
           patch.recurring === true && current.recurring !== true;
         if (
@@ -624,6 +655,7 @@ export function registerScheduledTasksRoutes(
     // "never run" when a task is run manually within its creation minute.
     const now = Date.now();
     let found = false;
+    let blockedDisabled = false;
     let updated: DurableCronTask | undefined;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
@@ -631,6 +663,15 @@ export function registerScheduledTasksRoutes(
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A disabled task must not record a manual run: it's paused (and if it
+        // was disabled by archiving its session, that session can't even fire),
+        // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
+        // record. Mirrors the PATCH route's refusal to re-enable such tasks and
+        // the UI, where onRunPrompt already rejects before recording.
+        if (current.enabled === false) {
+          blockedDisabled = true;
+          return tasks; // no write
+        }
         const next: DurableCronTask = {
           ...current,
           lastFiredAt: now,
@@ -650,6 +691,14 @@ export function registerScheduledTasksRoutes(
       res.status(500).json({
         error: 'Failed to record scheduled task run',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedDisabled) {
+      res.status(409).json({
+        error:
+          'Cannot run a disabled task; enable it first (unarchive its session if it was archived).',
+        code: 'task_disabled',
       });
       return;
     }

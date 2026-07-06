@@ -257,6 +257,12 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Durable ids whose catch-up fire was DELIVERED this session but whose
+  // lastFiredAt persist hasn't landed yet — a reload racing that async write
+  // reads the stale disk stamp, so it must not re-detect and re-fire the same
+  // overdue slot. Cleared when the persist completes. A catch-up that was only
+  // buffered and then dropped never enters this set, so it still re-detects.
+  private deliveredCatchUp = new Set<string>();
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -696,6 +702,14 @@ export class CronScheduler {
             ? t.sessionId === this.sessionId
             : handleMissed;
         if (!responsibleForMissed) continue;
+        // A catch-up already DELIVERED this session but whose persist hasn't
+        // landed yet must not be re-detected: any reload racing that async write
+        // — e.g. a foreign write (another task's manual run, a rename, an
+        // unarchive) tripping the watcher — would otherwise read the stale disk
+        // lastFiredAt and fire the same overdue slot a second time. (A catch-up
+        // that was only buffered and then dropped is NOT in this set, so it
+        // still re-detects from disk — the intended recovery.)
+        if (this.deliveredCatchUp.has(t.id)) continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
@@ -946,6 +960,11 @@ export class CronScheduler {
       if (fired !== undefined) stamps.set(id, fired);
     }
     if (stamps.size === 0) return;
+    // Guard the just-delivered ids against re-detection by any reload that
+    // races this async write (which still reads the stale disk lastFiredAt).
+    // Cleared once the write lands, after which the disk anchor is current.
+    const guarded = [...stamps.keys()];
+    for (const id of guarded) this.deliveredCatchUp.add(id);
     this.trackPersist(
       updateCronTasks(this.projectRoot, (tasks) => {
         let changed = false;
@@ -966,6 +985,8 @@ export class CronScheduler {
           };
         });
         return changed ? next : tasks;
+      }).finally(() => {
+        for (const id of guarded) this.deliveredCatchUp.delete(id);
       }),
     );
   }

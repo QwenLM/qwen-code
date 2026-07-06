@@ -324,6 +324,42 @@ describe('scheduled-tasks routes', () => {
     expect(res.body.code).toBe('task_not_found');
   });
 
+  it('refuses a manual run for a disabled task (409, no phantom record)', async () => {
+    await seedTask({
+      id: 'off1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: false,
+    });
+    const res = await request(h.app).post('/scheduled-tasks/off1/run');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_disabled');
+    // No run recorded and lastFiredAt untouched.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].runs).toEqual([]);
+    expect(list.body.tasks[0].lastFiredAt).toBe(1_700_000_000_000);
+  });
+
+  it('refuses a manual run for an archive-disabled task (409)', async () => {
+    await seedTask({
+      id: 'arch3',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: false,
+      disabledByArchive: true,
+      sessionId: 'sess-arch3',
+    });
+    const res = await request(h.app).post('/scheduled-tasks/arch3/run');
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_disabled');
+  });
+
   it('rejects a create past the max-tasks cap without spawning a session', async () => {
     for (let i = 0; i < 50; i++) {
       const r = await create({ cron: '0 9 * * *', prompt: `p${i}` });
@@ -631,6 +667,28 @@ describe('scheduled-tasks routes', () => {
     expect(patch.body.cron).toBe('30 8 * * *');
     expect(patch.body.lastFiredAt).toBeGreaterThan(firedAt);
     expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
+  });
+
+  it('a cosmetically-different but equivalent cron does NOT re-seat the anchor', async () => {
+    // `0 9 * * *` → `00 9 * * *` fires identically; re-seating would drop a
+    // legitimately-pending catch-up. The comparison is on the effective schedule.
+    const createdAt = 1_700_000_000_000;
+    const firedAt = createdAt + 3 * 86_400_000;
+    await seedTask({
+      id: 'eq1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt,
+      lastFiredAt: firedAt,
+      enabled: true,
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/eq1')
+      .send({ cron: '00 9 * * *' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.cron).toBe('00 9 * * *'); // stored verbatim
+    expect(patch.body.lastFiredAt).toBe(firedAt); // anchor untouched
   });
 
   it('editing only the prompt of an enabled recurring task leaves the anchor untouched', async () => {
