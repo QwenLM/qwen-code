@@ -411,6 +411,46 @@ describe('StreamingToolCallParser', () => {
       expect(completed).toHaveLength(1);
       expect(completed[0].args).toEqual({});
     });
+
+    it('should not overwrite a completed no-argument tool call when a new call reuses its index', () => {
+      // First tool call: no arguments, provider never sends a fragment
+      parser.addChunk(0, '', 'call_1', 'no_arg_function');
+
+      // Second tool call arrives at the same index with a different ID
+      parser.addChunk(0, '{"param": "value"}', 'call_2', 'function2');
+
+      // Both calls must survive: the second is relocated to a new index
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'no_arg_function', args: {}, index: 0 },
+        {
+          id: 'call_2',
+          name: 'function2',
+          args: { param: 'value' },
+          index: 1,
+        },
+      ]);
+    });
+
+    it('should not route continuation chunks to a completed no-argument tool call', () => {
+      // Incomplete tool call accumulating arguments at index 0
+      parser.addChunk(0, '{"key":', 'call_1', 'function1');
+      // Completed no-argument tool call at the higher index 1
+      parser.addChunk(1, '', 'call_2', 'no_arg_function');
+      // Completed tool call at index 2
+      parser.addChunk(2, '{"x": 1}', 'call_3', 'function3');
+
+      // Continuation chunk without an ID arriving at a completed index must
+      // be routed to the incomplete call_1, not to the no-argument call_2
+      parser.addChunk(2, '"value"}');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'function1', args: { key: 'value' }, index: 0 },
+        { id: 'call_2', name: 'no_arg_function', args: {}, index: 1 },
+        { id: 'call_3', name: 'function3', args: { x: 1 }, index: 2 },
+      ]);
+    });
   });
 
   describe('Edge cases', () => {
