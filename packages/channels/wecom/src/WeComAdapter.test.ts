@@ -624,7 +624,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('unrefs the delayed kick reconnect retry', () => {
+  it('keeps the delayed kick reconnect retry alive', () => {
     const unref = vi.fn();
     const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
     const setTimeoutSpy = vi
@@ -642,7 +642,31 @@ describe('WeComChannel', () => {
     inspectable.scheduleKickReconnectRetry('kicked', 0);
 
     expect(inspectable.kickReconnectRetry).toBe(timeout);
-    expect(unref).toHaveBeenCalledTimes(1);
+    expect(unref).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+  });
+
+  it('keeps the SDK disconnect fallback reconnect alive', () => {
+    const unref = vi.fn();
+    const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockReturnValue(timeout);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    const client = {};
+    const inspectable = channel as unknown as {
+      disconnectReconnectFallback?: ReturnType<typeof setTimeout>;
+      scheduleDisconnectReconnectFallback(
+        reason: unknown,
+        client: unknown,
+        disconnectGeneration: number,
+      ): void;
+    };
+
+    inspectable.scheduleDisconnectReconnectFallback('closed', client, 0);
+
+    expect(inspectable.disconnectReconnectFallback).toBe(timeout);
+    expect(unref).not.toHaveBeenCalled();
     setTimeoutSpy.mockRestore();
   });
 
@@ -691,6 +715,22 @@ describe('WeComChannel', () => {
 
     channel.disconnect();
     stderr.mockRestore();
+  });
+
+  it('does not reconnect when disconnect emits a kick event', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+    oldClient.off = undefined as unknown as MockWSClient['off'];
+    oldClient.disconnect.mockImplementationOnce(() => {
+      oldClient.emit('event.disconnected_event', 'kicked');
+    });
+
+    channel.disconnect();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(mocks.instances).toHaveLength(1);
   });
 
   it('resets exhausted kick retry cycles before SDK-disconnect fallback reconnect', async () => {

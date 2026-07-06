@@ -149,6 +149,7 @@ export class WeComChannel extends ChannelBase {
 
     const client = new ClientCtor(options);
     let authenticated = false;
+    const connectionGeneration = this.disconnectGeneration;
     const messageHandler = (payload: unknown) => {
       if (!authenticated) {
         process.stderr.write(
@@ -172,6 +173,7 @@ export class WeComChannel extends ChannelBase {
       );
     };
     const disconnectedHandler = (reason: unknown) => {
+      if (this.disconnectGeneration !== connectionGeneration) return;
       process.stderr.write(
         `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; waiting for SDK reconnect.\n`,
       );
@@ -184,6 +186,7 @@ export class WeComChannel extends ChannelBase {
       }
     };
     const kickedHandler = (reason: unknown) => {
+      if (this.disconnectGeneration !== connectionGeneration) return;
       this.clearDisconnectReconnectFallback();
       this.startKickReconnect(reason);
     };
@@ -780,7 +783,6 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectRetryCycles = 0;
       this.startKickReconnect(reason, 'SDK disconnect');
     }, DISCONNECT_RECONNECT_FALLBACK_MS);
-    this.disconnectReconnectFallback.unref?.();
   }
 
   private async reconnectAfterKick(
@@ -896,7 +898,6 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectAttempts = 0;
       this.startKickReconnect(reason, reconnectReason);
     }, delayMs);
-    this.kickReconnectRetry.unref?.();
   }
 
   private startKickReconnect(
