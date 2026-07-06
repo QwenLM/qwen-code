@@ -953,5 +953,22 @@ describe('<TableRenderer />', () => {
       ];
       expect(stripAnsi(render(tall))).not.toContain('┌'); // vertical list
     });
+
+    it('does not flip to vertical when a tall row is appended after a short first row', () => {
+      // The vertical decision is anchored to the header + FIRST row. A short
+      // first row renders horizontal; appending a later tall-wrapping row must
+      // NOT flip the whole table to vertical mid-stream — it stays a (taller)
+      // horizontal grid. Guards the no-flip guarantee against later rows.
+      const tallLaterRow = Array.from({ length: 80 }, (_, i) => `w${i}`).join(
+        ' ',
+      );
+      const output = stripAnsi(
+        render([
+          ['x', 'y'],
+          [tallLaterRow, 'y'],
+        ]),
+      );
+      expect(output).toContain('┌'); // still horizontal (box drawn)
+    });
   });
 });

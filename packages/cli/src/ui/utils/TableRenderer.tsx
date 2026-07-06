@@ -551,20 +551,30 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
+  // Measure only the header + the FIRST data row, not every row. Using every row
+  // lets a later, taller row push maxRowLines over the threshold and flip an
+  // already-horizontal table to vertical mid-stream — a visible format change.
+  // The first row is representative for the common case (rows are similar in
+  // size), so freezing the decision to it keeps the format stable as rows stream
+  // in. Column WIDTHS still track all rows (redraw-on-wider is unchanged); only
+  // the horizontal-vs-vertical CHOICE is anchored to the first row.
   function calculateMaxRowLines(): number {
     let maxLines = 1;
+    const firstRow = rowMetrics[0];
     for (let i = 0; i < colCount; i++) {
-      const wrapped = wrapText(headerMetrics[i]!.rendered, columnWidths[i]!, {
-        hard: needsHardWrap,
-      });
-      maxLines = Math.max(maxLines, wrapped.length);
-    }
-    for (const row of rowMetrics) {
-      for (let i = 0; i < colCount; i++) {
-        const wrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
+      const headerWrapped = wrapText(
+        headerMetrics[i]!.rendered,
+        columnWidths[i]!,
+        {
+          hard: needsHardWrap,
+        },
+      );
+      maxLines = Math.max(maxLines, headerWrapped.length);
+      if (firstRow) {
+        const cellWrapped = wrapText(firstRow[i]!.rendered, columnWidths[i]!, {
           hard: needsHardWrap,
         });
-        maxLines = Math.max(maxLines, wrapped.length);
+        maxLines = Math.max(maxLines, cellWrapped.length);
       }
     }
     return maxLines;
@@ -587,15 +597,11 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // vertical fallback iterates the rows and with none would render an empty
   // string (a blank box) on a narrow terminal where the width trigger fires.
   //
-  // KNOWN LIMITATION: `maxRowLines` depends on the column widths, which track
-  // content (a wider row redraws the table). For a table with very long cell
-  // text whose wrapped height sits right at MAX_ROW_LINES, a later row can grow
-  // the columns and nudge the wrap count across the threshold, so the format can
-  // still oscillate vertical↔horizontal WHILE STREAMING. This is an accepted
-  // trade-off of redraw-on-wider column sizing (only extreme wide/long-text
-  // tables hit it; normal tables stay well clear of the threshold). Eliminating
-  // it would require a content-independent decision (which mis-sizes common
-  // key/value tables) or frozen column widths (losing redraw-on-wider).
+  // The vertical trigger is anchored to the header + first row (see
+  // calculateMaxRowLines) so appending rows does not flip the format. Residual
+  // corner: a very wide later row can force a proportional column shrink that
+  // re-wraps the first row taller; that is rare and only for genuinely
+  // overflowing tables, where vertical is the right call anyway.
   const useVerticalFormat =
     rowMetrics.length > 0 &&
     (contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES);
