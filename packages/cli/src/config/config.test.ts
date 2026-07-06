@@ -2930,6 +2930,41 @@ describe('loadCliConfig safe mode', () => {
     expect(config.getDisabledTools().size).toBe(0);
   });
 
+  it('should pass settings.tools.visible into visibleTools', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch', 'monitor'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
+  });
+
+  it('should default visibleTools to empty when settings.tools.visible is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
   it('should respect safe mode via QWEN_CODE_SAFE_MODE env var', async () => {
     vi.stubEnv('QWEN_CODE_SAFE_MODE', 'true');
     process.argv = ['node', 'script.js'];

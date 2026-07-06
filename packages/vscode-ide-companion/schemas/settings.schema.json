@@ -1050,6 +1050,13 @@
             "type": "string"
           }
         },
+        "visible": {
+          "description": "Deferred tool names promoted to first-class visibility at startup. Listed tools appear in the initial function declaration set without requiring a tool_search round-trip, avoiding KV-cache invalidation for frequently-used deferred tools.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
           "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [

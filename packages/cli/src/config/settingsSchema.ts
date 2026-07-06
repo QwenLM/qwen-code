@@ -2246,6 +2246,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      visible: {
+        type: 'array',
+        label: 'Visible Deferred Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Deferred tool names promoted to first-class visibility at startup. Listed tools appear in the initial function declaration set without requiring a tool_search round-trip, avoiding KV-cache invalidation for frequently-used deferred tools.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
       approvalMode: {
         type: 'enum',
         label: 'Tool Approval Mode',
