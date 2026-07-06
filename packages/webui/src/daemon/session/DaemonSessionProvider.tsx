@@ -1608,6 +1608,7 @@ function normalizeAndFilterEvent(
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
   behavior: { updateConnection?: boolean } = {},
 ): DaemonUiEvent[] {
+  logSettingsReloadEvent(event);
   if (behavior.updateConnection !== false) {
     updateConnectionFromDaemonEvent(event, setConnection);
   }
@@ -1621,6 +1622,53 @@ function normalizeAndFilterEvent(
     return goalStatusEvent ? [goalStatusEvent] : [];
   }
   return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
+}
+
+function logSettingsReloadEvent(event: DaemonEvent): void {
+  if (event.type !== 'settings_reloaded') return;
+  console.debug(
+    '[DaemonSessionProvider] settings reloaded:',
+    getSettingsReloadLogData(event),
+  );
+}
+
+function getSettingsReloadLogData(event: DaemonEvent): Record<string, unknown> {
+  const log: Record<string, unknown> = {};
+  if (event.id !== undefined) log['eventId'] = event.id;
+  if (!isRecord(event.data)) {
+    log['payload'] = 'non-object';
+    return log;
+  }
+
+  const env = getSettingsReloadEnvLog(event.data['env']);
+  const changedKeys = getStringArray(event.data['changedKeys']);
+  const sessionsRefreshed = getStringArray(event.data['sessionsRefreshed']);
+  const sessionsSkipped = getStringArray(event.data['sessionsSkipped']);
+  const childReloaded = event.data['childReloaded'];
+  const childError = getString(event.data, 'childError');
+
+  if (env) log['env'] = env;
+  if (changedKeys) log['changedKeys'] = changedKeys;
+  if (typeof childReloaded === 'boolean') log['childReloaded'] = childReloaded;
+  if (sessionsRefreshed) log['sessionsRefreshed'] = sessionsRefreshed;
+  if (sessionsSkipped) log['sessionsSkipped'] = sessionsSkipped;
+  if (childError) log['childError'] = childError;
+  return log;
+}
+
+function getSettingsReloadEnvLog(
+  value: unknown,
+): { updatedKeys: string[]; removedKeys: string[] } | undefined {
+  if (!isRecord(value)) return undefined;
+  return {
+    updatedKeys: getStringArray(value['updatedKeys']) ?? [],
+    removedKeys: getStringArray(value['removedKeys']) ?? [],
+  };
+}
+
+function getStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 function filterDaemonUiEventsForTranscript(
