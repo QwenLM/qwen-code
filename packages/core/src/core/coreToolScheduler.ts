@@ -3957,7 +3957,8 @@ export class CoreToolScheduler {
           for (const candidatePath of candidatePaths) {
             // Inject conditional rules at most once per session per rule
             // file. The registry tracks dedup internally.
-            const rulesCtx = rulesRegistry?.matchAndConsume(candidatePath);
+            const rulesCtx =
+              await rulesRegistry?.matchAndConsume(candidatePath);
             if (rulesCtx) reminderBlocks.push(rulesCtx);
           }
 
