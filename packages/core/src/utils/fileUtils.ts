@@ -321,6 +321,7 @@ export async function readFileWithLineAndLimit(params: {
       offset: line || 0,
       limit,
       maxOutputBytes: normalizeRangeReadByteLimit(maxOutputBytes),
+      stats,
       ...(signal !== undefined ? { signal } : {}),
     });
   }
@@ -1135,18 +1136,20 @@ export async function processSingleFileContent(
             ...(signal !== undefined ? { signal } : {}),
           });
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
+        const startLine = offset || 0;
+        const selectedLineCount =
+          content.length === 0 ? 0 : selectedLines.length;
         const hasOriginalLineCount = _meta?.originalLineCount !== undefined;
         const originalLineCount =
           _meta?.originalLineCount ??
           (stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE
-            ? selectedLines.length
+            ? startLine + selectedLineCount
             : await countFileLines(filePath));
         const originalLineCountExact =
           _meta?.originalLineCountExact === false
             ? false
             : hasOriginalLineCount ||
               stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE;
-        const startLine = offset || 0;
         const configCharLimit = config.getTruncateToolOutputThreshold();
 
         // Apply character limit truncation

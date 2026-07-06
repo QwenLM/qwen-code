@@ -118,6 +118,7 @@ export async function readManyFiles(
     const projectRoot = config.getProjectRoot();
 
     for (const rawPattern of inputPatterns) {
+      signal?.throwIfAborted();
       const normalizedPattern = rawPattern.replace(/\\/g, '/');
       const fullPath = path.resolve(projectRoot, normalizedPattern);
       const stats = fs.existsSync(fullPath) ? fs.statSync(fullPath) : null;
@@ -126,6 +127,7 @@ export async function readManyFiles(
         const { contentParts: dirParts, info } = await readDirectory(
           config,
           fullPath,
+          signal,
         );
         contentParts.push(...dirParts);
         files.push(info);
@@ -173,11 +175,14 @@ export async function readManyFiles(
 async function readDirectory(
   config: Config,
   directoryPath: string,
+  signal?: AbortSignal,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo }> {
+  signal?.throwIfAborted();
   const structure = await getFolderStructure(directoryPath, {
     fileService: config.getFileService(),
     fileFilteringOptions: config.getFileFilteringOptions(),
   });
+  signal?.throwIfAborted();
 
   const contentParts: Part[] = [
     { text: `\nContent from ${directoryPath}:\n` },

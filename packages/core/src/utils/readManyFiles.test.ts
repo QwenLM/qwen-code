@@ -248,6 +248,20 @@ describe('readManyFiles', () => {
       expect(content).not.toContain('Content of file1.txt');
     });
 
+    it('should propagate aborts before reading a directory', async () => {
+      await createTestFile('mydir', 'file1.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readManyFiles(mockConfig, {
+          paths: ['mydir'],
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
     it('should handle directory with trailing slash', async () => {
       await createTestFile('mydir', 'file1.txt');
       const mockConfig = createMockConfig(tempRootDir);
@@ -411,6 +425,20 @@ describe('readManyFiles', () => {
   });
 
   describe('per-file error surfacing', () => {
+    it('should propagate aborts from file reads instead of returning an error message', async () => {
+      const { relativePath } = await createTestFile('cancel.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readManyFiles(mockConfig, {
+          paths: [relativePath],
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
     it('should surface processSingleFileContent errors instead of silently skipping the file', async () => {
       // Trigger the >10MB file-size error path in processSingleFileContent.
       const relativePath = 'huge.bin';

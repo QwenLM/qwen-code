@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createReadStream } from 'node:fs';
+import { createReadStream, type Stats } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { TextDecoder } from 'node:util';
 import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
@@ -20,6 +20,7 @@ export interface ReadTextRangeRequest {
   limit: number;
   maxOutputBytes: number;
   signal?: AbortSignal;
+  stats?: Stats;
 }
 
 export interface ReadTextRangeResult {
@@ -45,7 +46,7 @@ export async function readTextRange(
   request: ReadTextRangeRequest,
 ): Promise<ReadTextRangeResult> {
   request.signal?.throwIfAborted();
-  const stats = await stat(request.path);
+  const stats = request.stats ?? (await stat(request.path));
   const maxOutputBytes = normalizeMaxBytes(request.maxOutputBytes);
 
   if (stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE) {

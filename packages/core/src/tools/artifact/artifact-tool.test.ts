@@ -154,11 +154,22 @@ describe('ArtifactTool', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
-  it('enforces the size cap', async () => {
+  it('rejects source fragments that exceed the artifact byte budget', async () => {
     const big = '<p>' + 'a'.repeat(MAX_ARTIFACT_BYTES) + '</p>';
     const file = await writeFragment('big.html', big);
     const res = await tool.build({ file_path: file }).execute(signal);
     expect(res.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+    expect(res.error?.message).toContain('source exceeds');
+    expect(res.error?.message).toContain(`${MAX_ARTIFACT_BYTES} byte limit`);
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('enforces the published artifact size cap', async () => {
+    const almostTooBig = 'a'.repeat(MAX_ARTIFACT_BYTES - 1);
+    const file = await writeFragment('wrapped-big.html', almostTooBig);
+    const res = await tool.build({ file_path: file }).execute(signal);
+    expect(res.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+    expect(res.error?.message).toContain('Artifact is too large');
     expect(openSpy).not.toHaveBeenCalled();
   });
 

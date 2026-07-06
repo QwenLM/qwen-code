@@ -1671,7 +1671,7 @@ describe('fileUtils', () => {
       expect(result.isTruncated).toBe(true);
     });
 
-    it('should avoid full line counting when large file metadata is missing', async () => {
+    it('should use selected range as a lower bound when large file metadata is missing', async () => {
       actualNodeFs.writeFileSync(
         testTextFilePath,
         'x'.repeat(11 * 1024 * 1024),
@@ -1680,7 +1680,7 @@ describe('fileUtils', () => {
         ...mockConfig,
         getFileSystemService: () => ({
           readTextFile: vi.fn().mockResolvedValue({
-            content: 'visible',
+            content: 'visible\nnext',
           }),
         }),
       } as unknown as Config;
@@ -1688,12 +1688,13 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         missingMetadataConfig,
+        { offset: 9, limit: 2 },
       );
 
-      expect(result.originalLineCount).toBe(1);
+      expect(result.originalLineCount).toBe(11);
       expect(result.originalLineCountExact).toBe(false);
       expect(result.returnDisplay).toBe(
-        'Read lines 1-1 of at least 1 from test.txt',
+        'Read lines 10-11 of at least 11 from test.txt',
       );
     });
 

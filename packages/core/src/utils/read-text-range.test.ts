@@ -113,6 +113,27 @@ describe('readTextRange', () => {
     expect(result.originalLineCountExact).toBe(false);
   });
 
+  it('detects CRLF when the pair crosses a stream chunk boundary', async () => {
+    const highWaterMark = 512 * 1024;
+    const firstChunk = `${'a'.repeat(highWaterMark - 1)}\r`;
+    const body = Buffer.concat([
+      Buffer.from(firstChunk),
+      Buffer.from('\nsecond\n'),
+      Buffer.alloc(11 * 1024 * 1024, 'x'),
+    ]);
+    const filePath = await writeFile('split-crlf.log', body);
+
+    const result = await readTextRange({
+      path: filePath,
+      offset: 0,
+      limit: 2,
+      maxOutputBytes: highWaterMark + 100,
+    });
+
+    expect(result.lineEnding).toBe('crlf');
+    expect(result.content).toContain('\r\nsecond');
+  });
+
   it('strips UTF-8 BOM from large file content and reports BOM metadata', async () => {
     const body = largeUtf8Lines(65_000);
     const filePath = await writeFile(
@@ -219,5 +240,21 @@ describe('readTextRange', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow(/abort/i);
+  });
+
+  it('propagates aborts while streaming large files', async () => {
+    const filePath = await writeFile('large.log', largeUtf8Lines(80_000));
+    const controller = new AbortController();
+    const promise = readTextRange({
+      path: filePath,
+      offset: 70_000,
+      limit: 10,
+      maxOutputBytes: 10_000,
+      signal: controller.signal,
+    });
+
+    setTimeout(() => controller.abort(), 0);
+
+    await expect(promise).rejects.toThrow(/abort/i);
   });
 });
