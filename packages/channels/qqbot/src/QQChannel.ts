@@ -253,31 +253,6 @@ export class QQChannel extends ChannelBase {
             entry.timer = null;
           }
           entry.buffer += text;
-          if (entry.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
-            if (entry.timer) clearTimeout(entry.timer);
-            entry.timer = null;
-            const toFlushNow = entry.buffer;
-            entry.buffer = '';
-            if (toFlushNow) {
-              const target = this.router.getTarget(sessionId);
-              if (target) {
-                this.sendMessage(target.chatId, toFlushNow)
-                  .then(() => {
-                    if (!entry!.buffer) this.cronBuffer.delete(sessionId);
-                  })
-                  .catch((err) => {
-                    process.stderr.write(
-                      `[QQ:${this.name}] Cron flush (size cap) send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}
-`,
-                    );
-                    this.cronBuffer.delete(sessionId);
-                  });
-                return;
-              }
-            }
-            this.cronBuffer.delete(sessionId);
-            return;
-          }
           entry.timer = setTimeout(() => {
             const toFlush = entry!.buffer;
             entry!.buffer = '';
