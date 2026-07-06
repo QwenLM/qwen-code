@@ -193,6 +193,38 @@ describe('<ModelDialog />', () => {
 
     const props = mockedSelect.mock.calls[0][0];
     expect(props.maxItemsToShow).toBe(1);
+    expect(props.showScrollArrows).toBe(false);
+  });
+
+  it('drops the scroll arrows when they would crowd out every option row', () => {
+    const contextValue = {
+      getModel: vi.fn(() => 'model-1'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() =>
+        Array.from({ length: 12 }, (_, i) => ({
+          id: `model-${i + 1}`,
+          label: `Model ${i + 1}`,
+          description: '',
+          authType: AuthType.USE_OPENAI,
+        })),
+      ),
+    };
+
+    // height 17: one option row fits alongside the arrows -> keep them.
+    renderComponent({ availableTerminalHeight: 17 }, contextValue);
+    const propsWithArrows = mockedSelect.mock.calls[0][0];
+    expect(propsWithArrows.showScrollArrows).toBe(true);
+    expect(propsWithArrows.maxItemsToShow).toBe(1);
+
+    cleanup();
+    mockedSelect.mockClear();
+
+    // height 16: reserving the two arrow rows would leave no room for any
+    // option row -> drop the arrows and spend those rows on the list.
+    renderComponent({ availableTerminalHeight: 16 }, contextValue);
+    const propsWithoutArrows = mockedSelect.mock.calls[0][0];
+    expect(propsWithoutArrows.showScrollArrows).toBe(false);
+    expect(propsWithoutArrows.maxItemsToShow).toBe(2);
   });
 
   it('accounts for the taller two-row option height when descriptions are present', () => {
@@ -259,6 +291,7 @@ describe('<ModelDialog />', () => {
 
     const initialProps = mockedSelect.mock.calls[0][0];
     expect(initialProps.maxItemsToShow).toBe(4);
+    expect(initialProps.showScrollArrows).toBe(true);
 
     await act(async () => {
       await initialProps.onSelect(initialProps.items[0].value);
@@ -267,9 +300,11 @@ describe('<ModelDialog />', () => {
     const propsAfterError =
       mockedSelect.mock.calls[mockedSelect.mock.calls.length - 1][0];
     // errorMessage = "Failed to switch model to 'model-1'.\n\nnetwork down"
-    // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
-    // max(1, floor((20 - 16 - 5) / 1)) = 1.
+    // (3 lines) -> errorMessageRows = 2 + 3 = 5. With arrows the budget is
+    // 20 - 16 - 5 < 1, so the arrows are dropped ->
+    // max(1, floor((20 - 14 - 5) / 1)) = 1.
     expect(propsAfterError.maxItemsToShow).toBe(1);
+    expect(propsAfterError.showScrollArrows).toBe(false);
   });
 
   it('hides discontinued qwen-oauth models for other auth types', () => {
