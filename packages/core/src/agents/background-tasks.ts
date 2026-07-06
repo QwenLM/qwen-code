@@ -956,7 +956,9 @@ export class BackgroundTaskRegistry {
 
   private consumeBackgroundSlot(reservation: BackgroundSlotReservation): void {
     if (!this.reservedBackgroundSlots.delete(reservation.id)) {
-      throw new Error('Invalid background agent slot reservation.');
+      throw new Error(
+        'Invalid background agent slot reservation; it may have been invalidated by session reset.',
+      );
     }
   }
 

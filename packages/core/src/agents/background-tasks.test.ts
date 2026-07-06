@@ -645,6 +645,27 @@ describe('BackgroundTaskRegistry', () => {
       );
       expect(registry.getQueuedCount()).toBe(0);
     });
+
+    it('reports when reset invalidates a drained slot reservation', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      registry.complete('bg-1', 'done');
+      const reservation = await reservationPromise;
+
+      registry.reset();
+
+      expect(() =>
+        registry.register(makeRegistration('bg-2'), {
+          slotReservation: reservation,
+        }),
+      ).toThrow('invalidated by session reset');
+    });
   });
 
   it('aborts all running agents and emits fallback notifications', () => {
