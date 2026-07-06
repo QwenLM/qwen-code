@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
+  generateCronTaskId,
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
@@ -366,6 +367,21 @@ describe('cronTasksFile', () => {
       expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(
         'after-race',
       );
+    });
+  });
+
+  describe('generateCronTaskId', () => {
+    it('returns an 8-character base36 id', () => {
+      expect(generateCronTaskId()).toMatch(/^[a-z0-9]{8}$/);
+    });
+
+    it('is very unlikely to collide across calls', () => {
+      const ids = new Set(
+        Array.from({ length: 200 }, () => generateCronTaskId()),
+      );
+      // 36^8 space — 200 draws essentially never collide (P ~ 1e-8). Assert
+      // near-uniqueness with a tiny margin so this can't flake.
+      expect(ids.size).toBeGreaterThan(195);
     });
   });
 });

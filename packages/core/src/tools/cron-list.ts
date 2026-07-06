@@ -123,7 +123,7 @@ class CronListInvocation extends BaseToolInvocation<
 
     const displayLines = jobs.map(
       (job) =>
-        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}]`,
+        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}]${job.name ? `: ${job.name}` : ''}`,
     );
     const returnDisplay = displayLines.join('\n');
 

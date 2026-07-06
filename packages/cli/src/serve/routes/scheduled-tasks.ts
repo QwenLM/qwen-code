@@ -347,7 +347,7 @@ export function registerScheduledTasksRoutes(
       });
     } catch (err) {
       writeStderrLine(
-        `qwen serve: PATCH /scheduled-tasks/:id failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: PATCH /scheduled-tasks/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to update scheduled task',
@@ -376,7 +376,7 @@ export function registerScheduledTasksRoutes(
       removed = await removeCronTasks(boundWorkspace, [id]);
     } catch (err) {
       writeStderrLine(
-        `qwen serve: DELETE /scheduled-tasks/:id failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: DELETE /scheduled-tasks/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to delete scheduled task',

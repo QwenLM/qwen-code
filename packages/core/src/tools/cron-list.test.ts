@@ -132,7 +132,9 @@ describe('CronListTool', () => {
     expect(result.llmContent).toContain(
       'off01 — 0 */2 * * * (recurring) [durable, disabled]: Weekly digest: check deploy',
     );
-    expect(result.returnDisplay).toContain('[durable, disabled]');
+    expect(result.returnDisplay).toContain(
+      '[durable, disabled]: Weekly digest',
+    );
   });
 
   it('merges file-backed durable jobs with session-only jobs', async () => {

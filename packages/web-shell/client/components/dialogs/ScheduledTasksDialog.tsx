@@ -164,11 +164,11 @@ export function ScheduledTasksDialog({
 
   const handleDelete = useCallback(
     async (task: DaemonScheduledTask) => {
-      const label = task.name || task.prompt;
-      if (
-        typeof window !== 'undefined' &&
-        !window.confirm(t('scheduledTasks.deleteConfirm', { name: label }))
-      ) {
+      // Truncate: an unnamed task falls back to its prompt, which can be up to
+      // MAX_PROMPT_LENGTH — too long for a confirm() dialog.
+      const raw = task.name || task.prompt;
+      const label = raw.length > 60 ? `${raw.slice(0, 57)}…` : raw;
+      if (!window.confirm(t('scheduledTasks.deleteConfirm', { name: label }))) {
         return;
       }
       setBusyId(task.id);
@@ -249,6 +249,7 @@ export function ScheduledTasksDialog({
                 className={styles.textarea}
                 value={prompt}
                 rows={4}
+                maxLength={100_000}
                 placeholder={t('scheduledTasks.promptPlaceholder')}
                 onChange={(e) => setPrompt(e.target.value)}
               />
