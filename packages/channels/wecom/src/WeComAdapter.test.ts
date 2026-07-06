@@ -1717,6 +1717,7 @@ describe('WeComChannel', () => {
     for (const [index, url] of [
       'https://localhost/latest/meta-data/',
       'https://metadata.local/latest/meta-data/',
+      'https://metadata.local./latest/meta-data/',
       'https://metadata/latest/meta-data/',
     ].entries()) {
       client.emit('message.image', {
@@ -1728,7 +1729,7 @@ describe('WeComChannel', () => {
       });
     }
 
-    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(3));
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(4));
     expect(channel.envelopes.every((entry) => !entry.attachments)).toBe(true);
     expect(mocks.lookup).not.toHaveBeenCalled();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();

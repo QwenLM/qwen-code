@@ -1,6 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfiguredChannels } from './runtime.js';
 
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+}));
+
+vi.mock('../../config/settings.js', () => ({
+  loadSettings: () => ({ merged: {} }),
+}));
+
+vi.mock('../extensions/utils.js', () => ({
+  getExtensionManager: async () => ({
+    getLoadedExtensions: () => [],
+  }),
+}));
+
 vi.mock('./channel-registry.js', () => ({
   getPlugin: async (type: string) =>
     type === 'telegram'
@@ -51,19 +65,21 @@ describe('parseConfiguredChannels', () => {
     ]);
   });
 
-  it('does not re-expand credentials already resolved by settings loading', async () => {
-    const parsed = await parseConfiguredChannels(
-      {
-        telegram: {
-          type: 'telegram',
-          token: '$TOKEN_LITERAL_VALUE',
+  it('rejects unresolved credential env vars', async () => {
+    await expect(
+      parseConfiguredChannels(
+        {
+          telegram: {
+            type: 'telegram',
+            token: '$TOKEN_LITERAL_VALUE',
+          },
         },
-      },
-      ['telegram'],
-      { defaultCwd: '/workspace' },
+        ['telegram'],
+        { defaultCwd: '/workspace' },
+      ),
+    ).rejects.toThrow(
+      'Error in channel "telegram": Environment variable TOKEN_LITERAL_VALUE is not set (referenced as $TOKEN_LITERAL_VALUE). Set the variable or remove the $ prefix to use a literal value.',
     );
-
-    expect(parsed[0]?.config.token).toBe('$TOKEN_LITERAL_VALUE');
   });
 
   it('resolves channel credentials from environment loaded after settings', async () => {

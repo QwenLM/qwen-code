@@ -1419,7 +1419,10 @@ async function isSafeInboundMediaUrl(
     return { safe: false, reason: 'non-HTTPS protocol' };
   }
 
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const host = url.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
   if (!host || host === 'localhost' || host.endsWith('.localhost')) {
     return { safe: false, reason: 'local hostname' };
   }
