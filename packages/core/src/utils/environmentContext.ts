@@ -571,10 +571,18 @@ export async function getInitialChatHistory(
 }
 
 /**
- * Returns the number of initial API entries occupied by the startup reminder
- * (0 or 1). A single user message wrapped in <system-reminder> is the only
- * shape getInitialChatHistory currently produces, but routes through this
- * helper so detection stays consistent across the CLI and ACP integration.
+ * Returns the number of initial API entries occupied by structural context
+ * that should be skipped when counting real user turns:
+ *
+ *  - The startup reminder prelude (0 or 1 entry) — a single user message
+ *    wrapped in `<system-reminder>…</system-reminder>`, produced by
+ *    `getInitialChatHistory`.
+ *  - The legacy ack-pair prelude (2 entries) — sessions saved before the
+ *    startup context moved into system reminders.
+ *  - The compressed-history prefix (2 or 3 entries) — summary, ack, and
+ *    optionally a post-compact attachments entry produced by
+ *    `composePostCompactHistory`. These synthetic entries must not be
+ *    counted as real user prompts for rewind indexing.
  */
 export function getStartupContextLength(history: Content[]): number {
   const firstEntry = history[0];
@@ -601,7 +609,27 @@ export function getStartupContextLength(history: Content[]): number {
   ) {
     return 2;
   }
+  // Post-compression prefix: composePostCompactHistory always produces
+  // [user(summary), model(ack)] and optionally appends user(postAckParts)
+  // when file restorations or state reminders accompany the summary. The
+  // summary is plain prose (not <system-reminder>-wrapped) so it would pass
+  // isUserTextContent and corrupt rewind turn-counting. Detected via the
+  // compression-specific ack sentinel — distinct from the legacy ack above.
+  if (
+    history[1]?.role === 'model' &&
+    history[1]?.parts?.[0]?.text ===
+      'Got it. Thanks for the additional context!'
+  ) {
+    if (isUserTextContextEntry(history[2])) return 3;
+    return 2;
+  }
   return 0;
+}
+
+function isUserTextContextEntry(content: Content | undefined): boolean {
+  if (content?.role !== 'user') return false;
+  const parts = content.parts ?? [];
+  return parts.length > 0 && !parts.some((part) => 'functionResponse' in part);
 }
 
 /**

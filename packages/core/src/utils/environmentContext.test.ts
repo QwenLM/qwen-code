@@ -616,6 +616,69 @@ describe('getStartupContextLength', () => {
     );
     expect(getStartupContextLength([merged])).toBe(0);
   });
+
+  // Compressed history prefix: composePostCompactHistory produces
+  // [user(summary), model(ack), user(postAckParts)?, ...]. The ack sentinel
+  // is distinct from the legacy ack above.
+
+  it('is 2 for a compressed prefix without attachments', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+    ];
+    expect(getStartupContextLength(history)).toBe(2);
+  });
+
+  it('is 3 for a compressed prefix with post-compact attachments', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [
+          { text: 'file restoration content' },
+          { text: '<system-reminder>\nplan mode\n</system-reminder>' },
+        ],
+      },
+    ];
+    expect(getStartupContextLength(history)).toBe(3);
+  });
+
+  it('is 2 for a degraded compression fallback with merged reminders', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'summary\n\nResume the prior task...' },
+          { text: '<system-reminder>\nplan mode active\n</system-reminder>' },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Got it. Thanks for the additional context!' },
+          { functionCall: { name: 'fn', args: {} } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'fn', response: {} } }],
+      },
+    ];
+    expect(getStartupContextLength(history)).toBe(2);
+  });
 });
 
 describe('buildAvailableSkillsReminder', () => {
