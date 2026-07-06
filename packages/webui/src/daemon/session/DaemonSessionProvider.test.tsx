@@ -6118,7 +6118,14 @@ describe('DaemonSessionProvider', () => {
       expect(connection).toMatchObject({
         status: 'error',
         error: 'Unauthorized',
+        errorStatus: status,
+        missingSession: false,
+        capabilities: {
+          workspaceCwd: '/mock-workspace',
+          features: [],
+        },
       });
+      expect(connection?.sessionId).toBeUndefined();
       expect(blocks[0]).toMatchObject({
         kind: 'user',
         text: 'keep transcript',

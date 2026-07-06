@@ -440,7 +440,16 @@
 .missingSessionButton:focus-visible {
   border-color: color-mix(in srgb, var(--foreground) 24%, var(--border));
   opacity: 0.9;
+}
+
+.missingSessionButton:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--foreground) 12%, transparent);
   outline: none;
+}
+
+.missingSessionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* In-place panel that replaces the chat view (message list + composer) when
