@@ -62,6 +62,16 @@ const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
 const MAX_TOMBSTONED_IDS = 500;
 const MAX_STICKY_EPHEMERAL_IDS = 500;
 const MAX_WORKSPACE_HASH_BYTES = 100 * 1024 * 1024;
+const RESTORE_FAILED_WARNING_PREFIX = 'artifact snapshot restore failed';
+const RESTORE_PARTIAL_FAILED_WARNING_PREFIX =
+  'artifact snapshot restore partially failed';
+
+export function isArtifactRestoreFailureWarning(warning: string): boolean {
+  return (
+    warning.startsWith(RESTORE_FAILED_WARNING_PREFIX) ||
+    warning.startsWith(RESTORE_PARTIAL_FAILED_WARNING_PREFIX)
+  );
+}
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -586,8 +596,8 @@ export class SessionArtifactStore {
         this.restoreState(previousState);
         warnings.push(
           restoredCount === 0
-            ? 'artifact snapshot restore failed; kept existing live artifacts'
-            : `artifact snapshot restore partially failed; restored ${restoredCount}/${snapshot.artifacts.length} artifacts; kept existing live artifacts`,
+            ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
+            : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; restored ${restoredCount}/${snapshot.artifacts.length} artifacts; kept existing live artifacts`,
         );
         this.setLastRestoreWarnings(warnings);
         return warnings;

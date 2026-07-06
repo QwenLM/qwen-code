@@ -118,6 +118,7 @@ import {
 import { PermissionForbiddenError } from './bridgeErrors.js';
 import {
   SessionArtifactStore,
+  isArtifactRestoreFailureWarning,
   publicArtifactsEqual,
   type DaemonSessionArtifact,
   type SessionArtifactChange,
@@ -5953,9 +5954,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               })
             : [];
       const artifactRestoreFailed = artifactRestoreWarnings.some(
-        (warning) =>
-          warning.includes('artifact snapshot restore failed') ||
-          warning.includes('artifact snapshot restore partially failed'),
+        isArtifactRestoreFailureWarning,
       );
       const shouldRecordArtifactSnapshot =
         shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
