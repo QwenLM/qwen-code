@@ -2481,18 +2481,28 @@ export function App({
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
         let admitted = false;
-        sendPrompt(prompt, undefined, {
-          onAdmitted: () => {
-            admitted = true;
-            resolve();
-          },
-        }).then(
+        // Bound the admission phase: a send that wedges before admission (daemon
+        // hung, connection stalled — no error, no settle) would otherwise leave
+        // this promise unsettled forever, freezing the run controls. On timeout
+        // reject so it degrades to a visible "run failed".
+        const timer = setTimeout(() => {
+          if (!admitted) reject(new Error('Timed out starting the run'));
+        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
+        const admit = () => {
+          if (admitted) return;
+          admitted = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        sendPrompt(prompt, undefined, { onAdmitted: admit }).then(
           () => {
+            clearTimeout(timer);
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
             }
           },
           (error: unknown) => {
+            clearTimeout(timer);
             if (!admitted) reject(error);
           },
         );

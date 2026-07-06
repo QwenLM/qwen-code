@@ -284,6 +284,45 @@ describe('ScheduledTasksDialog run now', () => {
     expect(actions.runScheduledTask).not.toHaveBeenCalled();
   });
 
+  it('consumes a bound ONE-SHOT before enqueuing (record → enqueue)', async () => {
+    // /run deletes a one-shot (its single fire). Consuming it BEFORE the run
+    // means a failed enqueue leaves a recoverable "recorded but never ran", not
+    // a silent double execution at the task's own slot.
+    const order: string[] = [];
+    const onRunPrompt = vi.fn(() => {
+      order.push('enqueue');
+    });
+    await mount(
+      [baseTask({ recurring: false, enabled: true, sessionId: 'sess-9' })],
+      { onRunPrompt },
+    );
+    actions.runScheduledTask.mockImplementation(async () => {
+      order.push('record');
+      return baseTask({});
+    });
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(order).toEqual(['record', 'enqueue']);
+  });
+
+  it('records a RECURRING task after enqueuing (enqueue → record)', async () => {
+    const order: string[] = [];
+    const onRunPrompt = vi.fn(() => {
+      order.push('enqueue');
+    });
+    await mount(
+      [baseTask({ recurring: true, enabled: true, sessionId: 'sess-9' })],
+      { onRunPrompt },
+    );
+    actions.runScheduledTask.mockImplementation(async () => {
+      order.push('record');
+      return baseTask({});
+    });
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(order).toEqual(['enqueue', 'record']);
+  });
+
   it('serializes run now: a second click while one is pending is ignored', async () => {
     // Hold the first run pending (session still switching), then click again —
     // the button is disabled + the handler guards, so no second prompt/record.

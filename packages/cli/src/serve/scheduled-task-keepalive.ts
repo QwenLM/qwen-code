@@ -46,6 +46,10 @@ export interface KeepaliveBridge {
 
 /** Per-session revive-load timeout: a hung reload must not stall the sweep. */
 const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
+/** Upper bound on the per-session revive backoff, so a permanently-gone session
+ * (transcript deleted out-of-band) is retried at most this often rather than
+ * every interval forever. */
+const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 export interface ScheduledTaskKeepalive {
   /** Stops the periodic heartbeat. Idempotent. */
@@ -65,6 +69,13 @@ export function startScheduledTaskKeepalive(
   opts: StartScheduledTaskKeepaliveOptions,
 ): ScheduledTaskKeepalive {
   const { bridge, boundWorkspace, intervalMs } = opts;
+
+  // Per-session revive state: `nextAttemptAt` gates retries after failures so a
+  // permanently-gone session isn't reloaded every interval; cleared on success.
+  const reviveState = new Map<
+    string,
+    { failures: number; nextAttemptAt: number }
+  >();
 
   const tick = async (): Promise<void> => {
     let tasks;
@@ -92,12 +103,16 @@ export function startScheduledTaskKeepalive(
       beaten.add(sessionId);
       try {
         bridge.recordHeartbeat(sessionId);
+        reviveState.delete(sessionId); // resident again — reset any backoff
       } catch (err) {
         // Heartbeat failed → the session isn't resident. For an ENABLED bound
         // task that means the reaper let it go while the task was disabled/
         // archived and it's now re-enabled: revive it so its in-child scheduler
-        // resumes. Best-effort and debug-only (an expected, recoverable case);
-        // a persistent failure (transcript truly gone) just retries next pass.
+        // resumes. Best-effort and debug-only (an expected, recoverable case).
+        const state = reviveState.get(sessionId);
+        if (state && Date.now() < state.nextAttemptAt) {
+          continue; // still backing off from prior revive failures
+        }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
         try {
           await withTimeout(
@@ -110,15 +125,48 @@ export function startScheduledTaskKeepalive(
             sessionId,
           );
           log.debug('keepalive: revived non-resident session', sessionId);
+          reviveState.delete(sessionId);
         } catch (loadErr) {
-          log.debug('keepalive: failed to revive session', sessionId, loadErr);
+          // Back off exponentially so a permanently-gone transcript isn't
+          // retried every interval for the daemon's lifetime.
+          const failures = (state?.failures ?? 0) + 1;
+          const backoff = Math.min(
+            intervalMs * 2 ** Math.min(failures - 1, 6),
+            MAX_REVIVE_BACKOFF_MS,
+          );
+          reviveState.set(sessionId, {
+            failures,
+            nextAttemptAt: Date.now() + backoff,
+          });
+          log.debug(
+            'keepalive: failed to revive session',
+            sessionId,
+            `(failure ${failures}, next retry in ${backoff}ms)`,
+            loadErr,
+          );
         }
+      }
+    }
+    // Drop backoff state for sessions no longer bound to any task.
+    if (reviveState.size > 0) {
+      const live = new Set(tasks.map((t) => t.sessionId));
+      for (const id of reviveState.keys()) {
+        if (!live.has(id)) reviveState.delete(id);
       }
     }
   };
 
+  // In-flight guard: a pass can outlast the interval (each revive awaits up to
+  // the revive timeout), so skip a tick while the previous is still running —
+  // overlapping passes would issue duplicate concurrent loadSession spawns for
+  // the same dead sessions.
+  let running = false;
   const timer: ReturnType<typeof setInterval> = setInterval(() => {
-    void tick();
+    if (running) return;
+    running = true;
+    void tick().finally(() => {
+      running = false;
+    });
   }, intervalMs);
   // The heartbeat alone must never hold the daemon process open.
   timer.unref?.();

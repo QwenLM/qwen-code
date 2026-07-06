@@ -528,7 +528,12 @@ export function registerScheduledTasksRoutes(
           patch.recurring === true && current.recurring !== true;
         const becameOneShot =
           patch.recurring === false && current.recurring !== false;
-        if (next.enabled !== false) {
+        // Re-seated REGARDLESS of enabled: a schedule edit made while the task
+        // is paused must not leave a stale anchor that fires retroactively when
+        // it's later re-enabled in a SEPARATE request (the re-enable patch has no
+        // schedule change of its own to trigger the re-seat). Re-seating a paused
+        // task's anchor is harmless — it doesn't fire until enabled.
+        {
           const now = Date.now();
           const minute = now - (now % 60_000);
           if (

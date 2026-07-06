@@ -993,7 +993,14 @@ export class CronScheduler {
         let changed = false;
         const next = tasks.map((t) => {
           const stamp = stamps.get(t.id);
-          if (stamp === undefined || t.lastFiredAt === stamp) return t;
+          // Never regress lastFiredAt (`>=`, not just `===`): a NEWER stamp may
+          // have landed after this catch-up was delivered — mainly a manual
+          // POST /run in the daemon process writing lastFiredAt=now while this
+          // bound session's async catch-up persist is still in flight (a
+          // cross-process race firePersistPending can't see). Overwriting it with
+          // the older catch-up minute would re-open the manually-covered slots.
+          // Mirrors the tick persist's guard.
+          if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) return t;
           changed = true;
           // Late fire (overdue while no session owned the schedule) — record it
           // as 'catch-up' so the history distinguishes it from an on-time fire.

@@ -140,6 +140,30 @@ describe('scheduled-task keepalive', () => {
     expect(beats).toEqual(['sess-2']); // sibling unaffected
   });
 
+  it('backs off a failing revive instead of retrying it every tick', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+    ]);
+    const reviving = {
+      recordHeartbeat: () => {
+        throw new Error('not resident');
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
+        throw new Error('transcript gone');
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: reviving,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick(); // revive fails → backoff set (~intervalMs)
+    await ka.tick(); // still within backoff → revive skipped
+    ka.stop();
+    expect(loads).toEqual(['sess-1']); // only the first pass tried
+  });
+
   it('stop() is idempotent', async () => {
     const ka = startScheduledTaskKeepalive({
       bridge,

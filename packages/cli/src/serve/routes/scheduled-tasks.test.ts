@@ -817,6 +817,30 @@ describe('scheduled-tasks routes', () => {
     expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
   });
 
+  it('re-seats a schedule edit made while DISABLED (so a later re-enable is not a missed fire)', async () => {
+    // Edit a disabled one-shot's cron in one request, re-enable in another. The
+    // re-seat must happen at edit time (even disabled), or the re-enable — which
+    // has no schedule change of its own — leaves a weeks-old anchor that fires
+    // + deletes the task immediately.
+    const createdAt = 1_700_000_000_000;
+    await seedTask({
+      id: 'do1',
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      createdAt,
+      lastFiredAt: createdAt,
+      enabled: false,
+    });
+    const now = Date.now();
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/do1')
+      .send({ cron: '30 8 1 1 *' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.enabled).toBe(false); // still disabled
+    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated now
+  });
+
   it('rejects re-enabling an archive-disabled task via PATCH (409, no write)', async () => {
     // Disabled BY archiving its session — re-enabling here would show it enabled
     // while the session stays archived and can't fire. Must unarchive instead.

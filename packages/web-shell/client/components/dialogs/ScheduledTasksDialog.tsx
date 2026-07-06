@@ -78,6 +78,11 @@ const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
 // The largest delay window.setTimeout handles without 32-bit overflow (~24.8
 // days); larger values fire immediately.
 const MAX_SET_TIMEOUT_MS = 2_147_483_647;
+// A task past its nextRunAt reports the same past value on every fetch. Reload
+// promptly this many times (to catch a just-fired task advancing), then fall
+// back to the slow lane so a permanently-stuck task can't spin a 1 Hz GET loop.
+const PAST_DUE_FAST_RELOADS = 3;
+const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 
 export function ScheduledTasksDialog({
   onRunPrompt,
@@ -157,8 +162,7 @@ export function ScheduledTasksDialog({
 
   // Refresh the list shortly after the soonest task is due, so its countdown
   // rolls to the next occurrence and lastFiredAt / run history refresh too.
-  // A single timer for the whole list; the +2s buffer and 1s floor keep a
-  // just-passed snapshot from spinning a tight reload loop.
+  const pastDueReloadsRef = useRef(0);
   useEffect(() => {
     if (!tasks) return;
     let soonest = Infinity;
@@ -168,14 +172,22 @@ export function ScheduledTasksDialog({
       }
     }
     if (!Number.isFinite(soonest)) return;
-    // Clamp to the 32-bit signed-int ceiling: setTimeout overflows delays past
-    // ~24.8 days, firing immediately — which, for a months-away schedule, would
-    // reload, recompute the same far nextRunAt, and re-arm instantly in a tight
-    // loop. Capping re-arms at most every ~24.8 days while the page stays open.
-    const delay = Math.min(
-      Math.max(1000, soonest - Date.now() + 2000),
-      MAX_SET_TIMEOUT_MS,
-    );
+    const remaining = soonest - Date.now();
+    let delay: number;
+    if (remaining > 0) {
+      pastDueReloadsRef.current = 0;
+      // Reload just after the fire (+2s). Clamp to the 32-bit setTimeout ceiling
+      // (~24.8 days) so a months-away schedule can't overflow to fire-immediately
+      // and re-arm in a tight loop.
+      delay = Math.min(remaining + 2000, MAX_SET_TIMEOUT_MS);
+    } else {
+      // Already past due. A task that just fired advances its nextRunAt within a
+      // couple of prompt reloads; one that stays past due (unbound with no lock
+      // owner, or a bound session that won't revive) never advances — back off
+      // to a slow lane so the page doesn't spin a 1 Hz GET /scheduled-tasks loop.
+      const n = pastDueReloadsRef.current++;
+      delay = n < PAST_DUE_FAST_RELOADS ? 1000 : OVERDUE_RELOAD_INTERVAL_MS;
+    }
     const id = window.setTimeout(() => void reload(), delay);
     return () => window.clearTimeout(id);
   }, [tasks, reload]);
@@ -276,14 +288,13 @@ export function ScheduledTasksDialog({
       // latch and overlapping runs could drop a prompt.
       if (!task.enabled || runningTaskId !== null) return;
       setRunningTaskId(task.id);
-      let recordId: string | null = null;
       try {
-        // Server-authoritative re-check right before enqueuing: the dialog's
+        // Server-authoritative re-check right before running: the dialog's
         // snapshot can be stale — another tab/API may have disabled or deleted
-        // the task since it loaded. Enqueuing then would EXECUTE the prompt in
-        // the session while /run only refuses the RECORD afterward, i.e. a real
-        // unrecorded run. Refresh and bail if it's gone/disabled, and use the
-        // FRESH prompt/session so we never run an outdated one.
+        // the task since it loaded. Running then would EXECUTE the prompt in the
+        // session while /run only refuses the RECORD afterward, i.e. a real
+        // unrecorded run. Refresh, bail if gone/disabled, and use the FRESH
+        // prompt/session so we never run an outdated one.
         const fresh = (await actions.listScheduledTasks()).find(
           (tk) => tk.id === task.id,
         );
@@ -295,27 +306,31 @@ export function ScheduledTasksDialog({
           );
           return;
         }
-        // Enqueue FIRST — onRunPrompt resolves once the prompt is admitted to
-        // the session and REJECTS if it can't be. Only a successful enqueue
-        // records the run, so a failed session switch leaves no false entry.
-        await onRunPrompt(fresh.prompt, fresh.sessionId);
-        recordId = fresh.id;
+        if (fresh.recurring) {
+          // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
+          // if the session can't be opened), record AFTER — so a failed enqueue
+          // leaves no false "ran" entry. A record failure is surfaced but the
+          // history still catches up on the next refresh.
+          await onRunPrompt(fresh.prompt, fresh.sessionId);
+          try {
+            await actions.runScheduledTask(fresh.id);
+            await reload();
+          } catch (err) {
+            onError(err, t('scheduledTasks.error.runFailed'));
+          }
+        } else {
+          // One-shot: /run IS its single fire — it deletes the task. Consume it
+          // BEFORE enqueuing, so a failed enqueue leaves a visible "recorded but
+          // never ran" (recoverable by recreating) instead of a SILENT double
+          // execution — the task would otherwise still fire at its own slot.
+          await actions.runScheduledTask(fresh.id);
+          await reload();
+          await onRunPrompt(fresh.prompt, fresh.sessionId);
+        }
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));
       } finally {
-        // Re-enable the controls as soon as the enqueue settles; recording is a
-        // fast follow-up that shouldn't keep the row disabled.
         setRunningTaskId(null);
-      }
-      if (recordId === null) return; // not enqueued → do not record
-      try {
-        // Record the trigger (updates lastFiredAt + run history) and reload so
-        // the card reflects it. The prompt already ran; a record failure is
-        // surfaced but the history still catches up on the next refresh.
-        await actions.runScheduledTask(recordId);
-        await reload();
-      } catch (err) {
-        onError(err, t('scheduledTasks.error.runFailed'));
       }
     },
     [actions, onError, onRunPrompt, reload, runningTaskId, t],
