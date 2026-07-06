@@ -3351,13 +3351,35 @@ describe('WeComChannel', () => {
     );
   });
 
-  it('leaves media markers inside unclosed fenced code blocks as text', async () => {
+  it('closes unclosed fenced code blocks while leaving media markers as text', async () => {
     const parent = join(tmpdir(), 'channel-files');
     mkdirSync(parent, { recursive: true });
     const dir = mkdtempSync(join(parent, 'wecom-test-'));
     const imagePath = join(dir, 'out.png');
     writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     const text = `debug:\n\`\`\`text\n[IMAGE: ${imagePath}]`;
+
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', text);
+
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(client.sendMediaMessage).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenCalledWith('chat-1', {
+      msgtype: 'markdown',
+      markdown: { content: `${text}\n\`\`\`` },
+    });
+  });
+
+  it('leaves media markers inside tilde fenced code blocks as text', async () => {
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    const imagePath = join(dir, 'out.png');
+    writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const text = `debug:\n~~~text\n[IMAGE: ${imagePath}]\n~~~`;
 
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();

@@ -1259,13 +1259,17 @@ function parseOutboundMediaMarkers(text: string): {
 function findCodeRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   let fenceStart: number | undefined;
-  for (const match of text.matchAll(/```/g)) {
+  let fenceToken: FenceToken | undefined;
+  for (const match of text.matchAll(/```|~~~/g)) {
     const start = match.index ?? 0;
+    const token = match[0] as FenceToken;
     if (fenceStart === undefined) {
       fenceStart = start;
-    } else {
+      fenceToken = token;
+    } else if (token === fenceToken) {
       ranges.push([fenceStart, start + 3]);
       fenceStart = undefined;
+      fenceToken = undefined;
     }
   }
   if (fenceStart !== undefined) {
@@ -1279,6 +1283,8 @@ function findCodeRanges(text: string): Array<[number, number]> {
   }
   return ranges;
 }
+
+type FenceToken = '```' | '~~~';
 
 function isWeComMediaType(value: string | undefined): value is WeComMediaType {
   return (
@@ -1294,31 +1300,33 @@ function splitMarkdownChunks(text: string): string[] {
 
   const chunks: string[] = [];
   let current = '';
-  let inCode = false;
-  const fits = (value: string, codeState = inCode): boolean =>
-    Buffer.byteLength(codeState ? `${value}\n\`\`\`` : value, 'utf8') <=
-    MARKDOWN_CHUNK_BYTES;
+  let codeFence: FenceToken | undefined;
+  const fits = (value: string, nextCodeFence = codeFence): boolean =>
+    Buffer.byteLength(
+      nextCodeFence ? `${value}\n${nextCodeFence}` : value,
+      'utf8',
+    ) <= MARKDOWN_CHUNK_BYTES;
   const flush = (closeCode = true): void => {
     if (!current) return;
-    chunks.push(closeCode && inCode ? `${current}\n\`\`\`` : current);
-    current = closeCode && inCode ? '```' : '';
+    chunks.push(closeCode && codeFence ? `${current}\n${codeFence}` : current);
+    current = closeCode && codeFence ? codeFence : '';
   };
 
   for (const line of text.split('\n')) {
     const candidate = current ? `${current}\n${line}` : line;
-    const candidateInCode = toggleCodeFenceState(line, inCode);
-    if (fits(candidate, candidateInCode)) {
+    const candidateCodeFence = toggleCodeFenceState(line, codeFence);
+    if (fits(candidate, candidateCodeFence)) {
       current = candidate;
-      inCode = candidateInCode;
+      codeFence = candidateCodeFence;
       continue;
     }
 
     flush();
     const retried = current ? `${current}\n${line}` : line;
-    const retriedInCode = toggleCodeFenceState(line, inCode);
-    if (fits(retried, retriedInCode)) {
+    const retriedCodeFence = toggleCodeFenceState(line, codeFence);
+    if (fits(retried, retriedCodeFence)) {
       current = retried;
-      inCode = retriedInCode;
+      codeFence = retriedCodeFence;
       continue;
     }
 
@@ -1326,30 +1334,52 @@ function splitMarkdownChunks(text: string): string[] {
     for (let index = 0; index < line.length; ) {
       const token = line.startsWith('```', index)
         ? '```'
-        : (Array.from(line.slice(index))[0] ?? '');
+        : line.startsWith('~~~', index)
+          ? '~~~'
+          : (Array.from(line.slice(index))[0] ?? '');
       if (!token) break;
-      const nextInCode = token === '```' ? !inCode : inCode;
+      const nextCodeFence =
+        token === codeFence
+          ? undefined
+          : isFenceToken(token)
+            ? token
+            : codeFence;
       const addition = needsLineBreak && current ? `\n${token}` : token;
       const candidate = `${current}${addition}`;
-      if (!fits(candidate, nextInCode)) {
+      if (!fits(candidate, nextCodeFence)) {
         flush();
         current = current ? `${current}\n${token}` : token;
       } else {
         current = candidate;
       }
-      inCode = nextInCode;
+      codeFence = nextCodeFence;
       needsLineBreak = false;
       index += token.length;
     }
   }
 
-  flush(false);
+  flush();
   return chunks;
 }
 
-function toggleCodeFenceState(line: string, inCode: boolean): boolean {
-  const fenceCount = line.match(/```/g)?.length ?? 0;
-  return fenceCount % 2 === 0 ? inCode : !inCode;
+function toggleCodeFenceState(
+  line: string,
+  codeFence: FenceToken | undefined,
+): FenceToken | undefined {
+  let nextCodeFence = codeFence;
+  for (const match of line.matchAll(/```|~~~/g)) {
+    const token = match[0] as FenceToken;
+    if (nextCodeFence === token) {
+      nextCodeFence = undefined;
+    } else if (!nextCodeFence) {
+      nextCodeFence = token;
+    }
+  }
+  return nextCodeFence;
+}
+
+function isFenceToken(token: string): token is FenceToken {
+  return token === '```' || token === '~~~';
 }
 
 async function readOutboundMedia(
