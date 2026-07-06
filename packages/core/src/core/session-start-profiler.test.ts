@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +48,8 @@ function clockFrom(values: number[]) {
 }
 
 describe('session-start-profiler', () => {
+  const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
   beforeEach(() => {
     debugLoggerMock.debug.mockClear();
   });
@@ -350,4 +361,65 @@ describe('session-start-profiler', () => {
       await rm(runtimeDir, { recursive: true, force: true });
     }
   });
+
+  itNoSymlink('does not write through a symlinked JSONL file', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
+    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
+
+    try {
+      const perfDir = join(runtimeDir, 'session-start-perf');
+      const targetPath = join(runtimeDir, 'target.jsonl');
+      const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
+      await mkdir(perfDir);
+      await writeFile(targetPath, 'sentinel', 'utf8');
+      await symlink(targetPath, profilePath);
+
+      const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+        now: clockFrom([10, 20]),
+        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
+      });
+      expect(() => profiler.finish({ ok: true })).not.toThrow();
+
+      await expect(readFile(targetPath, 'utf8')).resolves.toBe('sentinel');
+      expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+        'session-start-profiler write failed',
+        expect.objectContaining({ name: 'Error' }),
+      );
+    } finally {
+      await rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  itNoSymlink(
+    'does not write through a symlinked profile directory',
+    async () => {
+      const runtimeDir = await mkdtemp(
+        join(tmpdir(), 'session-start-profiler-'),
+      );
+      vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
+      vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
+
+      try {
+        const targetDir = join(runtimeDir, 'target-perf');
+        const perfDir = join(runtimeDir, 'session-start-perf');
+        await mkdir(targetDir);
+        await symlink(targetDir, perfDir);
+
+        const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+          now: clockFrom([10, 20]),
+          getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
+        });
+        expect(() => profiler.finish({ ok: true })).not.toThrow();
+
+        await expect(readdir(targetDir)).resolves.toEqual([]);
+        expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+          'session-start-profiler write failed',
+          expect.objectContaining({ name: 'Error' }),
+        );
+      } finally {
+        await rm(runtimeDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

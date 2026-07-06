@@ -54,9 +54,46 @@ function roundMs(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function getAppendProfileOpenFlags(): number {
+  const constants = fs.constants;
+  return (
+    (constants.O_APPEND ?? 0) |
+    (constants.O_CREAT ?? 0) |
+    (constants.O_WRONLY ?? 0) |
+    (constants.O_NOFOLLOW ?? 0)
+  );
+}
+
+function assertSafeProfileDirectory(dir: string): void {
+  const dirStat = fs.lstatSync(dir);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+    throw new Error('session-start profiler path must be a real directory');
+  }
+}
+
+function assertSafeExistingProfileFile(filePath: string): void {
+  try {
+    const fileStat = fs.lstatSync(filePath);
+    if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+      throw new Error('session-start profiler path must be a real file');
+    }
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
 function writeProfileRecord(record: SessionStartProfileRecord): void {
   const dir = path.join(Storage.getRuntimeBaseDir(), 'session-start-perf');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertSafeProfileDirectory(dir);
   try {
     fs.chmodSync(dir, 0o700);
   } catch {
@@ -64,8 +101,12 @@ function writeProfileRecord(record: SessionStartProfileRecord): void {
   }
   const filename = `session-start-${record.timestamp.slice(0, 10)}.jsonl`;
   const filePath = path.join(dir, filename);
-  const fd = fs.openSync(filePath, 'a', 0o600);
+  assertSafeExistingProfileFile(filePath);
+  const fd = fs.openSync(filePath, getAppendProfileOpenFlags(), 0o600);
   try {
+    if (!fs.fstatSync(fd).isFile()) {
+      throw new Error('session-start profiler path must be a real file');
+    }
     try {
       fs.fchmodSync(fd, 0o600);
     } catch {
