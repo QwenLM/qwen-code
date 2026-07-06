@@ -2075,6 +2075,7 @@ export function App({
       !connection.sessionId &&
       isMissingSessionErrorStatus(connection.errorStatus)
     ) {
+      // Keep the missing-session route visible until the user chooses a new chat.
       return;
     }
     if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
