@@ -1769,7 +1769,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
-  it('sessionArtifactsPersist rejects a missing payload', async () => {
+  async function bootAcpAgent() {
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -1781,6 +1781,40 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         return mockConnectionState.promise;
       },
     }) as AgentLike;
+    return { agent, agentPromise };
+  }
+
+  it('sessionArtifactsPersist rejects a missing session id', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        kind: 'event',
+        payload: {},
+      }),
+    ).rejects.toThrowError(/Invalid or missing sessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects an invalid kind', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId: 'session-A',
+        kind: 'other',
+        payload: {},
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist kind/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects a missing payload', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
 
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
@@ -1788,6 +1822,92 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         kind: 'event',
       }),
     ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects a missing live session', async () => {
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId: 'session-A',
+        kind: 'event',
+        payload: {},
+      }),
+    ).rejects.toThrowError(/Session not found for id: session-A/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects when chat recording is unavailable', async () => {
+    const sessionId = 'session-A';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: {},
+      }),
+    ).rejects.toThrowError(/Chat recording service unavailable/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist records artifact events and snapshots', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactEvent: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+    const eventPayload = {
+      v: 1,
+      sessionId,
+      sequence: 1,
+      changes: [],
+    };
+    const snapshotPayload = {
+      v: 1,
+      sessionId,
+      sequence: 2,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+    };
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: eventPayload,
+      }),
+    ).resolves.toEqual({ sessionId, persisted: true, kind: 'event' });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'snapshot',
+        payload: snapshotPayload,
+      }),
+    ).resolves.toEqual({ sessionId, persisted: true, kind: 'snapshot' });
+
+    expect(recording.recordSessionArtifactEvent).toHaveBeenCalledWith(
+      eventPayload,
+    );
+    expect(recording.recordSessionArtifactSnapshot).toHaveBeenCalledWith(
+      snapshotPayload,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
