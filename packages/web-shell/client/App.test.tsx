@@ -834,6 +834,13 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-view-page"]'),
     ).not.toBeNull();
+    // The outer chat subtree is hidden (display:none + aria-hidden) behind the
+    // split, so keyboard/AT can't reach the outer composer/toolbar.
+    expect(
+      container
+        .querySelector('[data-testid="messages"]')
+        ?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
   });
 
   it('returns to the Session Overview when leaving the split view', async () => {

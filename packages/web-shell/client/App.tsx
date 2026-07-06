@@ -4492,26 +4492,35 @@ export function App({
               )}
               {mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
-                  <SplitView
-                    initialSessionIds={splitSessionIds}
-                    // Back returns to the Session Overview (the hub the split is
-                    // launched from), not the single-session chat.
-                    onExit={() => openPanel('sessions')}
-                    onError={reportError}
-                  />
+                  {/* Share the app-level customization + compact-mode contexts so
+                      split panes render markdown/tool-headers/thinking the same
+                      way the single-session chat does (todo contexts stay chat-
+                      only — they belong to the outer session, not the panes). */}
+                  <WebShellCustomizationProvider value={customization}>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <SplitView
+                        initialSessionIds={splitSessionIds}
+                        // Back returns to the Session Overview (the hub the split
+                        // is launched from), not the single-session chat.
+                        onExit={() => openPanel('sessions')}
+                        onError={reportError}
+                      />
+                    </CompactModeContext.Provider>
+                  </WebShellCustomizationProvider>
                 </div>
               )}
               <div
                 className={
-                  activePanel
+                  activePanel || mainView !== 'chat'
                     ? `${styles.chatViewWrap} ${styles.chatViewHidden}`
                     : styles.chatViewWrap
                 }
-                // `display:none` already drops this subtree from the a11y tree in
-                // Chromium, but that's a browser detail, not an ARIA guarantee;
-                // mark it hidden explicitly so AT can't wander into the stale
-                // chat / hidden composer while a panel is shown.
-                aria-hidden={activePanel ? true : undefined}
+                // Hide the outer chat whenever a panel or a full-page view (split
+                // / scheduled tasks) is up. `display:none` drops the subtree from
+                // layout and the tab order, and aria-hidden keeps AT out — so no
+                // keyboard/AT can reach the outer composer/toolbar behind the
+                // split. State is preserved (the node stays mounted).
+                aria-hidden={activePanel || mainView !== 'chat' ? true : undefined}
               >
                 <WebShellCustomizationProvider value={customization}>
                   <CompactModeContext.Provider value={compactMode}>
