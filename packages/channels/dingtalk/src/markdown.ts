@@ -2,7 +2,7 @@
  * DingTalk markdown normalization.
  *
  * DingTalk's markdown renderer is a limited subset with quirks:
- * - Tables don't render — convert to pipe-separated plain text
+ * - Tables don't render consistently - convert to pipe-separated plain text
  * - Max message length ~3800 chars — split into chunks
  * - Code fences must be closed/reopened across chunk boundaries
  */
@@ -18,8 +18,8 @@ function isTableSeparator(line: string): boolean {
     .replace(/^\|/, '')
     .replace(/\|$/, '')
     .split('|')
-    .map((c) => c.trim());
-  return cells.length > 0 && cells.every((c) => /^:?-{3,}:?$/.test(c));
+    .map((cell) => cell.trim());
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
 function isTableRow(line: string): boolean {
@@ -33,7 +33,7 @@ function parseTableRow(line: string): string[] {
     .replace(/^\|/, '')
     .replace(/\|$/, '')
     .split('|')
-    .map((c) => c.trim());
+    .map((cell) => cell.trim());
 }
 
 function renderTable(lines: string[]): string {
@@ -63,7 +63,7 @@ export function convertTables(text: string): string {
       isTableSeparator(lines[i + 1] || '')
     ) {
       const tableLines = [line];
-      i += 2; // skip header + separator
+      i += 2;
       while (i < lines.length && isTableRow(lines[i] || '')) {
         tableLines.push(lines[i] || '');
         i++;
@@ -194,8 +194,7 @@ export function extractTitle(text: string): string {
   return cleaned || 'Reply';
 }
 
-/** Full normalization pipeline: tables → chunks. */
+/** Full normalization pipeline: tables, then chunks. */
 export function normalizeDingTalkMarkdown(text: string): string[] {
-  const converted = convertTables(text);
-  return splitChunks(converted);
+  return splitChunks(convertTables(text));
 }

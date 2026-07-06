@@ -21,9 +21,17 @@ import {
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
 } from './pending-rendered-height.js';
-// Minimum content lines to keep in a clipped live preview before the
-// "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
+// Minimum content lines to keep in a clipped live preview (own constant — not
+// coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
+
+// Rows reserved from the viewport when clamping a streaming table's height:
+// marginY 2 + one row of wrapped-cell safety headroom. Tables under-estimate
+// their rendered height the most (a wrapped cell), so they keep one more
+// reserved row than the other blocks. Shared by the render-side clamp
+// (RenderTable's `maxHeight`) and the slice-side estimate (`tableClampRows`)
+// so the two never diverge and let a table overflow the render cap.
+const TABLE_PENDING_RESERVED_ROWS = 3;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -131,12 +139,13 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // top lock"). The rendered-height-aware slice below keeps a CONTIGUOUS head of
   // source lines whose RENDERED height fits the budget; a contiguous slice
   // (rather than ink `overflow="hidden"`) avoids decimating interspersed rows
-  // and preserves a code block's own truncation cue. The full message still
+  // and preserves a code block's own truncation. The full message still
   // renders once it commits to `<Static>`. Only while pending and when a budget
   // is known (constrainHeight on — both non-VP and VP pending items pass one).
   //
-  // Reserve 2 rows: 1 for the "generating more" cue, 1 so a retained code/math
-  // block's OWN inner truncation cue can't stack on top of the outer one.
+  // Reserve 2 rows of headroom below the viewport so the live frame stays bound
+  // even when a retained code/math block's own rendered height slightly exceeds
+  // the source-line estimate.
   //
   // This is a SAFETY NET on top of incremental scrollback commit: it guarantees
   // the live frame never exceeds the viewport regardless of how the streaming
@@ -164,23 +173,20 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
   // (the scroll-to-top lock). Note keptLines can be 0 when even the first
   // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
-  // the budget): render nothing plus the "generating more" cue rather than one
-  // oversized row that would bypass the bound.
+  // the budget): render nothing rather than an oversized row.
   let lines = allLines;
-  let pendingClipped = false;
   if (pendingRenderedBudget !== undefined) {
     const tableClampRows =
       availableTerminalHeight !== undefined
-        ? Math.max(2, availableTerminalHeight - 3)
+        ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
         : Number.MAX_SAFE_INTEGER;
-    const { keptLines, clipped } = fitPendingSlice(
+    const { keptLines } = fitPendingSlice(
       allLines,
       contentWidth,
       pendingRenderedBudget,
       tableClampRows,
     );
-    if (clipped) {
-      pendingClipped = true;
+    if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
     }
   }
@@ -351,6 +357,24 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         cells.length = tableHeaders.length;
       }
       tableRows.push(cells);
+    } else if (
+      isPending &&
+      inTable &&
+      !tableRowMatch &&
+      index === lines.length - 1 &&
+      tableHeaders.length > 0 &&
+      /^\s*\|/.test(line)
+    ) {
+      // Live streaming frontier: the final line is an unterminated table row or
+      // separator (`| a | b` with no closing `|` yet). Rendering it as a plain
+      // text line and then flipping it into the table once the closing `|`
+      // arrives makes the frame height and column widths oscillate on every
+      // token, which visibly jitters the footer/composer. Hold it back instead:
+      // skip it so `inTable` stays set and the end-of-content handler renders
+      // only the COMPLETE rows as a live table. A partial row never flips in;
+      // the table appears once its first row terminates and grows one complete
+      // row at a time. Until then the table is simply not drawn (no header +
+      // separator with a stray partial line beneath it).
     } else if (inTable && !tableRowMatch) {
       // End of table — a following line closes it, so this table is COMPLETE
       // and renders in full (the rendered-aware slice guarantees a completed
@@ -568,20 +592,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
-  // When the live message was clipped to a head slice (see pendingLineBudget
-  // above), add a cue that more is streaming. Code blocks retained in the head
-  // still render their own "... generating more ..." truncation.
-  if (pendingClipped) {
-    return (
-      <Box flexDirection="column">
-        {contentBlocks}
-        <Text color={theme.text.secondary} wrap="truncate">
-          ... generating more ...
-        </Text>
-      </Box>
-    );
-  }
-
+  // Safety-net clip: when the pending preview exceeds the rendered-height
+  // budget, slice it to keep the live frame within the viewport. The clipping
+  // still happens (prevents scroll-to-top lock), but we no longer show the
+  // "... generating more ..." cue — incremental scrollback commit (PR #6170)
+  // already streams content to <Static> in real-time, so clipped content is
+  // not "delayed output" but rather "still streaming".
   return <>{contentBlocks}</>;
 };
 
@@ -608,8 +624,13 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 }) => {
   const settings = useSettings();
   const { renderMode } = useRenderMode();
-  const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
-  const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
+  // Below this many usable rows there is no room for a meaningful code
+  // preview, so we fall back to the "... code is being written ..." notice.
+  const MIN_PREVIEW_LINES = 1;
+  // One row of headroom below availableTerminalHeight. This used to also hold a
+  // "... generating more ..." cue (removed with PR #6170's incremental commit),
+  // so the reclaimed row now shows an extra code line at the same total height.
+  const RESERVED_LINES = 1;
 
   if (lang?.toLowerCase() === 'mermaid' && renderMode === 'render') {
     if (isPending) {
@@ -642,8 +663,8 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     );
 
     if (content.length > MAX_CODE_LINES_WHEN_PENDING) {
-      if (MAX_CODE_LINES_WHEN_PENDING < MIN_LINES_FOR_MESSAGE) {
-        // Not enough space to even show the message meaningfully
+      if (MAX_CODE_LINES_WHEN_PENDING < MIN_PREVIEW_LINES) {
+        // Not enough space to even show a truncated preview meaningfully
         return (
           <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING}>
             <Text color={theme.text.secondary}>
@@ -664,7 +685,6 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       return (
         <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
           {colorizedTruncatedCode}
-          <Text color={theme.text.secondary}>... generating more ...</Text>
         </Box>
       );
     }
@@ -702,10 +722,13 @@ interface RenderPendingMermaidBlockProps {
 const RenderPendingMermaidBlockInternal: React.FC<
   RenderPendingMermaidBlockProps
 > = ({ content, availableTerminalHeight, contentWidth }) => {
+  // Reserve one row for the "Mermaid diagram is being written..." header. The
+  // second reserved row used to hold a "... generating more ..." cue (removed
+  // with PR #6170); reclaiming it shows an extra preview line at the same height.
   const maxPreviewLines =
     availableTerminalHeight === undefined
       ? 6
-      : Math.max(0, availableTerminalHeight - 2);
+      : Math.max(0, availableTerminalHeight - 1);
   const previewLines = content.slice(0, maxPreviewLines);
   return (
     <Box
@@ -720,9 +743,6 @@ const RenderPendingMermaidBlockInternal: React.FC<
           {line || ' '}
         </Text>
       ))}
-      {content.length > previewLines.length && (
-        <Text color={theme.text.secondary}>... generating more ...</Text>
-      )}
     </Box>
   );
 };
@@ -744,7 +764,10 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   isPending,
   availableTerminalHeight,
 }) => {
-  const RESERVED_LINES = 3;
+  // One row for the "LaTeX block · source:" header plus one row of headroom.
+  // The third row used to hold a "... generating more ..." cue (removed with PR
+  // #6170); reclaiming it shows an extra preview line at the same total height.
+  const RESERVED_LINES = 2;
   if (isPending && availableTerminalHeight !== undefined) {
     const maxPreviewLines = Math.max(
       0,
@@ -767,7 +790,6 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
               {line || ' '}
             </Text>
           ))}
-          <Text color={theme.text.secondary}>... generating more ...</Text>
         </Box>
       );
     }
@@ -881,12 +903,6 @@ interface RenderTableProps {
   isPending?: boolean;
   availableTerminalHeight?: number;
 }
-
-// Backstop only: the pending slice bounds a completed table's height assuming
-// single-line cells, but a cell that WRAPS renders taller and could still
-// overflow. While streaming, cap the table to the viewport (reserve 3 rows:
-// marginY 2 + the outer cue) so it can never trigger the scroll-to-top lock.
-const TABLE_PENDING_RESERVED_ROWS = 3;
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
   headers,
