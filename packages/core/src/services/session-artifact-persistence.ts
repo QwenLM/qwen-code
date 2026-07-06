@@ -406,6 +406,10 @@ export function normalizeEventPayload(
   if (!Array.isArray(value['changes'])) return undefined;
   const sessionId = getString(value, 'sessionId', MAX_PERSISTED_ID_CHARS);
   if (!sessionId) return undefined;
+  const rawChanges = value['changes'];
+  if (rawChanges.length > MAX_PERSISTED_ARTIFACTS) {
+    warnings.push(`event change list truncated to ${MAX_PERSISTED_ARTIFACTS}`);
+  }
   return {
     v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
     sessionId,
@@ -413,7 +417,8 @@ export function normalizeEventPayload(
     recordedAt:
       getString(value, 'recordedAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
       new Date(0).toISOString(),
-    changes: value['changes']
+    changes: rawChanges
+      .slice(0, MAX_PERSISTED_ARTIFACTS)
       .map((change) => normalizePersistedChange(change, warnings))
       .filter((change) => change !== undefined),
   };
@@ -681,11 +686,15 @@ function getStringArray(
   record: Record<string, unknown>,
   key: string,
   maxItems = MAX_PERSISTED_IDS,
+  maxLength = MAX_PERSISTED_ID_CHARS,
 ): string[] | undefined {
   const value = record[key];
   if (!Array.isArray(value)) return undefined;
   const items = value
-    .filter((item): item is string => typeof item === 'string')
+    .filter(
+      (item): item is string =>
+        typeof item === 'string' && item.length <= maxLength,
+    )
     .slice(-maxItems);
   return items.length > 0 ? items : undefined;
 }

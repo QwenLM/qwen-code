@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  normalizeEventPayload,
   normalizeSnapshotPayload,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
@@ -675,6 +676,50 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.stickyEphemeralIds).toHaveLength(500);
     expect(snapshot?.stickyEphemeralIds?.[0]).toBe('sticky-1');
     expect(warnings).toContain('snapshot artifact list truncated to 500');
+  });
+
+  it('normalizes inbound event payloads with bounded changes', () => {
+    const warnings: string[] = [];
+    const changes = Array.from({ length: 501 }, (_, index) => {
+      const item = artifact('session-A', `https://example.com/event-${index}`);
+      return {
+        action: 'created' as const,
+        artifactId: item.id,
+        artifact: item,
+      };
+    });
+
+    const normalized = normalizeEventPayload(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'session-A',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes,
+      },
+      warnings,
+    );
+
+    expect(normalized?.changes).toHaveLength(500);
+    expect(warnings).toContain('event change list truncated to 500');
+  });
+
+  it('drops overlong persisted string array items', () => {
+    const snapshot = normalizeSnapshotPayload(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'session-A',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts: [],
+        tombstonedIds: ['deleted', 'x'.repeat(201)],
+        stickyEphemeralIds: ['sticky', 'y'.repeat(201)],
+      },
+      [],
+    );
+
+    expect(snapshot?.tombstonedIds).toEqual(['deleted']);
+    expect(snapshot?.stickyEphemeralIds).toEqual(['sticky']);
   });
 
   it('drops unsafe persisted metadata and overlong string fields', () => {

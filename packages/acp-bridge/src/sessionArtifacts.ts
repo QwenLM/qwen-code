@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -478,6 +478,7 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
+      const before = this.cloneState();
       this.artifacts.delete(artifactId);
       const removeChange: SessionArtifactChange & {
         durableTombstoneRequired?: boolean;
@@ -493,8 +494,17 @@ export class SessionArtifactStore {
             : undefined,
       };
       const changes: SessionArtifactChange[] = [removeChange];
-      const warnings = await this.persistChanges(changes, false);
-      delete removeChange.durableTombstoneRequired;
+      let warnings: string[];
+      try {
+        warnings = await this.persistChanges(
+          changes,
+          this.persistence !== undefined,
+        );
+        delete removeChange.durableTombstoneRequired;
+      } catch (error) {
+        this.restoreState(before);
+        throw error;
+      }
       return {
         v: 1,
         sessionId: this.sessionId,
@@ -2296,12 +2306,16 @@ async function getWorkspaceStatus(
     if (!relative || isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
+    const preOpenStat = await fs.lstat(realPath);
     const handle = await fs.open(
       realPath,
       fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
     );
     try {
       const stat = await handle.stat();
+      if (!isSameFile(preOpenStat, stat)) {
+        return { status: 'missing', escaped: true };
+      }
       if (stat.isFile()) {
         const expectedMtimeMs =
           typeof expected?.mtimeMs === 'number' ? expected.mtimeMs : undefined;
@@ -2365,6 +2379,10 @@ async function getWorkspaceStatus(
     }
     return { status: 'missing' };
   }
+}
+
+function isSameFile(before: Stats, after: Stats): boolean {
+  return before.dev === after.dev && before.ino === after.ino;
 }
 
 async function hashFile(handle: FileHandle): Promise<string> {

@@ -2708,7 +2708,7 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
-  it('keeps live removal when explicit tombstone persistence fails', async () => {
+  it('rolls back explicit removal when tombstone persistence fails', async () => {
     let calls = 0;
     const store = new SessionArtifactStore({
       sessionId: 's11-remove-live-first',
@@ -2728,26 +2728,16 @@ describe('SessionArtifactStore', () => {
       { strict: true },
     );
 
-    await expect(store.remove(created.changes[0]!.artifactId)).resolves.toEqual(
-      expect.objectContaining({
-        changes: [
-          expect.objectContaining({
-            action: 'removed',
-            artifactId: created.changes[0]?.artifactId,
-          }),
-        ],
-        warnings: ['artifact removal not persisted; live removal kept'],
-      }),
+    await expect(store.remove(created.changes[0]!.artifactId)).rejects.toThrow(
+      'disk full',
     );
     await expect(store.list()).resolves.toMatchObject({
-      artifacts: [],
-    });
-    const replay = await store.upsertMany([
-      { title: 'Sensitive', url: 'https://example.com/sensitive' },
-    ]);
-    expect(replay.changes).toEqual([]);
-    await expect(store.list()).resolves.toMatchObject({
-      artifacts: [],
+      artifacts: [
+        expect.objectContaining({
+          id: created.changes[0]?.artifactId,
+          title: 'Sensitive',
+        }),
+      ],
     });
   });
 
