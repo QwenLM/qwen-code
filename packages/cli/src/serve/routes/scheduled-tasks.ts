@@ -267,6 +267,24 @@ export function registerScheduledTasksRoutes(
     // session. Forcing 'thread' guarantees each task gets an isolated session.
     let boundSessionId: string | undefined;
     if (bridge) {
+      // Pre-check the cap BEFORE spawning: an over-cap create must not spawn a
+      // session it will immediately tear down, because closeSession removes the
+      // live bridge entry but can leave the just-spawned+named session listed as
+      // an orphan with no owning task. Best-effort — the write-lock cap check
+      // below stays authoritative for the concurrent-create race.
+      try {
+        if (
+          (await readCronTasks(boundWorkspace)).length >= MAX_SCHEDULED_TASKS
+        ) {
+          res.status(409).json({
+            error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
+            code: 'max_tasks_reached',
+          });
+          return;
+        }
+      } catch {
+        // Read failure → skip the pre-check; the write below is authoritative.
+      }
       try {
         const session = await bridge.spawnOrAttach({
           workspaceCwd: boundWorkspace,

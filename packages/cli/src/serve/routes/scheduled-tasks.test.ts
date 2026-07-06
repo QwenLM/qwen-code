@@ -156,6 +156,26 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.closed).toEqual([]);
   });
 
+  it('creates an UNBOUND task (no session) when no bridge is provided', async () => {
+    // Mirrors createServeApp passing no bridge when resident task-session
+    // management is off: binding a task to a session nothing keeps resident /
+    // reloads would leave it dormant, so those callers get unbound tasks.
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      // no bridge
+    });
+    const res = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(201);
+    expect(res.body.sessionId).toBeNull(); // unbound — fires via shared owner
+    expect(h.bridge.spawned).toEqual([]); // nothing was spawned
+  });
+
   it('mints the task session with thread scope (never reuses the shared session)', async () => {
     // The daemon default scope is 'single' (attach to the shared workspace
     // session). A task MUST get its own isolated session, so the route forces
@@ -304,7 +324,7 @@ describe('scheduled-tasks routes', () => {
     expect(res.body.code).toBe('task_not_found');
   });
 
-  it('rejects a create past the max-tasks cap', async () => {
+  it('rejects a create past the max-tasks cap without spawning a session', async () => {
     for (let i = 0; i < 50; i++) {
       const r = await create({ cron: '0 9 * * *', prompt: `p${i}` });
       expect(r.status).toBe(201);
@@ -312,10 +332,10 @@ describe('scheduled-tasks routes', () => {
     const over = await create({ cron: '0 9 * * *', prompt: 'overflow' });
     expect(over.status).toBe(409);
     expect(over.body.code).toBe('max_tasks_reached');
-    // The over-cap create still minted a session before the write was rejected;
-    // it must be rolled back so a bounced create doesn't leak a resident one.
-    expect(h.bridge.spawned).toHaveLength(51);
-    expect(h.bridge.closed).toEqual([h.bridge.spawned[50]]);
+    // The cap is pre-checked BEFORE spawning, so an over-cap create never mints
+    // a session — no orphan task session to roll back (spawned stays at 50).
+    expect(h.bridge.spawned).toHaveLength(50);
+    expect(h.bridge.closed).toEqual([]);
   });
 
   it('updates cron / prompt / recurring via PATCH', async () => {

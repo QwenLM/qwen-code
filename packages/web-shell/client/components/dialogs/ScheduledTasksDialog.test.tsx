@@ -272,6 +272,23 @@ describe('ScheduledTasksDialog run now', () => {
   });
 });
 
+describe('ScheduledTasksDialog far-future countdown', () => {
+  it('clamps the reload timer so a months-away schedule cannot overflow setTimeout', async () => {
+    const spy = vi.spyOn(window, 'setTimeout');
+    try {
+      // ~100 days out: the raw delay exceeds setTimeout's 32-bit ceiling, which
+      // would fire immediately and spin a reload loop. It must be clamped.
+      const farFuture = Date.now() + 100 * 86_400_000;
+      await mount([baseTask({ nextRunAt: farFuture })]);
+      const delays = spy.mock.calls.map((c) => Number(c[1] ?? 0));
+      expect(delays.every((d) => d <= 2_147_483_647)).toBe(true);
+      expect(delays).toContain(2_147_483_647); // clamped to the ceiling
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('ScheduledTasksDialog view-history (bound session)', () => {
   it('opens the bound session when its history control is clicked', async () => {
     const onOpenSession = vi.fn();

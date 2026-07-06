@@ -75,6 +75,9 @@ const FREQUENCIES: Frequency[] = [
 // more often than "every N minutes" implies, so the picker offers only values
 // that actually mean "every N minutes".
 const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+// The largest delay window.setTimeout handles without 32-bit overflow (~24.8
+// days); larger values fire immediately.
+const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 
 export function ScheduledTasksDialog({
   onRunPrompt,
@@ -165,7 +168,14 @@ export function ScheduledTasksDialog({
       }
     }
     if (!Number.isFinite(soonest)) return;
-    const delay = Math.max(1000, soonest - Date.now() + 2000);
+    // Clamp to the 32-bit signed-int ceiling: setTimeout overflows delays past
+    // ~24.8 days, firing immediately — which, for a months-away schedule, would
+    // reload, recompute the same far nextRunAt, and re-arm instantly in a tight
+    // loop. Capping re-arms at most every ~24.8 days while the page stays open.
+    const delay = Math.min(
+      Math.max(1000, soonest - Date.now() + 2000),
+      MAX_SET_TIMEOUT_MS,
+    );
     const id = window.setTimeout(() => void reload(), delay);
     return () => window.clearTimeout(id);
   }, [tasks, reload]);

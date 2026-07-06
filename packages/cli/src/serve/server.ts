@@ -311,6 +311,25 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
 const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
 
+/**
+ * Sizes the keepalive heartbeat interval so a resident task session is beaten
+ * BEFORE the idle reaper closes it. Targets a third of the reaper window, but
+ * never exceeds HALF of it — so at least one heartbeat lands in time even for a
+ * small custom timeout, where the 30s floor would otherwise overshoot the whole
+ * window and let the session be reaped before the first beat. When the reaper is
+ * disabled (idle timeout ≤ 0) sessions are never reaped, so heartbeats aren't
+ * needed — the loop still runs (to revive re-enabled bound sessions) but at the
+ * relaxed max cadence.
+ */
+export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
+  if (idleTimeoutMs <= 0) return KEEPALIVE_MAX_INTERVAL_MS;
+  const target = Math.min(
+    Math.max(KEEPALIVE_MIN_INTERVAL_MS, Math.floor(idleTimeoutMs / 3)),
+    KEEPALIVE_MAX_INTERVAL_MS,
+  );
+  return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
+}
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
@@ -812,11 +831,18 @@ export function createServeApp(
   // Reads/writes the per-project cron file only; firing stays with the
   // session-side scheduler. Non-strict mutate: creating a scheduled prompt
   // is the same capability class as POST /session/:id/prompt.
+  //
+  // The bridge is passed ONLY when resident task-session management is enabled.
+  // Binding a task to a dedicated session is only safe when something keeps that
+  // session resident and reloads it after a restart (the keepalive + rehydration
+  // below); without it, a bound task would fire only inside a session nothing
+  // revives and silently go dormant. So embedders that leave the manager off
+  // get UNBOUND tasks (shared-owner firing) instead.
   registerScheduledTasksRoutes(app, {
     boundWorkspace,
     mutate,
     safeBody,
-    bridge,
+    bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -828,28 +854,25 @@ export function createServeApp(
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
     // Keepalive: keep task sessions resident so their in-child schedulers keep
-    // ticking rather than being idle-reaped. A disabled reaper (timeout ≤ 0)
-    // never closes idle sessions, so none is needed. Interval is a third of the
-    // reaper window, clamped — the same window the bridge is configured with.
+    // ticking rather than being idle-reaped, AND revive a re-enabled bound
+    // session the reaper already let go. The revive loop is needed even when the
+    // reaper is disabled (idle timeout ≤ 0), because archiving a task closes its
+    // session — so this always runs when task sessions are managed, not only
+    // when a reaper is active.
     const idleTimeoutMs =
       opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
-    if (idleTimeoutMs > 0) {
-      const keepalive = startScheduledTaskKeepalive({
-        bridge,
-        boundWorkspace,
-        intervalMs: Math.max(
-          KEEPALIVE_MIN_INTERVAL_MS,
-          Math.min(Math.floor(idleTimeoutMs / 3), KEEPALIVE_MAX_INTERVAL_MS),
-        ),
-      });
-      // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
-      // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
-      // run-qwen-serve.ts can invoke it without threading it back through the
-      // createServeApp return type.
-      (
-        app.locals as { stopScheduledTaskKeepalive?: () => void }
-      ).stopScheduledTaskKeepalive = keepalive.stop;
-    }
+    const keepalive = startScheduledTaskKeepalive({
+      bridge,
+      boundWorkspace,
+      intervalMs: computeKeepaliveIntervalMs(idleTimeoutMs),
+    });
+    // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
+    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+    // run-qwen-serve.ts can invoke it without threading it back through the
+    // createServeApp return type.
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive = keepalive.stop;
 
     // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
     // restart (a bound task fires only in its own session, which nothing else

@@ -13,6 +13,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { trace, type Span } from '@opentelemetry/api';
 import {
+  computeKeepaliveIntervalMs,
   createServeApp,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
@@ -1831,6 +1832,29 @@ function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
       else signal?.addEventListener('abort', onAbort, { once: true });
     });
 }
+
+describe('computeKeepaliveIntervalMs', () => {
+  it('keeps the heartbeat strictly under the reaper window (beats before reap)', () => {
+    // A small custom idle timeout must not get an interval ≥ the window, or the
+    // session is reaped before the first heartbeat. Half the window is the cap.
+    for (const idle of [1_000, 2_000, 10_000, 40_000, 60_000, 120_000]) {
+      const interval = computeKeepaliveIntervalMs(idle);
+      expect(interval).toBeLessThanOrEqual(Math.floor(idle / 2));
+      expect(interval).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('uses ~a third of a large window (default 30m → 10m cap)', () => {
+    expect(computeKeepaliveIntervalMs(30 * 60_000)).toBe(10 * 60_000); // MAX cap
+    expect(computeKeepaliveIntervalMs(15 * 60_000)).toBe(5 * 60_000); // /3
+  });
+
+  it('returns the relaxed max cadence when the reaper is disabled (≤ 0)', () => {
+    // No reaping → no heartbeat pressure, but the revive loop still runs.
+    expect(computeKeepaliveIntervalMs(0)).toBe(10 * 60_000);
+    expect(computeKeepaliveIntervalMs(-5)).toBe(10 * 60_000);
+  });
+});
 
 describe('createServeApp', () => {
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {

@@ -2471,8 +2471,14 @@ export function App({
     (prompt: string, sessionId: string | null): Promise<void> => {
       setMainView('chat');
       if (!sessionId) {
-        // Unbound: runs in the current session — resolves when enqueued.
-        return sendPrompt(prompt).then(() => undefined);
+        // Unbound: runs in the current session. Resolve only if admitted —
+        // `undefined` means the prompt was cancelled before admission, so the
+        // caller must not record a run.
+        return sendPrompt(prompt).then((result) => {
+          if (result === undefined) {
+            throw new Error('Run was cancelled before it started');
+          }
+        });
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
@@ -2512,20 +2518,29 @@ export function App({
     ) {
       clearTimeout(pending.timer);
       pendingBoundRunRef.current = null;
-      // The session is active — enqueue the prompt and resolve at that point
-      // (the run has happened). A send error is surfaced but no longer un-does
-      // the record, matching a scheduled fire's "recorded when fired" contract.
-      sendPrompt(pending.prompt).catch((error: unknown) =>
-        reportError(error, 'Failed to run scheduled task'),
+      // The session is active — enqueue the prompt. Resolve the latch ONLY if
+      // the prompt was actually admitted: sendPrompt returns `undefined` when it
+      // was cancelled before admission (e.g. an embedder's onSubmitBefore
+      // rejected), in which case nothing reached the task session and the caller
+      // must NOT record a run. A throw (session-ensure/submit failure) rejects
+      // too. The switch-timeout was already cleared above, so a long turn can't
+      // trip it. (Recording happens in the dialog once this resolves.)
+      sendPrompt(pending.prompt).then(
+        (result) => {
+          if (result === undefined) {
+            pending.reject(new Error('Run was cancelled before it started'));
+          } else {
+            pending.resolve();
+          }
+        },
+        (error: unknown) => pending.reject(error),
       );
-      pending.resolve();
     }
   }, [
     connection.sessionId,
     connection.loadingTranscript,
     connection.catchingUp,
     sendPrompt,
-    reportError,
   ]);
 
   const openTasksPanel = useCallback(() => {
