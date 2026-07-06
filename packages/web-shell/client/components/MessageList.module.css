@@ -151,6 +151,9 @@
 .turnAnswerRow {
   max-width: 100%;
 }
+.turnStatusRow {
+  margin-bottom: 4px;
+}
 
 .turnAnswerRow {
   margin-top: 10px;

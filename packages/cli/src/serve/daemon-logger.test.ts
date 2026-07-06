@@ -148,19 +148,19 @@ describe('initDaemonLogger file init', () => {
     }
   });
 
-  it('derives daemon-id "serve-<pid>-<workspaceHash>" and creates log file', () => {
+  it('derives daemon-scoped daemon-id and creates log file', () => {
     const logger = initDaemonLogger({
       boundWorkspace: '/workspace/foo',
       pid: 1234,
       baseDir: tmp,
     });
-    expect(logger.getDaemonId()).toMatch(/^serve-1234-[0-9a-f]{8}$/);
+    expect(logger.getDaemonId()).toBe('daemon:1234');
     expect(logger.getLogPath()).toBe(
-      path.join(tmp, 'daemon', `${logger.getDaemonId()}.log`),
+      path.join(tmp, 'daemon', 'serve-1234.log'),
     );
     expect(existsSync(logger.getLogPath())).toBe(true);
     expect(readFileSync(logger.getLogPath(), 'utf8')).toMatch(
-      /\[INFO\] \[DAEMON\] daemon started pid=1234 workspace=\/workspace\/foo/,
+      /\[INFO\] \[DAEMON\] workspace=\/workspace\/foo workspaceHash=[0-9a-f]{8} daemon started pid=1234/,
     );
   });
 
