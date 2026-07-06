@@ -2253,7 +2253,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Deferred tool names promoted to first-class visibility at startup. Listed tools appear in the initial function declaration set without requiring a tool_search round-trip, avoiding KV-cache invalidation for frequently-used deferred tools.',
+          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

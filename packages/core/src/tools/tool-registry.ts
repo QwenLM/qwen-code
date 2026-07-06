@@ -745,7 +745,8 @@ export class ToolRegistry {
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
    * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools are excluded.
+   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * {@link Config.getVisibleTools} are excluded.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     const summary: DeferredToolSummary[] = [];

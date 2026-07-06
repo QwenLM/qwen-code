@@ -621,6 +621,47 @@ describe('ToolRegistry', () => {
       const summary = registry.getDeferredToolSummary();
       expect(summary).toEqual([]);
     });
+
+    it('disabledTools takes priority over visibleTools', () => {
+      const config = new Config({
+        ...baseConfigParams,
+        disabledTools: ['contested'],
+        visibleTools: ['contested'],
+      });
+      const registry = new ToolRegistry(config);
+      registry.registerTool(
+        new MockTool({ name: 'contested', shouldDefer: true }),
+      );
+
+      const names = registry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).not.toContain('contested');
+    });
+
+    it('visible tool survives clearRevealedDeferredTools', () => {
+      const visibleConfig = new Config({
+        ...baseConfigParams,
+        visibleTools: ['web_fetch'],
+      });
+      const registry = new ToolRegistry(visibleConfig);
+      registry.registerTool(
+        new MockTool({ name: 'web_fetch', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'monitor', shouldDefer: true }),
+      );
+
+      // Both start visible (web_fetch via visibleTools, monitor is hidden)
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'web_fetch',
+      );
+
+      registry.clearRevealedDeferredTools();
+
+      // web_fetch stays — it's not in revealedDeferred
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'web_fetch',
+      );
+    });
   });
 
   describe('getToolsByServer', () => {

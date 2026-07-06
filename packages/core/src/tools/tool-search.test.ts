@@ -1065,6 +1065,43 @@ describe('ToolSearchTool', () => {
 
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
   });
+
+  it('select: mixed visible+non-visible only reveals the hidden ones', async () => {
+    const { registry } = makeConfigWithRegistry();
+    registry.registerTool(
+      new MockTool({ name: 'web_fetch', shouldDefer: true }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(registry);
+
+    const mockSetTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: mockSetTools,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'select:web_fetch,cron_create' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // Both schemas returned
+    expect(content).toContain('"name":"web_fetch"');
+    expect(content).toContain('"name":"cron_create"');
+    // web_fetch NOT revealed (visible), cron_create revealed
+    expect(registry.isDeferredToolRevealed('web_fetch')).toBe(false);
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+    // setTools called exactly once for cron_create
+    expect(mockSetTools).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('ToolRegistry.clearRevealedDeferredTools', () => {
