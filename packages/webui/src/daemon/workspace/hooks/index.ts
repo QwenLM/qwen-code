@@ -18,5 +18,9 @@ export {
   useDaemonStatusReport,
   type DaemonStatusReportOptions,
 } from './useDaemonStatusReport.js';
+export {
+  useDaemonUsageDashboard,
+  type DaemonUsageDashboardOptions,
+} from './useDaemonUsageDashboard.js';
 export { useDaemonTools } from './useDaemonTools.js';
 export { useDaemonSettings } from './useDaemonSettings.js';

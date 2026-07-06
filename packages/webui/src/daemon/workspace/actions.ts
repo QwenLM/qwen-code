@@ -242,6 +242,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadUsageDashboard(opts) {
+      const client = requireClient(getClient, 'Load usage dashboard failed');
+      return withActionTimeout(
+        client.usageDashboard(opts),
+        'Load usage dashboard timed out',
+      );
+    },
+
     async loadSkillsStatus() {
       const client = requireClient(getClient, 'Load skills failed');
       return withActionTimeout(

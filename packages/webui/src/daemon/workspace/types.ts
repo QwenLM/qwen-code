@@ -63,6 +63,8 @@ import type {
   DaemonSessionExportResult,
   DaemonStatusReport,
   DaemonStatusReportDetail,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
 } from '@qwen-code/sdk/daemon';
@@ -264,6 +266,12 @@ export interface DaemonWorkspaceActions {
   loadDaemonStatus(
     detail?: DaemonStatusReportDetail,
   ): Promise<DaemonStatusReport>;
+
+  // Token-usage dashboard (read-only)
+  loadUsageDashboard(opts?: {
+    range?: DaemonUsageRange;
+    heatmapDays?: number;
+  }): Promise<DaemonUsageDashboard>;
 
   // Skills (read-only)
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;

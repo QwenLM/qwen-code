@@ -69,6 +69,7 @@ import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
+import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
@@ -817,6 +818,10 @@ export function createServeApp(
     safeBody,
     bridge,
   });
+
+  // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
+  // usage only; open GET like /daemon/status, with its own short TTL cache.
+  registerUsageStatsRoutes(app);
 
   // Resident management of scheduled-task-owned sessions — opt-in, so tests and
   // embeds that call createServeApp neither spawn sessions on boot nor hold a

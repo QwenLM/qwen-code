@@ -353,7 +353,7 @@ describe('DaemonStatusDialog', () => {
     mount();
     // Overview is the default tab.
     expect(container!.textContent ?? '').toContain('4242'); // pid (Overview)
-    const metricsTab = container!.querySelectorAll('[role="tab"]')[1];
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
     act(() => {
       metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
@@ -373,7 +373,7 @@ describe('DaemonStatusDialog', () => {
   it('shows the collecting-metrics placeholder when the series is empty', () => {
     // summaryReport carries no runtime.metrics.
     mount();
-    const metricsTab = container!.querySelectorAll('[role="tab"]')[1];
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
     act(() => {
       metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
@@ -394,7 +394,7 @@ describe('DaemonStatusDialog', () => {
       error: undefined,
     };
     mount();
-    const metricsTab = container!.querySelectorAll('[role="tab"]')[1];
+    const metricsTab = container!.querySelector('#daemon-tab-metrics')!;
     act(() => {
       metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
@@ -407,8 +407,8 @@ describe('DaemonStatusDialog', () => {
   it('moves between tabs with arrow / Home / End keys (roving tabindex)', () => {
     mount();
     const tabs = container!.querySelectorAll('[role="tab"]');
-    expect(tabs).toHaveLength(3);
-    // Overview active by default; ArrowRight advances to Metrics.
+    expect(tabs).toHaveLength(4);
+    // Overview active by default; ArrowRight advances to the next tab (Usage).
     act(() => {
       tabs[0].dispatchEvent(
         new KeyboardEvent('keydown', {
@@ -434,9 +434,9 @@ describe('DaemonStatusDialog', () => {
         }),
       );
     });
-    expect(tabs[2].getAttribute('aria-selected')).toBe('true');
+    expect(tabs[3].getAttribute('aria-selected')).toBe('true');
     act(() => {
-      tabs[2].dispatchEvent(
+      tabs[3].dispatchEvent(
         new KeyboardEvent('keydown', {
           key: 'Home',
           bubbles: true,

@@ -40,7 +40,9 @@ export {
   useDaemonSessions,
   useDaemonSkills,
   useDaemonStatusReport,
+  useDaemonUsageDashboard,
   useDaemonTools,
   useDaemonSettings,
 } from './hooks/index.js';
 export type { DaemonStatusReportOptions } from './hooks/index.js';
+export type { DaemonUsageDashboardOptions } from './hooks/index.js';
