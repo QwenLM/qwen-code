@@ -50,6 +50,7 @@ export async function readTextRange(
   if (stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE) {
     const { content, encoding, bom } = await readFileWithEncodingInfo(
       request.path,
+      request.signal,
     );
     request.signal?.throwIfAborted();
     const range = sliceDecodedContent(

@@ -267,9 +267,13 @@ function bomEncodingToName(bomEncoding: UnicodeEncoding): string {
  */
 export async function readFileWithEncodingInfo(
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<FileReadResult> {
   // Read the file once; detect BOM and decode from the single buffer.
-  const full = await fs.promises.readFile(filePath);
+  const full = await fs.promises.readFile(
+    filePath,
+    signal === undefined ? undefined : { signal },
+  );
   return decodeBufferWithEncodingInfo(full);
 }
 
@@ -326,7 +330,12 @@ export async function readFileWithLineAndLimit(params: {
     );
   }
 
-  const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
+  signal?.throwIfAborted();
+  const { content, encoding, bom } = await readFileWithEncodingInfo(
+    filePath,
+    signal,
+  );
+  signal?.throwIfAborted();
   const lines = content.split('\n');
   const originalLineCount = lines.length;
   const startLine = line || 0;

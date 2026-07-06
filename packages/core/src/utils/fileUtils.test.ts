@@ -1482,6 +1482,20 @@ describe('fileUtils', () => {
       ).rejects.toThrow(/File too large for full read/);
     });
 
+    it('should propagate aborts from unbounded full reads', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: Number.POSITIVE_INFINITY,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
     it('should not byte-truncate multibyte text before the character limit', async () => {
       const content = '你'.repeat(1000);
       actualNodeFs.writeFileSync(testTextFilePath, content, 'utf-8');
