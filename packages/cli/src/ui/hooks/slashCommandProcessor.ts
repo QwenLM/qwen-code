@@ -109,6 +109,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
   'history',
 ]);
+const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
 
 function getSkillCommandName(command: SlashCommand): string {
   return command.skillDetail?.name ?? command.name;
@@ -288,8 +289,17 @@ export const useSlashCommandProcessor = (
       return;
     }
     extensionContentRefreshRunningRef.current = true;
+    let refreshPasses = 0;
     try {
       do {
+        if (refreshPasses >= MAX_EXTENSION_CONTENT_REFRESH_PASSES) {
+          extensionContentRefreshPendingRef.current = false;
+          showExtensionContentRefreshError(
+            new Error('too many extension content changes are still pending'),
+          );
+          return;
+        }
+        refreshPasses++;
         extensionContentRefreshPendingRef.current = false;
         if (activeExtensionRefreshState.needsExtensionRefresh()) {
           return;

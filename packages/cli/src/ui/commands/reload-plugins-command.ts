@@ -72,9 +72,10 @@ export const reloadPluginsCommand: SlashCommand = {
       };
     }
 
+    const extensionRefreshState =
+      context.services.extensionRefreshState ?? new ExtensionRefreshState();
+
     try {
-      const extensionRefreshState =
-        context.services.extensionRefreshState ?? new ExtensionRefreshState();
       extensionRefreshState.notifyExtensionsReloadStarted();
       const summary = await reloadPluginsRuntime({
         config,
@@ -89,6 +90,7 @@ export const reloadPluginsCommand: SlashCommand = {
         }),
       };
     } catch (error) {
+      extensionRefreshState.clearExtensionsChanged();
       return {
         type: 'message',
         messageType: 'error',

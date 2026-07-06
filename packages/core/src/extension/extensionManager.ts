@@ -562,12 +562,7 @@ export class ExtensionManager {
 
   /** Toggles favorite state for an extension/MCP server; returns new state. */
   toggleFavorite(name: string): boolean {
-    const endMutation = this.beginMutation('toggleFavorite');
-    try {
-      return this.preferencesStore.toggleFavorite(name);
-    } finally {
-      endMutation();
-    }
+    return this.preferencesStore.toggleFavorite(name);
   }
 
   getExtensionScope(name: string): ExtensionScope | undefined {
@@ -687,22 +682,17 @@ export class ExtensionManager {
    * the discovery cache so the next discover re-fetches it.
    */
   markSourceUpdated(name: string): ExtensionSource | undefined {
-    const endMutation = this.beginMutation('markSourceUpdated');
-    try {
-      const entry = this.getSources().find((m) => m.name === name);
-      if (!entry) {
-        return undefined;
-      }
-      const updated: ExtensionSource = {
-        ...entry,
-        lastUpdatedAt: new Date().toISOString(),
-      };
-      this.sourceRegistryStore.add(updated); // add() replaces by name
-      this.discoverCache = null;
-      return updated;
-    } finally {
-      endMutation();
+    const entry = this.getSources().find((m) => m.name === name);
+    if (!entry) {
+      return undefined;
     }
+    const updated: ExtensionSource = {
+      ...entry,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.sourceRegistryStore.add(updated); // add() replaces by name
+    this.discoverCache = null;
+    return updated;
   }
 
   loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {

@@ -27,37 +27,33 @@ export async function refreshExtensionRuntime(
   // MCP servers must settle first — skills and subagents may depend on the
   // updated MCP tool list for their own refresh (e.g. SkillTool.refreshSkills()
   // rebuilds the model-facing tool description and updates geminiClient's tool
-  // list). Wrap in try/catch so a failure here does not prevent the remaining
-  // refresh legs from running.
-  try {
-    await config.reinitializeMcpServers(config.getSettingsMcpServers());
-  } catch (err) {
-    debugLogger.warn(
-      'refreshExtensionRuntime: reinitializeMcpServers failed:',
-      err,
-    );
-  }
+  // list). A failure here is user-visible because extension MCP tools will be
+  // unavailable, so let callers surface it.
+  await config.reinitializeMcpServers(config.getSettingsMcpServers());
 
   // Skills, subagents, and hooks refresh in parallel. Use allSettled (rather
-  // than Promise.all) so a rejection from one leg does not cascade — the other
-  // legs' results are still applied, refreshHierarchicalMemory below still
-  // runs, and callers (`enableExtension`, etc.) don't unwind because of an
-  // unrelated transient failure.
+  // than Promise.all) so a rejection from one leg does not prevent the other
+  // legs from applying or skip refreshHierarchicalMemory below. Hook reload
+  // failures are surfaced after these best-effort legs settle.
   const skillManager = config.getSkillManager();
   const settled = await Promise.allSettled([
     skillManager?.refreshCache(),
     config.getSubagentManager().refreshCache(),
     config.getHookSystem()?.reload(),
   ]);
+  let hookReloadError: unknown;
 
-  for (const result of settled) {
+  settled.forEach((result, index) => {
     if (result.status === 'rejected') {
       debugLogger.warn(
         'refreshExtensionRuntime: a refresh leg failed:',
         result.reason,
       );
+      if (index === 2) {
+        hookReloadError = result.reason;
+      }
     }
-  }
+  });
 
   // Await hierarchical memory refresh so callers only continue after the
   // extension refresh has settled. Wrap in try/catch so a transient failure
@@ -75,5 +71,9 @@ export async function refreshExtensionRuntime(
       'refreshExtensionRuntime: refreshHierarchicalMemory failed:',
       err,
     );
+  }
+
+  if (hookReloadError) {
+    throw hookReloadError;
   }
 }

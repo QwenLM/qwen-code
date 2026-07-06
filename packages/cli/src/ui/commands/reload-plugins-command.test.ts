@@ -80,7 +80,7 @@ describe('reloadPluginsCommand', () => {
     });
   });
 
-  it('does not clear stale state when reload fails', async () => {
+  it('clears stale state when reload fails', async () => {
     vi.mocked(reloadPluginsRuntime).mockRejectedValueOnce(new Error('boom'));
     const context = {
       services: { config: {} as Config, extensionRefreshState },
@@ -92,7 +92,7 @@ describe('reloadPluginsCommand', () => {
     expect(
       extensionRefreshState.notifyExtensionsReloadStarted,
     ).toHaveBeenCalledOnce();
-    expect(extensionRefreshState.clearExtensionsChanged).not.toHaveBeenCalled();
+    expect(extensionRefreshState.clearExtensionsChanged).toHaveBeenCalledOnce();
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',

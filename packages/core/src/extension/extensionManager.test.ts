@@ -200,6 +200,36 @@ describe('extension tests', () => {
       });
     });
 
+    it('should emit mutation lifecycle events around install', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'local-archive-extension');
+        },
+      );
+
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+
+      await manager.installExtension(
+        {
+          source: archivePath,
+          type: 'local',
+        },
+        async () => {},
+      );
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'installExtension' },
+        { id: 2, phase: 'start', operation: 'enableExtension' },
+        { id: 2, phase: 'end', operation: 'enableExtension' },
+        { id: 1, phase: 'end', operation: 'installExtension' },
+      ]);
+    });
+
     it('should clean up converted temp dir for local archive installs', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'gemini-extension.zip');
       fs.writeFileSync(archivePath, 'not used by mocked extractor');
@@ -336,6 +366,33 @@ describe('extension tests', () => {
 
       expect(tempDir).toBeDefined();
       expect(fs.existsSync(tempDir!)).toBe(false);
+    });
+  });
+
+  describe('uninstallExtension', () => {
+    it('should emit mutation lifecycle events around uninstall', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: tempWorkspaceDir,
+          originSource: 'QwenCode',
+        },
+      });
+
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+
+      await manager.uninstallExtension('my-extension', false);
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'uninstallExtension' },
+        { id: 1, phase: 'end', operation: 'uninstallExtension' },
+      ]);
     });
   });
 
@@ -825,6 +882,32 @@ describe('extension tests', () => {
 
       await manager.enableExtension('ext1', SettingScope.Workspace);
       expect(manager.isEnabled('ext1', tempWorkspaceDir)).toBe(true);
+    });
+  });
+
+  describe('preference-only operations', () => {
+    it('should not emit mutation lifecycle events for preference changes', () => {
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+
+      expect(manager.toggleFavorite('my-extension')).toBe(true);
+      fs.writeFileSync(
+        path.join(userExtensionsDir, 'marketplaces.json'),
+        JSON.stringify([
+          {
+            name: 'marketplace',
+            source: 'owner/repo',
+            type: 'github',
+            addedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ]),
+      );
+      expect(manager.markSourceUpdated('marketplace')).toMatchObject({
+        name: 'marketplace',
+      });
+
+      expect(events).toEqual([]);
     });
   });
 
