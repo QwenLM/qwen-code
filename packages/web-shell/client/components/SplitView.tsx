@@ -14,11 +14,13 @@ import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SESSION_ORGANIZATION_FEATURE,
+} from '../constants/sessions';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
-const SESSION_PAGE_SIZE = 1000;
-const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 
 export interface SplitViewProps {
   /** Sessions to open initially (e.g. the selection from the overview). */
@@ -49,7 +51,7 @@ export function SplitView({
     ) ?? false;
   const { sessions } = useSessions({
     autoLoad: true,
-    pageSize: SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -110,6 +112,18 @@ export function SplitView({
     );
     setPickerOpen(false);
   }, []);
+
+  // Closing the last pane is a natural "I'm done" gesture — return to the
+  // overview instead of stranding the user on an empty split. Guarded so an
+  // initial empty seed (no current session) doesn't bounce straight back out.
+  const hadPanesRef = useRef(false);
+  useEffect(() => {
+    if (paneIds.length > 0) {
+      hadPanesRef.current = true;
+    } else if (hadPanesRef.current) {
+      onExit();
+    }
+  }, [paneIds, onExit]);
 
   const removePane = useCallback((sessionId: string) => {
     setPaneIds((prev) => prev.filter((id) => id !== sessionId));

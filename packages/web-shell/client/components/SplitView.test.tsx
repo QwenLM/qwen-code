@@ -146,6 +146,17 @@ describe('SplitView', () => {
     expect(titles()).toEqual(['Two']);
   });
 
+  it('auto-exits to the overview when the last pane is closed', () => {
+    const onExit = vi.fn();
+    render({ initialSessionIds: ['s1'], onExit });
+    expect(onExit).not.toHaveBeenCalled();
+    const close = container!.querySelector('[data-testid="pane-close"]');
+    act(() =>
+      close!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
   it('exits via the back button', () => {
     const onExit = vi.fn();
     render({ initialSessionIds: ['s1'], onExit });

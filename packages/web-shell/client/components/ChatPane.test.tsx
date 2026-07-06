@@ -243,4 +243,37 @@ describe('ChatPane', () => {
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('cancels the active turn via the composer cancel action', () => {
+    render();
+    act(() =>
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not send a whitespace-only prompt', () => {
+    render();
+    let returned: boolean | undefined;
+    act(() => {
+      returned = latestOnSubmit!('   ', undefined, vi.fn());
+    });
+    expect(returned).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('routes send failures to the onError prop', async () => {
+    const onError = vi.fn();
+    render({ onError });
+    act(() => {
+      latestOnSubmit!('hi', undefined, vi.fn());
+    });
+    await act(async () => {
+      sendPromptReject!(new Error('disconnected'));
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalled();
+  });
 });

@@ -19,6 +19,10 @@ import { useI18n } from '../i18n';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
 import { getDaemonToken } from '../config/daemon';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SESSION_ORGANIZATION_FEATURE,
+} from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
 import styles from './SessionOverviewPanel.module.css';
 
@@ -33,8 +37,6 @@ import styles from './SessionOverviewPanel.module.css';
 // hidden or a previous request is still outstanding.
 const LIST_POLL_MS = 3000;
 const STATUS_POLL_MS = 10000;
-const SESSION_PAGE_SIZE = 1000;
-const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 
 export type SessionCardStatus = 'needsApproval' | 'running' | 'idle';
 
@@ -147,7 +149,7 @@ function SessionOverviewPanelInner({
 
   const { sessions, loading, error, reload } = useSessions({
     autoLoad: true,
-    pageSize: SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }

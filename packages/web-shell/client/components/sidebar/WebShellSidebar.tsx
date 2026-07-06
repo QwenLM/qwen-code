@@ -25,16 +25,18 @@ import type {
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SESSION_ORGANIZATION_FEATURE,
+} from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_SESSION_PAGE_SIZE = 1000;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
-const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
@@ -490,7 +492,7 @@ export function WebShellSidebar({
     archiveSession,
   } = useSessions({
     autoLoad: true,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -507,7 +509,7 @@ export function WebShellSidebar({
   } = useSessions({
     autoLoad: true,
     enabled: archivedExpanded,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
