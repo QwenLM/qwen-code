@@ -480,6 +480,22 @@ Done.`.replace(/\n/g, eol);
       expect(lastFrame() ?? '').toContain('grep foo');
     });
 
+    it('does not hold back a header with an empty-named column once its separator matches', () => {
+      // `| A || B |` is a 3-column table to the renderer (the empty middle cell
+      // counts). The hold-back must count columns the same way, or it never
+      // finds the matching 3-column separator and hides the table all stream.
+      const text = `intro line
+| A || B |
+| - | - | - |
+| x || y |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('x');
+      expect(output).toContain('y');
+    });
+
     it('keeps holding the header while its separator is still being typed', () => {
       // A partial separator whose column count does not yet match the header is
       // not enough to recognize the table, so the header stays held.

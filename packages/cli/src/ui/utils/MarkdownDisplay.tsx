@@ -217,10 +217,18 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // cell — one cell so far — is indistinguishable from a single-pipe line,
       // so it renders briefly until the second column appears; that is the
       // narrowest flash we can allow without hiding real non-table text.)
-      const headerCells = insideCodeFence
-        ? 0
-        : splitMarkdownTableRow(lines[start]!).filter((c) => c.length > 0)
-            .length;
+      // Count header cells the way the main table detector does (strip the
+      // outer pipes, split WITHOUT dropping empty cells) so an empty-named
+      // column like `| A || B |` — which the renderer treats as a real table —
+      // agrees between this hold-back and the renderer, instead of being held
+      // back for the whole stream. The trailing pipe is stripped only when
+      // present, so a still-forming header (`| A | B`) is counted mid-type.
+      let headerCells = 0;
+      if (!insideCodeFence) {
+        let hdr = lines[start]!.replace(/^\s*\|/, '');
+        if (/\|\s*$/.test(hdr)) hdr = hdr.replace(/\|\s*$/, '');
+        headerCells = splitMarkdownTableRow(hdr).length;
+      }
       if (headerCells >= 2) {
         const hasMatchingSeparator = lines.slice(start + 1).some((l) => {
           if (!tableSeparatorRegex.test(l)) return false;
