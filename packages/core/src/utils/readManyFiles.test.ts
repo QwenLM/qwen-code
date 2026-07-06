@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +17,17 @@ import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
+import { getPDFPageCount } from './pdf.js';
+
+vi.mock('./pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./pdf.js')>();
+  return {
+    ...actual,
+    getPDFPageCount: vi.fn(),
+  };
+});
+
+const mockGetPDFPageCount = vi.mocked(getPDFPageCount);
 
 /** Helper to convert PartListUnion to string for test assertions */
 function contentToString(parts: PartListUnion): string {
@@ -90,6 +101,8 @@ describe('readManyFiles', () => {
   }
 
   beforeEach(async () => {
+    mockGetPDFPageCount.mockReset();
+    mockGetPDFPageCount.mockResolvedValue(null);
     tempRootDir = nodeFs.realpathSync(
       await fs.mkdtemp(path.join(os.tmpdir(), 'read-many-files-test-')),
     );
@@ -205,6 +218,7 @@ describe('readManyFiles', () => {
       const relativePath = 'paper.pdf';
       const absolutePath = path.join(tempRootDir, relativePath);
       await fs.writeFile(absolutePath, Buffer.alloc(2 * 1024 * 1024));
+      mockGetPDFPageCount.mockResolvedValueOnce(31);
       const cache = new FileReadCache();
       const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 
@@ -216,6 +230,8 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.content).toContain('PDF "paper.pdf"');
       expect(content).toContain("Use the 'pages' parameter");
       expect(content.length).toBeLessThan(1000);
+      expect(mockGetPDFPageCount).toHaveBeenCalledTimes(1);
+      expect(mockGetPDFPageCount).toHaveBeenCalledWith(absolutePath);
 
       const status = cache.check(nodeFs.statSync(absolutePath));
       expect(status.state).toBe('fresh');
