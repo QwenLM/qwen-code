@@ -1977,7 +1977,7 @@ describe('startInteractiveUI', () => {
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
       mockSettings,
-      { connectIde: true, initializeTelemetry: true },
+      { connectIde: false, initializeTelemetry: true },
     );
   });
 
@@ -2039,7 +2039,7 @@ describe('startInteractiveUI', () => {
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
       settingsWithAutoUpdateDisabled,
-      { connectIde: true, initializeTelemetry: true },
+      { connectIde: false, initializeTelemetry: true },
     );
   });
 });
