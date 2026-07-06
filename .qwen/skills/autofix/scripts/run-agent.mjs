@@ -36,6 +36,7 @@ const specs = {
     outputs: ['address-summary.md', 'no-action.md'],
     required: ['pr', 'issue'],
     anyOutput: true,
+    exclusiveOutput: true,
     invocation: (o) =>
       `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
   },
@@ -129,9 +130,9 @@ const result = spawnSync(options.qwenBin, ['--yolo', '--prompt', prompt], {
 if (result.error || result.signal || result.status !== 0) {
   const detail = result.error
     ? result.error.message
-    : result.signal === 'SIGTERM'
-      ? `timeout (SIGTERM after ${QWEN_TIMEOUT_MS}ms)`
-      : (result.signal ?? `status ${String(result.status)}`);
+    : result.signal
+      ? `signal ${result.signal}`
+      : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
     writeFailure(
       options.workdir,
@@ -152,6 +153,14 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
 }
 
 const missingOutputs = missing(options.workdir, spec.outputs);
+const presentOutputs = spec.outputs.filter(
+  (name) => !missingOutputs.includes(name),
+);
+if (spec.exclusiveOutput && presentOutputs.length > 1) {
+  const message = `Autofix agent wrote mutually exclusive output files: ${presentOutputs.join(', ')}.`;
+  writeFailure(options.workdir, message);
+  fail(message);
+}
 const ok = spec.anyOutput
   ? missingOutputs.length < spec.outputs.length
   : missingOutputs.length === 0;

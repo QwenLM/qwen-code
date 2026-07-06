@@ -119,6 +119,8 @@ jobs:
             value="${value//$'\n'/}"
             if [[ "${value}" =~ ^[0-9]+$ ]]; then
               printf '%s' "${value}"
+            elif [[ -n "${value}" ]]; then
+              echo "::warning::Rejected non-numeric routing input: '${value}'" >&2
             fi
           }
           # workflow_dispatch inputs are user-controlled; keep GITHUB_OUTPUT
@@ -372,8 +374,7 @@ jobs:
           if [[ "${COUNT}" -gt 0 ]]; then
             if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --limit 100 --json number,headRefName > "${WORKDIR}/open-autofix-prs.json"; then
-              echo "::warning::Open autofix PR scan failed; falling back to an empty candidate list to avoid duplicate PRs."
-              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+              echo "::warning::Open autofix PR scan failed; candidates will proceed without duplicate-PR annotation."
             else
               if ! jq -c --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
                 ($prs[0] // []) as $prs
@@ -388,8 +389,7 @@ jobs:
                     | . + {existingAutofixPr: $existing}
                   )
               ' "${WORKDIR}/candidates.json" > "${WORKDIR}/annotated-candidates.json"; then
-                echo "::warning::Open autofix PR annotation failed; falling back to an empty candidate list."
-                jq -n -c '[]' > "${WORKDIR}/candidates.json"
+                echo "::warning::Open autofix PR annotation failed; candidates will proceed without duplicate-PR annotation."
               else
                 mv "${WORKDIR}/annotated-candidates.json" "${WORKDIR}/candidates.json"
                 CANDIDATES_WITH_PRS="$(jq '[.[] | select(.existingAutofixPr != null)] | length' "${WORKDIR}/candidates.json")"

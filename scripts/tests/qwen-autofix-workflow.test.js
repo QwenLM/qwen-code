@@ -237,6 +237,7 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain('[[ "${value}" =~ ^[0-9]+$ ]]');
     expect(routeStep).toContain('ROUTE_ISSUE="$(sanitize_number');
     expect(routeStep).toContain('ROUTE_PR="$(sanitize_number');
+    expect(routeStep).toContain('Rejected non-numeric routing input');
     expect(routeStep).toContain('routing values single-line numeric');
     expect(workflow).toContain(
       "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'",
@@ -277,6 +278,18 @@ describe('qwen-autofix workflow', () => {
     );
     expect(findCandidateIssuesStep).toContain('existingAutofixPr');
     expect(findCandidateIssuesStep).toContain('annotated-candidates.json');
+    expect(findCandidateIssuesStep).toContain(
+      'Open autofix PR scan failed; candidates will proceed without duplicate-PR annotation.',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'Open autofix PR annotation failed; candidates will proceed without duplicate-PR annotation.',
+    );
+    expect(findCandidateIssuesStep).not.toContain(
+      'Open autofix PR scan failed; falling back to an empty candidate list',
+    );
+    expect(findCandidateIssuesStep).not.toContain(
+      'Open autofix PR annotation failed; falling back to an empty candidate list',
+    );
     expect(readDecisionStep).toContain(
       'first(.[] | select(.number == $go) | .existingAutofixPr.number) // empty',
     );
@@ -960,6 +973,48 @@ describe('qwen-autofix workflow', () => {
     expect(runner).toContain('timeout: QWEN_TIMEOUT_MS');
   });
 
+  it('reports external qwen subprocess signals without calling them timeouts', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(
+        stub,
+        [
+          '#!/usr/bin/env node',
+          "process.kill(process.pid, 'SIGTERM');",
+          '',
+        ].join('\n'),
+      );
+      chmodSync(stub, 0o755);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).not.toBe(0);
+      const failure = readFileSync(join(dir, 'failure.md'), 'utf8');
+      expect(failure).toContain('signal SIGTERM');
+      expect(failure).not.toContain('timeout (');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects invalid --conflict values', () => {
     expect(() =>
       execFileSync(
@@ -1036,6 +1091,54 @@ describe('qwen-autofix workflow', () => {
       expect(result.status).toBe(0);
       expect(result.stderr).toContain('failure.md:');
       expect(result.stderr).toContain('cannot proceed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects mutually exclusive address-review output files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(
+        stub,
+        [
+          '#!/usr/bin/env node',
+          "import { writeFileSync } from 'node:fs';",
+          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+          "writeFileSync(`${workdir}/address-summary.md`, 'fixed\\n');",
+          "writeFileSync(`${workdir}/no-action.md`, 'skipped\\n');",
+          '',
+        ].join('\n'),
+      );
+      chmodSync(stub, 0o755);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('mutually exclusive output files');
+      expect(result.stderr).toContain('address-summary.md');
+      expect(result.stderr).toContain('no-action.md');
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'mutually exclusive output files',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
