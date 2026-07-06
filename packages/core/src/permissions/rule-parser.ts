@@ -523,7 +523,6 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         'model',
         'subagent_type',
         'skill',
-        'server_name',
       ]);
       if (ctx.toolParams) {
         for (const key of stableParamKeys) {
@@ -817,30 +816,28 @@ export function matchesCommandPattern(
 }
 
 /**
- * Match a parameter value against a pattern.
- * Unlike matchesCommandPattern, this uses simple glob matching without
- * shell-specific semantics (no prefix+space matching, no variable stripping).
- * Supports `*` as wildcard for any substring.
- */
-/**
  * Match a glob pattern against a value using linear-time greedy matching.
- * `*` matches any substring (including empty). No regex involved — avoids
+ * `*` matches any substring (including empty). Case-insensitive to match
+ * the convention used by matchesDomainPattern. No regex involved — avoids
  * ReDoS risk from catastrophic backtracking on multi-wildcard patterns.
  */
 function matchesParamValuePattern(pattern: string, value: string): boolean {
-  if (pattern === '*') {
+  const normalizedPattern = pattern.toLowerCase();
+  const normalizedValue = value.toLowerCase();
+
+  if (normalizedPattern === '*') {
     return true;
   }
-  if (!pattern.includes('*')) {
-    return value === pattern;
+  if (!normalizedPattern.includes('*')) {
+    return normalizedValue === normalizedPattern;
   }
 
-  const segments = pattern.split('*');
+  const segments = normalizedPattern.split('*');
   let pos = 0;
 
   // First segment must match at the start
   if (segments[0]!.length > 0) {
-    if (!value.startsWith(segments[0]!)) {
+    if (!normalizedValue.startsWith(segments[0]!)) {
       return false;
     }
     pos = segments[0]!.length;
@@ -850,7 +847,7 @@ function matchesParamValuePattern(pattern: string, value: string): boolean {
   for (let i = 1; i < segments.length - 1; i++) {
     const seg = segments[i]!;
     if (seg.length === 0) continue;
-    const idx = value.indexOf(seg, pos);
+    const idx = normalizedValue.indexOf(seg, pos);
     if (idx === -1) {
       return false;
     }
@@ -860,10 +857,10 @@ function matchesParamValuePattern(pattern: string, value: string): boolean {
   // Last segment must match at the end
   const last = segments[segments.length - 1]!;
   if (last.length > 0) {
-    if (value.length - pos < last.length) {
+    if (normalizedValue.length - pos < last.length) {
       return false;
     }
-    return value.endsWith(last);
+    return normalizedValue.endsWith(last);
   }
 
   return true;

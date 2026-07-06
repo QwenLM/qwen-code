@@ -3084,3 +3084,205 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe('deny');
   });
 });
+
+// ─── PermissionManager integration tests with toolParams ─────────────────────
+
+describe('PermissionManager — toolParams end-to-end', () => {
+  it('evaluate respects allow rule with param matcher', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder,model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'opus' },
+      }),
+    ).toBe('allow');
+  });
+
+  it('evaluate denies when param matcher does not match', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder,model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'sonnet' },
+      }),
+    ).not.toBe('allow');
+  });
+
+  it('findMatchingDenyRule matches deny rule with param matcher', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:restricted)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'agent',
+        toolParams: { model: 'restricted' },
+      }),
+    ).toBe('Agent(model:restricted)');
+  });
+
+  it('findMatchingDenyRule returns undefined when param does not match', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:restricted)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('hasRelevantRules returns true when param matcher rule exists', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['Agent(model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBe(true);
+  });
+
+  it('hasMatchingAskRule returns true when param matcher ask rule matches', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['Agent(model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.hasMatchingAskRule({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBe(true);
+  });
+
+  it('case-insensitive param matching: deny rule blocks different casing', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:Sonnet)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        toolParams: { model: 'sonnet' },
+      }),
+    ).toBe('deny');
+  });
+});
+
+// ─── evaluateParamMatchers type guard tests ──────────────────────────────────
+
+describe('matchesRule — param matcher type guards', () => {
+  it('rejects boolean param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: true },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects null param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: null },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects undefined param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: undefined },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects object param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: { nested: 'opus' } },
+      ),
+    ).toBe(false);
+  });
+
+  it('accepts number param values via coercion', () => {
+    const rule = parseRule('Agent(count:42)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { count: 42 },
+      ),
+    ).toBe(true);
+  });
+});
