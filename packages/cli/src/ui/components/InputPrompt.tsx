@@ -219,7 +219,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const settings = useSettings();
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
-  const mouseInteractionsEnabled = !!settings.merged.ui?.useTerminalBuffer;
+  const mouseInteractionsEnabled = uiState.useTerminalBuffer;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();

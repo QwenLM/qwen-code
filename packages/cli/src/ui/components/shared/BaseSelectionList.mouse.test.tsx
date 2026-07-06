@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { LoadedSettings } from '../../../config/settings.js';
+import { UIStateContext, type UIState } from '../../contexts/UIStateContext.js';
 import { RadioButtonSelect } from './RadioButtonSelect.js';
 
 // Integration smoke test: with ui.useTerminalBuffer on, BaseSelectionList
@@ -44,6 +45,20 @@ describe('BaseSelectionList with mouse enabled (integration)', () => {
     );
     // `frames` captures both rendered frames and the raw enable escape that
     // useMouseEvents writes to the same stdout — assert across all of them.
+    const output = frames.join('\n');
+    expect(output).toContain('Alpha');
+    expect(output).toContain('Beta');
+    expect(output).toContain(ENABLE_ANY);
+  });
+
+  it('uses UIState VP mode when the raw setting is unset', () => {
+    const { frames } = renderWithProviders(
+      <UIStateContext.Provider
+        value={{ useTerminalBuffer: true } as unknown as UIState}
+      >
+        <RadioButtonSelect items={items} onSelect={() => {}} />
+      </UIStateContext.Provider>,
+    );
     const output = frames.join('\n');
     expect(output).toContain('Alpha');
     expect(output).toContain('Beta');

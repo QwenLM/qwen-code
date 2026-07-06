@@ -760,6 +760,33 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
+    it('uses the startup VP decision when provided', () => {
+      const legacySettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={legacySettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          initialUseTerminalBuffer={true}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
+    });
+
     it('keeps screen reader mode on the Static path when useTerminalBuffer is unset', () => {
       vi.spyOn(mockConfig, 'getScreenReader').mockReturnValue(true);
       const defaultSettings = {

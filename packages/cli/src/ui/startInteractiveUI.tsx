@@ -134,6 +134,12 @@ export async function startInteractiveUI(
   // always reads from the same stable prop rather than the (now empty) module buffer.
   const initialCapturedInput = stopAndGetCapturedInput();
 
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  );
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -163,6 +169,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        initialUseTerminalBuffer={useVP}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -175,11 +182,6 @@ export async function startInteractiveUI(
     );
   };
 
-  const useVP = shouldUseVirtualViewport(
-    settings.merged.ui?.useTerminalBuffer,
-    config.getScreenReader(),
-    isInteractiveTerminal(),
-  );
   const instance = render(
     process.env['DEBUG'] ? (
       <React.StrictMode>

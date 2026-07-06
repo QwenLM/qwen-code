@@ -398,6 +398,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  initialUseTerminalBuffer?: boolean;
 }
 
 /**
@@ -413,7 +414,8 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult } = props;
+  const { settings, config, initializationResult, initialUseTerminalBuffer } =
+    props;
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -1017,12 +1019,14 @@ export const AppContainer = (props: AppContainerProps) => {
   // The visible refresh in VP mode comes for free from the React tree
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
-  const [useTerminalBuffer] = useState(() =>
-    shouldUseVirtualViewport(
-      settings.merged.ui?.useTerminalBuffer,
-      config.getScreenReader(),
-      isInteractiveTerminal(),
-    ),
+  const [useTerminalBuffer] = useState(
+    () =>
+      initialUseTerminalBuffer ??
+      shouldUseVirtualViewport(
+        settings.merged.ui?.useTerminalBuffer,
+        config.getScreenReader(),
+        isInteractiveTerminal(),
+      ),
   );
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {

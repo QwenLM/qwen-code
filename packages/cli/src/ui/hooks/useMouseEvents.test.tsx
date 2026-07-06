@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useStdin, useStdout } from 'ink';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { useMouseEvents } from './useMouseEvents.js';
 
@@ -45,6 +46,23 @@ const vpWrapper = (useTerminalBuffer: boolean) => {
       <KeypressProvider kittyProtocolEnabled={false}>
         {children}
       </KeypressProvider>
+    </SettingsContext.Provider>
+  );
+  return VpWrapper;
+};
+
+const uiStateVpWrapper = (useTerminalBuffer: boolean) => {
+  const VpWrapper = ({ children }: { children: React.ReactNode }) => (
+    <SettingsContext.Provider
+      value={{ merged: { ui: {} } } as unknown as LoadedSettings}
+    >
+      <UIStateContext.Provider
+        value={{ useTerminalBuffer } as unknown as UIState}
+      >
+        <KeypressProvider kittyProtocolEnabled={false}>
+          {children}
+        </KeypressProvider>
+      </UIStateContext.Provider>
     </SettingsContext.Provider>
   );
   return VpWrapper;
@@ -194,6 +212,13 @@ describe('useMouseEvents', () => {
     it('VP without bypass: enables mouse mode', () => {
       renderHook(() => useMouseEvents(() => {}, { isActive: true }), {
         wrapper: vpWrapper(true),
+      });
+      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+
+    it('uses UIState VP mode when the raw setting is unset', () => {
+      renderHook(() => useMouseEvents(() => {}, { isActive: true }), {
+        wrapper: uiStateVpWrapper(true),
       });
       expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
     });
