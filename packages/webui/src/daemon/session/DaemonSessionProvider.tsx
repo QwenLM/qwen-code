@@ -403,7 +403,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
-              errorStatus: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
             const getWorkspaceCapabilities =
               workspaceGetCapabilitiesRef.current;
@@ -914,7 +917,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
-              errorStatus: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
           };
           for await (const event of activeSession.events({
@@ -1131,7 +1137,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ...current,
                     status: 'connecting',
                     error: undefined,
-                    errorStatus: undefined,
+                    errorStatus: resolveConnectionErrorStatus(
+                      undefined,
+                      current.errorStatus,
+                    ),
                   }));
                   break;
                 }
@@ -1277,7 +1286,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 status: 'error',
                 sessionId: undefined,
                 error: message,
-                errorStatus,
+                errorStatus: resolveConnectionErrorStatus(
+                  errorStatus,
+                  current.errorStatus,
+                ),
                 capabilities: capabilities ?? current.capabilities,
                 loadingTranscript: undefined,
                 catchingUp: undefined,
@@ -1289,7 +1301,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: message,
-              errorStatus,
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -1467,6 +1482,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 deadSessionId,
                 errorStatus,
               );
+            } else {
+              console.warn(
+                '[DaemonSessionProvider] heartbeat auth failure (sessionId=%s, status=%d)',
+                deadSessionId,
+                errorStatus,
+              );
             }
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
@@ -1483,7 +1504,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...current,
                   status: authFailure ? 'error' : 'disconnected',
                   error: message,
-                  errorStatus,
+                  errorStatus: resolveConnectionErrorStatus(
+                    errorStatus,
+                    current.errorStatus,
+                  ),
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,

@@ -529,6 +529,28 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('does not notify session change when missing-session new chat fails', async () => {
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('network'));
+
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'New session')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
   it('gates direct submissions and dispatches submit events with delayed sidebar reload', async () => {
     vi.useFakeTimers();
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);

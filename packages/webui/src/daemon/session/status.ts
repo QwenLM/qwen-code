@@ -18,6 +18,12 @@ export function resolveConnectionErrorStatus(
   nextStatus: number | undefined,
   currentStatus: number | undefined,
 ): number | undefined {
+  if (
+    isMissingSessionHttpStatus(currentStatus) &&
+    !isMissingSessionHttpStatus(nextStatus)
+  ) {
+    return currentStatus;
+  }
   return (
     nextStatus ??
     (isMissingSessionHttpStatus(currentStatus) ? currentStatus : undefined)

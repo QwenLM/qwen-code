@@ -972,6 +972,7 @@ export function App({
   const btwAbortControllerRef = useRef<AbortController | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
+  const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
       (message): message is LocalAnchoredMessage => message !== null,
@@ -1133,6 +1134,8 @@ export function App({
     assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
   }, [composerRef]);
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
+  const [isCreatingMissingSession, setIsCreatingMissingSession] =
+    useState(false);
   const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
   activeGoalRef.current = activeGoal;
   const {
@@ -2193,9 +2196,14 @@ export function App({
   }, [connection.currentMode, connection.sessionId]);
 
   useEffect(() => {
-    if (connection.sessionId) {
+    const previousGoalSessionId = lastGoalSessionIdRef.current;
+    if (
+      connection.sessionId &&
+      connection.sessionId !== previousGoalSessionId
+    ) {
       setActiveGoal(null);
     }
+    lastGoalSessionIdRef.current = connection.sessionId;
     if (
       !connection.sessionId &&
       isMissingSessionHttpStatus(connection.errorStatus)
@@ -2412,12 +2420,18 @@ export function App({
     }
   }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
   const handleMissingSessionNewSession = useCallback(async () => {
+    if (isCreatingMissingSession) return;
+    setIsCreatingMissingSession(true);
     setMainView('chat');
-    const success = await createNewSession();
-    if (success) {
-      onSessionIdChange?.(undefined);
+    try {
+      const success = await createNewSession();
+      if (success) {
+        onSessionIdChange?.(undefined);
+      }
+    } finally {
+      setIsCreatingMissingSession(false);
     }
-  }, [createNewSession, onSessionIdChange]);
+  }, [createNewSession, isCreatingMissingSession, onSessionIdChange]);
 
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
@@ -4328,6 +4342,7 @@ export function App({
                   <button
                     type="button"
                     className={styles.missingSessionButton}
+                    disabled={isCreatingMissingSession}
                     onClick={handleMissingSessionNewSession}
                   >
                     {t('session.new')}

@@ -25,7 +25,12 @@ describe('daemon session status helpers', () => {
   });
 
   it('uses the next status when one is available', () => {
-    expect(resolveConnectionErrorStatus(500, 410)).toBe(500);
+    expect(resolveConnectionErrorStatus(500, undefined)).toBe(500);
     expect(resolveConnectionErrorStatus(404, undefined)).toBe(404);
+  });
+
+  it('keeps missing-session status over later non-missing statuses', () => {
+    expect(resolveConnectionErrorStatus(502, 404)).toBe(404);
+    expect(resolveConnectionErrorStatus(503, 410)).toBe(410);
   });
 });
