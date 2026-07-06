@@ -73,7 +73,10 @@ import {
   isPendingPromptEvent,
   publishPendingPromptEvent,
 } from '../pendingPromptVersion.js';
-import { isMissingSessionHttpStatus } from './status.js';
+import {
+  isMissingSessionHttpStatus,
+  resolveConnectionErrorStatus,
+} from './status.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -1276,6 +1279,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error: message,
                 errorStatus,
                 capabilities: capabilities ?? current.capabilities,
+                loadingTranscript: undefined,
+                catchingUp: undefined,
               }));
               return;
             }
@@ -1455,10 +1460,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const missingSession = isMissingSessionHttpStatus(errorStatus);
           if (missingSession) {
             const deadSessionId = session.sessionId;
+            console.warn(
+              '[DaemonSessionProvider] heartbeat detected missing session (sessionId=%s, status=%d)',
+              deadSessionId,
+              errorStatus,
+            );
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(deadSessionId);
-            sessionRef.current = undefined;
+            if (sessionRef.current?.sessionId === deadSessionId) {
+              sessionRef.current = undefined;
+            }
           }
           setConnection((current) =>
             current.sessionId === session.sessionId
@@ -2081,20 +2093,6 @@ function isTerminalSessionHttpError(error: unknown): boolean {
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
-}
-
-/**
- * Preserve 404/410 after heartbeat detects a missing session so a later
- * status-less transport retry cannot hide the missing-session empty state.
- */
-function resolveConnectionErrorStatus(
-  nextStatus: number | undefined,
-  currentStatus: number | undefined,
-): number | undefined {
-  return (
-    nextStatus ??
-    (isMissingSessionHttpStatus(currentStatus) ? currentStatus : undefined)
-  );
 }
 
 function extractHttpStatus(error: unknown): number | undefined {

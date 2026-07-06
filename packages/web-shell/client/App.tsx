@@ -4320,7 +4320,7 @@ export function App({
                   </svg>
                 </button>
               )}
-              {missingSession ? (
+              {missingSession && !activePanel && mainView === 'chat' ? (
                 <div className={styles.missingSessionState}>
                   <div className={styles.missingSessionMessage}>
                     {t('session.missing')}

@@ -9,3 +9,17 @@ export function isMissingSessionHttpStatus(
 ): boolean {
   return status === 404 || status === 410;
 }
+
+/**
+ * Preserve 404/410 after heartbeat detects a missing session so a later
+ * status-less transport retry cannot hide the missing-session empty state.
+ */
+export function resolveConnectionErrorStatus(
+  nextStatus: number | undefined,
+  currentStatus: number | undefined,
+): number | undefined {
+  return (
+    nextStatus ??
+    (isMissingSessionHttpStatus(currentStatus) ? currentStatus : undefined)
+  );
+}
