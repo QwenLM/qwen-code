@@ -308,7 +308,7 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('pauses scheduled issue autofix when review backlog is high', () => {
-    expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS_FOR_ISSUE: '10'");
+    expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '10'");
     expect(routeStep).toContain(
       '[[ "${EVENT_NAME}" == \'schedule\' && "${DO_ISSUE}" == \'true\' ]]',
     );
@@ -319,7 +319,7 @@ describe('qwen-autofix workflow', () => {
       '[.[] | select(.headRefName | startswith($p))] | length',
     );
     expect(routeStep).toContain(
-      'Open autofix PR backlog ${BACKLOG_COUNT} is at or above ${MAX_OPEN_AUTOFIX_PRS_FOR_ISSUE}; pausing scheduled issue autofix.',
+      'Open autofix PR backlog ${BACKLOG_COUNT} is at or above ${MAX_OPEN_AUTOFIX_PRS}; pausing scheduled issue autofix.',
     );
     expect(routeStep).toContain('DO_ISSUE=false');
   });
@@ -553,7 +553,7 @@ describe('qwen-autofix workflow', () => {
       'run_shell_command(npm run build)',
       'run_shell_command(npm run typecheck)',
       'run_shell_command(npm run lint)',
-      'run_shell_command(npm run test)',
+      'run_shell_command(npx vitest)',
     ]) {
       expect(developFixStep).toContain(command);
       expect(triageAndAddressStep).toContain(command);
@@ -564,7 +564,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('run_shell_command(npm publish)');
     expect(workflow).not.toContain('run_shell_command(npm exec)');
     expect(workflow).not.toContain('run_shell_command(npm run bundle)');
-    expect(workflow).not.toContain('run_shell_command(npx vitest)');
+    expect(assessCandidatesStep).not.toContain('run_shell_command(npx vitest)');
     expect(workflowAndSkill).toContain(
       'Run required verification commands before committing',
     );
@@ -645,6 +645,14 @@ describe('qwen-autofix workflow', () => {
     expect(liveReviewTargetStep).toContain('gh pr view "${PR}"');
     expect(liveReviewTargetStep).toContain('should_continue=false');
     expect(liveReviewTargetStep).toContain('autofix-eval');
+    expect(liveReviewTargetStep).toContain('is_draft');
+    expect(liveReviewTargetStep).toContain('ROUND}" -ge "${MAX_ROUNDS}"');
+    expect(liveReviewTargetStep).toContain(
+      'N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0',
+    );
+    expect(liveReviewTargetStep).toContain(
+      'could not fetch issue comments for PR #${PR}.',
+    );
     expect(liveReviewTargetStep).toContain('ROUND=${ROUND}');
     expect(liveReviewTargetStep).toContain('WATERMARK=${EFF_WM}');
     expect(liveReviewTargetStep).toContain('should_continue=true');
