@@ -296,9 +296,13 @@ export class QQChannel extends ChannelBase {
                         process.stderr.write(
                           `[QQ:${this.name}] Cron flush (size cap) retry: no route for ${sanitizeLogText(sessionId, 64)}, discarding\n`,
                         );
+                        this.cronRetryCount.delete(sessionId);
+                        this.cronBuffer.delete(sessionId);
                         return;
                       }
-                      this.sendMessage(retryTarget.chatId, retryEntry.buffer)
+                      const toFlush = retryEntry.buffer;
+                      retryEntry.buffer = '';
+                      this.sendMessage(retryTarget.chatId, toFlush)
                         .then(() => {
                           this.cronRetryCount.delete(sessionId);
                           if (!retryEntry.buffer)
@@ -361,9 +365,13 @@ export class QQChannel extends ChannelBase {
                         process.stderr.write(
                           `[QQ:${this.name}] Cron flush retry: no route for ${sanitizeLogText(sessionId, 64)}, discarding\n`,
                         );
+                        this.cronRetryCount.delete(sessionId);
+                        this.cronBuffer.delete(sessionId);
                         return;
                       }
-                      this.sendMessage(retryTarget.chatId, retryEntry.buffer)
+                      const toFlush = retryEntry.buffer;
+                      retryEntry.buffer = '';
+                      this.sendMessage(retryTarget.chatId, toFlush)
                         .then(() => {
                           this.cronRetryCount.delete(sessionId);
                           if (!retryEntry.buffer)
@@ -801,6 +809,7 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
+    this.groupActiveMsgEnabled.clear();
     this.seenMessages.clear();
     this.crossEventDedup.clear();
     this.coldStart = true;
@@ -1472,6 +1481,7 @@ export class QQChannel extends ChannelBase {
                 this.reconnectWithRetry();
               }, 1000);
               this.reconnectTimer.unref?.();
+              return;
             }
             this.tokenRefreshTimer = setTimeout(() => {
               this.fetchToken().catch((e2) => {
@@ -1918,7 +1928,6 @@ export class QQChannel extends ChannelBase {
     }
   }
 
-  // ── Message Handlers ───────────────────────────────────────────
   // ── Bot OpenID extraction ──────────────────────────────────────
 
   private extractBotOpenId(
@@ -2040,14 +2049,6 @@ export class QQChannel extends ChannelBase {
     // and botTag always '' here. The code is retained as defense-in-depth
     // in case a future caller skips the guard.
 
-    // Log slash commands with safeName for audit trail
-    if (isSlash) {
-      process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}
-`,
-      );
-    }
-
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
     const suffixFromBotOpenId = groupBotOpenId
@@ -2077,6 +2078,10 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] C2C message dropped: missing author\n`,
       );
+      return;
+    }
+    if (event.author.bot) {
+      process.stderr.write(`[QQ:${this.name}] Bot C2C message dropped\n`);
       return;
     }
     const chatId = event.author.user_openid || event.author.id;
@@ -2145,7 +2150,13 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, senderName } = result;
+    const { isSlash, text, senderName, safeName, cleanText } = result;
+
+    if (isSlash) {
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+      );
+    }
 
     // GROUP_AT_MESSAGE_CREATE always has finalIsAtBot=true, so @-bot
     // messages are always delivered. Log when active messages are disabled.
@@ -2208,7 +2219,13 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, text, senderName, isAtBot } = result;
+    const { isSlash, text, senderName, isAtBot, safeName, cleanText } = result;
+
+    if (isSlash) {
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+      );
+    }
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2249,7 +2266,10 @@ export class QQChannel extends ChannelBase {
           .toLowerCase()
           .normalize('NFC');
         const matched = this._keywordTriggerCache.some((kw) =>
-          cleanText.includes(kw),
+          new RegExp(
+            `(?:^|[^\\w])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^\\w]|$)`,
+            'i',
+          ).test(cleanText),
         );
         if (!matched) {
           process.stderr.write(
@@ -2258,6 +2278,10 @@ export class QQChannel extends ChannelBase {
           return;
         }
       }
+    } else if (this.groupActiveMsgEnabled.get(chatId) === false) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAll: @-bot message allowed through (passive) despite active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
+      );
     }
 
     // Dedup after policy check: QQ guarantees GROUP_MESSAGE_CREATE and

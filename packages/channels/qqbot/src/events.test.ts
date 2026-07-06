@@ -93,13 +93,6 @@ import type {
   GroupMsgToggleEvent,
 } from './types.js';
 import { Intent } from './types.js';
-import type {
-  QQMessageEvent,
-  QQGroupMessageEvent,
-  GroupAddRobotEvent,
-  GroupDelRobotEvent,
-  GroupMsgToggleEvent,
-} from './types.js';
 
 function makeChannel(
   configOverrides?: Record<string, unknown>,
