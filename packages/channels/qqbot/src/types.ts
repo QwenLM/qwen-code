@@ -81,6 +81,8 @@ export interface QQChannelConfig {
   chatTypes?: Record<string, string>;
   /** Enable experimental cron-msg features. Use at your own risk. */
   'cron-msg-experimental'?: boolean;
+  /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
+  bufferFlushLength?: number;
 }
 
 /** Robot added to a group. */

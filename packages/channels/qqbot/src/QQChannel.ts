@@ -253,6 +253,10 @@ export class QQChannel extends ChannelBase {
             entry.timer = null;
           }
           entry.buffer += text;
+          // Size-cap flush: when buffer exceeds configurable limit, flush immediately.
+          const limit =
+            this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
+          const delay = entry.buffer.length >= limit ? 0 : 2000;
           entry.timer = setTimeout(() => {
             const toFlush = entry!.buffer;
             entry!.buffer = '';
@@ -275,7 +279,7 @@ export class QQChannel extends ChannelBase {
               }
             }
             this.cronBuffer.delete(sessionId);
-          }, 2000).unref();
+          }, delay).unref();
         });
       };
       this.attachCronHandler();
@@ -743,7 +747,10 @@ export class QQChannel extends ChannelBase {
         state.timer = null;
       }
       // Flush immediately when buffer exceeds max to prevent unbounded growth
-      if (state.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
+      if (
+        state.buffer.length >=
+        (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
+      ) {
         const buf = state.buffer;
         state.buffer = '';
         this.flushAndTrack(sessionId, buf, state, 'idleFlush');
@@ -869,7 +876,10 @@ export class QQChannel extends ChannelBase {
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
             // #3: If re-buffer exceeds max length, flush immediately
-            if (current.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
+            if (
+              current.buffer.length >=
+              (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
+            ) {
               this.idleFlush(sessionId, this._reconnectId);
               // Don't return — let .finally() clear flushingSessions.
               // Skip retry scheduling: idleFlush handles it.
