@@ -1,5 +1,5 @@
-import { lstatSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { open, writeFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -1424,20 +1424,25 @@ async function readOutboundMedia(
 }> {
   const resolved = resolve(cwd, rawPath);
   const real = realpathSync(resolved);
-  const stat = statSync(real);
-  if (!stat.isFile())
-    throw new Error(`Not a regular file: ${basename(rawPath)}`);
-  if (stat.size > MAX_MEDIA_BYTES) {
-    throw new Error(`Media file too large: ${stat.size} bytes`);
-  }
-
   const allowedDirs = [
     ensureDirectoryRealpath(join(tmpdir(), 'channel-files')),
   ];
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
     throw new Error('Media path outside allowed outbound directory');
   }
-  return { data: await readFile(real), fileName: basename(real) };
+
+  const file = await open(real, 'r');
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile())
+      throw new Error(`Not a regular file: ${basename(rawPath)}`);
+    if (stat.size > MAX_MEDIA_BYTES) {
+      throw new Error(`Media file too large: ${stat.size} bytes`);
+    }
+    return { data: await file.readFile(), fileName: basename(real) };
+  } finally {
+    await file.close();
+  }
 }
 
 function ensureDirectoryRealpath(path: string): string {

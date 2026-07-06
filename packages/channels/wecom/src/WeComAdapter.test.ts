@@ -38,11 +38,26 @@ const mocks = vi.hoisted(() => {
     request: MockHttpRequest;
     response: MockHttpResponse;
   };
+  type MockFileHandle = {
+    stat: ReturnType<typeof vi.fn>;
+    readFile: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+  };
 
   const instances: MockWSClient[] = [];
   const httpCalls: MockHttpCall[] = [];
+  const openHandles: MockFileHandle[] = [];
   const lookup = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
   const decryptFile = vi.fn((buffer: Buffer, _aesKey: string) => buffer);
+  const open = vi.fn(async (_path: string, _flags: string) => {
+    const handle: MockFileHandle = {
+      stat: vi.fn(async () => ({ isFile: () => true, size: 4 })),
+      readFile: vi.fn(async () => Buffer.from([0x89, 0x50, 0x4e, 0x47])),
+      close: vi.fn(async () => {}),
+    };
+    openHandles.push(handle);
+    return handle;
+  });
   const readFile = vi.fn(async (_path: string) =>
     Buffer.from([0x89, 0x50, 0x4e, 0x47]),
   );
@@ -188,8 +203,10 @@ const mocks = vi.hoisted(() => {
     MockWSClient,
     instances,
     httpCalls,
+    openHandles,
     lookup,
     decryptFile,
+    open,
     readFile,
     writeFile,
     httpResponse,
@@ -209,6 +226,7 @@ vi.mock('node:https', () => ({
   request: mocks.httpsRequest,
 }));
 vi.mock('node:fs/promises', () => ({
+  open: mocks.open,
   readFile: mocks.readFile,
   writeFile: mocks.writeFile,
 }));
@@ -347,6 +365,7 @@ describe('WeComChannel', () => {
   beforeEach(() => {
     mocks.instances.length = 0;
     mocks.httpCalls.length = 0;
+    mocks.openHandles.length = 0;
     mocks.state.autoAuthenticate = true;
     mocks.state.connectErrorsRemaining = 0;
     mocks.state.connectNeverSettles = false;
@@ -3616,9 +3635,15 @@ describe('WeComChannel', () => {
 
     await channel.sendMessage('chat-1', '[IMAGE: out.png]');
 
-    expect(mocks.readFile).toHaveBeenCalledWith(
+    expect(mocks.open).toHaveBeenCalledWith(
       realpathSync(join(dir, 'out.png')),
+      'r',
     );
+    const handle = mocks.openHandles.at(-1);
+    expect(handle?.stat).toHaveBeenCalled();
+    expect(handle?.readFile).toHaveBeenCalled();
+    expect(handle?.close).toHaveBeenCalled();
+    expect(mocks.readFile).not.toHaveBeenCalled();
     expect(client.uploadMedia).toHaveBeenCalledWith(expect.any(Buffer), {
       type: 'image',
       filename: 'out.png',
