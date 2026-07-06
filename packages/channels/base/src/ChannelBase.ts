@@ -199,6 +199,7 @@ export abstract class ChannelBase {
    * so a cleared session can't be resurrected by an already-queued prompt.
    */
   private sessionGenerations: Map<string, number> = new Map();
+  private pendingClears: Map<string, number> = new Map();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
@@ -1857,6 +1858,8 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_request') {
+      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}`;
+      this.pendingClears.set(pendingKey, Date.now() + 60_000);
       await this.sendMessage(
         envelope.chatId,
         'This clears channel memory for this chat. Say "确认清空记忆" to proceed.',
@@ -1914,6 +1917,17 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
+      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}`;
+      const expiresAt = this.pendingClears.get(pendingKey);
+      this.pendingClears.delete(pendingKey);
+      if (expiresAt === undefined || expiresAt < Date.now()) {
+        await this.sendMessage(
+          envelope.chatId,
+          'No pending clear request. Say "清空记忆" first.',
+        );
+        return;
+      }
+
       let result: { changed: boolean };
       try {
         result = await channelMemory.clearChannelMemory(
