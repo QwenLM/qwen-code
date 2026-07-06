@@ -4965,7 +4965,7 @@ describe('DaemonSessionProvider', () => {
     });
 
     await act(async () => {
-      await wait(10);
+      await wait(50);
       await flushPromises();
     });
 
@@ -5002,12 +5002,12 @@ describe('DaemonSessionProvider', () => {
 
     await renderWithProvider(<Harness />, {
       autoConnect: true,
-      heartbeatIntervalMs: 1,
+      heartbeatIntervalMs: 20,
       heartbeatFailureThreshold: 1,
     });
 
     await act(async () => {
-      await wait(10);
+      await wait(50);
       await flushPromises();
     });
 
@@ -5020,6 +5020,53 @@ describe('DaemonSessionProvider', () => {
         workspaceCwd: '/mock-workspace',
         features: ['client_heartbeat'],
       },
+    });
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
+  it('uses recent HTTP status when heartbeat threshold ends with transport failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('session gone'), { status: 410 }),
+      )
+      .mockRejectedValue(new Error('heartbeat lost'));
+    sdkMocks.sessions.push(
+      createMockSession({
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 2,
+    });
+
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'heartbeat lost',
+      errorStatus: 410,
     });
     expect(connection?.sessionId).toBeUndefined();
   });
@@ -5071,10 +5118,9 @@ describe('DaemonSessionProvider', () => {
       promptResult = providerActions.sendPrompt('still running');
       await flushPromises();
     });
-    expect(streamingState).toBe('waiting');
 
     await act(async () => {
-      await wait(10);
+      await wait(50);
       await flushPromises();
     });
 

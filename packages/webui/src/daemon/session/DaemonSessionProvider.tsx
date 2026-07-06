@@ -1296,6 +1296,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }));
               return;
             }
+            console.warn(
+              '[DaemonSessionProvider] terminal session error (sessionId=%s, status=%d, message=%s)',
+              failedSessionId,
+              errorStatus,
+              message,
+            );
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
@@ -1444,6 +1450,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
     let disposed = false;
     let consecutiveFailures = 0;
+    let lastHttpErrorStatus: number | undefined;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
@@ -1464,15 +1471,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
           }
           consecutiveFailures = 0;
+          lastHttpErrorStatus = undefined;
         })
         .catch((error: unknown) => {
           if (disposed) return;
           consecutiveFailures += 1;
+          const thisErrorStatus = extractHttpStatus(error);
+          if (thisErrorStatus !== undefined) {
+            lastHttpErrorStatus = thisErrorStatus;
+          }
           if (consecutiveFailures < heartbeatFailureThreshold) return;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
-          const errorStatus = extractHttpStatus(error);
-          const authFailure = isAuthFailureHttpError(error);
+          const errorStatus = thisErrorStatus ?? lastHttpErrorStatus;
+          const authFailure =
+            errorStatus !== undefined &&
+            AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
           const missingSession = isMissingSessionHttpStatus(errorStatus);
           if (authFailure || missingSession) {
             const deadSessionId = session.sessionId;

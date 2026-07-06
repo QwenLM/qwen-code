@@ -529,6 +529,20 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('does not show missing-session state for non-404/410 errors', async () => {
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Server error';
+    mockConnection.errorStatus = 500;
+
+    const { container } = renderApp({ onSessionIdChange: vi.fn() });
+    await flush();
+
+    expect(container.textContent).not.toContain(
+      'Current session does not exist',
+    );
+  });
+
   it('does not notify session change when missing-session new chat fails', async () => {
     mockConnection.status = 'disconnected';
     mockConnection.sessionId = undefined;
