@@ -3477,11 +3477,12 @@ describe('Server Config (config.ts)', () => {
     const config = new Config({
       ...baseParams,
       model: 'unknown-model-for-context-warning-test',
-      userMemory: 'a'.repeat(100_000),
+      // ~40K estimated tokens — above 15% of the 200K default window.
+      userMemory: 'a'.repeat(160_000),
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining("model's 131,072 token context window"),
+      expect.stringContaining("model's 200,000 token context window"),
     );
   });
 
