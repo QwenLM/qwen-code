@@ -61,6 +61,61 @@
   overflow: hidden;
 }
 
+/* Positioning context so the scheduled-tasks page (position:absolute) covers
+   exactly the chat pane. Only applied while the page is shown, so normal chat
+   layout is untouched. */
+.chatPaneShowingPage {
+  position: relative;
+}
+
+/* Full-pane view that replaces the chat (messages + composer stay mounted
+   underneath, so returning to chat preserves their state). */
+.fullPage {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: var(--background);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fullPageHeader {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.fullPageBack {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.fullPageBack:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.fullPageTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.fullPageBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
 .mobileDrawer {
   display: contents;
 }

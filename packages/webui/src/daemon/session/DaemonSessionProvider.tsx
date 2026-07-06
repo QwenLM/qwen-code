@@ -1433,13 +1433,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (consecutiveFailures < heartbeatFailureThreshold) return;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
+          const errorStatus = extractHttpStatus(error);
+          const missingSession = errorStatus === 404 || errorStatus === 410;
           setConnection((current) =>
             current.sessionId === session.sessionId
               ? {
                   ...current,
                   status: 'disconnected',
                   error: message,
-                  errorStatus: extractHttpStatus(error),
+                  errorStatus,
+                  ...(missingSession ? { sessionId: undefined } : {}),
                 }
               : current,
           );

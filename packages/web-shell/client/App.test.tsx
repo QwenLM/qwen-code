@@ -407,6 +407,7 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.createSession).not.toHaveBeenCalled();
       expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
       expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+      expect(onSessionIdChange).toHaveBeenCalledTimes(1);
     },
   );
 

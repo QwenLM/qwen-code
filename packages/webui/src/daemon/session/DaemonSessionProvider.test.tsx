@@ -4976,6 +4976,54 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('clears stale sessions on terminal HTTP heartbeat errors', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi.fn(async () => {
+      throw Object.assign(new Error('session gone'), { status: 410 });
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
+    });
+
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    expect(heartbeat).toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      capabilities: {
+        workspaceCwd: '/mock-workspace',
+        features: ['client_heartbeat'],
+      },
+    });
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
   it('ignores stale connect attempts after provider props change', async () => {
     const staleLoad = createDeferred<MockSession>();
     const staleSession = createMockSession({ sessionId: 'session-a' });
