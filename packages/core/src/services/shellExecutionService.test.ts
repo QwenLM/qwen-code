@@ -133,6 +133,13 @@ const shellExecutionConfig = {
   disableDynamicLineTrimming: true,
 } satisfies ShellExecutionConfig;
 
+const shellExecutionConfigWithoutPager = {
+  terminalWidth: 80,
+  terminalHeight: 24,
+  showColor: false,
+  disableDynamicLineTrimming: true,
+} satisfies ShellExecutionConfig;
+
 const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
 const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
 const EXPECTED_MERGED_WINDOWS_PATH =
@@ -1896,6 +1903,52 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('does not inject Unix pager defaults into Windows pty env when unset', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
+
+      await simulateExecution(
+        'echo hello',
+        (pty) => pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+        shellExecutionConfigWithoutPager,
+      );
+
+      const spawnOptions = mockPtySpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBeUndefined();
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('preserves explicit pager configuration in Windows pty env', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
+
+      await simulateExecution('echo hello', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      const spawnOptions = mockPtySpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBe('cat');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
     it('should use bash on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
       await simulateExecution('ls "foo bar"', (pty) =>
@@ -3161,6 +3214,48 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expectNormalizedWindowsPathEnv(spawnOptions.env);
+    });
+
+    it('does not inject Unix pager defaults into Windows child_process env when unset', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
+
+      await simulateExecutionWithConfig(
+        'echo hello',
+        (cp) => cp.emit('exit', 0, null),
+        shellExecutionConfigWithoutPager,
+      );
+
+      const spawnOptions = mockCpSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBeUndefined();
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('preserves explicit pager configuration in Windows child_process env', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
+
+      await simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null));
+
+      const spawnOptions = mockCpSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('cat');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
     });
 
     it('should use bash and detached process group on Linux', async () => {

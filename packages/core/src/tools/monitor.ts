@@ -54,6 +54,7 @@ import {
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -366,7 +367,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
           ...process.env,
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
-          PAGER: 'cat',
+          ...getShellPagerEnv(undefined),
           ...getShellContextEnvVars(),
         },
       });
