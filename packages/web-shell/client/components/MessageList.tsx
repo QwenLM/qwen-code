@@ -135,6 +135,7 @@ export interface SessionTimelineEntry {
   detail: string;
   timestamp?: number;
   nodeKinds: TurnTimelineNodeKind[];
+  isScheduledTask?: boolean;
 }
 
 export interface SessionTimelineRange {
@@ -619,6 +620,13 @@ function timelineLabelForTurn(message: Message): string {
   return compact;
 }
 
+function isScheduledTaskMessage(message: Message): boolean {
+  return (
+    message.role === 'user' &&
+    (message.source === 'cron' || message.source === 'loop')
+  );
+}
+
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat
 // auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
@@ -756,6 +764,7 @@ export function getSessionTimelineEntries(
       detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
       timestamp: turnStart.timestamp,
       nodeKinds,
+      isScheduledTask: isScheduledTaskMessage(turnStart),
     });
   };
 
@@ -773,6 +782,20 @@ export function getSessionTimelineEntries(
   pushTurn();
 
   return entries;
+}
+
+function TimelineClockIcon() {
+  return (
+    <svg
+      className={styles.sessionTimelineDetailsIcon}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.5v4l-2.5 2" />
+    </svg>
+  );
 }
 
 function toolTimelineSignature(tool: ACPToolCall): string {
@@ -1636,8 +1659,21 @@ const SessionTimeline = memo(function SessionTimeline({
                     data-testid="session-timeline-detail"
                     data-title={entry.label}
                     data-detail={entry.detail}
+                    data-scheduled-task={
+                      entry.isScheduledTask ? 'true' : undefined
+                    }
                     aria-hidden="true"
-                  />
+                  >
+                    <span className={styles.sessionTimelineDetailsTitle}>
+                      {entry.isScheduledTask && <TimelineClockIcon />}
+                      <span className={styles.sessionTimelineDetailsTitleText}>
+                        {entry.label}
+                      </span>
+                    </span>
+                    <span className={styles.sessionTimelineDetailsDetail}>
+                      {entry.detail}
+                    </span>
+                  </span>
                 </button>
               </li>
             );

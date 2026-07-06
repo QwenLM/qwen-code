@@ -403,6 +403,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('marks scheduled task turns in the session timeline', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount([
+      { ...userMsg('u1'), source: 'cron', content: 'scheduled tracking task' },
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+      userMsg('u3'),
+      asstMsg('a3'),
+      userMsg('u4'),
+      asstMsg('a4'),
+    ]);
+    await nextFrame();
+
+    const scheduledDetail = c.querySelector(
+      '[data-turn-id="u1"] [data-testid="session-timeline-detail"]',
+    );
+    expect(scheduledDetail?.getAttribute('data-scheduled-task')).toBe('true');
+    expect(
+      scheduledDetail?.querySelector(`.${styles.sessionTimelineDetailsIcon}`),
+    ).not.toBeNull();
+    expect(scheduledDetail?.textContent).toContain('scheduled tracking task');
+    rectSpy.mockRestore();
+  });
+
   it('hides the session timeline until there are at least four turns', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount(simpleTurns(3));
