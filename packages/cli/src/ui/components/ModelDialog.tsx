@@ -392,6 +392,11 @@ export function ModelDialog({
   )
     ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
     : MODEL_OPTION_ROW_HEIGHT;
+  // The error box adds its own marginTop plus one row per line (errorPrefix +
+  // blank line from the "\n\n" join + the underlying error's own lines).
+  const errorMessageRows = errorMessage
+    ? 1 + errorMessage.split('\n').length
+    : 0;
   const maxModelItemsToShow =
     availableTerminalHeight === undefined
       ? MAX_MODEL_ITEMS_TO_SHOW
@@ -400,7 +405,9 @@ export function ModelDialog({
           Math.min(
             MAX_MODEL_ITEMS_TO_SHOW,
             Math.floor(
-              (availableTerminalHeight - MODEL_DIALOG_FIXED_ROWS) /
+              (availableTerminalHeight -
+                MODEL_DIALOG_FIXED_ROWS -
+                errorMessageRows) /
                 modelOptionRowHeight,
             ),
           ),

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render, cleanup } from '@testing-library/react';
+import { render, cleanup, act } from '@testing-library/react';
 import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
@@ -171,6 +171,101 @@ describe('<ModelDialog />', () => {
     const props = mockedSelect.mock.calls[0][0];
     expect(props.items).toHaveLength(12);
     expect(props.maxItemsToShow).toBe(6);
+  });
+
+  it('floors visible model options to 1 when the terminal is very short', () => {
+    renderComponent(
+      { availableTerminalHeight: 5 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(1);
+  });
+
+  it('accounts for the taller two-row option height when descriptions are present', () => {
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: `Description ${i + 1}`,
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(3);
+  });
+
+  it('falls back to the default max item count when no terminal height is given', () => {
+    renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(10);
+  });
+
+  it('shrinks visible model options to leave room for a displayed error message', async () => {
+    const switchModel = vi.fn().mockRejectedValue(new Error('network down'));
+
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const initialProps = mockedSelect.mock.calls[0][0];
+    expect(initialProps.maxItemsToShow).toBe(6);
+
+    await act(async () => {
+      await initialProps.onSelect(initialProps.items[0].value);
+    });
+
+    const propsAfterError =
+      mockedSelect.mock.calls[mockedSelect.mock.calls.length - 1][0];
+    expect(propsAfterError.maxItemsToShow).toBeLessThan(6);
   });
 
   it('hides discontinued qwen-oauth models for other auth types', () => {
