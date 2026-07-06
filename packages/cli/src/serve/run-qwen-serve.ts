@@ -216,6 +216,21 @@ function envFlagDisabled(raw: string | undefined): boolean {
   return normalized === '0' || normalized === 'false';
 }
 
+function resolveSingleWorkspaceInput(workspace: unknown): string {
+  if (Array.isArray(workspace)) {
+    if (workspace.length === 0) return process.cwd();
+    if (workspace.length > 1) {
+      throw new Error(
+        'Multiple --workspace values are not supported yet. ' +
+          'Multi-workspace serve is not enabled; pass one --workspace.',
+      );
+    }
+    return String(workspace[0]);
+  }
+  if (workspace === undefined) return process.cwd();
+  return String(workspace);
+}
+
 function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
   return (
     origins?.some((origin) =>
@@ -1625,7 +1640,7 @@ export async function runQwenServe(
   // multiple daemon processes, not intra-daemon routing.
   //
   // Boot-loud validation: absolute path, exists, is a directory.
-  const rawWorkspace = opts.workspace ?? process.cwd();
+  const rawWorkspace = resolveSingleWorkspaceInput(opts.workspace);
   if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
       `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
@@ -2026,7 +2041,7 @@ export async function runQwenServe(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
-        `daemon:${daemonWorkspaceHash}:${process.pid}`,
+        `daemon:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
           telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
@@ -2701,7 +2716,7 @@ export async function runQwenServe(
         performance.now() - runStartedAt,
       );
       profileCheckpoint('serve_listener_ready');
-      finalizeStartupProfile(daemonLog.getDaemonId() || 'serve');
+      finalizeStartupProfile(`serve-${process.pid}`);
 
       // Listener-level connection cap, set inside the listen callback
       // because Node only exposes the underlying `Server` after

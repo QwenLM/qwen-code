@@ -341,14 +341,14 @@ describe('runQwenServe daemon logger wiring', () => {
       const daemonDir = path.join(debugDir, 'daemon');
       expect(fs.existsSync(daemonDir)).toBe(true);
 
-      // Find the log file (pattern: serve-<pid>-<hash>.log)
+      // Find the daemon-scoped log file.
       const logFiles = fs
         .readdirSync(daemonDir)
         .filter((f) => f.endsWith('.log'));
-      expect(logFiles.length).toBeGreaterThanOrEqual(1);
+      expect(logFiles).toContain(`serve-${process.pid}.log`);
 
       const logContent = fs.readFileSync(
-        path.join(daemonDir, logFiles[0]!),
+        path.join(daemonDir, `serve-${process.pid}.log`),
         'utf8',
       );
       // Should contain the "daemon started" boot line
@@ -363,7 +363,7 @@ describe('runQwenServe daemon logger wiring', () => {
 
       // The log should still be readable after shutdown
       const finalContent = fs.readFileSync(
-        path.join(daemonDir, logFiles[0]!),
+        path.join(daemonDir, `serve-${process.pid}.log`),
         'utf8',
       );
       expect(finalContent).toContain('daemon started');
@@ -382,6 +382,7 @@ describe('runQwenServe telemetry validation', () => {
     process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'];
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (originalSensitiveSpanAttributeMaxLengthEnv === undefined) {
       delete process.env['QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH'];
     } else {
@@ -407,6 +408,95 @@ describe('runQwenServe telemetry validation', () => {
 
     await expect(run).rejects.toThrow(qwenCore.FatalConfigError);
     await expect(run).rejects.toThrow(/Invalid telemetry configuration:/);
+  });
+
+  it('rejects multiple explicit workspace inputs before runtime boot', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+      } as unknown as Parameters<typeof runQwenServe>[0]),
+    ).rejects.toThrow(/Multiple --workspace values are not supported yet/);
+  });
+
+  it('accepts a single workspace array input as the primary workspace', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const primary = path.join(tmpDir, 'primary');
+    fs.mkdirSync(primary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary],
+        maxSessions: 1,
+        serveWebShell: false,
+      } as unknown as Parameters<typeof runQwenServe>[0],
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { workspaceCwd: string }).toMatchObject({
+        workspaceCwd: canonicalizeWorkspace(primary),
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('uses a daemon-scoped telemetry service instance id', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tv-')));
+    const initializeTelemetry = vi
+      .spyOn(qwenCore, 'initializeTelemetry')
+      .mockImplementation(() => {});
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const runtimeConfig = initializeTelemetry.mock.calls[0]?.[0] as {
+        getSessionId(): string;
+        getTelemetryResourceAttributes(): Record<string, unknown>;
+      };
+      expect(runtimeConfig.getSessionId()).toBe(`daemon:${process.pid}`);
+      expect(runtimeConfig.getTelemetryResourceAttributes()).toMatchObject({
+        'service.instance.id': `daemon:${process.pid}`,
+      });
+    } finally {
+      await handle.close();
+    }
   });
 });
 

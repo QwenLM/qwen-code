@@ -172,7 +172,7 @@ export function resolveDaemonTelemetryRoute(
 }
 
 export function daemonTelemetryMiddleware(
-  boundWorkspace: string,
+  resolveWorkspaceCwd: (req: Request) => string,
   // Optional in-process sink for the Daemon Status dashboard's time-series
   // charts. Fed the same (durationMs, statusCode) already computed for OTel,
   // so it adds no extra measurement — just a second consumer. Only known
@@ -181,13 +181,13 @@ export function daemonTelemetryMiddleware(
   // traffic rather than static-asset or unrouted noise.
   recordRequest?: (durationMs: number, statusCode: number) => void,
 ): (req: Request, res: Response, next: NextFunction) => void {
-  const workspaceHash = hashDaemonWorkspace(boundWorkspace);
   return (req, res, next) => {
     const route = resolveDaemonTelemetryRoute(req);
     if (!route) {
       next();
       return;
     }
+    const workspaceHash = hashDaemonWorkspace(resolveWorkspaceCwd(req));
     const rawClientId = req.get(CLIENT_ID_HEADER);
     const clientId =
       rawClientId !== undefined &&
