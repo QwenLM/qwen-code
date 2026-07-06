@@ -152,7 +152,7 @@ You can customize review criteria per project. `/review` reads rules from these 
 
 Rules are injected into the LLM review agents (0-6) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
 
-## Linked Issue Fit
+## Issue Fidelity
 
 For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It uses `gh pr view <pr> --repo <owner/repo> --json closingIssuesReferences` for GitHub's strong closing-issue metadata, then `gh issue view <number> --repo <issue_owner>/<issue_repo> --json title,body,comments` for the original report and discussion — the `--json` form includes the issue **body** (the reporter's original repro), which `--comments` alone omits, and the issue's own repository is read from each reference (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
 
