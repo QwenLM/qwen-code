@@ -463,6 +463,34 @@ describe('StreamingToolCallParser', () => {
       expect(noArg?.args).toEqual({});
     });
 
+    it('should collapse null argument buffers to empty args', () => {
+      parser.addChunk(0, 'null', 'call_1', 'function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should collapse array argument buffers to empty args', () => {
+      parser.addChunk(0, '[1,2,3]', 'call_1', 'function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should scan past occupied no-argument slots when relocating a colliding call', () => {
+      parser.addChunk(0, '', 'call_a', 'no_arg_a');
+      parser.addChunk(1, '', 'call_b', 'no_arg_b');
+      // Collision at index 0 must relocate past both occupied no-arg slots
+      parser.addChunk(0, '{"x": 1}', 'call_c', 'fn_c');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_a', name: 'no_arg_a', args: {}, index: 0 },
+        { id: 'call_b', name: 'no_arg_b', args: {}, index: 1 },
+        { id: 'call_c', name: 'fn_c', args: { x: 1 }, index: 2 },
+      ]);
+    });
+
     it('should not route continuation chunks to a completed no-argument tool call', () => {
       // Incomplete tool call accumulating arguments at index 0
       parser.addChunk(0, '{"key":', 'call_1', 'function1');
