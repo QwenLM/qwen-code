@@ -29,7 +29,8 @@ import {
   StrictMissingCredentialsError,
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
-import { PROVIDER_SOURCED_FIELDS } from '../models/modelsConfig.js';
+import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
+import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -81,6 +82,11 @@ export type ContentGeneratorConfig = {
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
+  // Inactivity timeout for streaming responses: if no chunk arrives for this
+  // many ms, the request is aborted and surfaced as a retryable ETIMEDOUT.
+  // The SDK `timeout` only covers connect + first response, so a stream that
+  // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
+  streamIdleTimeoutMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
@@ -99,7 +105,20 @@ export type ContentGeneratorConfig = {
   reasoning?:
     | false
     | {
-        effort?: 'low' | 'medium' | 'high';
+        // Unified reasoning-effort ladder (see core/reasoning-effort.ts).
+        // Providers accept different subsets and use different wire fields;
+        // each provider adapter maps + clamps this tier onto the active model:
+        //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
+        //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
+        //   - The default OpenAI-compatible pipeline forwards the tier verbatim
+        //     (no 'max' clamp); Gemini caps at 'high'.
+        //   - Real Anthropic clamps each tier to the active model's supported
+        //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
+        //     'max'; older models cap at 'high'), logged once per generator via
+        //     debugLogger.warn, when the baseURL doesn't look like a
+        //     DeepSeek-compatible endpoint, so configs targeting DeepSeek don't
+        //     400 when the same auth profile is reused against api.anthropic.com.
+        effort?: ReasoningEffort;
         budget_tokens?: number;
       };
   proxy?: string | undefined;
@@ -116,6 +135,22 @@ export type ContentGeneratorConfig = {
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
+  // When true, media parts in tool responses (including the built-in read_file
+  // and MCP tools) are split into a follow-up `role: "user"` message instead of
+  // being embedded inside the `role: "tool"` message. The OpenAI Chat
+  // Completions spec only permits string / text-part content on tool messages;
+  // strict OpenAI-compatible servers (e.g. doubao / new-api / LM Studio) drop or
+  // reject anything else (HTTP 400 "Invalid 'messages' in payload"), so an image
+  // read via read_file never reaches the model. Default: true (spec-compliant
+  // and safe for permissive providers); set false to restore the legacy
+  // embed-in-tool-message behavior. See QwenLM/qwen-code#4876, #3616.
+  splitToolMedia?: boolean;
+  // OpenAI Chat Completions accepts tool result content as either a plain
+  // string or an array of text content parts. Some older OpenAI-compatible
+  // tool templates only read the string form, so this opt-in serializes
+  // text-only tool results as strings while leaving the default spec-compliant
+  // content-part shape unchanged.
+  toolResultContentFormat?: 'parts' | 'string';
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
@@ -292,6 +327,24 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
+function getModuleNotFoundError(
+  error: unknown,
+): NodeJS.ErrnoException | undefined {
+  let current = error;
+
+  while (current instanceof Error) {
+    if (
+      'code' in current &&
+      (current as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
+    ) {
+      return current as NodeJS.ErrnoException;
+    }
+    current = current.cause;
+  }
+
+  return undefined;
+}
+
 export async function createContentGenerator(
   generatorConfig: ContentGeneratorConfig,
   config: Config,
@@ -309,51 +362,64 @@ export async function createContentGenerator(
 
   let baseGenerator: ContentGenerator;
 
-  if (authType === AuthType.USE_OPENAI) {
-    const { createOpenAIContentGenerator } = await import(
-      './openaiContentGenerator/index.js'
-    );
-    baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
-  } else if (authType === AuthType.QWEN_OAUTH) {
-    const { getQwenOAuthClient: getQwenOauthClient } = await import(
-      '../qwen/qwenOAuth2.js'
-    );
-    const { QwenContentGenerator } = await import(
-      '../qwen/qwenContentGenerator.js'
-    );
+  try {
+    if (authType === AuthType.USE_OPENAI) {
+      const { createOpenAIContentGenerator } = await import(
+        './openaiContentGenerator/index.js'
+      );
+      baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+    } else if (authType === AuthType.QWEN_OAUTH) {
+      const { getQwenOAuthClient: getQwenOauthClient } = await import(
+        '../qwen/qwenOAuth2.js'
+      );
+      const { QwenContentGenerator } = await import(
+        '../qwen/qwenContentGenerator.js'
+      );
 
-    try {
-      const qwenClient = await getQwenOauthClient(
-        config,
-        isInitialAuth ? { requireCachedCredentials: true } : undefined,
+      try {
+        const qwenClient = await getQwenOauthClient(
+          config,
+          isInitialAuth ? { requireCachedCredentials: true } : undefined,
+        );
+        baseGenerator = new QwenContentGenerator(
+          qwenClient,
+          generatorConfig,
+          config,
+        );
+      } catch (error) {
+        if (getModuleNotFoundError(error)) {
+          throw error;
+        }
+        throw new Error(error instanceof Error ? error.message : String(error));
+      }
+    } else if (authType === AuthType.USE_ANTHROPIC) {
+      const { createAnthropicContentGenerator } = await import(
+        './anthropicContentGenerator/index.js'
       );
-      baseGenerator = new QwenContentGenerator(
-        qwenClient,
-        generatorConfig,
-        config,
+      baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
+    } else if (
+      authType === AuthType.USE_GEMINI ||
+      authType === AuthType.USE_VERTEX_AI
+    ) {
+      const { createGeminiContentGenerator } = await import(
+        './geminiContentGenerator/index.js'
       );
-    } catch (error) {
+      baseGenerator = createGeminiContentGenerator(generatorConfig, config);
+    } else {
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}`,
+        `Error creating contentGenerator: Unsupported authType: ${authType}`,
       );
     }
-  } else if (authType === AuthType.USE_ANTHROPIC) {
-    const { createAnthropicContentGenerator } = await import(
-      './anthropicContentGenerator/index.js'
-    );
-    baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
-  } else if (
-    authType === AuthType.USE_GEMINI ||
-    authType === AuthType.USE_VERTEX_AI
-  ) {
-    const { createGeminiContentGenerator } = await import(
-      './geminiContentGenerator/index.js'
-    );
-    baseGenerator = createGeminiContentGenerator(generatorConfig, config);
-  } else {
-    throw new Error(
-      `Error creating contentGenerator: Unsupported authType: ${authType}`,
-    );
+  } catch (error) {
+    const moduleNotFoundError = getModuleNotFoundError(error);
+    if (moduleNotFoundError) {
+      throw new Error(
+        `Qwen Code was updated in the background and needs to be restarted.\n` +
+          `Please exit and restart Qwen Code to use the '${authType}' provider.`,
+        { cause: moduleNotFoundError },
+      );
+    }
+    throw error;
   }
 
   return new LoggingContentGenerator(baseGenerator, config, generatorConfig);

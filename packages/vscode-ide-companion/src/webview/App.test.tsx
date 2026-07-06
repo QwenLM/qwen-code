@@ -12,13 +12,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import type { CompletionItem } from '../types/completionItemTypes.js';
 
-const { mockPostMessage, mockOpenCompletion, mockCloseCompletion } = vi.hoisted(
-  () => ({
-    mockPostMessage: vi.fn(),
-    mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
-    mockCloseCompletion: vi.fn(),
-  }),
-);
+const {
+  mockPostMessage,
+  mockOpenCompletion,
+  mockCloseCompletion,
+  mockMessageState,
+  mockAddMessage,
+  mockEndStreaming,
+} = vi.hoisted(() => ({
+  mockPostMessage: vi.fn(),
+  mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
+  mockCloseCompletion: vi.fn(),
+  mockMessageState: {
+    isStreaming: false,
+    isWaitingForResponse: false,
+  },
+  mockAddMessage: vi.fn(),
+  mockEndStreaming: vi.fn(),
+}));
 
 const slashSkillsItem: CompletionItem = {
   id: 'skills',
@@ -32,6 +43,20 @@ const secondarySkillItem: CompletionItem = {
   label: 'code-review',
   type: 'command',
   value: 'skills code-review',
+};
+
+const commitCommandItem: CompletionItem = {
+  id: 'commit',
+  label: '/commit',
+  type: 'command',
+  value: 'commit',
+};
+
+const clearCommandItem: CompletionItem = {
+  id: 'clear',
+  label: '/clear',
+  type: 'command',
+  value: 'clear',
 };
 
 vi.mock('./hooks/useVSCode.js', () => ({
@@ -73,11 +98,11 @@ vi.mock('./hooks/file/useFileContext.js', () => ({
 vi.mock('./hooks/message/useMessageHandling.js', () => ({
   useMessageHandling: () => ({
     messages: [],
-    isStreaming: false,
-    isWaitingForResponse: false,
+    isStreaming: mockMessageState.isStreaming,
+    isWaitingForResponse: mockMessageState.isWaitingForResponse,
     loadingMessage: null,
-    addMessage: vi.fn(),
-    endStreaming: vi.fn(),
+    addMessage: mockAddMessage,
+    endStreaming: mockEndStreaming,
     setWaitingForResponse: vi.fn(),
   }),
 }));
@@ -101,7 +126,11 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
     }: {
       setIsAuthenticated: (value: boolean) => void;
       setAvailableCommands: (
-        value: Array<{ name: string; description?: string }>,
+        value: Array<{
+          name: string;
+          description: string;
+          input?: { hint: string } | null;
+        }>,
       ) => void;
       setAvailableSkills: (value: string[]) => void;
     }) => {
@@ -114,7 +143,21 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         initializedRef.current = true;
         setIsAuthenticated(true);
         setAvailableCommands([
-          { name: 'skills', description: 'List available skills' },
+          {
+            name: 'skills',
+            description: 'List available skills',
+            input: null,
+          },
+          {
+            name: 'commit',
+            description: 'Commit current changes',
+            input: { hint: '' },
+          },
+          {
+            name: 'clear',
+            description: 'Clear the chat',
+            input: null,
+          },
         ]);
         setAvailableSkills(['code-review']);
       }, [setAvailableCommands, setAvailableSkills, setIsAuthenticated]);
@@ -143,7 +186,12 @@ vi.mock('./hooks/useCompletionTrigger.js', () => ({
     isOpen: true,
     triggerChar: '/',
     query: 'skills ',
-    items: [slashSkillsItem, secondarySkillItem],
+    items: [
+      slashSkillsItem,
+      secondarySkillItem,
+      commitCommandItem,
+      clearCommandItem,
+    ],
     closeCompletion: mockCloseCompletion,
     openCompletion: mockOpenCompletion,
     refreshCompletion: vi.fn(),
@@ -184,17 +232,22 @@ vi.mock('@qwen-code/webui', () => ({
   EmptyState: () => null,
   ChatHeader: () => null,
   SessionSelector: () => null,
+  ZERO_WIDTH_SPACE: '\u200B',
+  CloseSmallIcon: () => null,
+  stripZeroWidthSpaces: (text: string) => text.replace(/\u200B/g, ''),
 }));
 
 vi.mock('./components/layout/InputForm.js', () => ({
   InputForm: ({
     inputText,
     inputFieldRef,
+    onCancel,
     onCompletionSelect,
     onCompletionFill,
   }: {
     inputText: string;
     inputFieldRef: React.RefObject<HTMLDivElement>;
+    onCancel: () => void;
     onCompletionSelect: (item: CompletionItem) => void;
     onCompletionFill?: (item: CompletionItem) => void;
   }) => (
@@ -208,6 +261,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
         {inputText}
       </div>
       <div data-testid="input-text">{inputText}</div>
+      <button onClick={onCancel}>cancel-input</button>
       <button onClick={() => onCompletionSelect(slashSkillsItem)}>
         select-skills-command
       </button>
@@ -217,11 +271,20 @@ vi.mock('./components/layout/InputForm.js', () => ({
       <button onClick={() => onCompletionFill?.(secondarySkillItem)}>
         select-skill-tab
       </button>
+      <button onClick={() => onCompletionSelect(commitCommandItem)}>
+        select-commit-enter
+      </button>
+      <button onClick={() => onCompletionSelect(clearCommandItem)}>
+        select-clear-enter
+      </button>
+      <button onClick={() => onCompletionFill?.(clearCommandItem)}>
+        select-clear-tab
+      </button>
     </div>
   ),
 }));
 
-import { App } from './App.js';
+import { App, getLastUserTurnIndex, type MessageListItem } from './App.js';
 
 function createDomRect(): DOMRect {
   return {
@@ -301,12 +364,67 @@ function renderApp() {
   return { container, root };
 }
 
+describe('getLastUserTurnIndex', () => {
+  it('returns the latest user turn and ignores assistant messages', () => {
+    const messages: MessageListItem[] = [
+      {
+        type: 'message',
+        timestamp: 1,
+        data: { role: 'user', content: 'first', timestamp: 1, turnIndex: 0 },
+      },
+      {
+        type: 'message',
+        timestamp: 2,
+        data: { role: 'assistant', content: 'reply', timestamp: 2 },
+      },
+      {
+        type: 'message',
+        timestamp: 3,
+        data: { role: 'user', content: 'second', timestamp: 3, turnIndex: 1 },
+      },
+    ];
+
+    expect(getLastUserTurnIndex(messages)).toBe(1);
+  });
+
+  it('keeps image and text parts in the same explicit user turn', () => {
+    const messages: MessageListItem[] = [
+      {
+        type: 'message',
+        timestamp: 1,
+        data: { role: 'user', content: 'first', timestamp: 1, turnIndex: 0 },
+      },
+      {
+        type: 'message',
+        timestamp: 2,
+        data: {
+          role: 'user',
+          content: '',
+          timestamp: 2,
+          turnIndex: 1,
+          kind: 'image',
+          imagePath: '/tmp/image.png',
+        },
+      },
+      {
+        type: 'message',
+        timestamp: 2,
+        data: { role: 'user', content: 'caption', timestamp: 2, turnIndex: 1 },
+      },
+    ];
+
+    expect(getLastUserTurnIndex(messages)).toBe(1);
+  });
+});
+
 describe('App /skills secondary picker', () => {
   let root: Root | null = null;
   let container: HTMLDivElement | null = null;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMessageState.isStreaming = false;
+    mockMessageState.isWaitingForResponse = false;
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -409,5 +527,98 @@ describe('App /skills secondary picker', () => {
     expect(getRenderedInputText(rendered.container)).toBe(
       '/skills code-review ',
     );
+  });
+
+  it('fills slash commands that declare input when pressing Enter', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+
+    clickButton(rendered.container, 'select-commit-enter');
+
+    expect(mockPostMessage).not.toHaveBeenCalled();
+    expect(getRenderedInputText(rendered.container)).toBe('/commit ');
+    expect(mockCloseCompletion).toHaveBeenCalled();
+  });
+
+  it('auto-submits slash commands without input when pressing Enter', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+
+    clickButton(rendered.container, 'select-clear-enter');
+
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: { text: '/clear' },
+    });
+    expect(mockCloseCompletion).toHaveBeenCalled();
+  });
+
+  it('fills slash commands without input when pressing Tab', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+
+    clickButton(rendered.container, 'select-clear-tab');
+
+    expect(mockPostMessage).not.toHaveBeenCalled();
+    expect(getRenderedInputText(rendered.container)).toBe('/clear ');
+  });
+
+  it('blurs and preserves composer text on idle cancel without cancelling the session', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, 'draft after escape');
+
+    const input = rendered.container.querySelector(
+      '[data-testid="input-field"]',
+    ) as HTMLDivElement;
+    const blurSpy = vi.spyOn(input, 'blur');
+
+    clickButton(rendered.container, 'cancel-input');
+
+    expect(blurSpy).toHaveBeenCalled();
+    expect(input.getAttribute('data-empty')).toBe('false');
+    expect(getRenderedInputText(rendered.container)).toBe('draft after escape');
+    expect(mockPostMessage).not.toHaveBeenCalledWith({
+      type: 'cancelStreaming',
+      data: {},
+    });
+  });
+
+  it('still cancels the session while streaming', async () => {
+    mockMessageState.isStreaming = true;
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    clickButton(rendered.container, 'cancel-input');
+
+    expect(mockEndStreaming).toHaveBeenCalled();
+    expect(mockAddMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Interrupted',
+      }),
+    );
+    expect(mockPostMessage).toHaveBeenCalledWith({
+      type: 'cancelStreaming',
+      data: {},
+    });
   });
 });

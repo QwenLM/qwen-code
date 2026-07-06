@@ -6,12 +6,30 @@
 
 import process from 'node:process';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import type { CommandContext } from '../ui/commands/types.js';
 import { getCliVersion } from './version.js';
-import { IdeClient, AuthType } from '@qwen-code/qwen-code-core';
+import {
+  IdeClient,
+  AuthType,
+  createDebugLogger,
+  type LspStatusSnapshot,
+} from '@qwen-code/qwen-code-core';
 import { formatMemoryUsage } from '../ui/utils/formatters.js';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
+
+const debugLogger = createDebugLogger('STATUS');
+
+/**
+ * The subset of {@link CommandContext} these helpers actually read: only
+ * `services.config` and `services.settings`. Narrowing the parameter to this
+ * shape lets call sites that don't have a full `CommandContext` (e.g. the
+ * Settings dialog, which holds `config` + `settings` as props) pass a plain
+ * object without an unsafe cast. A full `CommandContext` is still assignable.
+ */
+type SystemInfoContext = {
+  services: Partial<Pick<CommandContext['services'], 'config' | 'settings'>>;
+};
 
 /**
  * System information interface containing all system-related details
@@ -42,30 +60,56 @@ export interface ExtendedSystemInfo extends SystemInfo {
   gitCommit?: string;
   proxy?: string;
   fastModel?: string;
+  lspStatus?: string;
+}
+
+// `execFile` (not the shell-spawning `exec`) so a hostile binary on PATH
+// can't inject shell metacharacters. The timeout protects the daemon's
+// event loop from a hung `git` / `npm` (NFS stall, Gatekeeper prompt,
+// broken install) — `execSync` would have blocked indefinitely.
+const VERSION_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Run a tiny `<binary> --version` probe with a hard timeout, return stdout
+ * trimmed, or `'unknown'` on any failure (including timeout). Helper kept
+ * inline (rather than `const probeVersion = promisify(execFile)`) so a
+ * `vi.mock('node:child_process', { execFile: vi.fn() })` test can override
+ * each call individually — the promisified value would otherwise capture
+ * the original `execFile` reference at module load.
+ */
+function probeVersion(binary: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    execFile(
+      binary,
+      ['--version'],
+      { timeout: VERSION_PROBE_TIMEOUT_MS, encoding: 'utf-8' },
+      (err, stdout) => {
+        if (err) {
+          resolve('unknown');
+          return;
+        }
+        resolve(typeof stdout === 'string' ? stdout.trim() : 'unknown');
+      },
+    );
+  });
 }
 
 /**
  * Gets the NPM version, handling cases where npm might not be available.
- * Returns 'unknown' if npm command fails or is not found.
+ * Returns 'unknown' if npm command fails, is not found, or exceeds the
+ * version-probe timeout.
  */
 export async function getNpmVersion(): Promise<string> {
-  try {
-    return execSync('npm --version', { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'unknown';
-  }
+  return probeVersion('npm');
 }
 
 /**
  * Gets the Git version, handling cases where git might not be available.
- * Returns 'unknown' if git command fails or is not found.
+ * Returns 'unknown' if git command fails, is not found, or exceeds the
+ * version-probe timeout.
  */
 export async function getGitVersion(): Promise<string> {
-  try {
-    return execSync('git --version', { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'unknown';
-  }
+  return probeVersion('git');
 }
 
 /**
@@ -73,7 +117,7 @@ export async function getGitVersion(): Promise<string> {
  * Returns empty string if IDE mode is disabled or IDE client is not detected.
  */
 export async function getIdeClientName(
-  context: CommandContext,
+  context: SystemInfoContext,
 ): Promise<string> {
   if (!context.services.config?.getIdeMode()) {
     return '';
@@ -121,7 +165,7 @@ export function getSandboxEnv(stripPrefix = false): string {
  * @returns Promise resolving to SystemInfo object with all collected information
  */
 export async function getSystemInfo(
-  context: CommandContext,
+  context: SystemInfoContext,
 ): Promise<SystemInfo> {
   const osPlatform = process.platform;
   const osArch = process.arch;
@@ -160,7 +204,7 @@ export async function getSystemInfo(
  * @returns Promise resolving to ExtendedSystemInfo object
  */
 export async function getExtendedSystemInfo(
-  context: CommandContext,
+  context: SystemInfoContext,
 ): Promise<ExtendedSystemInfo> {
   const baseInfo = await getSystemInfo(context);
   const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
@@ -185,6 +229,7 @@ export async function getExtendedSystemInfo(
 
   // Get fast model from settings
   const fastModel = context.services.settings?.merged?.fastModel || undefined;
+  const lspStatus = getLspStatus(context);
 
   return {
     ...baseInfo,
@@ -194,5 +239,60 @@ export async function getExtendedSystemInfo(
     apiKeyEnvKey,
     gitCommit,
     fastModel,
+    lspStatus,
   };
+}
+
+function getLspStatus(context: SystemInfoContext): string | undefined {
+  try {
+    const snapshot = context.services.config?.getLspStatusSnapshot?.();
+    if (!snapshot) {
+      return undefined;
+    }
+
+    if (context.services.config?.getDebugMode?.()) {
+      debugLogger.debug('LSP status snapshot for /status:', snapshot);
+    }
+
+    return formatLspStatusSnapshot(snapshot);
+  } catch (error) {
+    if (context.services.config?.getDebugMode?.()) {
+      debugLogger.debug(
+        'Unable to read LSP status snapshot for /status:',
+        error,
+      );
+    }
+    return undefined;
+  }
+}
+
+function formatLspStatusSnapshot(snapshot: LspStatusSnapshot): string {
+  if (!snapshot.enabled) {
+    return 'disabled';
+  }
+
+  if (snapshot.initializationError) {
+    return `enabled, initialization failed: ${snapshot.initializationError}`;
+  }
+
+  if (snapshot.statusUnavailable) {
+    return 'enabled, status unavailable';
+  }
+
+  if (snapshot.configuredServers === 0) {
+    return 'enabled, no servers configured';
+  }
+
+  const details = [
+    snapshot.failedServers > 0 ? `${snapshot.failedServers} failed` : '',
+    snapshot.inProgressServers > 0
+      ? `${snapshot.inProgressServers} starting`
+      : '',
+    snapshot.notStartedServers > 0
+      ? `${snapshot.notStartedServers} not started`
+      : '',
+  ].filter(Boolean);
+
+  const detailText = details.length > 0 ? ` (${details.join(', ')})` : '';
+  return `enabled, ${snapshot.readyServers}/${snapshot.configuredServers} ready${detailText}`;
 }

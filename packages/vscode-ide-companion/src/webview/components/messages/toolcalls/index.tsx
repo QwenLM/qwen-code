@@ -7,89 +7,18 @@
  * All UI components are now imported from @qwen-code/webui
  */
 
+import { shouldShowToolCall, getToolCallComponent } from '@qwen-code/webui';
 import type { FC } from 'react';
-import {
-  shouldShowToolCall,
-  // All ToolCall components from webui
-  AgentToolCall,
-  isAgentExecutionToolCall,
-  GenericToolCall,
-  ThinkToolCall,
-  EditToolCall,
-  WriteToolCall,
-  SearchToolCall,
-  UpdatedPlanToolCall,
-  ShellToolCall,
-  ReadToolCall,
-  WebFetchToolCall,
-} from '@qwen-code/webui';
-import type { BaseToolCallProps, ToolCallData } from '@qwen-code/webui';
-
-/**
- * Factory function that returns the appropriate tool call component based on kind
- */
-export const getToolCallComponent = (
-  toolCall: ToolCallData,
-): FC<BaseToolCallProps> => {
-  if (isAgentExecutionToolCall(toolCall)) {
-    return AgentToolCall;
-  }
-
-  const normalizedKind = toolCall.kind.toLowerCase();
-
-  // Route to specialized components
-  switch (normalizedKind) {
-    case 'read':
-    case 'read_file':
-    case 'read_many_files':
-    case 'readmanyfiles':
-    case 'list_directory':
-    case 'listfiles':
-      return ReadToolCall;
-
-    case 'write':
-      return WriteToolCall;
-
-    case 'edit':
-      return EditToolCall;
-
-    case 'execute':
-    case 'bash':
-    case 'command':
-      return ShellToolCall;
-
-    case 'updated_plan':
-    case 'updatedplan':
-    case 'todo_write':
-    case 'update_todos':
-    case 'todowrite':
-      return UpdatedPlanToolCall;
-
-    case 'search':
-    case 'grep':
-    case 'glob':
-    case 'find':
-      return SearchToolCall;
-
-    case 'think':
-    case 'thinking':
-      return ThinkToolCall;
-
-    case 'fetch':
-    case 'web_fetch':
-    case 'webfetch':
-      return WebFetchToolCall;
-
-    default:
-      // Fallback to generic component
-      return GenericToolCall;
-  }
-};
+import type { BaseToolCallProps } from '@qwen-code/webui';
 
 /**
  * Main tool call component that routes to specialized implementations
  */
-export const ToolCallRouter: React.FC<BaseToolCallProps> = ({ toolCall }) => {
+export const ToolCallRouter: FC<BaseToolCallProps> = ({
+  toolCall,
+  isFirst,
+  isLast,
+}) => {
   // Check if we should show this tool call (hide internal ones)
   if (!shouldShowToolCall(toolCall.kind)) {
     return null;
@@ -99,7 +28,7 @@ export const ToolCallRouter: React.FC<BaseToolCallProps> = ({ toolCall }) => {
   const Component = getToolCallComponent(toolCall);
 
   // Render the specialized component
-  return <Component toolCall={toolCall} />;
+  return <Component toolCall={toolCall} isFirst={isFirst} isLast={isLast} />;
 };
 
 // Re-export types for convenience

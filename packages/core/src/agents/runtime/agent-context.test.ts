@@ -1,0 +1,298 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import {
+  canSpawnNestedAgent,
+  childLaunchDepth,
+  getCurrentAgentDepth,
+  getCurrentAgentId,
+  getRuntimeContentGenerator,
+  isTopLevelSession,
+  runWithAgentContext,
+  runWithRuntimeContentGenerator,
+  spawnBlockReason,
+  type RuntimeContentGeneratorView,
+} from './agent-context.js';
+import { runWithTeammateIdentity } from '../team/identity.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
+import {
+  AuthType,
+  type ContentGenerator,
+  type ContentGeneratorConfig,
+} from '../../core/contentGenerator.js';
+
+function makeView(model: string): RuntimeContentGeneratorView {
+  return {
+    contentGenerator: { tag: model } as unknown as ContentGenerator,
+    contentGeneratorConfig: {
+      model,
+      authType: AuthType.USE_OPENAI,
+    } as ContentGeneratorConfig,
+  };
+}
+
+describe('agent-context (agentId)', () => {
+  it('returns null outside any frame', () => {
+    expect(getCurrentAgentId()).toBeNull();
+  });
+
+  it('exposes the agentId inside a frame', async () => {
+    await runWithAgentContext('explore-abc', async () => {
+      expect(getCurrentAgentId()).toBe('explore-abc');
+    });
+    expect(getCurrentAgentId()).toBeNull();
+  });
+
+  it('propagates across awaits', async () => {
+    await runWithAgentContext('outer-1', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(getCurrentAgentId()).toBe('outer-1');
+    });
+  });
+
+  it('nested frames shadow the outer agentId', async () => {
+    await runWithAgentContext('outer-1', async () => {
+      expect(getCurrentAgentId()).toBe('outer-1');
+      await runWithAgentContext('inner-2', async () => {
+        expect(getCurrentAgentId()).toBe('inner-2');
+      });
+      expect(getCurrentAgentId()).toBe('outer-1');
+    });
+  });
+
+  it('isolates concurrent frames', async () => {
+    const results: string[] = [];
+    await Promise.all([
+      runWithAgentContext('a', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        results.push(getCurrentAgentId() ?? 'null');
+      }),
+      runWithAgentContext('b', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        results.push(getCurrentAgentId() ?? 'null');
+      }),
+    ]);
+    expect(results.sort()).toEqual(['a', 'b']);
+  });
+});
+
+describe('agent-context (runtimeView)', () => {
+  it('returns undefined outside any frame', () => {
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+  });
+
+  it('exposes the view to code running inside the frame', async () => {
+    const view = makeView('qwen3.6-plus');
+    const inner = await runWithRuntimeContentGenerator(view, async () =>
+      getRuntimeContentGenerator(),
+    );
+    expect(inner).toBe(view);
+    expect(getRuntimeContentGenerator()).toBeUndefined();
+  });
+
+  it('isolates sibling runs', async () => {
+    const v1 = makeView('model-a');
+    const v2 = makeView('model-b');
+    const [seen1, seen2] = await Promise.all([
+      runWithRuntimeContentGenerator(v1, async () =>
+        getRuntimeContentGenerator(),
+      ),
+      runWithRuntimeContentGenerator(v2, async () =>
+        getRuntimeContentGenerator(),
+      ),
+    ]);
+    expect(seen1).toBe(v1);
+    expect(seen2).toBe(v2);
+  });
+
+  it('propagates through await chains', async () => {
+    const view = makeView('chained');
+    const seen = await runWithRuntimeContentGenerator(view, async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      return getRuntimeContentGenerator();
+    });
+    expect(seen).toBe(view);
+  });
+
+  it('lets a nested run shadow the outer view', async () => {
+    const outer = makeView('outer');
+    const inner = makeView('inner');
+    const [seenOuter, seenInner] = await runWithRuntimeContentGenerator(
+      outer,
+      async () => {
+        const before = getRuntimeContentGenerator();
+        const after = await runWithRuntimeContentGenerator(inner, async () =>
+          getRuntimeContentGenerator(),
+        );
+        return [before, after];
+      },
+    );
+    expect(seenOuter).toBe(outer);
+    expect(seenInner).toBe(inner);
+    const outerAgain = await runWithRuntimeContentGenerator(outer, async () => {
+      await runWithRuntimeContentGenerator(inner, async () => undefined);
+      return getRuntimeContentGenerator();
+    });
+    expect(outerAgain).toBe(outer);
+  });
+});
+
+describe('agent-context (merging)', () => {
+  it('runtimeView wrap preserves agentId from outer frame', async () => {
+    const view = makeView('inner-model');
+    await runWithAgentContext('outer-agent', async () => {
+      await runWithRuntimeContentGenerator(view, async () => {
+        expect(getCurrentAgentId()).toBe('outer-agent');
+        expect(getRuntimeContentGenerator()).toBe(view);
+      });
+      // After the inner run resolves, runtimeView is gone but agentId stays.
+      expect(getCurrentAgentId()).toBe('outer-agent');
+      expect(getRuntimeContentGenerator()).toBeUndefined();
+    });
+  });
+
+  it('agentId wrap preserves runtimeView from outer frame', async () => {
+    const view = makeView('outer-model');
+    await runWithRuntimeContentGenerator(view, async () => {
+      await runWithAgentContext('inner-agent', async () => {
+        expect(getRuntimeContentGenerator()).toBe(view);
+        expect(getCurrentAgentId()).toBe('inner-agent');
+      });
+      expect(getRuntimeContentGenerator()).toBe(view);
+      expect(getCurrentAgentId()).toBeNull();
+    });
+  });
+});
+
+describe('agent-context (depth) — #3731 Phase 3', () => {
+  it('returns 0 outside any frame', () => {
+    expect(getCurrentAgentDepth()).toBe(0);
+  });
+
+  it('top-level subagent has depth 0', async () => {
+    await runWithAgentContext('top', async () => {
+      expect(getCurrentAgentDepth()).toBe(0);
+    });
+  });
+
+  it('auto-increments per nesting: top=0, child=1, grandchild=2', async () => {
+    await runWithAgentContext('top', async () => {
+      expect(getCurrentAgentDepth()).toBe(0);
+      await runWithAgentContext('child', async () => {
+        expect(getCurrentAgentDepth()).toBe(1);
+        await runWithAgentContext('grandchild', async () => {
+          expect(getCurrentAgentDepth()).toBe(2);
+        });
+        expect(getCurrentAgentDepth()).toBe(1);
+      });
+      expect(getCurrentAgentDepth()).toBe(0);
+    });
+    expect(getCurrentAgentDepth()).toBe(0);
+  });
+
+  it('sibling subagents at the same nesting level both see the same depth', async () => {
+    await runWithAgentContext('parent', async () => {
+      await runWithAgentContext('siblingA', async () => {
+        expect(getCurrentAgentDepth()).toBe(1);
+      });
+      await runWithAgentContext('siblingB', async () => {
+        expect(getCurrentAgentDepth()).toBe(1);
+      });
+    });
+  });
+
+  it('depthOverride pins the depth for background/foreground resume', async () => {
+    // Resume runs from a top-level frame; without the override a resumed
+    // nested agent would recompute to depth 0 and regain spawn capacity.
+    // Passing the persisted launch depth restores the original level, and a
+    // child frame still auto-increments from the restored value.
+    await runWithAgentContext(
+      'resumed',
+      async () => {
+        expect(getCurrentAgentDepth()).toBe(3);
+        await runWithAgentContext('child', async () => {
+          expect(getCurrentAgentDepth()).toBe(4);
+        });
+      },
+      3,
+    );
+  });
+});
+
+describe('agent-context (nesting predicates)', () => {
+  it('isTopLevelSession: true outside any frame, false inside one', async () => {
+    expect(isTopLevelSession()).toBe(true);
+    await runWithAgentContext('sub', async () => {
+      expect(isTopLevelSession()).toBe(false);
+    });
+    expect(isTopLevelSession()).toBe(true);
+  });
+
+  it('childLaunchDepth: 0 from the top level, parent depth + 1 inside frames', async () => {
+    expect(childLaunchDepth()).toBe(0);
+    await runWithAgentContext('lvl1', async () => {
+      expect(childLaunchDepth()).toBe(1);
+      await runWithAgentContext('lvl2', async () => {
+        expect(childLaunchDepth()).toBe(2);
+      });
+    });
+  });
+
+  it('canSpawnNestedAgent: child level (1-based) must not exceed maxDepth', async () => {
+    // Top level: the child would be a level-1 agent — allowed at max 1.
+    expect(canSpawnNestedAgent(1)).toBe(true);
+    await runWithAgentContext('lvl1', async () => {
+      // Inside a level-1 agent: the child would be level 2.
+      expect(canSpawnNestedAgent(1)).toBe(false);
+      expect(canSpawnNestedAgent(2)).toBe(true);
+      await runWithAgentContext('lvl2', async () => {
+        // Inside a level-2 agent: the child would be level 3.
+        expect(canSpawnNestedAgent(2)).toBe(false);
+        expect(canSpawnNestedAgent(3)).toBe(true);
+      });
+    });
+  });
+
+  it('canSpawnNestedAgent respects a depthOverride-pinned frame', async () => {
+    // A resumed agent pinned at depth 4 must not spawn at max 5 (child would
+    // be level 6) even though the resume itself runs from the top level.
+    await runWithAgentContext(
+      'resumed',
+      async () => {
+        expect(canSpawnNestedAgent(5)).toBe(false);
+        expect(canSpawnNestedAgent(6)).toBe(true);
+      },
+      4,
+    );
+  });
+
+  it('spawnBlockReason: depth wins first, then teammate, then fork, else null', async () => {
+    expect(spawnBlockReason(5)).toBeNull();
+    await runWithAgentContext('lvl1', async () => {
+      expect(spawnBlockReason(5)).toBeNull();
+      expect(spawnBlockReason(1)).toBe('depth');
+      await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        async () => {
+          expect(spawnBlockReason(5)).toBe('teammate');
+          // A teammate at leaf depth reports depth — the reason order is
+          // execute()'s guard order, keeping the user-facing message stable.
+          expect(spawnBlockReason(1)).toBe('depth');
+        },
+      );
+      await runInForkContext(async () => {
+        expect(spawnBlockReason(5)).toBe('fork');
+      });
+    });
+  });
+});

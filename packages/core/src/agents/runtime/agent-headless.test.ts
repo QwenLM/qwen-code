@@ -30,7 +30,9 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { normalizeModelToolCallIds } from '../../core/toolCallIdUtils.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
+import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import { ContextState, AgentHeadless } from './agent-headless.js';
@@ -79,17 +81,17 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 vi.mock('../../utils/environmentContext.js', () => ({
+  SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [{ text: 'Env Context' }],
-    },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
-    },
-    ...(extraHistory ?? []),
+    [
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
+      },
+      ...(extraHistory ?? []),
+    ],
+    [],
   ]),
 }));
 vi.mock('../../core/nonInteractiveToolExecutor.js');
@@ -105,6 +107,17 @@ vi.mock('../../skills/skill-manager.js', () => {
   SkillManagerMock.prototype.addChangeListener = vi
     .fn()
     .mockReturnValue(() => {});
+  // Path-conditional skill activation hook (called from
+  // CoreToolScheduler.executeSingleToolCall whenever a tool's input names a
+  // filesystem path). The unit tests in this file do not exercise
+  // activation, but the hook fires unconditionally so the mock must expose
+  // the methods or the scheduler crashes on every tool call.
+  SkillManagerMock.prototype.matchAndActivateByPath = vi
+    .fn()
+    .mockResolvedValue([]);
+  SkillManagerMock.prototype.matchAndActivateByPaths = vi
+    .fn()
+    .mockResolvedValue([]);
   return { SkillManager: SkillManagerMock };
 });
 
@@ -234,6 +247,7 @@ describe('subagent.ts', () => {
 
   describe('AgentHeadless', () => {
     let mockSendMessageStream: Mock;
+    let mockGetHistoryFunctionResponseIds: Mock;
 
     const defaultModelConfig: ModelConfig = {
       model: 'qwen3-coder-plus',
@@ -265,10 +279,13 @@ describe('subagent.ts', () => {
       });
 
       mockSendMessageStream = vi.fn();
+      mockGetHistoryFunctionResponseIds = vi.fn(() => new Set<string>());
       vi.mocked(GeminiChat).mockImplementation(
         () =>
           ({
             sendMessageStream: mockSendMessageStream,
+            setLastPromptTokenCount: vi.fn(),
+            getHistoryFunctionResponseIds: mockGetHistoryFunctionResponseIds,
           }) as unknown as GeminiChat,
       );
 
@@ -452,11 +469,16 @@ describe('subagent.ts', () => {
 
         // Check History (should include environment context)
         const history = callArgs[2];
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: true,
+        });
         expect(history).toEqual([
-          { role: 'user', parts: [{ text: 'Env Context' }] },
           {
-            role: 'model',
-            parts: [{ text: 'Got it. Thanks for the context!' }],
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\nEnv Context\n</system-reminder>' },
+            ],
           },
         ]);
       });
@@ -599,6 +621,38 @@ describe('subagent.ts', () => {
         expect(history).toEqual(initialMessages);
       });
 
+      it('should skip env history when initialMessages is an empty array', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System ${name}.',
+          initialMessages: [],
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const generationConfig = getGenerationConfigFromMock();
+
+        expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(callArgs[2]).toEqual([]);
+        expect(getInitialChatHistory).not.toHaveBeenCalled();
+      });
+
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
@@ -724,6 +778,215 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
+      it('should wait for external notification after a no-tool response', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        let resolveWait:
+          | ((inputs: [{ kind: 'notification'; text: string }]) => void)
+          | undefined;
+        const waitForExternalMessages = vi.fn(
+          (_signal: AbortSignal) =>
+            new Promise<[{ kind: 'notification'; text: string }]>((resolve) => {
+              resolveWait = resolve;
+            }),
+        );
+        let shouldWait = true;
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => shouldWait);
+
+        const executePromise = scope.execute(new ContextState());
+        await vi.waitFor(() =>
+          expect(waitForExternalMessages).toHaveBeenCalled(),
+        );
+
+        shouldWait = false;
+        resolveWait?.([
+          {
+            kind: 'notification',
+            text: '<task-notification>event</task-notification>',
+          },
+        ]);
+
+        await executePromise;
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '<task-notification>event</task-notification>' },
+        ]);
+      });
+
+      it('should finalize after an empty wake when no owner monitor remains running', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        let shouldWait = true;
+        const waitForExternalMessages = vi.fn(async () => {
+          shouldWait = false;
+          return [];
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => shouldWait);
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Done.');
+        expect(waitForExternalMessages).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('should skip idle wait when the predicate flips false before wait registration', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        let predicateCalls = 0;
+        const waitForExternalMessages = vi.fn(async () => [
+          {
+            kind: 'notification' as const,
+            text: '<task-notification>late</task-notification>',
+          },
+        ]);
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => {
+          predicateCalls += 1;
+          return predicateCalls === 1;
+        });
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Done.');
+        expect(waitForExternalMessages).not.toHaveBeenCalled();
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('should keep waiting after an empty wake while an owner monitor is still running', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        let shouldWait = true;
+        let waitCalls = 0;
+        const waitForExternalMessages = vi.fn(async () => {
+          waitCalls += 1;
+          if (waitCalls === 1) {
+            return [];
+          }
+          shouldWait = false;
+          return [
+            {
+              kind: 'notification' as const,
+              text: '<task-notification>event</task-notification>',
+            },
+          ];
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => shouldWait);
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(waitForExternalMessages).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '<task-notification>event</task-notification>' },
+        ]);
+      });
+
+      it('should drain queued external notification before finalizing', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+        const pendingInputs: Array<{ kind: 'notification'; text: string }> = [
+          {
+            kind: 'notification',
+            text: '<task-notification>terminal</task-notification>',
+          },
+        ];
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        scope.setExternalMessageProvider(() => pendingInputs.splice(0));
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '<task-notification>terminal</task-notification>' },
+        ]);
+      });
+
+      it('should not idle-wait when max turns prevents another round', async () => {
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { ...defaultRunConfig, max_turns: 1 };
+        const waitForExternalMessages = vi.fn(async () => []);
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+        );
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => true);
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+        expect(waitForExternalMessages).not.toHaveBeenCalled();
+      });
+
       it('should execute external tools and provide the response to the model', async () => {
         const listFilesToolDef: FunctionDeclaration = {
           name: 'list_files',
@@ -803,6 +1066,494 @@ describe('subagent.ts', () => {
 
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
       });
+
+      it('should ignore duplicate provider tool-call ids across rounds', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        const [duplicateNormalizedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            },
+          ],
+          new Set(['call_1']),
+          new Set<string>(),
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            [duplicateNormalizedPart!.functionCall!],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(toolCallEvents).toHaveLength(2);
+        expect(toolResultEvents).toHaveLength(2);
+        expect(toolCallEvents[0].callId).toBe('call_1');
+        expect(toolResultEvents[0].callId).toBe('call_1');
+        expect(toolCallEvents[1].callId).toMatch(
+          /^call_1__qwen_dup_2:duplicate:/,
+        );
+        expect(toolResultEvents[1].callId).toBe(toolCallEvents[1].callId);
+        expect(toolResultEvents[1].error).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+
+        const thirdCallArgs = mockSendMessageStream.mock.calls[2][1];
+        const parts = thirdCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_2');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should stop repeated duplicate provider tool-call responses', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        const [duplicateNormalizedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            },
+          ],
+          new Set(['call_1']),
+          new Set<string>(),
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            [duplicateNormalizedPart!.functionCall!],
+            [
+              duplicateNormalizedPart!.functionCall!,
+              {
+                id: 'call_2',
+                name: 'list_files',
+                args: { path: './fresh' },
+              },
+            ],
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+        expect(toolResultEvents).toHaveLength(2);
+        expect(toolResultEvents[1].error).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+
+        const thirdCallArgs = mockSendMessageStream.mock.calls[2][1];
+        const parts = thirdCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_2');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
+      it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        const [duplicateNormalizedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            },
+          ],
+          new Set(['call_1']),
+          new Set<string>(),
+        );
+        mockGetHistoryFunctionResponseIds.mockReturnValue(new Set(['call_1']));
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([[duplicateNormalizedPart!.functionCall!], 'stop']),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).not.toHaveBeenCalled();
+        expect(toolCallEvents).toHaveLength(1);
+        expect(toolResultEvents).toHaveLength(1);
+        expect(toolCallEvents[0].callId).toMatch(
+          /^call_1__qwen_dup_2:duplicate:/,
+        );
+        expect(toolResultEvents[0].callId).toBe(toolCallEvents[0].callId);
+        expect(toolResultEvents[0].error).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_2');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should execute only the first duplicate functionCall id in one model turn', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'dup_id_0001',
+                name: 'list_files',
+                args: { path: 'a' },
+              },
+              {
+                id: 'dup_id_0001',
+                name: 'list_files',
+                args: { path: 'b' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: 'a' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt',
+            returnDisplay: 'Listed 1 file',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledOnce();
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as Part[];
+        expect(
+          parts
+            .map((part) => part.functionResponse?.id)
+            .filter((id): id is string => Boolean(id)),
+        ).toEqual(['dup_id_0001']);
+      });
+
+      it('should report unauthorized tool names before duplicate provider ids', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_reused',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            [
+              {
+                id: 'call_reused',
+                name: 'write_file',
+                args: { path: 'x.txt', content: 'x' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        const thirdCallArgs = mockSendMessageStream.mock.calls[2][1];
+        const parts = thirdCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_reused');
+        expect(parts[0].functionResponse?.name).toBe('write_file');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Tool "write_file" not found',
+        );
+        expect(parts[0].functionResponse?.response?.['error']).not.toContain(
+          'Duplicate provider tool call id',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
     });
 
     describe('execute - Termination and Recovery', () => {
@@ -851,53 +1602,55 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
       });
 
-      it.skip('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
+      it('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
         // Use fake timers to reliably test timeouts
         vi.useFakeTimers();
 
-        const { config } = await createMockConfig();
-        const runConfig: RunConfig = { max_time_minutes: 5, max_turns: 100 };
+        try {
+          const { config } = await createMockConfig();
+          const runConfig: RunConfig = { max_time_minutes: 5, max_turns: 100 };
 
-        // We need to control the resolution of the sendMessageStream promise to advance the timer during execution.
-        let resolveStream: (
-          value: AsyncGenerator<unknown, void, unknown>,
-        ) => void;
-        const streamPromise = new Promise<
-          AsyncGenerator<unknown, void, unknown>
-        >((resolve) => {
+          // We need to control the resolution of the sendMessageStream promise to advance the timer during execution.
+          let resolveStream: (
+            value: AsyncGenerator<unknown, void, unknown>,
+          ) => void;
+          const streamPromise = new Promise<
+            AsyncGenerator<unknown, void, unknown>
+          >((resolve) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            resolveStream = resolve as any;
+          });
+
+          // The LLM call will hang until we resolve the promise.
+          mockSendMessageStream.mockReturnValue(streamPromise);
+
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            runConfig,
+          );
+
+          const runPromise = scope.execute(new ContextState());
+
+          // Advance time beyond the limit (6 minutes) while the agent is awaiting the LLM response.
+          await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+
+          // Now resolve the stream. The model returns 'stop'.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          resolveStream = resolve as any;
-        });
+          resolveStream!(createMockStream(['stop'])() as any);
 
-        // The LLM call will hang until we resolve the promise.
-        mockSendMessageStream.mockReturnValue(streamPromise);
+          await runPromise;
 
-        const scope = await AgentHeadless.create(
-          'test-agent',
-          config,
-          promptConfig,
-          defaultModelConfig,
-          runConfig,
-        );
-
-        const runPromise = scope.execute(new ContextState());
-
-        // Advance time beyond the limit (6 minutes) while the agent is awaiting the LLM response.
-        await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
-
-        // Now resolve the stream. The model returns 'stop'.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        resolveStream!(createMockStream(['stop'])() as any);
-
-        await runPromise;
-
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-
-        vi.useRealTimers();
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
-      it.skip('should terminate with ERROR if the model call throws', async () => {
+      it('should terminate with ERROR if the model call throws', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
 
@@ -947,6 +1700,8 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setLastPromptTokenCount: vi.fn(),
+              getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
             }) as unknown as GeminiChat,
         );
 
@@ -986,6 +1741,8 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setLastPromptTokenCount: vi.fn(),
+              getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
             }) as unknown as GeminiChat,
         );
 
@@ -1050,6 +1807,8 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setLastPromptTokenCount: vi.fn(),
+              getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
             }) as unknown as GeminiChat,
         );
 
@@ -1440,6 +2199,96 @@ describe('subagent.ts', () => {
         expect(writeResult!.error).not.toContain(
           'rejected to prevent writing truncated content',
         );
+      });
+
+      it('keeps automatic max token escalation warm for the next agent round', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        let callCount = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return (async function* () {
+              yield {
+                type: 'retry',
+                maxOutputTokensEscalated: 65_536,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_complete',
+                      name: WriteFileTool.Name,
+                      args: {
+                        file_path: '/tmp/sticky-escalation.txt',
+                        content: 'hello',
+                      },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    { finishReason: 'STOP', content: { parts: [] } },
+                  ],
+                },
+              };
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'done' }] },
+                  },
+                ],
+              },
+            };
+          })();
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          mockSendMessageStream.mock.calls[0][1].config.maxOutputTokens,
+        ).toBeUndefined();
+        expect(
+          mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
+        ).toBe(65_536);
       });
     });
   });

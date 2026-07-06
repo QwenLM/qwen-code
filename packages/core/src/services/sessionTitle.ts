@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
 
@@ -22,7 +23,6 @@ Rules:
 - Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
-- Match the dominant language of the conversation (English or Chinese). For Chinese, treat as roughly 12-20 characters total; still no trailing punctuation.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
 
 Good examples:
@@ -69,8 +69,8 @@ const TRAILING_PAIRED_BRACKETS_RE =
  * command) can surface actionable messages instead of a generic "could not
  * generate".
  *
- * - `no_fast_model`: config.getFastModel() returned undefined. User needs to
- *   configure one via `/model --fast <name>`.
+ * - `no_fast_model`: config.getFastModel() returned undefined.
+ *   User needs to configure one via `/model --fast <name>`.
  * - `no_client`: BaseLlmClient or GeminiClient not yet initialized. Rare,
  *   usually means the session hasn't authenticated yet.
  * - `empty_history`: the conversation has fewer than 2 turns of usable text.
@@ -112,7 +112,7 @@ export async function tryGenerateSessionTitle(
     const geminiClient = config.getGeminiClient();
     if (!geminiClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = geminiClient.getChat().getHistory();
+    const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const dialog = filterToDialog(fullHistory);
@@ -127,11 +127,8 @@ export async function tryGenerateSessionTitle(
     );
     if (!conversationText.trim()) return { ok: false, reason: 'empty_history' };
 
-    const baseLlmClient = config.getBaseLlmClient();
-    if (!baseLlmClient) return { ok: false, reason: 'no_client' };
-
-    const result = await baseLlmClient.generateJson({
-      model,
+    const result = await runSideQuery<{ title?: string }>(config, {
+      purpose: 'session-title',
       systemInstruction: TITLE_SYSTEM_PROMPT,
       schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
       contents: [
@@ -149,7 +146,6 @@ export async function tryGenerateSessionTitle(
         maxOutputTokens: 100,
       },
       abortSignal,
-      promptId: 'session_title',
       // Titles are best-effort cosmetic metadata — one shot only, no long retry loop.
       maxAttempts: 1,
     });

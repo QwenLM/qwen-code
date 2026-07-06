@@ -14,9 +14,11 @@
 
 import type { Config } from '../config/config.js';
 import {
+  createContentGenerator,
   type AuthType,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
@@ -48,7 +50,11 @@ export function buildAgentContentGeneratorConfig(
   const sameProvider = authOverrides.authType === parentConfig.authType;
   const modelsConfig = base.getModelsConfig();
   const resolvedModel = modelId
-    ? modelsConfig.getResolvedModel(authOverrides.authType as AuthType, modelId)
+    ? modelsConfig.getResolvedModel(
+        authOverrides.authType as AuthType,
+        modelId,
+        authOverrides.baseUrl,
+      )
     : undefined;
 
   const nextConfig: ContentGeneratorConfig = {
@@ -95,6 +101,34 @@ export function buildAgentContentGeneratorConfig(
     : undefined;
 
   return nextConfig;
+}
+
+/**
+ * Compose `buildAgentContentGeneratorConfig` + `createContentGenerator` into
+ * a single {@link RuntimeContentGeneratorView}. Both InProcessBackend and
+ * SubagentManager need the same three-step recipe; this helper centralizes
+ * it so the two paths can't drift.
+ *
+ * `contentGeneratorOwner` is the Config instance the new ContentGenerator
+ * should bind to for cwd / workspace / telemetry purposes — typically the
+ * per-agent override Config when one exists, or the parent Config otherwise.
+ */
+export async function createRuntimeContentGeneratorView(
+  base: Config,
+  contentGeneratorOwner: Config,
+  modelId: string | undefined,
+  authOverrides: AuthOverrides,
+): Promise<RuntimeContentGeneratorView> {
+  const contentGeneratorConfig = buildAgentContentGeneratorConfig(
+    base,
+    modelId,
+    authOverrides,
+  );
+  const contentGenerator = await createContentGenerator(
+    contentGeneratorConfig,
+    contentGeneratorOwner,
+  );
+  return { contentGenerator, contentGeneratorConfig };
 }
 
 function applyResolvedModelConfig(

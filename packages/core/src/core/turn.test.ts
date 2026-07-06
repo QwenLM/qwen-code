@@ -8,15 +8,30 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
+  ServerGeminiModelFallbackEvent,
 } from './turn.js';
-import { Turn, GeminiEventType } from './turn.js';
-import type { GenerateContentResponse, Part, Content } from '@google/genai';
+import {
+  CompressionStatus,
+  Turn,
+  GeminiEventType,
+  findRepeatedDuplicateProviderToolCall,
+} from './turn.js';
+import type {
+  GenerateContentResponse,
+  Part,
+  Content,
+  PartListUnion,
+} from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
+import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
+import { createOpenAIReasoningThoughtPart } from '../utils/thoughtUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
+const mockGetHistoryLength = vi.fn();
+const mockGetHistoryTailShallow = vi.fn();
 const mockMaybeIncludeSchemaDepthContext = vi.fn();
 
 vi.mock('@google/genai', async (importOriginal) => {
@@ -24,6 +39,8 @@ vi.mock('@google/genai', async (importOriginal) => {
   const MockChat = vi.fn().mockImplementation(() => ({
     sendMessageStream: mockSendMessageStream,
     getHistory: mockGetHistory,
+    getHistoryLength: mockGetHistoryLength,
+    getHistoryTailShallow: mockGetHistoryTailShallow,
     maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
   }));
   return {
@@ -36,12 +53,62 @@ vi.mock('../utils/errorReporting', () => ({
   reportError: vi.fn(),
 }));
 
+describe('findRepeatedDuplicateProviderToolCall', () => {
+  const getProviderCallId = (item: { providerCallId?: string }) =>
+    item.providerCallId;
+
+  it('finds a handled provider id that already received a synthetic response', () => {
+    const items = [{ providerCallId: 'fresh' }, { providerCallId: 'handled' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set(['handled']),
+      ),
+    ).toBe(items[1]);
+  });
+
+  it('finds a handled provider id repeated within the same batch', () => {
+    const items = [
+      { providerCallId: 'handled' },
+      { providerCallId: 'fresh' },
+      { providerCallId: 'handled' },
+    ];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set<string>(),
+      ),
+    ).toBe(items[0]);
+  });
+
+  it('ignores unhandled repeated ids', () => {
+    const items = [{ providerCallId: 'fresh' }, { providerCallId: 'fresh' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        new Set(['handled']),
+        new Set<string>(),
+      ),
+    ).toBeUndefined();
+  });
+});
+
 describe('Turn', () => {
   let turn: Turn;
   // Define a type for the mocked Chat instance for clarity
   type MockedChatInstance = {
     sendMessageStream: typeof mockSendMessageStream;
     getHistory: typeof mockGetHistory;
+    getHistoryLength: typeof mockGetHistoryLength;
+    getHistoryTailShallow: typeof mockGetHistoryTailShallow;
     maybeIncludeSchemaDepthContext: typeof mockMaybeIncludeSchemaDepthContext;
   };
   let mockChatInstance: MockedChatInstance;
@@ -51,10 +118,14 @@ describe('Turn', () => {
     mockChatInstance = {
       sendMessageStream: mockSendMessageStream,
       getHistory: mockGetHistory,
+      getHistoryLength: mockGetHistoryLength,
+      getHistoryTailShallow: mockGetHistoryTailShallow,
       maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
     };
     turn = new Turn(mockChatInstance as unknown as GeminiChat, 'prompt-id-1');
     mockGetHistory.mockReturnValue([]);
+    mockGetHistoryLength.mockReturnValue(0);
+    mockGetHistoryTailShallow.mockReturnValue([]);
     mockSendMessageStream.mockResolvedValue((async function* () {})());
   });
 
@@ -63,9 +134,8 @@ describe('Turn', () => {
   });
 
   describe('constructor', () => {
-    it('should initialize pendingToolCalls and debugResponses', () => {
+    it('should initialize pendingToolCalls', () => {
       expect(turn.pendingToolCalls).toEqual([]);
-      expect(turn.getDebugResponses()).toEqual([]);
     });
   });
 
@@ -110,7 +180,6 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'Hello' },
         { type: GeminiEventType.Content, value: ' world' },
       ]);
-      expect(turn.getDebugResponses().length).toBe(2);
     });
 
     it('should emit Thought events when a thought part is present', async () => {
@@ -150,6 +219,80 @@ describe('Turn', () => {
           value: { subject: '', description: 'reasoning...' },
         },
         { type: GeminiEventType.Content, value: 'final answer' },
+      ]);
+    });
+
+    it('should keep OpenAI reasoning markdown as a streaming thought description', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    createOpenAIReasoningThoughtPart(
+                      '**Analyzing the request**',
+                    ),
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: '', description: '**Analyzing the request**' },
+        },
+      ]);
+    });
+
+    it('should keep parsing unmarked structured thought subjects', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ thought: true, text: '**Only Subject**' }],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: 'Only Subject', description: '' },
+        },
       ]);
     });
 
@@ -264,7 +407,73 @@ describe('Turn', () => {
         expect.stringMatching(/^tool2-\d{13}-\w{10,}$/),
       );
       expect(turn.pendingToolCalls[1]).toEqual(event2.value);
-      expect(turn.getDebugResponses().length).toBe(1);
+    });
+
+    it('clears response id state when a model fallback occurs', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            responseId: 'primary-response',
+            functionCalls: [
+              {
+                id: 'primary-call',
+                name: 'tool1',
+                args: {},
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'fallback-call',
+                name: 'tool2',
+                args: {},
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const toolCalls = events.filter(
+        (event): event is ServerGeminiToolCallRequestEvent =>
+          event.type === GeminiEventType.ToolCallRequest,
+      );
+      const fallbackEvent = events.find(
+        (event): event is ServerGeminiModelFallbackEvent =>
+          event.type === GeminiEventType.ModelFallback,
+      );
+      expect(fallbackEvent).toEqual({
+        type: GeminiEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        statusCode: undefined,
+        fallbackIndex: 1,
+      });
+      expect(toolCalls[0]!.value.response_id).toBe('primary-response');
+      expect(toolCalls[1]!.value.response_id).toBeUndefined();
+      expect(turn.pendingToolCalls).toEqual([toolCalls[1]!.value]);
     });
 
     it('should yield UserCancelled event if signal is aborted', async () => {
@@ -305,7 +514,6 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'First part' },
         { type: GeminiEventType.UserCancelled },
       ]);
-      expect(turn.getDebugResponses().length).toBe(1);
     });
 
     it('should yield Error event and report if sendMessageStream throws', async () => {
@@ -315,7 +523,8 @@ describe('Turn', () => {
       const historyContent: Content[] = [
         { role: 'model', parts: [{ text: 'Previous history' }] },
       ];
-      mockGetHistory.mockReturnValue(historyContent);
+      mockGetHistoryLength.mockReturnValue(historyContent.length);
+      mockGetHistoryTailShallow.mockReturnValue(historyContent);
       mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
       const events = [];
       for await (const event of turn.run(
@@ -332,12 +541,233 @@ describe('Turn', () => {
       expect(errorEvent.value).toEqual({
         error: { message: 'API Error', status: undefined },
       });
-      expect(turn.getDebugResponses().length).toBe(0);
       expect(reportError).toHaveBeenCalledWith(
         error,
         'Error when talking to API',
-        [...historyContent, reqParts],
+        {
+          history: {
+            rawLength: 1,
+            tail: [
+              {
+                role: 'model',
+                partCount: 1,
+                functionCalls: [],
+                functionResponses: [],
+                textPreview: 'Previous history',
+              },
+            ],
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should report API errors with empty history summary', async () => {
+      const error = new Error('API Error');
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const errorEvent = events[0] as ServerGeminiErrorEvent;
+      expect(errorEvent.type).toBe(GeminiEventType.Error);
+      expect(errorEvent.value).toEqual({
+        error: { message: 'API Error', status: undefined },
+      });
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            rawLength: 0,
+            tail: [],
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should report API errors without cloning full history', async () => {
+      const error = new Error('API Error');
+      const largeText = 'x'.repeat(1024 * 1024);
+      const reqParts: Part = { text: 'Trigger error' };
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistory.mockImplementation(() => {
+        throw new Error('full history clone should not be used');
+      });
+      mockGetHistoryLength.mockReturnValue(100);
+      mockGetHistoryTailShallow.mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'tool', response: { largeText } } },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            { thought: true, text: 'internal reasoning' },
+            { functionCall: { name: 'readFile', args: {} } },
+            { text: largeText },
+          ],
+        },
+      ] satisfies Content[]);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(mockGetHistory).not.toHaveBeenCalled();
+      expect(mockGetHistoryLength).toHaveBeenCalled();
+      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8, true);
+      const reportedContext = vi.mocked(reportError).mock.calls[0]?.[2];
+      expect(JSON.stringify(reportedContext)).not.toContain(largeText);
+      expect(JSON.stringify(reportedContext)).not.toContain(
+        'internal reasoning',
+      );
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            rawLength: 100,
+            tail: [
+              {
+                role: 'user',
+                partCount: 1,
+                functionCalls: [],
+                functionResponses: ['tool'],
+                textPreview: '',
+              },
+              {
+                role: 'model',
+                partCount: 3,
+                functionCalls: ['readFile'],
+                functionResponses: [],
+                textPreview: largeText.slice(0, 200),
+              },
+            ],
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should report API errors when request parts include strings', async () => {
+      const error = new Error('API Error');
+      const reqParts: PartListUnion = ['Trigger ', { text: 'error' }];
+      const diagnosticFailure: unknown = 'history is unavailable';
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistoryLength.mockImplementation(() => {
+        throw diagnosticFailure;
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause: 'history is unavailable',
+          },
+          request: {
+            partCount: 2,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should preserve API errors when diagnostic summary fails', async () => {
+      const error = new Error('API Error');
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistoryLength.mockImplementation(() => {
+        throw new Error('history is unavailable');
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause: {
+              message: 'history is unavailable',
+              stack: expect.any(String),
+            },
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -392,6 +822,93 @@ describe('Turn', () => {
       });
     });
 
+    it('should preserve provider tool-call ids separately from generated call ids', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [
+              { id: 'fc1', name: 'tool1', args: { arg1: 'val1' } },
+              { name: 'tool2', args: { arg2: 'val2' } },
+            ],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test provider ids' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(2);
+
+      const event1 = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event1.value).toMatchObject({
+        callId: 'fc1',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
+      });
+
+      const event2 = events[1] as ServerGeminiToolCallRequestEvent;
+      expect(event2.value.callId).toMatch(/^tool2-/);
+      expect(event2.value.providerCallId).toBeUndefined();
+      expect(event2.value).toMatchObject({
+        name: 'tool2',
+        args: { arg2: 'val2' },
+      });
+    });
+
+    it('should preserve raw provider ids for suffixed function call ids', async () => {
+      const [normalizedPart] = normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'fc1',
+              name: 'tool1',
+              args: { arg1: 'val1' },
+            },
+          },
+        ],
+        new Set(['fc1']),
+        new Set<string>(),
+      );
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [normalizedPart!.functionCall],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test suffixed provider id' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(1);
+      const event = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event.value).toMatchObject({
+        callId: 'fc1__qwen_dup_2',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
+      });
+    });
+
     it('should yield finished event when response has finish reason', async () => {
       const mockResponseStream = (async function* () {
         yield {
@@ -408,7 +925,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           } as GenerateContentResponse,
         };
@@ -435,7 +951,6 @@ describe('Turn', () => {
               candidatesTokenCount: 50,
               cachedContentTokenCount: 10,
               thoughtsTokenCount: 5,
-              toolUsePromptTokenCount: 2,
             },
           },
         },
@@ -847,30 +1362,37 @@ describe('Turn', () => {
         { type: GeminiEventType.Content, value: 'Success' },
       ]);
     });
-  });
 
-  describe('getDebugResponses', () => {
-    it('should return collected debug responses', async () => {
-      const resp1 = {
-        candidates: [{ content: { parts: [{ text: 'Debug 1' }] } }],
-      } as unknown as GenerateContentResponse;
-      const resp2 = {
-        functionCalls: [{ name: 'debugTool' }],
-      } as unknown as GenerateContentResponse;
+    it('bridges a compressed stream event to a ChatCompressed event', async () => {
+      const compressionInfo = {
+        originalTokenCount: 1000,
+        newTokenCount: 200,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      };
       const mockResponseStream = (async function* () {
-        yield { type: StreamEventType.CHUNK, value: resp1 };
-        yield { type: StreamEventType.CHUNK, value: resp2 };
+        yield { type: StreamEventType.COMPRESSED, info: compressionInfo };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'after' }] } }],
+          },
+        };
       })();
       mockSendMessageStream.mockResolvedValue(mockResponseStream);
-      const reqParts: Part[] = [{ text: 'Hi' }];
-      for await (const _ of turn.run(
+
+      const events = [];
+      for await (const event of turn.run(
         'test-model',
-        reqParts,
+        [],
         new AbortController().signal,
       )) {
-        // consume stream
+        events.push(event);
       }
-      expect(turn.getDebugResponses()).toEqual([resp1, resp2]);
+
+      expect(events).toEqual([
+        { type: GeminiEventType.ChatCompressed, value: compressionInfo },
+        { type: GeminiEventType.Content, value: 'after' },
+      ]);
     });
   });
 

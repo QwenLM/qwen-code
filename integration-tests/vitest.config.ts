@@ -21,6 +21,7 @@ export default defineConfig({
     exclude: [
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
+      '**/qwen-daemon-loadtest*',
       '**/node_modules/**',
     ],
     retry: 2,

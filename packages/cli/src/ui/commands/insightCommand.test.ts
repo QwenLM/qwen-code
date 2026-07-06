@@ -6,22 +6,28 @@
 
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
-import open from 'open';
+import { pathToFileURL } from 'node:url';
 import { parseInsightMessage, Storage } from '@qwen-code/qwen-code-core';
 import { insightCommand } from './insightCommand.js';
 import type { CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 const mockGenerateStaticInsight = vi.fn();
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
+  };
+});
 
 vi.mock('../../services/insight/generators/StaticInsightGenerator.js', () => ({
   StaticInsightGenerator: vi.fn(() => ({
     generateStaticInsight: mockGenerateStaticInsight,
   })),
-}));
-
-vi.mock('open', () => ({
-  default: vi.fn(),
 }));
 
 describe('insightCommand', () => {
@@ -32,7 +38,8 @@ describe('insightCommand', () => {
     mockGenerateStaticInsight.mockResolvedValue(
       path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
     );
-    vi.mocked(open).mockResolvedValue(undefined as never);
+    mockOpenBrowserSecurely.mockClear();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
 
     mockContext = createMockCommandContext({
       services: {
@@ -62,6 +69,41 @@ describe('insightCommand', () => {
       path.join(Storage.getRuntimeBaseDir(), 'projects'),
       expect.any(Function),
     );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      pathToFileURL(
+        path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+      ).href,
+      {
+        allowFile: true,
+        allowedFilePaths: [
+          path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+        ],
+      },
+    );
+  });
+
+  it('shows the generated file path before attempting to open the browser', async () => {
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    await insightCommand.action(mockContext, '');
+
+    const messages = vi
+      .mocked(mockContext.ui.addItem)
+      .mock.calls.map(([item]) =>
+        'text' in item && typeof item.text === 'string' ? item.text : '',
+      );
+    expect(messages).toContain(
+      `Insights generated at: ${path.resolve(
+        'runtime-output',
+        'insights',
+        'insight-2026-03-05.html',
+      )}. If the browser does not open automatically, open this file manually.`,
+    );
+    expect(
+      messages.some((message) => message.includes('Opening insights')),
+    ).toBe(false);
   });
 
   it('streams ACP progress messages without waiting for generation to finish', async () => {
@@ -120,7 +162,7 @@ describe('insightCommand', () => {
 
     const messagesPromise = (async () => {
       const messages: Array<{
-        messageType: 'info' | 'error';
+        messageType: 'info' | 'warning' | 'error';
         content: string;
       }> = [];
       for await (const message of result.messages) {
@@ -198,7 +240,7 @@ describe('insightCommand', () => {
     expect((result as { content: string }).content).toContain(
       path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
     );
-    expect(open).not.toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
   });
 
   it('non_interactive: returns error message when generation fails', async () => {
@@ -227,6 +269,6 @@ describe('insightCommand', () => {
       messageType: 'error',
     });
     expect((result as { content: string }).content).toContain('disk full');
-    expect(open).not.toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
   });
 });

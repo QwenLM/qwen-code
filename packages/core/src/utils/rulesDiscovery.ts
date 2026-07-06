@@ -16,12 +16,13 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { homedir } from 'node:os';
 import picomatch from 'picomatch';
 import { parse as parseYaml } from './yaml-parser.js';
 import { normalizeContent } from './textUtils.js';
 import { QWEN_DIR } from './paths.js';
+import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
+import { resolveProjectRelativePath } from './projectPath.js';
 
 const logger = createDebugLogger('RULES_DISCOVERY');
 
@@ -238,7 +239,7 @@ export class ConditionalRulesRegistry {
     this.projectRoot = projectRoot;
     this.compiledRules = rules.map((rule) => ({
       rule,
-      matchers: (rule.paths ?? []).map((p) => picomatch(p, { dot: false })),
+      matchers: (rule.paths ?? []).map((p) => picomatch(p, { dot: true })),
     }));
     logger.debug(
       `ConditionalRulesRegistry created with ${rules.length} rule(s)`,
@@ -256,19 +257,14 @@ export class ConditionalRulesRegistry {
   matchAndConsume(filePath: string): string | undefined {
     if (this.compiledRules.length === 0) return undefined;
 
-    // Resolve first to handle both absolute and relative input paths,
-    // then compute the path relative to projectRoot for pattern matching.
-    const absolutePath = path.isAbsolute(filePath)
-      ? filePath
-      : path.resolve(this.projectRoot, filePath);
-    const relativePath = path
-      .relative(this.projectRoot, absolutePath)
-      .replace(/\\/g, '/');
-
-    // Paths outside the project root produce `../` prefixes (or exact `..`
-    // when the target equals the parent of projectRoot) — don't inject rules
-    // for files outside the project boundary.
-    if (relativePath === '..' || relativePath.startsWith('../')) {
+    // Shared helper handles `..` outside-root, plus the Windows
+    // cross-drive case (where `path.relative('C:\\proj', 'D:\\else')`
+    // returns an absolute path that would otherwise normalize to
+    // forward slashes and false-match a broad glob like `**/*.ts`).
+    // Without this guard the rules registry diverged from
+    // SkillActivationRegistry, which had been hardened earlier.
+    const relativePath = resolveProjectRelativePath(filePath, this.projectRoot);
+    if (relativePath === null) {
       return undefined;
     }
 
@@ -324,8 +320,8 @@ export async function loadRules(
 
   const allRules: RuleFile[] = [];
 
-  // 1. Global rules: ~/.qwen/rules/
-  const globalRulesDir = path.join(homedir(), QWEN_DIR, 'rules');
+  // 1. Global rules: <QWEN_HOME or ~/.qwen>/rules/
+  const globalRulesDir = path.join(Storage.getGlobalQwenDir(), 'rules');
   const globalRules = await loadRulesFromDir(globalRulesDir, excludes);
   allRules.push(...globalRules);
   logger.debug(`Loaded ${globalRules.length} global rule(s)`);

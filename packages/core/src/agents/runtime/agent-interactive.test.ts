@@ -8,9 +8,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentInteractive } from './agent-interactive.js';
 import type { AgentCore } from './agent-core.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
+import type {
+  AgentRoundTextEvent,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentToolOutputUpdateEvent,
+} from './agent-events.js';
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
 import { AgentStatus } from './agent-types.js';
+import {
+  getCurrentAgentDepth,
+  getCurrentAgentId,
+  runWithAgentContext,
+} from './agent-context.js';
 
 function createMockChat() {
   return {
@@ -31,6 +42,15 @@ function createMockCore(
     : overrides.chatValue !== undefined
       ? overrides.chatValue
       : createMockChat();
+
+  // Simulate the observable state that the real AgentCore now owns.
+  // AgentInteractive delegates its state accessors to these, so the mock
+  // needs to reflect mutations made via `pushMessage` / approval helpers.
+  const messages: Array<Record<string, unknown>> = [];
+  const pendingApprovals = new Map<string, unknown>();
+  const liveOutputs = new Map<string, unknown>();
+  const shellPids = new Map<string, number>();
+
   const core = {
     subagentId: 'test-agent-abc123',
     name: 'test-agent',
@@ -71,7 +91,94 @@ function createMockCore(
       outputTokens: 0,
       totalTokens: 0,
     }),
+    // Observable state surface (mirrors real AgentCore API).
+    getMessages: () => messages,
+    getPendingApprovals: () => pendingApprovals,
+    getLiveOutputs: () => liveOutputs,
+    getShellPids: () => shellPids,
+    pushMessage: (
+      role: string,
+      content: string,
+      options?: { thought?: boolean; metadata?: Record<string, unknown> },
+    ) => {
+      const message: Record<string, unknown> = {
+        role,
+        content,
+        timestamp: Date.now(),
+      };
+      if (options?.thought) message['thought'] = true;
+      if (options?.metadata) message['metadata'] = options.metadata;
+      messages.push(message);
+    },
+    setPendingApproval: (callId: string, details: unknown) =>
+      pendingApprovals.set(callId, details),
+    deletePendingApproval: (callId: string) => pendingApprovals.delete(callId),
+    clearPendingApprovals: () => pendingApprovals.clear(),
   } as unknown as AgentCore;
+
+  // Mirror AgentCore.setupStateListeners: events on the shared emitter
+  // populate the state containers above. The real AgentCore wires this in
+  // its constructor; the mock does it here so tests that drive behavior
+  // by emitting events observe the same resulting state.
+  emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
+    if (event.thoughtText) {
+      (core.pushMessage as (...args: unknown[]) => void)(
+        'assistant',
+        event.thoughtText,
+        { thought: true },
+      );
+    }
+    if (event.text) {
+      (core.pushMessage as (...args: unknown[]) => void)(
+        'assistant',
+        event.text,
+      );
+    }
+  });
+  emitter.on(AgentEventType.TOOL_CALL, (event: AgentToolCallEvent) => {
+    (core.pushMessage as (...args: unknown[]) => void)(
+      'tool_call',
+      `Tool call: ${event.name}`,
+      {
+        metadata: {
+          callId: event.callId,
+          toolName: event.name,
+          args: event.args,
+          description: event.description,
+          renderOutputAsMarkdown: event.isOutputMarkdown,
+          round: event.round,
+        },
+      },
+    );
+  });
+  emitter.on(
+    AgentEventType.TOOL_OUTPUT_UPDATE,
+    (event: AgentToolOutputUpdateEvent) => {
+      liveOutputs.set(event.callId, event.outputChunk);
+      if (event.pid !== undefined) {
+        shellPids.set(event.callId, event.pid);
+      }
+    },
+  );
+  emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
+    liveOutputs.delete(event.callId);
+    shellPids.delete(event.callId);
+    pendingApprovals.delete(event.callId);
+    const statusText = event.success ? 'succeeded' : 'failed';
+    const summary = event.error
+      ? `Tool ${event.name} ${statusText}: ${event.error}`
+      : `Tool ${event.name} ${statusText}`;
+    (core.pushMessage as (...args: unknown[]) => void)('tool_result', summary, {
+      metadata: {
+        callId: event.callId,
+        toolName: event.name,
+        success: event.success,
+        resultDisplay: event.resultDisplay,
+        outputFile: event.outputFile,
+        round: event.round,
+      },
+    });
+  });
 
   return { core, emitter };
 }
@@ -105,6 +212,80 @@ describe('AgentInteractive', () => {
     // Shutdown drains queue, loop exits normally → completed.
     await agent.shutdown();
     expect(agent.getStatus()).toBe('completed');
+  });
+
+  it('runs start() and the message loop inside the agent identity frame', async () => {
+    // Regression (codex review): start() called prepareTools() outside any
+    // runWithAgentContext frame, so in-process interactive agents (Arena,
+    // in-process teammates) were depth-gated as the top-level session —
+    // receiving the `agent` tool even at maxSubagentDepth=1 — and their
+    // later `agent` calls were counted as top-level spawns.
+    const { core } = createMockCore();
+    let prepId: string | null = null;
+    let prepDepth = -1;
+    let loopId: string | null = null;
+    let loopDepth = -1;
+    (core.prepareTools as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      prepId = getCurrentAgentId();
+      prepDepth = getCurrentAgentDepth();
+      return [];
+    });
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        loopId = getCurrentAgentId();
+        loopDepth = getCurrentAgentDepth();
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    // Spawned from the top-level session → the agent's own frame is depth 0
+    // (a level-1 agent), for schema preparation and reasoning rounds alike.
+    expect(prepId).toBe('agent-1');
+    expect(prepDepth).toBe(0);
+    expect(loopId).toBe('agent-1');
+    expect(loopDepth).toBe(0);
+  });
+
+  it('pins the construction-time depth when built inside a sub-agent frame', async () => {
+    // A nested in-process interactive agent captures childLaunchDepth() at
+    // construction. start() runs OUTSIDE the parent's frame here, so a
+    // measured depth of 1 proves the pin — without it the agent would be
+    // framed as depth 0 (top-level spawn) and regain spawn capacity.
+    const { core } = createMockCore();
+    let prepDepth = -1;
+    let loopDepth = -1;
+    (core.prepareTools as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      prepDepth = getCurrentAgentDepth();
+      return [];
+    });
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        loopDepth = getCurrentAgentDepth();
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const agent = await runWithAgentContext(
+      'parent-agent',
+      async () =>
+        new AgentInteractive(createConfig({ initialTask: 'go' }), core),
+    );
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    expect(prepDepth).toBe(1);
+    expect(loopDepth).toBe(1);
   });
 
   it('should process initialTask immediately on start', async () => {
@@ -238,6 +419,76 @@ describe('AgentInteractive', () => {
     });
 
     await agent.shutdown();
+  });
+
+  it('processes a message enqueued synchronously during the IDLE status emit', async () => {
+    // Regression: TeamManager's status bridge flushes a held message the
+    // instant a teammate settles to IDLE — synchronously, from inside the
+    // STATUS_CHANGE emit. At that point the run loop has already passed
+    // its final empty-queue check but `processing` is still true, so
+    // enqueueMessage won't restart the loop; without the run-loop
+    // re-check the message strands in a dead queue forever.
+    const { core, emitter } = createMockCore();
+    const processed: string[] = [];
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      (
+        _chat: unknown,
+        initialMessages: Array<{ parts: [{ text: string }] }>,
+      ) => {
+        processed.push(initialMessages[0]!.parts[0].text);
+        return Promise.resolve({
+          text: 'ok',
+          terminateMode: null,
+          turnsUsed: 1,
+        });
+      },
+    );
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+
+    let flushedOnce = false;
+    emitter.on(AgentEventType.STATUS_CHANGE, (payload) => {
+      if (payload.newStatus === AgentStatus.IDLE && !flushedOnce) {
+        flushedOnce = true;
+        agent.enqueueMessage('flushed message');
+      }
+    });
+
+    agent.enqueueMessage('first message');
+
+    await vi.waitFor(() => {
+      expect(processed).toEqual(['first message', 'flushed message']);
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    await agent.shutdown();
+  });
+
+  it('reaches a terminal status when aborted while idle', async () => {
+    // Regression: abort() on an agent with no run loop in flight used to
+    // only set the signal — nothing observed it, so the agent never
+    // reached a terminal status and terminal-status cleanup never fired.
+    const { core } = createMockCore();
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+
+    agent.enqueueMessage('task');
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    agent.abort();
+    expect(agent.getStatus()).toBe('cancelled');
+    await agent.waitForCompletion();
+  });
+
+  it('reaches a terminal status when aborted before any message', async () => {
+    const { core } = createMockCore();
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+
+    agent.abort();
+    expect(agent.getStatus()).toBe('cancelled');
   });
 
   it('should abort immediately', async () => {

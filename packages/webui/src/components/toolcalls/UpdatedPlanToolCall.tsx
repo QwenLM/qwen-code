@@ -66,6 +66,7 @@ const mapToolStatusToBullet = (
     case 'failed':
       return 'error';
     case 'in_progress':
+    case 'cancelled':
       return 'warning';
     case 'pending':
       return 'loading';
@@ -131,7 +132,7 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
   if (errors.length > 0) {
     return (
       <PlanToolCallContainer
-        label="TodoWrite"
+        label="TodoList"
         status="error"
         isFirst={isFirst}
         isLast={isLast}

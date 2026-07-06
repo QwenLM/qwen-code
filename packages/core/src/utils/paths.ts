@@ -44,19 +44,115 @@ export function _resetValidatePathCacheForTest(): void {
  * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
+export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
+
+// Single shared list of path-argument keys used across file tools.
+// file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
+// filePath (Lsp), notebook_path.
+export const PATH_ARG_KEYS = [
+  'file_path',
+  'path',
+  'filePath',
+  'notebook_path',
+] as const;
+
+/** Compiled regex for unescapePath — hoisted to avoid re-compilation per call. */
+const UNESCAPE_REGEX = (() => {
+  const inner = SHELL_SPECIAL_CHARS.source.slice(1, -1);
+  return new RegExp(`\\\\([${inner}])`, 'g');
+})();
 
 /**
  * Replaces the home directory with a tilde.
- * @param path - The path to tildeify.
+ * @param filePath - The path to tildeify.
  * @returns The tildeified path.
  */
-export function tildeifyPath(path: string): string {
-  const homeDir = os.homedir();
-  if (path.startsWith(homeDir)) {
-    return path.replace(homeDir, '~');
+export function tildeifyPath(filePath: string): string {
+  const rawHomeDir = os.homedir();
+  if (!rawHomeDir) {
+    return filePath;
   }
-  return path;
+
+  const homeDir = path.normalize(rawHomeDir);
+  const normalizedPath = path.normalize(filePath);
+  if (normalizedPath === homeDir) {
+    return '~';
+  }
+  if (normalizedPath.startsWith(`${homeDir}${path.sep}`)) {
+    return normalizedPath.replace(homeDir, '~');
+  }
+  return filePath;
+}
+
+/**
+ * Expands tilde (~) to the full home directory path.
+ * Supports both POSIX-style ~/ and Windows-style ~\ home-relative paths.
+ * @param p - The path to expand.
+ * @returns The expanded path.
+ */
+function expandTilde(p: string): string {
+  if (!p) {
+    return '';
+  }
+  if (p === '~') {
+    return os.homedir();
+  }
+  if (p === '~/' || p === '~\\') {
+    return os.homedir() + path.sep;
+  }
+  if (p.startsWith('~/')) {
+    return path.join(os.homedir(), p.substring(2));
+  }
+  if (p.startsWith('~\\')) {
+    const rest = p.substring(2);
+    const hasTrailingSep = rest.endsWith('/') || rest.endsWith('\\');
+    const expandedPath = path.join(
+      os.homedir(),
+      ...rest.split(/[/\\]+/).filter(Boolean),
+    );
+    return hasTrailingSep ? expandedPath + path.sep : expandedPath;
+  }
+  return p;
+}
+
+/**
+ * Expands tilde (~) and Windows-style %userprofile% to the full home directory path.
+ * @param p - The path to expand.
+ * @returns The expanded path.
+ */
+export function expandHomeDir(p: string): string {
+  if (!p) {
+    return '';
+  }
+  const userProfilePrefix = '%userprofile%';
+  const lowerPath = p.toLowerCase();
+  if (lowerPath === userProfilePrefix) {
+    return path.normalize(os.homedir());
+  }
+  if (
+    lowerPath === `${userProfilePrefix}/` ||
+    lowerPath === `${userProfilePrefix}\\`
+  ) {
+    return path.normalize(os.homedir() + path.sep);
+  }
+  if (
+    lowerPath.startsWith(`${userProfilePrefix}/`) ||
+    lowerPath.startsWith(`${userProfilePrefix}\\`)
+  ) {
+    const rest = p.substring(userProfilePrefix.length + 1);
+    const hasTrailingSep = rest.endsWith('/') || rest.endsWith('\\');
+    const expandedPath = path.join(
+      os.homedir(),
+      ...rest.split(/[/\\]+/).filter(Boolean),
+    );
+    return path.normalize(
+      hasTrailingSep ? expandedPath + path.sep : expandedPath,
+    );
+  }
+  if (lowerPath.startsWith(userProfilePrefix)) {
+    return path.normalize(os.homedir() + p.substring(userProfilePrefix.length));
+  }
+  return path.normalize(expandTilde(p));
 }
 
 /**
@@ -205,12 +301,17 @@ export function escapePath(filePath: string): string {
 /**
  * Unescapes special characters in a file path.
  * Removes backslash escaping from shell metacharacters.
+ *
+ * On Windows, backslashes are path separators, not shell escape characters
+ * (PowerShell uses backtick, cmd.exe uses caret). Skipping unescaping on
+ * win32 avoids corrupting valid absolute paths like C:\(v2)\file.txt.
  */
 export function unescapePath(filePath: string): string {
-  return filePath.replace(
-    new RegExp(`\\\\([${SHELL_SPECIAL_CHARS.source.slice(1, -1)}])`, 'g'),
-    '$1',
-  );
+  if (os.platform() === 'win32') {
+    return filePath;
+  }
+  const unescaped = filePath.replace(UNESCAPE_REGEX, '$1');
+  return unescaped;
 }
 
 /**
@@ -283,16 +384,12 @@ export function resolvePath(
   baseDir: string | undefined = process.cwd(),
   relativePath: string,
 ): string {
-  const homeDir = os.homedir();
+  const expandedPath = expandTilde(relativePath);
 
-  if (relativePath === '~') {
-    return homeDir;
-  } else if (relativePath.startsWith('~/')) {
-    return path.join(homeDir, relativePath.slice(2));
-  } else if (path.isAbsolute(relativePath)) {
-    return relativePath;
+  if (path.isAbsolute(expandedPath)) {
+    return expandedPath;
   } else {
-    return path.resolve(baseDir, relativePath);
+    return path.resolve(baseDir, expandedPath);
   }
 }
 

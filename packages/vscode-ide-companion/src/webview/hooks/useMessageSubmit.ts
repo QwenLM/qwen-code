@@ -19,6 +19,8 @@ interface UseMessageSubmitProps {
   inputFieldRef: React.RefObject<HTMLDivElement | null>;
   isStreaming: boolean;
   isWaitingForResponse: boolean;
+  editTargetTurnIndex?: number | null;
+  onSubmitted?: () => void;
   // When true, do NOT auto-attach the active editor file/selection to context
   skipAutoActiveContext?: boolean;
 
@@ -68,6 +70,8 @@ export const useMessageSubmit = ({
   inputFieldRef,
   isStreaming,
   isWaitingForResponse,
+  editTargetTurnIndex = null,
+  onSubmitted,
   skipAutoActiveContext = false,
   fileContext,
   messageHandling,
@@ -101,8 +105,11 @@ export const useMessageSubmit = ({
         return;
       }
 
-      // Handle /login command - show inline loading while extension authenticates
-      if (textToSend.trim() === '/login') {
+      // Handle /auth (and its legacy alias /login) — trigger interactive
+      // auth flow directly in the extension instead of sending the command
+      // to the agent.
+      const trimmedInput = textToSend.trim();
+      if (trimmedInput === '/auth' || trimmedInput === '/login') {
         setInputText('');
         if (inputFieldRef.current) {
           inputFieldRef.current.textContent = ZERO_WIDTH_SPACE;
@@ -112,7 +119,6 @@ export const useMessageSubmit = ({
           type: 'auth',
           data: {},
         });
-        // Show a friendly loading message in the chat while authenticating
         try {
           messageHandling.setWaitingForResponse('Authenticating Qwen Code...');
         } catch (_err) {
@@ -182,12 +188,18 @@ export const useMessageSubmit = ({
       }
 
       vscode.postMessage({
-        type: 'sendMessage',
+        type:
+          typeof editTargetTurnIndex === 'number'
+            ? 'editMessage'
+            : 'sendMessage',
         data: {
           text: textToSend,
           context: context.length > 0 ? context : undefined,
           fileContext: fileContextForMessage,
           attachments: attachedImages.length > 0 ? attachedImages : undefined,
+          ...(typeof editTargetTurnIndex === 'number'
+            ? { targetTurnIndex: editTargetTurnIndex }
+            : {}),
         },
       });
 
@@ -200,6 +212,7 @@ export const useMessageSubmit = ({
       if (clearImages) {
         clearImages();
       }
+      onSubmitted?.();
     },
     [
       inputText,
@@ -213,6 +226,8 @@ export const useMessageSubmit = ({
       skipAutoActiveContext,
       isWaitingForResponse,
       messageHandling,
+      editTargetTurnIndex,
+      onSubmitted,
     ],
   );
 

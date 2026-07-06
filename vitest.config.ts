@@ -11,6 +11,7 @@ export default defineConfig({
       'packages/channels/dingtalk',
       'packages/channels/telegram',
       'packages/channels/weixin',
+      'packages/channels/qqbot',
       'integration-tests',
       'scripts',
     ],

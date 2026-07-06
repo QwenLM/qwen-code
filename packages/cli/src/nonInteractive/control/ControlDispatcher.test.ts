@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ControlDispatcher } from './ControlDispatcher.js';
 import type { IControlContext } from './ControlContext.js';
+import { createMinimalSettings } from '../../config/settings.js';
 import type { SystemController } from './controllers/systemController.js';
 import type { StreamJsonOutputAdapter } from '../io/StreamJsonOutputAdapter.js';
 import type {
@@ -40,6 +41,7 @@ function createMockContext(debugMode: boolean = false): IControlContext {
     sessionId: 'test-session-id',
     abortSignal: abortController.signal,
     debugMode,
+    settings: createMinimalSettings(),
     permissionMode: 'default',
     sdkMcpServers: new Set<string>(),
     mcpClients: new Map(),
@@ -169,6 +171,41 @@ describe('ControlDispatcher', () => {
         response: {
           subtype: 'success',
           request_id: 'req-2',
+          response: mockResponse,
+        },
+      });
+    });
+
+    it('should route continue_last_turn request to system controller', async () => {
+      const request: CLIControlRequest = {
+        type: 'control_request',
+        request_id: 'req-continue',
+        request: {
+          subtype: 'continue_last_turn',
+        },
+      };
+
+      const mockResponse = {
+        subtype: 'continue_last_turn',
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      };
+
+      vi.mocked(mockSystemController.handleRequest).mockResolvedValue(
+        mockResponse,
+      );
+
+      await dispatcher.dispatch(request);
+
+      expect(mockSystemController.handleRequest).toHaveBeenCalledWith(
+        request.request,
+        'req-continue',
+      );
+      expect(mockContext.streamJson.send).toHaveBeenCalledWith({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: 'req-continue',
           response: mockResponse,
         },
       });

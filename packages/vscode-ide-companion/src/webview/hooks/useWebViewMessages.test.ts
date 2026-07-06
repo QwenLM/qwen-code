@@ -5,7 +5,41 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { resetConversationState } from './useWebViewMessages.js';
+import {
+  liftToolNameFromMeta,
+  resetConversationState,
+} from './useWebViewMessages.js';
+
+describe('liftToolNameFromMeta', () => {
+  it('lifts _meta.toolName onto toolCall.toolName', () => {
+    const toolCall = { _meta: { toolName: 'agent' } } as Parameters<
+      typeof liftToolNameFromMeta
+    >[0];
+    liftToolNameFromMeta(toolCall);
+    expect(toolCall?.toolName).toBe('agent');
+  });
+
+  it('does not overwrite a pre-existing toolName', () => {
+    const toolCall = {
+      toolName: 'already-set',
+      _meta: { toolName: 'agent' },
+    } as Parameters<typeof liftToolNameFromMeta>[0];
+    liftToolNameFromMeta(toolCall);
+    expect(toolCall?.toolName).toBe('already-set');
+  });
+
+  it('is a no-op when _meta is absent', () => {
+    const toolCall = { kind: 'other' } as Parameters<
+      typeof liftToolNameFromMeta
+    >[0];
+    liftToolNameFromMeta(toolCall);
+    expect(toolCall?.toolName).toBeUndefined();
+  });
+
+  it('does not crash on an undefined toolCall', () => {
+    expect(() => liftToolNameFromMeta(undefined)).not.toThrow();
+  });
+});
 
 describe('resetConversationState', () => {
   it('clears retained usage stats when a conversation is reset', () => {

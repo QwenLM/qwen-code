@@ -8,6 +8,7 @@ import {
   isScopedNpmPackage,
   resolveNpmRegistry,
   checkNpmUpdate,
+  downloadFromNpmRegistry,
 } from './npm.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { ExtensionUpdateState } from './extensionManager.js';
@@ -61,6 +62,23 @@ describe('parseNpmPackageSource', () => {
     expect(() => parseNpmPackageSource('some-package')).toThrow(
       'Invalid scoped npm package source',
     );
+  });
+
+  it('should redact URL credentials in invalid source errors', () => {
+    const source = 'https://user:token@example.com/some-package';
+
+    let message = '';
+    try {
+      parseNpmPackageSource(source);
+    } catch (error: unknown) {
+      message = String(error);
+    }
+
+    expect(message).toContain(
+      'https://***REDACTED***@example.com/some-package',
+    );
+    expect(message).not.toContain('user');
+    expect(message).not.toContain('token');
   });
 });
 
@@ -148,8 +166,14 @@ vi.mock('node:http', () => ({
   get: vi.fn(),
 }));
 
+vi.mock('tar', () => ({
+  x: vi.fn(),
+}));
+
 // We need to import https after mocking
 const https = await import('node:https');
+const http = await import('node:http');
+const tar = await import('tar');
 
 function mockNpmRegistryResponse(data: object) {
   vi.mocked(https.get).mockImplementation(
@@ -172,6 +196,119 @@ function mockNpmRegistryResponse(data: object) {
     },
   );
 }
+
+function mockNpmRegistryStatus(statusCode: number) {
+  vi.mocked(https.get).mockImplementation(
+    (_url: unknown, _options: unknown, callback: unknown) => {
+      const mockRes = {
+        statusCode,
+        headers: {},
+        on: vi.fn(),
+      };
+      if (typeof callback === 'function') {
+        callback(mockRes as never);
+      }
+      return { on: vi.fn() } as never;
+    },
+  );
+}
+
+describe('downloadFromNpmRegistry', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.createWriteStream).mockReturnValue({
+      on: vi.fn((event: string, handler: () => void) => {
+        if (event === 'finish') {
+          handler();
+        }
+      }),
+      close: vi.fn((callback: () => void) => callback()),
+    } as never);
+    vi.mocked(tar.x).mockResolvedValue(undefined);
+  });
+
+  it('redacts credentialed registry URLs in metadata request errors', async () => {
+    mockNpmRegistryStatus(404);
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'https://user:token@registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).rejects.toThrow(
+      'npm registry request failed with status 404: https://***REDACTED***@registry.example.com/@scope%2fpkg',
+    );
+  });
+
+  it('uses the HTTPS client for uppercase HTTPS tarball URLs', async () => {
+    let requestCount = 0;
+    vi.mocked(http.get).mockImplementation(() => {
+      throw new Error('wrong client');
+    });
+    vi.mocked(https.get).mockImplementation(
+      (_url: unknown, _options: unknown, callback: unknown) => {
+        requestCount += 1;
+        const mockRes =
+          requestCount === 1
+            ? {
+                statusCode: 200,
+                headers: {},
+                on: vi.fn(
+                  (event: string, handler: (data?: Buffer) => void) => {
+                    if (event === 'data') {
+                      handler(
+                        Buffer.from(
+                          JSON.stringify({
+                            'dist-tags': { latest: '1.0.0' },
+                            versions: {
+                              '1.0.0': {
+                                dist: {
+                                  tarball:
+                                    'HTTPS://registry.example.com/@scope/pkg/-/pkg-1.0.0.tgz',
+                                },
+                              },
+                            },
+                          }),
+                        ),
+                      );
+                    }
+                    if (event === 'end') {
+                      handler();
+                    }
+                  },
+                ),
+              }
+            : {
+                statusCode: 200,
+                headers: {},
+                pipe: vi.fn(),
+              };
+        if (typeof callback === 'function') {
+          callback(mockRes as never);
+        }
+        return { on: vi.fn() } as never;
+      },
+    );
+
+    await expect(
+      downloadFromNpmRegistry(
+        {
+          source: '@scope/pkg',
+          type: 'npm',
+          registryUrl: 'HTTPS://registry.example.com',
+        },
+        '/tmp/qwen-extension',
+      ),
+    ).resolves.toEqual({ version: '1.0.0', type: 'npm' });
+    expect(https.get).toHaveBeenCalledTimes(2);
+    expect(http.get).not.toHaveBeenCalled();
+  });
+});
 
 describe('checkNpmUpdate', () => {
   beforeEach(() => {
@@ -200,6 +337,29 @@ describe('checkNpmUpdate', () => {
 
     const result = await checkNpmUpdate(metadata);
     expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+  });
+
+  it('uses the HTTPS client for uppercase HTTPS registry URLs', async () => {
+    vi.mocked(http.get).mockImplementation(() => {
+      throw new Error('wrong client');
+    });
+    mockNpmRegistryResponse({
+      'dist-tags': { latest: '1.0.0' },
+      versions: { '1.0.0': { dist: { tarball: '' } } },
+    });
+
+    const metadata: ExtensionInstallMetadata = {
+      source: '@scope/pkg',
+      type: 'npm',
+      releaseTag: '1.0.0',
+      registryUrl: 'HTTPS://registry.npmjs.org',
+    };
+
+    const result = await checkNpmUpdate(metadata);
+
+    expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+    expect(https.get).toHaveBeenCalled();
+    expect(http.get).not.toHaveBeenCalled();
   });
 
   it('should report UP_TO_DATE when latest matches', async () => {

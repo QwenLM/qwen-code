@@ -9,6 +9,16 @@ import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
 
+const debugLoggerSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    error: debugLoggerSpy.error,
+  }),
+}));
+
 describe('EnhancedErrorHandler', () => {
   const fixedNow = 10_000;
   let errorHandler: EnhancedErrorHandler;
@@ -16,6 +26,7 @@ describe('EnhancedErrorHandler', () => {
   let mockRequest: GenerateContentParameters;
 
   beforeEach(() => {
+    debugLoggerSpy.error.mockReset();
     vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
     mockContext = {
       model: 'test-model',
@@ -59,6 +70,92 @@ describe('EnhancedErrorHandler', () => {
       }).toThrow(originalError);
     });
 
+    it('logs structured API diagnostics without request contents', () => {
+      const apiError = Object.assign(
+        new Error(
+          'event:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-123","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+        ),
+        { type: 'rate_limit_error' },
+      );
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        {
+          durationMs: 5000,
+          errorType: 'rate_limit_error',
+          model: 'test-model',
+          providerCode: 'Throttling.AllocationQuota',
+          providerMessage: 'Allocated quota exceeded',
+          requestId: 'req-123',
+          statusCode: 429,
+          transport: 'sse',
+        },
+      );
+      expect(JSON.stringify(debugLoggerSpy.error.mock.calls[0])).not.toContain(
+        'test prompt',
+      );
+    });
+
+    it('prefers top-level request ids before parsed provider details', () => {
+      const apiError = Object.assign(new Error('API failure'), {
+        requestID: 'req-top-level',
+        request_id: 'req-snake-case',
+        response_id: 'resp-id',
+        status: 500,
+      });
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        expect.objectContaining({
+          requestId: 'req-top-level',
+          statusCode: 500,
+        }),
+      );
+    });
+
+    it('skips empty request ids and falls back to later request id fields', () => {
+      const apiError = Object.assign(new Error('API failure'), {
+        requestID: '',
+        request_id: '',
+        response_id: 'resp-id',
+      });
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        expect.objectContaining({
+          requestId: 'resp-id',
+        }),
+      );
+    });
+
+    it('throws the original error when provider details have a null error object', () => {
+      const apiError = { error: null, message: 'API failure' };
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBe(apiError);
+    });
+
     it('should throw enhanced error message for timeout errors', () => {
       const timeoutError = new Error('Request timeout');
 
@@ -85,6 +182,27 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(stringError, mockContext, mockRequest);
       }).toThrow(stringError);
+    });
+
+    it('should redact proxy credentials before throwing request-time errors', () => {
+      const proxyError = new Error(
+        'connect ECONNREFUSED token@proxy.local:8080',
+      );
+
+      expect(() => {
+        errorHandler.handle(proxyError, mockContext, mockRequest);
+      }).toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+      expect(proxyError.message).not.toContain('token@');
+    });
+
+    it('should redact proxy credentials from string errors', () => {
+      expect(() => {
+        errorHandler.handle(
+          '407 via http://user:pass@proxy.local',
+          mockContext,
+          mockRequest,
+        );
+      }).toThrow('407 via http://<redacted>@proxy.local');
     });
 
     it('should handle null/undefined errors', () => {

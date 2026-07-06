@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
-import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
+import {
+  CompactToolGroupDisplay,
+  buildToolSummary,
+  isCollapsibleTool,
+} from './CompactToolGroupDisplay.js';
 import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 
@@ -36,7 +40,22 @@ function shellTool(
   };
 }
 
-describe('<CompactToolGroupDisplay />', () => {
+function toolCall(
+  overrides: Partial<IndividualToolCallDisplay> = {},
+): IndividualToolCallDisplay {
+  return {
+    callId: 'call-1',
+    name: 'read_file',
+    description: 'Read a.ts',
+    resultDisplay: 'file contents',
+    status: ToolCallStatus.Success,
+    confirmationDetails: undefined,
+    renderOutputAsMarkdown: false,
+    ...overrides,
+  };
+}
+
+describe('<CompactToolGroupDisplay /> — shell timeout plumbing', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
@@ -89,5 +108,163 @@ describe('<CompactToolGroupDisplay />', () => {
     // No timeout in display → legacy 3s-threshold elapsed.
     expect(lastFrame()).toContain('5s');
     expect(lastFrame()).not.toContain('timeout');
+  });
+});
+
+describe('<CompactToolGroupDisplay /> — summary label', () => {
+  it('renders semantic summary for collapsible tools', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+      toolCall({ callId: 'c3', name: 'Grep', description: 'search pattern' }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+    // CATEGORY_ORDER: search → read → list → ...
+    expect(frame).toContain('Searched 1 pattern');
+    expect(frame).toContain('read 2 files');
+  });
+
+  it('renders nothing for empty tool calls', () => {
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={[]} contentWidth={80} />,
+    );
+    expect(lastFrame()).toBe('');
+  });
+
+  it('renders semantic summary for shell commands without label', () => {
+    const tools = [
+      toolCall({
+        callId: 'c1',
+        name: 'Shell',
+        description: 'ls -la',
+      }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    expect(lastFrame()).toContain('Ran 1 command');
+  });
+});
+
+describe('buildToolSummary', () => {
+  const make = (
+    overrides: Partial<IndividualToolCallDisplay>,
+  ): IndividualToolCallDisplay => ({
+    callId: 'c1',
+    name: 'ReadFile',
+    description: 'a.ts',
+    status: ToolCallStatus.Success,
+    resultDisplay: '',
+    confirmationDetails: undefined,
+    ...overrides,
+  });
+
+  it('returns empty string for empty array', () => {
+    expect(buildToolSummary([], false)).toBe('');
+  });
+
+  it('single tool uses count format', () => {
+    expect(buildToolSummary([make({})], false)).toBe('Read 1 file');
+  });
+
+  it('single tool uses progressive verb when active', () => {
+    expect(buildToolSummary([make({})], true)).toBe('Reading 1 file');
+  });
+
+  it('multiple same-type tools use count', () => {
+    const tools = [
+      make({ callId: 'c1', description: 'a.ts' }),
+      make({ callId: 'c2', description: 'b.ts' }),
+      make({ callId: 'c3', description: 'c.ts' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 3 files');
+  });
+
+  it('mixed types joined with comma and lowercase verbs', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'Edit', description: 'b.ts' }),
+      make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
+    ];
+    // CATEGORY_ORDER: search → read → list → command → edit
+    expect(buildToolSummary(tools, false)).toBe(
+      'Read 1 file, ran 1 command, edited 1 file',
+    );
+  });
+
+  it('respects CATEGORY_ORDER (read before command)', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'Shell', description: 'ls' }),
+    ];
+    const result = buildToolSummary(tools, false);
+    expect(result).toBe('Read 1 file, ran 1 command');
+  });
+
+  it('unknown tool names fall to other category', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'UnknownTool', description: 'something' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Used 1 tool');
+  });
+
+  it('mixed group with count per category', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+      make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
+  });
+
+  it('legacy display names map to correct categories', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'SearchFiles', description: 'pattern' }),
+      make({ callId: 'c2', name: 'ReadFolder', description: '/src' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe(
+      'Searched 1 pattern, listed 1 directory',
+    );
+  });
+});
+
+describe('isCollapsibleTool', () => {
+  it('returns true for read/search/list tools', () => {
+    expect(isCollapsibleTool('ReadFile')).toBe(true);
+    expect(isCollapsibleTool('Grep')).toBe(true);
+    expect(isCollapsibleTool('Glob')).toBe(true);
+    expect(isCollapsibleTool('ListFiles')).toBe(true);
+    expect(isCollapsibleTool('Read File')).toBe(true);
+    expect(isCollapsibleTool('Read File(s)')).toBe(true);
+    expect(isCollapsibleTool('Read Directory')).toBe(true);
+  });
+
+  it('returns false for mutation/command/agent tools', () => {
+    expect(isCollapsibleTool('Shell')).toBe(false);
+    expect(isCollapsibleTool('Edit')).toBe(false);
+    expect(isCollapsibleTool('WriteFile')).toBe(false);
+    expect(isCollapsibleTool('Agent')).toBe(false);
+    expect(isCollapsibleTool('Workflow')).toBe(false);
+    expect(isCollapsibleTool('NotebookEdit')).toBe(false);
+  });
+
+  it('returns false for unknown tool names', () => {
+    expect(isCollapsibleTool('CustomMcpTool')).toBe(false);
+    expect(isCollapsibleTool('unknown')).toBe(false);
+  });
+
+  it('handles legacy display names from ToolDisplayNamesMigration', () => {
+    // Legacy search tools → collapsible
+    expect(isCollapsibleTool('SearchFiles')).toBe(true);
+    expect(isCollapsibleTool('FindFiles')).toBe(true);
+    // Legacy list tool → collapsible
+    expect(isCollapsibleTool('ReadFolder')).toBe(true);
+    // Legacy agent tool → non-collapsible
+    expect(isCollapsibleTool('Task')).toBe(false);
+    // Legacy todo tool → non-collapsible
+    expect(isCollapsibleTool('TodoWrite')).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ export const MarkdownCommandDefSchema = z.object({
   frontmatter: z
     .object({
       description: z.string().optional(),
+      'argument-hint': z.string().optional(),
       when_to_use: z.string().optional(),
       'disable-model-invocation': z.boolean().optional(),
     })

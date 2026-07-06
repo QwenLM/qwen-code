@@ -3,6 +3,48 @@
 This file provides guidance to Qwen Code when working with code in this
 repository.
 
+## Working Principles
+
+### Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+**(This is the principle we care about most.)**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
+simplify.
+
+_Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
+
+### Core Infrastructure Is Maintainer-Only (triage gate, two-tier rule)
+
+Core modules — `packages/core/src/**`, `packages/*/src/auth/**`,
+`packages/*/src/providers/**`, `packages/*/src/models/**`,
+`packages/*/src/config/**`, `packages/*/src/tools/**`,
+`packages/*/src/services/**`, cross-package changes — are the architectural
+backbone. External PRs touching them face a two-tier gate (maintainer-authored
+PRs are exempt):
+
+1. **Large-scope changes (500+ changed lines in core, additions +
+   deletions combined) → hard block.**
+   Skip evaluation entirely — the maintainer exemption above is the sole
+   exception. Large-scale core refactors must be maintainer-initiated. Breadth alone is not size — a low-risk sweep that
+   touches 10+ files but changes a line or two each is escalated to a
+   maintainer for awareness and otherwise judged under Tier 2's
+   100%-confidence bar, not auto-rejected on file count.
+2. **Small-scope changes → gate may evaluate, but must be 100% confident.**
+   Any doubt at all → escalate to maintainer. "The direction looks correct"
+   is not confidence. The gate must name every downstream consumer; if it
+   cannot, escalate.
+
+**When in doubt, escalate. Better to wrongly escalate than to wrongly
+approve.**
+
 ## Common Commands
 
 ### Building
@@ -101,8 +143,11 @@ npm run preflight  # Full check: clean → install → format → lint → build
   between packages
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
+- **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for
+  `.ts` files in `packages/core` and `packages/cli` (enforced by ESLint). Existing camelCase files are allowlisted in `eslint.legacy-filenames.mjs`; rename opportunistically when touching them, updating all imports in the same commit (note: renames lose `git blame` history).
+- **Comments**: Default to none. Add only when _why_ is non-obvious; don't delete existing ones as cleanup.
 - **Commits**: Conventional Commits (e.g., `feat(cli): Add --json flag`)
-- **Node.js**: Development requires `~20.19.0`; production requires `>=20`
+- **Node.js**: Development and production both require `>=22` (Ink 7 + React 19.2 requirement)
 
 ## Development Guidelines
 
@@ -158,8 +203,13 @@ applicable.
 
 - **PR description**: explain the motivation and changes in prose. Avoid
   referencing file names or function names.
-- **Reviewer Test Plan**: describe behaviors a reviewer should verify and what
-  to expect, not scripted test commands.
+- **Reviewer Test Plan** (template section): describe behaviors a reviewer
+  should verify and what to expect, not scripted test commands. Use **How to
+  verify** for reproduction steps; Before/After for TUI evidence when
+  applicable.
+- **Line wrapping**: do not hard-wrap the PR body at a fixed column width.
+  GitHub renders single newlines as `<br>`, so a wrapped description displays
+  as a narrow column. Write each paragraph or list item as one long line.
 
 ## Project Directories
 

@@ -250,6 +250,18 @@ export const useToolCalls = () => {
     setToolCalls(new Map());
   }, []);
 
+  const rewindToolCallsToTimestamp = useCallback((cutoffTimestamp: number) => {
+    setToolCalls((prevToolCalls) => {
+      const next = new Map<string, ToolCallData>();
+      for (const [id, toolCall] of prevToolCalls) {
+        if ((toolCall.timestamp ?? 0) < cutoffTimestamp) {
+          next.set(id, toolCall);
+        }
+      }
+      return next;
+    });
+  }, []);
+
   /**
    * Get in-progress tool calls
    */
@@ -272,5 +284,6 @@ export const useToolCalls = () => {
     completedToolCalls,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
   };
 };

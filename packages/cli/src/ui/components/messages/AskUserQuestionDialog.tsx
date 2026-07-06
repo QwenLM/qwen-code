@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   type ToolAskUserQuestionConfirmationDetails,
@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { TextInput } from '../shared/TextInput.js';
 import { t } from '../../../i18n/index.js';
 
@@ -38,6 +39,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   const [customInputValues, setCustomInputValues] = useState<
     Record<number, string>
   >({});
+  const customInputValuesRef = useRef<Record<number, string>>({});
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [multiSelectedOptions, setMultiSelectedOptions] = useState<
     Record<number, string[]>
@@ -66,7 +68,9 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     currentQuestion &&
     selectedIndex === currentQuestion.options.length;
 
-  const currentCustomInputValue = customInputValues[currentQuestionIndex] ?? '';
+  const getCustomInputValue = (idx: number) =>
+    customInputValuesRef.current[idx] ?? customInputValues[idx] ?? '';
+  const currentCustomInputValue = getCustomInputValue(currentQuestionIndex);
   const isCustomInputAnswer =
     !isSubmitTab &&
     currentQuestion &&
@@ -81,7 +85,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     const q = confirmationDetails.questions[idx];
     if (q?.multiSelect) {
       const selections = [...(multiSelectedOptions[idx] ?? [])];
-      const customValue = (customInputValues[idx] ?? '').trim();
+      const customValue = getCustomInputValue(idx).trim();
       if (customInputChecked[idx] && customValue) {
         selections.push(customValue);
       }
@@ -118,28 +122,38 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
   };
 
-  const handleMultiSelectSubmit = () => {
+  const getCurrentMultiSelectAnswer = (
+    includeCustomInput = customInputChecked[currentQuestionIndex],
+    inputValue = currentCustomInputValue,
+  ): string | undefined => {
     if (!currentQuestion) return;
     const selections = [...(multiSelectedOptions[currentQuestionIndex] ?? [])];
-    const customValue = currentCustomInputValue.trim();
-    if (customInputChecked[currentQuestionIndex] && customValue) {
+    const customValue = inputValue.trim();
+    if (includeCustomInput && customValue) {
       selections.push(customValue);
     }
-    if (selections.length === 0) return;
-
-    selectAndAdvance(selections.join(', '));
+    return selections.length > 0 ? selections.join(', ') : undefined;
   };
 
-  const handleCustomInputSubmit = () => {
-    const trimmedValue = currentCustomInputValue.trim();
+  const handleMultiSelectSubmit = () => {
+    const answer = getCurrentMultiSelectAnswer();
+    if (!answer) return;
+
+    selectAndAdvance(answer);
+  };
+
+  const handleCustomInputSubmit = (inputValue = currentCustomInputValue) => {
+    const trimmedValue = inputValue.trim();
 
     if (isMultiSelect) {
-      // Toggle custom input checked state
-      if (!trimmedValue) return;
+      // Toggle custom input checked state, then submit/advance if non-empty
       setCustomInputChecked((prev) => ({
         ...prev,
-        [currentQuestionIndex]: !prev[currentQuestionIndex],
+        [currentQuestionIndex]: trimmedValue.length > 0,
       }));
+      if (trimmedValue) {
+        selectAndAdvance(getCurrentMultiSelectAnswer(true, inputValue)!);
+      }
       return;
     }
 
@@ -150,18 +164,29 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   // Handle navigation and selection
   useKeypress(
     (key) => {
-      // When custom input is focused, still allow up/down navigation and escape
+      // When the custom-input TextInput is focused, we must NOT match bare
+      // letter keys (k/j) for option navigation — those characters are being
+      // typed into the input. Only honor unambiguous shortcuts: arrow keys
+      // and the readline-style Ctrl+P/Ctrl+N. TextInput itself doesn't bind
+      // those, so there's no double-fire.
       if (isCustomInputSelected) {
-        if (key.name === 'up') {
+        const isOptionUp = key.name === 'up' || (key.ctrl && key.name === 'p');
+        const isOptionDown =
+          key.name === 'down' || (key.ctrl && key.name === 'n');
+        if (isOptionUp) {
           setSelectedIndex(Math.max(0, selectedIndex - 1));
           return;
         }
-        if (key.name === 'down') {
+        if (isOptionDown) {
           setSelectedIndex(Math.min(totalOptions - 1, selectedIndex + 1));
           return;
         }
         if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
           void onConfirm(ToolConfirmationOutcome.Cancel);
+          return;
+        }
+        if (key.name === 'return') {
+          handleCustomInputSubmit();
           return;
         }
         return;
@@ -185,19 +210,19 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         return;
       }
 
-      // Option navigation (up/down arrows)
-      if (key.name === 'up') {
+      // Option navigation (up/down arrows and Ctrl+P/N)
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex(Math.max(0, selectedIndex - 1));
         return;
       }
-      if (key.name === 'down') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex(Math.min(totalOptions - 1, selectedIndex + 1));
         return;
       }
 
       // Number key selection
-      const numKey = parseInt(input || '', 10);
-      if (!isNaN(numKey) && numKey >= 1 && numKey <= totalOptions) {
+      const numKey = input && /^[1-9]\d*$/.test(input) ? Number(input) : NaN;
+      if (Number.isSafeInteger(numKey) && numKey <= totalOptions) {
         const targetIndex = numKey - 1;
         setSelectedIndex(targetIndex);
 
@@ -462,7 +487,13 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 initialCursorOffset={currentCustomInputValue.length}
                 onChange={(value: string) => {
                   const oldValue =
-                    customInputValues[currentQuestionIndex] ?? '';
+                    customInputValuesRef.current[currentQuestionIndex] ??
+                    customInputValues[currentQuestionIndex] ??
+                    '';
+                  customInputValuesRef.current = {
+                    ...customInputValuesRef.current,
+                    [currentQuestionIndex]: value,
+                  };
                   if (isMultiSelect && value !== oldValue) {
                     setCustomInputChecked((prevChecked) => ({
                       ...prevChecked,

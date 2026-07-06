@@ -5,6 +5,7 @@
  */
 
 import type {
+  CompactionThresholds,
   CompressionStatus,
   MCPServerConfig,
   ThoughtSummary,
@@ -90,16 +91,42 @@ export interface SummaryProps {
 
 export interface HistoryItemBase {
   text?: string; // Text content for user/gemini/info/error messages
+  /** Display-only flags that do not affect canonical history semantics. */
+  display?: {
+    /**
+     * If true, the item is kept in history for turn mapping but not
+     * rendered in the restored transcript. Set by ui.history.collapseOnResume
+     * when resuming a session.
+     */
+    suppressOnRestore?: boolean;
+    /**
+     * Identifies special display-only items, like the summary row added
+     * when history is collapsed.
+     */
+    kind?: 'collapse-summary';
+  };
 }
 
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  promptId?: string;
+  /**
+   * Whether this UI history item represents a user turn that reached the model.
+   *
+   * NOTE: This is set explicitly by slash command processing because visible
+   * slash-command invocations may be handled locally without entering API
+   * history. Regular user messages leave this undefined and are classified by
+   * the legacy lexical fallback in isRealUserTurn. New user-item paths with
+   * ambiguous model-history behavior must set this explicitly.
+   */
+  sentToModel?: boolean;
 };
 
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
@@ -110,6 +137,7 @@ export type HistoryItemGeminiContent = HistoryItemBase & {
 export type HistoryItemGeminiThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
+  durationMs?: number;
 };
 
 export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
@@ -145,6 +173,13 @@ export type HistoryItemRetryCountdown = HistoryItemBase & {
   text: string;
 };
 
+// Dim, tip-style disclosure shown when the vision bridge runs (success or
+// cancellation). Failures use the prominent ERROR variant instead.
+export type HistoryItemVisionNotice = HistoryItemBase & {
+  type: 'vision_notice';
+  text: string;
+};
+
 export type HistoryItemAbout = HistoryItemBase & {
   type: 'about';
   systemInfo: {
@@ -162,6 +197,7 @@ export type HistoryItemAbout = HistoryItemBase & {
     memoryUsage: string;
     baseUrl?: string;
     gitCommit?: string;
+    lspStatus?: string;
   };
 };
 
@@ -175,12 +211,51 @@ export type HistoryItemStats = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Structured payload rendered by `/diff`. Kept as plain data (not React nodes)
+ * so the same model can feed both the Ink-based interactive display and the
+ * plain-text non-interactive / ACP output.
+ */
+export interface DiffRenderRow {
+  filename: string;
+  /** `undefined` for binary files; a line count (lower bound if `truncated`)
+   *  otherwise. */
+  added?: number;
+  /** `undefined` for binary and untracked files. */
+  removed?: number;
+  isBinary: boolean;
+  isUntracked: boolean;
+  /** `true` when the file is removed from the worktree relative to HEAD.
+   *  Mutually exclusive with `isUntracked`. */
+  isDeleted: boolean;
+  /** Only set for untracked text files that exceeded the read cap. */
+  truncated: boolean;
+}
+
+export interface DiffRenderModel {
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  rows: DiffRenderRow[];
+  /** `filesCount - rows.length` when the per-file cap truncated the listing. */
+  hiddenCount: number;
+}
+
+export type HistoryItemDiffStats = HistoryItemBase & {
+  type: 'diff_stats';
+  model: DiffRenderModel;
+};
+
 export type HistoryItemModelStats = HistoryItemBase & {
   type: 'model_stats';
 };
 
 export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
+};
+
+export type HistoryItemSkillStats = HistoryItemBase & {
+  type: 'skill_stats';
 };
 
 export type HistoryItemQuit = HistoryItemBase & {
@@ -208,6 +283,19 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+};
+
+/**
+ * Short LLM-generated label summarizing a preceding tool batch. Emitted after
+ * the batch completes and consumed by compact-mode rendering to replace the
+ * generic "Tool × N" line with something like "Searched in auth/". Also
+ * surfaces to SDK clients as a `tool_use_summary` stream message.
+ */
+export type HistoryItemToolUseSummary = HistoryItemBase & {
+  type: 'tool_use_summary';
+  summary: string;
+  /** Tool callIds this summary describes. Used to locate the target tool_group. */
+  precedingToolUseIds: string[];
 };
 
 export type HistoryItemNotification = HistoryItemBase & {
@@ -242,6 +330,8 @@ export interface ToolDefinition {
 
 export interface SkillDefinition {
   name: string;
+  description?: string;
+  level?: string;
 }
 
 export type HistoryItemToolsList = HistoryItemBase & {
@@ -292,6 +382,17 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
 
 // --- Context Usage types ---
 
+export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
+
+/**
+ * Alias for the core compaction-thresholds shape. Re-exported under the
+ * CLI-friendly name so consumers in this package don't pull on the core
+ * module path; structurally identical to `CompactionThresholds`. The
+ * `readonly` modifiers on the core type are immaterial for UI rendering,
+ * but kept implicitly through the alias.
+ */
+export type ContextThresholds = CompactionThresholds;
+
 export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -300,7 +401,20 @@ export interface ContextCategoryBreakdown {
   skills: number;
   messages: number;
   freeSpace: number;
+  /**
+   * Distance from the auto-compaction threshold to the window edge.
+   * Derived from `thresholds.auto` (= `contextWindowSize - auto`); retained
+   * so the legacy three-segment progress bar in `ContextUsage.tsx` keeps
+   * working without a separate code path.
+   */
   autocompactBuffer: number;
+  /** Three-tier ladder used by auto-compaction (warn / auto / hard) plus the effective window. */
+  thresholds: ContextThresholds;
+  /**
+   * Which tier the current usage sits in. `safe` is below `warn`; `warn` /
+   * `auto` / `hard` mean `totalTokens` has crossed the corresponding tier.
+   */
+  currentTier: ContextTier;
 }
 
 export interface ContextToolDetail {
@@ -451,6 +565,34 @@ export type HistoryItemDoctor = HistoryItemBase & {
   summary: { pass: number; warn: number; fail: number };
 };
 
+export type GoalStatusKind =
+  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
+
+export const TERMINAL_GOAL_STATUS_KINDS = [
+  'achieved',
+  'aborted',
+  'failed',
+] as const satisfies readonly GoalStatusKind[];
+
+export function isTerminalGoalStatusKind(
+  kind: GoalStatusKind,
+): kind is (typeof TERMINAL_GOAL_STATUS_KINDS)[number] {
+  return TERMINAL_GOAL_STATUS_KINDS.includes(
+    kind as (typeof TERMINAL_GOAL_STATUS_KINDS)[number],
+  );
+}
+
+export type HistoryItemGoalStatus = HistoryItemBase & {
+  type: 'goal_status';
+  kind: GoalStatusKind;
+  condition: string;
+  /** Set for active, progress, and terminal goal states. */
+  iterations?: number;
+  setAt?: number;
+  durationMs?: number;
+  lastReason?: string;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -468,12 +610,15 @@ export type HistoryItemWithoutId =
   | HistoryItemWarning
   | HistoryItemSuccess
   | HistoryItemRetryCountdown
+  | HistoryItemVisionNotice
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
+  | HistoryItemToolUseSummary
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemSkillStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -492,7 +637,9 @@ export type HistoryItemWithoutId =
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage
-  | HistoryItemDoctor;
+  | HistoryItemDoctor
+  | HistoryItemDiffStats
+  | HistoryItemGoalStatus;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -508,6 +655,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  SKILL_STATS = 'skill_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
@@ -521,6 +669,10 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  NOTIFICATION = 'notification',
+  DIFF_STATS = 'diff_stats',
+  GOAL_STATUS = 'goal_status',
+  VISION_NOTICE = 'vision_notice',
 }
 
 export interface InsightProgressProps {
@@ -534,7 +686,11 @@ export interface InsightProgressProps {
 // Simplified message structure for internal feedback
 export type Message =
   | {
-      type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
+      type:
+        | MessageType.INFO
+        | MessageType.WARNING
+        | MessageType.ERROR
+        | MessageType.USER;
       content: string; // Renamed from text for clarity in this context
       timestamp: Date;
     }
@@ -556,6 +712,7 @@ export type Message =
         memoryUsage: string;
         baseUrl?: string;
         gitCommit?: string;
+        lspStatus?: string;
       };
       content?: string; // Optional content, not really used for ABOUT
     }
@@ -577,6 +734,11 @@ export type Message =
     }
   | {
       type: MessageType.TOOL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
+      type: MessageType.SKILL_STATS;
       timestamp: Date;
       content?: string;
     }
@@ -617,6 +779,11 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. Applies to this submitted prompt (and its
+   * tool-call continuations) only — no session change, no persistence.
+   */
+  modelOverride?: string;
 }
 
 /**

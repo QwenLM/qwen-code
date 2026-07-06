@@ -182,7 +182,7 @@ export class FileCommandLoader implements ICommandLoader {
         for (const cmdPath of commandsPaths) {
           dirs.push({
             path: cmdPath,
-            extensionName: ext.name,
+            extensionName: ext.displayName ?? ext.name,
           });
         }
       }
@@ -355,6 +355,7 @@ export class FileCommandLoader implements ICommandLoader {
           ? validDef.frontmatter.description
           : undefined,
       whenToUse: validDef.frontmatter?.when_to_use,
+      argumentHint: validDef.frontmatter?.['argument-hint'],
       disableModelInvocation:
         validDef.frontmatter?.['disable-model-invocation'],
     };

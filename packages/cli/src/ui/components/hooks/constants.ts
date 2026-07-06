@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { HooksConfigSource, HookEventName } from '@qwen-code/qwen-code-core';
+import {
+  HooksConfigSource,
+  HookEventName,
+  hookEventSupportsMatcher,
+} from '@qwen-code/qwen-code-core';
 import type { HookExitCode, HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 
@@ -39,7 +43,16 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 2, description: t('show stderr to model immediately') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.PostToolBatch]: [
+      { code: 0, description: t('stdout shown in transcript mode (ctrl+o)') },
+      { code: 2, description: t('show stderr to model immediately') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
     [HookEventName.Notification]: [
+      { code: 0, description: t('stdout/stderr not shown') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.InstructionsLoaded]: [
       { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
@@ -49,6 +62,16 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
         code: 2,
         description: t(
           'block processing, erase original prompt, and show stderr to user only',
+        ),
+      },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.UserPromptExpansion]: [
+      { code: 0, description: t('stdout shown to Qwen') },
+      {
+        code: 2,
+        description: t(
+          'block expanded prompt submission and show stderr to user only',
         ),
       },
       { code: 'Other', description: t('show stderr to user only') },
@@ -90,8 +113,42 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
         description: t('show stderr to user only but continue with compaction'),
       },
     ],
+    [HookEventName.PostCompact]: [
+      { code: 0, description: t('stdout/stderr not shown') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.StopFailure]: [
+      {
+        code: 0,
+        description: t('fire-and-forget; exit status is ignored'),
+      },
+      {
+        code: 'Other',
+        description: t('fire-and-forget; exit status is ignored'),
+      },
+    ],
     [HookEventName.PermissionRequest]: [
       { code: 0, description: t('use hook decision if provided') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.PermissionDenied]: [
+      { code: 0, description: t('stdout/stderr not shown') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.TodoCreated]: [
+      { code: 0, description: t('allow todo creation') },
+      {
+        code: 2,
+        description: t('block todo creation and show reason to model'),
+      },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.TodoCompleted]: [
+      { code: 0, description: t('allow todo completion') },
+      {
+        code: 2,
+        description: t('block todo completion and show reason to model'),
+      },
       { code: 'Other', description: t('show stderr to user only') },
     ],
   };
@@ -106,8 +163,13 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PreToolUse]: t('Before tool execution'),
     [HookEventName.PostToolUse]: t('After tool execution'),
     [HookEventName.PostToolUseFailure]: t('After tool execution fails'),
+    [HookEventName.PostToolBatch]: t('After all tool calls in a batch resolve'),
     [HookEventName.Notification]: t('When notifications are sent'),
+    [HookEventName.InstructionsLoaded]: t('When instruction files are loaded'),
     [HookEventName.UserPromptSubmit]: t('When the user submits a prompt'),
+    [HookEventName.UserPromptExpansion]: t(
+      'When a slash command expands into a prompt',
+    ),
     [HookEventName.SessionStart]: t('When a new session is started'),
     [HookEventName.Stop]: t('Right before Qwen Code concludes its response'),
     [HookEventName.SubagentStart]: t(
@@ -117,10 +179,19 @@ export function getHookShortDescription(eventName: string): string {
       'Right before a subagent concludes its response',
     ),
     [HookEventName.PreCompact]: t('Before conversation compaction'),
+    [HookEventName.PostCompact]: t('After conversation compaction'),
+    [HookEventName.StopFailure]: t(
+      'When the turn ends due to an API error (fires instead of Stop)',
+    ),
     [HookEventName.SessionEnd]: t('When a session is ending'),
     [HookEventName.PermissionRequest]: t(
       'When a permission dialog is displayed',
     ),
+    [HookEventName.PermissionDenied]: t(
+      'When a tool call is denied before a permission dialog is displayed',
+    ),
+    [HookEventName.TodoCreated]: t('When a new todo item is created'),
+    [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),
   };
   return descriptions[eventName] || '';
 }
@@ -140,11 +211,20 @@ export function getHookDescription(eventName: string): string {
     [HookEventName.PostToolUseFailure]: t(
       'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
     ),
+    [HookEventName.PostToolBatch]: t(
+      'Input to command is JSON with tool_calls, an array of resolved tool calls containing tool_name, tool_input, tool_use_id, and tool_response.',
+    ),
     [HookEventName.Notification]: t(
       'Input to command is JSON with notification message and type.',
     ),
+    [HookEventName.InstructionsLoaded]: t(
+      'Input to command is JSON with file_path, memory_type, load_reason, and optional trigger_file_path and parent_file_path.',
+    ),
     [HookEventName.UserPromptSubmit]: t(
       'Input to command is JSON with original user prompt text.',
+    ),
+    [HookEventName.UserPromptExpansion]: t(
+      'Input to command is JSON with command_name, command_args, and expanded prompt text.',
     ),
     [HookEventName.SessionStart]: t(
       'Input to command is JSON with session start source.',
@@ -161,8 +241,23 @@ export function getHookDescription(eventName: string): string {
     [HookEventName.PreCompact]: t(
       'Input to command is JSON with compaction details.',
     ),
+    [HookEventName.PostCompact]: t(
+      'Input to command is JSON with trigger (manual/auto) and compact_summary. Output is ignored for control purposes.',
+    ),
+    [HookEventName.StopFailure]: t(
+      'Input to command is JSON with error (rate_limit, authentication_failed, billing_error, invalid_request, server_error, max_output_tokens, unknown) and optional error_details. Fire-and-forget: output and exit status are ignored.',
+    ),
     [HookEventName.PermissionRequest]: t(
       'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+    ),
+    [HookEventName.PermissionDenied]: t(
+      'Input to command is JSON with tool_name, tool_input, tool_use_id, and reason.',
+    ),
+    [HookEventName.TodoCreated]: t(
+      'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
+    ),
+    [HookEventName.TodoCompleted]: t(
+      'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
     ),
   };
   return descriptions[eventName] || '';
@@ -184,19 +279,13 @@ export function getTranslatedSourceDisplayMap(): Record<
   };
 }
 
-/**
- * List of hook events to display in the UI
- * Automatically synced with HookEventName enum from core.
- * Note: Order follows the enum definition order. If UI presentation order
- * needs to be different (e.g., grouped by lifecycle phase), consider using
- * an explicit sorted array instead. Current enum order is acceptable for display.
- */
 export const DISPLAY_HOOK_EVENTS: HookEventName[] =
   Object.values(HookEventName);
 
-/**
- * Create empty hook event display info
- */
+export function supportsMatchers(eventName: HookEventName): boolean {
+  return hookEventSupportsMatcher(eventName);
+}
+
 export function createEmptyHookEventInfo(
   eventName: HookEventName,
 ): HookEventDisplayInfo {
@@ -205,6 +294,6 @@ export function createEmptyHookEventInfo(
     shortDescription: getHookShortDescription(eventName),
     description: getHookDescription(eventName),
     exitCodes: getHookExitCodes(eventName),
-    configs: [],
+    matcherGroups: [],
   };
 }

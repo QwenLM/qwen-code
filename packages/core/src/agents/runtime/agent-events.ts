@@ -35,6 +35,7 @@ export type AgentEvent =
   | 'tool_output_update'
   | 'tool_waiting_approval'
   | 'usage_metadata'
+  | 'external_message'
   | 'finish'
   | 'error'
   | 'status_change';
@@ -51,6 +52,8 @@ export enum AgentEventType {
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
+  /** External user message injected mid-run (e.g. via send_message). */
+  EXTERNAL_MESSAGE = 'external_message',
   FINISH = 'finish',
   ERROR = 'error',
   STATUS_CHANGE = 'status_change',
@@ -149,6 +152,13 @@ export interface AgentApprovalRequestEvent {
   callId: string;
   name: string;
   description: string;
+  /**
+   * Original tool-call arguments. Use this — not `confirmationDetails`
+   * — when forwarding to a permission policy, since
+   * `confirmationDetails` is the UI-rendering shape (e.g. `fileDiff`,
+   * `command`) which differs from the raw tool arguments.
+   */
+  args: Record<string, unknown>;
   confirmationDetails: Omit<ToolCallConfirmationDetails, 'onConfirm'> & {
     type: ToolCallConfirmationDetails['type'];
   };
@@ -156,6 +166,15 @@ export interface AgentApprovalRequestEvent {
     outcome: ToolConfirmationOutcome,
     payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
   ) => Promise<void>;
+  timestamp: number;
+}
+
+export interface AgentExternalMessageEvent {
+  subagentId: string;
+  /** Source kind for observability; messages are parent send_message text. */
+  kind?: 'message' | 'notification';
+  /** Raw message text (without any framing prefix). */
+  text: string;
   timestamp: number;
 }
 
@@ -204,6 +223,7 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
+  [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;

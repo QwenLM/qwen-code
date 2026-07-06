@@ -123,6 +123,41 @@ describe('useMessageHandling', () => {
     expect(assistantMessages[1].timestamp).toBeGreaterThan(toolCallTimestamp);
   });
 
+  it('keeps thinking after the user message when streamStart shares the same timestamp', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.addMessage({
+        role: 'user',
+        content: 'edited prompt',
+        timestamp: 1_000,
+      });
+    });
+
+    act(() => {
+      rendered.api.startStreaming(1_000);
+    });
+
+    act(() => {
+      rendered.api.appendThinkingChunk('thinking');
+    });
+
+    const sorted = [...rendered.api.messages].sort(
+      (a, b) => a.timestamp - b.timestamp,
+    );
+
+    expect(sorted.map((message) => message.role)).toEqual([
+      'user',
+      'thinking',
+      'assistant',
+    ]);
+  });
+
   it.fails(
     'keeps every assistant segment of a turn before a user message that was sent between segments (#3273)',
     () => {

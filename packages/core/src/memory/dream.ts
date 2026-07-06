@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getAutoMemoryMetadataPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
@@ -23,28 +24,18 @@ export interface AutoMemoryDreamResult {
   systemMessage?: string;
 }
 
-async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
-  const metadataPath = getAutoMemoryMetadataPath(projectRoot);
-  try {
-    const content = await fs.readFile(metadataPath, 'utf-8');
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    metadata.lastDreamAt = now.toISOString();
-    await fs.writeFile(
-      metadataPath,
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
-    );
-  } catch {
-    // Best-effort metadata bump.
-  }
-}
-
 async function runDreamByAgent(
   projectRoot: string,
   config: Config,
+  abortSignal?: AbortSignal,
+  options: { suppressChatRecording?: boolean } = {},
 ): Promise<AutoMemoryDreamResult> {
-  const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+  const result = await planManagedAutoMemoryDreamByAgent(
+    config,
+    projectRoot,
+    abortSignal,
+    { suppressChatRecording: options.suppressChatRecording },
+  );
 
   // Infer which topics were touched from the file paths
   const touchedTopics = new Set<AutoMemoryType>();
@@ -72,6 +63,12 @@ export async function runManagedAutoMemoryDream(
   projectRoot: string,
   now = new Date(),
   config?: Config,
+  abortSignal?: AbortSignal,
+  options: {
+    trigger?: 'auto' | 'manual';
+    recordMetadata?: boolean;
+    suppressChatRecording?: boolean;
+  } = {},
 ): Promise<AutoMemoryDreamResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
   const t0 = Date.now();
@@ -82,18 +79,39 @@ export async function runManagedAutoMemoryDream(
     );
   }
 
-  const agentResult = await runDreamByAgent(projectRoot, config);
+  const agentResult = await runDreamByAgent(projectRoot, config, abortSignal, {
+    suppressChatRecording: options.suppressChatRecording,
+  });
+  // Cancel-aware ordering:
+  //   1. If aborted before this point, return the agent's partial result
+  //      WITHOUT rebuilding the index — index rebuild can be expensive
+  //      and re-running a cancelled dream cycle next time will rebuild
+  //      against the latest topic files anyway.
+  //   2. If still alive, rebuild the index (informational, powers
+  //      recall) — but only when topics actually changed.
+  // Scheduler-gating metadata (`lastDreamAt`, `lastDreamSessionId`,
+  // `lastDreamTouchedTopics`, `lastDreamStatus`) is intentionally NOT
+  // written here — `MemoryManager.runDream` owns the atomic
+  // status-flip + metadata-write sequence to close the cancel race
+  // window where a writeFile finishing concurrently with a cancel
+  // could persist gating metadata for a record the manager is about
+  // to mark `'cancelled'`.
+  if (abortSignal?.aborted) return agentResult;
   if (agentResult.touchedTopics.length > 0) {
-    await bumpMetadata(projectRoot, now);
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
-
-  await updateDreamMetadataResult(projectRoot, now, agentResult.touchedTopics);
+  if (options.recordMetadata) {
+    await updateDreamMetadataResult(
+      projectRoot,
+      now,
+      agentResult.touchedTopics,
+    );
+  }
 
   logMemoryDream(
     config,
     new MemoryDreamEvent({
-      trigger: 'auto',
+      trigger: options.trigger ?? 'auto',
       status: agentResult.touchedTopics.length > 0 ? 'updated' : 'noop',
       deduped_entries: agentResult.dedupedEntries,
       touched_topics: agentResult.touchedTopics,
@@ -121,10 +139,10 @@ async function updateDreamMetadataResult(
       metadata.lastDreamSessionId = sessionId;
       metadata.recentSessionIdsSinceDream = [];
     }
-    await fs.writeFile(
+    await atomicWriteFile(
       metadataPath,
       `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
+      { encoding: 'utf-8' },
     );
   } catch {
     // Best-effort metadata bump.

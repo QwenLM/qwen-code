@@ -106,7 +106,6 @@ describe('<StatsDisplay />', () => {
             total: 43234,
             cached: 500,
             thoughts: 100,
-            tool: 50,
           },
         }),
         'gemini-2.5-flash': mainOnly({
@@ -117,7 +116,6 @@ describe('<StatsDisplay />', () => {
             total: 150000000,
             cached: 10000,
             thoughts: 2000,
-            tool: 1000,
           },
         }),
       },
@@ -156,7 +154,6 @@ describe('<StatsDisplay />', () => {
             total: 250,
             cached: 50,
             thoughts: 0,
-            tool: 0,
           },
         }),
       },
@@ -239,7 +236,6 @@ describe('<StatsDisplay />', () => {
               total: 200,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
           }),
         },
@@ -400,7 +396,6 @@ describe('<StatsDisplay />', () => {
         total: tokens * 2,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
     });
 
@@ -438,7 +433,6 @@ describe('<StatsDisplay />', () => {
               total: mainCore.tokens.total + echoerCore.tokens.total,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
             bySource: {
               [MAIN_SOURCE]: mainCore,
@@ -472,7 +466,6 @@ describe('<StatsDisplay />', () => {
               total: 80,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
             bySource: {
               researcher: coreMetrics(1, 40),
@@ -506,7 +499,6 @@ describe('<StatsDisplay />', () => {
               total: 60,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
             bySource: {
               alpha: alphaCore,

@@ -10,16 +10,17 @@ import { getFileName } from '../utils/webviewUtils.js';
 import { showDiffCommand } from '../../commands/index.js';
 import {
   findLeftGroupOfChatWebview,
-  ensureLeftGroupOfChatWebview,
+  findRightGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
-import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
 import {
+  crawlCache,
+  FileDiscoveryService,
   FileSearchFactory,
   type FileSearch,
-} from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
-import * as crawlCache from '@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js';
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
 
 /**
  * File message handler
@@ -104,13 +105,29 @@ export class FileMessageHandler extends BaseMessageHandler {
   }
 
   private clearFileSearchCache(rootPath: string): void {
+    // Drop the instance from the Map first so any concurrent reader sees a
+    // miss, then dispose() the prior holder so its worker_threads worker
+    // (if RecursiveFileSearch promoted past the in-thread threshold)
+    // doesn't accumulate inside the long-running extension host. Fire-and-
+    // forget — dispose is best-effort.
+    const previous = this.fileSearchInstances.get(rootPath);
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    void previous?.dispose?.().catch(() => {
+      // Already gone or never had a worker; nothing actionable here.
+    });
     crawlCache.clear();
     console.log(
       '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
     );
+  }
+
+  private toZeroBasedEditorPosition(value: string | undefined): number {
+    if (!value) {
+      return 0;
+    }
+    return Math.max(0, parseInt(value, 10) - 1);
   }
 
   private createWatcherForFolder(folder: vscode.WorkspaceFolder): void {
@@ -171,6 +188,11 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
         this.fileWatchers.clear();
         foldersChangeListener.dispose();
+        for (const instance of this.fileSearchInstances.values()) {
+          void instance.dispose?.().catch(() => {});
+        }
+        this.fileSearchInstances.clear();
+        this.fileSearchInitializing.clear();
       },
     };
   }
@@ -539,12 +561,12 @@ export class FileMessageHandler extends BaseMessageHandler {
       }
 
       const [, path, lineStr, columnStr] = match;
-      const lineNumber = lineStr ? parseInt(lineStr, 10) - 1 : 0; // VS Code uses 0-based line numbers
-      const columnNumber = columnStr ? parseInt(columnStr, 10) - 1 : 0; // VS Code uses 0-based column numbers
+      const lineNumber = this.toZeroBasedEditorPosition(lineStr);
+      const columnNumber = this.toZeroBasedEditorPosition(columnStr);
 
       // Convert to absolute path if relative
       let absolutePath = path;
-      if (!path.startsWith('/') && !path.match(/^[a-zA-Z]:/)) {
+      if (shouldResolveAgainstWorkspace(path)) {
         // Relative path - resolve against workspace
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (workspaceFolder) {
@@ -673,16 +695,17 @@ export class FileMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      // Find or ensure left group of chat webview
-      let targetViewColumn = findLeftGroupOfChatWebview();
-      if (targetViewColumn === undefined) {
-        targetViewColumn = await ensureLeftGroupOfChatWebview();
-      }
+      // Find the nearest editor group to the left or right of the chat webview.
+      // Fall back to ViewColumn.Beside when neither neighbor exists or the webview is missing.
+      const targetViewColumn =
+        findLeftGroupOfChatWebview() ??
+        findRightGroupOfChatWebview() ??
+        vscode.ViewColumn.Beside;
 
-      // Open as readonly document in the left group and focus it (single click should be enough)
+      // Open as readonly document in the selected neighboring group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, {
-        viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
+        viewColumn: targetViewColumn,
         preview: false,
         preserveFocus: false,
       });

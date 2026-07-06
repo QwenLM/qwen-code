@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.15.2",
+  "version": "0.19.6",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -30,7 +30,6 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:qwen-code.chatView.sidebar",
-    "onView:qwen-code.chatView.secondary",
     "onCommand:qwen-code.openChat",
     "onCommand:qwen-code.focusChat",
     "onCommand:qwen-code.newConversation",
@@ -48,16 +47,7 @@
         {
           "id": "qwen-code-sidebar",
           "title": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "!qwen-code:supportsSecondarySidebar"
-        }
-      ],
-      "secondarySidebar": [
-        {
-          "id": "qwen-code-secondary",
-          "title": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "qwen-code:supportsSecondarySidebar"
+          "icon": "assets/sidebar-icon.svg"
         }
       ]
     },
@@ -67,17 +57,7 @@
           "type": "webview",
           "id": "qwen-code.chatView.sidebar",
           "name": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "!qwen-code:supportsSecondarySidebar"
-        }
-      ],
-      "qwen-code-secondary": [
-        {
-          "type": "webview",
-          "id": "qwen-code.chatView.secondary",
-          "name": "Qwen Code",
-          "icon": "assets/sidebar-icon.svg",
-          "when": "qwen-code:supportsSecondarySidebar"
+          "icon": "assets/sidebar-icon.svg"
         }
       ]
     },
@@ -235,6 +215,18 @@
           ],
           "default": "china",
           "markdownDescription": "Region for Coding Plan. _(Only used when Provider is `coding-plan`)_"
+        },
+        "qwen-code.dotIndicator": {
+          "order": 3,
+          "type": "boolean",
+          "default": true,
+          "description": "Show a colored dot on the tab icon when a task completes (orange) or needs your attention (blue) while the tab is hidden."
+        },
+        "qwen-code.notifications": {
+          "order": 4,
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications with sound when a task completes (at least 20 seconds) or needs your attention, while you are not actively viewing the Qwen Code panel."
         }
       }
     },
@@ -279,13 +271,14 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/markdown-it": "^14.1.2",
-    "@types/node": "20.x",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
+    "@vscode/vsce": "^3.9.2",
     "autoprefixer": "^10.4.22",
     "esbuild": "^0.25.3",
     "eslint": "^9.25.1",
@@ -298,9 +291,11 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
+    "@qwen-code/sdk": "*",
     "@qwen-code/webui": "*",
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "cors": "^2.8.5",
+    "dotenv": "^17.1.0",
     "express": "^5.1.0",
     "markdown-it": "^14.1.0",
     "react": "^19.2.4",

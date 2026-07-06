@@ -8,14 +8,17 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import { Storage } from '../../config/storage.js';
-import type { Config } from '../../config/config.js';
-import type { ContentGenerator } from '../../core/contentGenerator.js';
+import {
+  APPROVAL_MODES,
+  type ApprovalMode,
+  type Config,
+} from '../../config/config.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { runSideQuery } from '../../utils/sideQuery.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
-import { getResponseText } from '../../utils/partUtils.js';
 import { ArenaEventEmitter, ArenaEventType } from './arena-events.js';
 import type { AgentSpawnConfig, Backend, DisplayMode } from '../index.js';
 import { detectBackend, DISPLAY_MODE } from '../index.js';
@@ -1069,6 +1072,7 @@ export class ArenaManager {
       inProcess: {
         agentName: model.modelId,
         initialTask: this.arenaConfig?.task,
+        approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
             systemPrompt: getCoreSystemPrompt(
@@ -1682,55 +1686,29 @@ export class ArenaManager {
     );
   }
 
-  private getAgentSummaryGenerator(
-    agentId: string,
-  ): ContentGenerator | undefined {
-    if (this.backend?.type !== DISPLAY_MODE.IN_PROCESS) {
-      return undefined;
-    }
-
-    return (this.backend as InProcessBackend).getAgentContentGenerator(agentId);
-  }
-
   private async generateAgentApproachSummary(
     summaryInput: ArenaSummaryInput,
   ): Promise<string> {
     const { result } = summaryInput;
-    const generator = this.getAgentSummaryGenerator(result.agentId);
-    if (!generator) {
-      return buildFallbackApproachSummary(result);
-    }
-
-    const abortController = new AbortController();
-    const timeout = setTimeout(
-      () => abortController.abort(),
-      ARENA_SUMMARY_TIMEOUT_MS,
-    );
 
     try {
-      const response = await generator.generateContent(
-        {
-          model: result.model.modelId,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: this.buildAgentApproachSummaryPrompt(summaryInput),
-                },
-              ],
-            },
-          ],
-          config: {
-            abortSignal: abortController.signal,
-            thinkingConfig: { includeThoughts: false },
+      const response = await runSideQuery(this.config, {
+        purpose: 'arena-approach-summary',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: this.buildAgentApproachSummaryPrompt(summaryInput),
+              },
+            ],
           },
-        },
-        'arena_approach_summary',
-      );
+        ],
+        abortSignal: AbortSignal.timeout(ARENA_SUMMARY_TIMEOUT_MS),
+      });
 
       return (
-        parseApproachSummaryResponse(getResponseText(response) ?? '')?.trim() ||
+        parseApproachSummaryResponse(response.text)?.trim() ||
         buildFallbackApproachSummary(result)
       );
     } catch (error) {
@@ -1739,8 +1717,6 @@ export class ArenaManager {
         error,
       );
       return buildFallbackApproachSummary(result);
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
@@ -1829,6 +1805,15 @@ export class ArenaManager {
       wasRepoInitialized: false,
     };
   }
+}
+
+function toApprovalMode(mode: string | undefined): ApprovalMode | undefined {
+  if (!mode) {
+    return undefined;
+  }
+  return APPROVAL_MODES.includes(mode as ApprovalMode)
+    ? (mode as ApprovalMode)
+    : undefined;
 }
 
 function truncateForPrompt(text: string, maxChars: number): string {

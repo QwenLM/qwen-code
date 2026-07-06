@@ -6,6 +6,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { atomicWriteFile } from './atomicFileWrite.js';
 
 export interface ProjectSummaryInfo {
   hasHistory: boolean;
@@ -85,7 +86,9 @@ export async function saveWelcomeBackRestartChoice(
     summaryFingerprint,
   };
 
-  await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
+  await atomicWriteFile(statePath, JSON.stringify(state, null, 2), {
+    encoding: 'utf-8',
+  });
 }
 
 export async function clearWelcomeBackState(): Promise<void> {

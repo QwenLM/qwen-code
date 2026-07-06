@@ -9,9 +9,8 @@ import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
-import { theme } from '../../semantic-colors.js';
-import { t } from '../../../i18n/index.js';
+import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
+import { SHELL_COMMAND_NAME } from '../../constants.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
@@ -21,7 +20,7 @@ interface CompactToolGroupDisplayProps {
 }
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
-function getOverallStatus(
+export function getOverallStatus(
   toolCalls: IndividualToolCallDisplay[],
 ): ToolCallStatus {
   if (toolCalls.some((t) => t.status === ToolCallStatus.Confirming))
@@ -48,10 +47,6 @@ function getActiveTool(
   );
 }
 
-// Pull the configured shell timeout off an AnsiOutputDisplay result so
-// ToolElapsedTime can surface it inline (matches the expanded
-// ToolMessage path). Non-ansi resultDisplay → undefined → legacy
-// quiet-then-elapsed behavior.
 function getShellTimeoutMs(
   tool: IndividualToolCallDisplay,
 ): number | undefined {
@@ -66,6 +61,177 @@ function getShellTimeoutMs(
   return undefined;
 }
 
+type ToolCategory =
+  | 'read'
+  | 'edit'
+  | 'write'
+  | 'search'
+  | 'list'
+  | 'command'
+  | 'agent'
+  | 'other';
+
+const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
+  [ToolDisplayNames.READ_FILE]: 'read',
+  [ToolDisplayNames.EDIT]: 'edit',
+  [ToolDisplayNames.WRITE_FILE]: 'write',
+  [ToolDisplayNames.NOTEBOOK_EDIT]: 'edit',
+  [ToolDisplayNames.GREP]: 'search',
+  [ToolDisplayNames.GLOB]: 'search',
+  [ToolDisplayNames.LS]: 'list',
+  [ToolDisplayNames.SHELL]: 'command',
+  [SHELL_COMMAND_NAME]: 'command',
+  [ToolDisplayNames.AGENT]: 'agent',
+  [ToolDisplayNames.WORKFLOW]: 'agent',
+  [ToolDisplayNames.SEND_MESSAGE]: 'agent',
+  'Read File': 'read',
+  'Read File(s)': 'read',
+  'Read Directory': 'list',
+  // Legacy display names (keys from ToolDisplayNamesMigration)
+  SearchFiles: 'search',
+  FindFiles: 'search',
+  ReadFolder: 'list',
+  Task: 'agent',
+  TodoWrite: 'other',
+};
+
+type CategoryTemplate = {
+  pastVerb: string;
+  activeVerb: string;
+  singular: string;
+  plural: string;
+};
+
+const CATEGORY_TEMPLATES: Record<ToolCategory, CategoryTemplate> = {
+  read: {
+    pastVerb: 'Read',
+    activeVerb: 'Reading',
+    singular: 'file',
+    plural: 'files',
+  },
+  edit: {
+    pastVerb: 'Edited',
+    activeVerb: 'Editing',
+    singular: 'file',
+    plural: 'files',
+  },
+  write: {
+    pastVerb: 'Wrote',
+    activeVerb: 'Writing',
+    singular: 'file',
+    plural: 'files',
+  },
+  search: {
+    pastVerb: 'Searched',
+    activeVerb: 'Searching',
+    singular: 'pattern',
+    plural: 'patterns',
+  },
+  list: {
+    pastVerb: 'Listed',
+    activeVerb: 'Listing',
+    singular: 'directory',
+    plural: 'directories',
+  },
+  command: {
+    pastVerb: 'Ran',
+    activeVerb: 'Running',
+    singular: 'command',
+    plural: 'commands',
+  },
+  agent: {
+    pastVerb: 'Ran',
+    activeVerb: 'Running',
+    singular: 'agent',
+    plural: 'agents',
+  },
+  other: {
+    pastVerb: 'Used',
+    activeVerb: 'Using',
+    singular: 'tool',
+    plural: 'tools',
+  },
+};
+
+const CATEGORY_ORDER: ToolCategory[] = [
+  'search',
+  'read',
+  'list',
+  'command',
+  'edit',
+  'write',
+  'agent',
+  'other',
+];
+
+const COLLAPSIBLE_CATEGORIES: ReadonlySet<ToolCategory> = new Set([
+  'read',
+  'search',
+  'list',
+]);
+
+function getToolCategory(toolName: string): ToolCategory {
+  return TOOL_NAME_TO_CATEGORY[toolName] ?? 'other';
+}
+
+/**
+ * Whether a tool is information-gathering (read/search/list) vs mutation/action.
+ *
+ * Used at two decision points:
+ * 1. ToolGroupMessage — partitions collapsible tools into a summary line
+ * 2. ToolMessage.shouldCollapseResult — hides completed text/ANSI output
+ *
+ * Adding a category here suppresses individual rendering AND result output
+ * for completed tools of that type. Only add categories whose results are
+ * disposable (file contents, search hits) — never agent/command results.
+ */
+export function isCollapsibleTool(toolName: string): boolean {
+  return COLLAPSIBLE_CATEGORIES.has(getToolCategory(toolName));
+}
+
+/**
+ * Build a semantic summary line from a batch of tool calls.
+ *
+ * Single tool  → "Read 1 file" / "Ran 1 command"
+ * Multi  same  → "Read 3 files"
+ * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
+ *
+ * Uses past tense when all tools are done, present progressive when active.
+ */
+export function buildToolSummary(
+  toolCalls: IndividualToolCallDisplay[],
+  isActive: boolean,
+): string {
+  if (toolCalls.length === 0) return '';
+
+  // Group by category and count
+  const counts = new Map<ToolCategory, number>();
+
+  for (const tool of toolCalls) {
+    const cat = getToolCategory(tool.name);
+    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+  }
+
+  const parts: string[] = [];
+  for (const cat of CATEGORY_ORDER) {
+    const count = counts.get(cat);
+    if (!count) continue;
+
+    const template = CATEGORY_TEMPLATES[cat];
+    const verb = isActive ? template.activeVerb : template.pastVerb;
+    const lower = parts.length > 0;
+    const v = lower ? verb.toLowerCase() : verb;
+
+    if (count === 1) {
+      parts.push(`${v} 1 ${template.singular}`);
+    } else {
+      parts.push(`${v} ${count} ${template.plural}`);
+    }
+  }
+
+  return parts.join(', ');
+}
+
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
 > = ({ toolCalls, contentWidth }) => {
@@ -73,54 +239,19 @@ export const CompactToolGroupDisplay: React.FC<
 
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
-
-  const isShellCommand = toolCalls.some(
-    (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
-  );
-  const hasPending = !toolCalls.every(
-    (t) => t.status === ToolCallStatus.Success,
-  );
-
-  const borderColor = isShellCommand
-    ? theme.ui.symbol
-    : hasPending
-      ? theme.status.warning
-      : theme.border.default;
-
-  // Take only the first line of description to prevent multi-line shell scripts
-  // from expanding the compact view (wrap="truncate-end" only handles width overflow,
-  // not literal \n characters in the content)
-  const activeToolDescription = activeTool.description
-    ? activeTool.description.split('\n')[0]
-    : '';
+  const isActive =
+    overallStatus === ToolCallStatus.Executing ||
+    overallStatus === ToolCallStatus.Pending ||
+    overallStatus === ToolCallStatus.Confirming;
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      width={contentWidth}
-      borderDimColor={hasPending}
-      borderColor={borderColor}
-      gap={0}
-    >
-      {/* Status line: icon + tool name + count + description + elapsed */}
+    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end">
-            <Text bold>{activeTool.name}</Text>
-            {toolCalls.length > 1 ? (
-              <Text color={theme.text.secondary}>
-                {' × '}
-                {toolCalls.length}
-              </Text>
-            ) : null}
-            {activeToolDescription ? (
-              <Text color={theme.text.secondary}>
-                {'  '}
-                {activeToolDescription}
-              </Text>
-            ) : null}
+          <Text wrap="truncate-end" bold>
+            {buildToolSummary(toolCalls, isActive)}
+            {isActive && <Text key="ellipsis">…</Text>}
           </Text>
         </Box>
         <ToolElapsedTime
@@ -129,11 +260,6 @@ export const CompactToolGroupDisplay: React.FC<
           timeoutMs={getShellTimeoutMs(activeTool)}
         />
       </Box>
-
-      {/* Hint line */}
-      <Text color={theme.text.secondary}>
-        {t('Press Ctrl+O to show full tool output')}
-      </Text>
     </Box>
   );
 };

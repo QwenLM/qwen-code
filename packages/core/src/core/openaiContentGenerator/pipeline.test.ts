@@ -5,17 +5,27 @@
  */
 
 import type { Mock } from 'vitest';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { ErrorHandler, PipelineConfig } from './types.js';
-import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
+import {
+  ContentGenerationPipeline,
+  StreamContentError,
+  StreamInactivityTimeoutError,
+} from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
+import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
-import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
+import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -148,6 +158,7 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           model: 'test-model',
           messages: mockMessages,
+          stream: false,
           temperature: 0.7,
           top_p: 0.9,
           max_tokens: 1000,
@@ -212,6 +223,219 @@ describe('ContentGenerationPipeline', () => {
           model: 'override-model',
         }),
         expect.any(Object),
+      );
+    });
+
+    it('should apply provider request context overrides', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        splitToolMedia: true,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: true,
+        }),
+      );
+    });
+
+    it('should let provider request context overrides take precedence over content generator config', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockContentGeneratorConfig.splitToolMedia = true;
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        splitToolMedia: false,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: false,
+        }),
+      );
+    });
+
+    it('should default splitToolMedia to true when neither provider override nor content generator config sets it (issue #4876)', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      // Neither the provider nor the content generator config sets
+      // splitToolMedia — it must default to true so tool-returned images are
+      // moved out of the spec-violating `role: "tool"` message (#4876).
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({});
+      mockContentGeneratorConfig.splitToolMedia = undefined;
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: true,
+        }),
+      );
+    });
+
+    it('should pass configured tool result content format to the converter', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({});
+      mockContentGeneratorConfig.toolResultContentFormat = 'string';
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          toolResultContentFormat: 'string',
+        }),
+      );
+    });
+
+    it('should let provider tool result content format overrides take precedence', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockContentGeneratorConfig.toolResultContentFormat = 'parts';
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        toolResultContentFormat: 'string',
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          toolResultContentFormat: 'string',
+        }),
       );
     });
 
@@ -377,15 +601,31 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it('should override enable_thinking when thinkingConfig disables it', async () => {
-      // Arrange — provider injects enable_thinking: true via extra_body,
-      // but request explicitly disables thinking
+      // Arrange — provider injects enable_thinking: true via extra_body
+      // (e.g. user configured `enableThinking: true` via setup wizard,
+      // see provider-config.ts), but request explicitly disables thinking.
+      // DashScope hostname + qwen model name are both required: the gate
+      // is hostname + model-name to avoid leaking the qwen-specific
+      // `enable_thinking` field to non-qwen routings (off-DashScope, or
+      // GLM/DeepSeek on the same DashScope hostname).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
       (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
         ...req,
         enable_thinking: true, // Simulates extra_body injection
       }));
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -506,6 +746,665 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(true);
     });
 
+    it('emits thinking:disabled on DeepSeek hostname when includeThoughts is false', async () => {
+      // DeepSeek V4+ defaults thinking.type to 'enabled' — just stripping
+      // the effort knob keeps thinking on, leaking latency/cost into side
+      // queries. Verify the explicit disable signal is emitted.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest next' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+    });
+
+    it('emits thinking:disabled on DeepSeek hostname when reasoning is configured to false', async () => {
+      // Config-level opt-out should also disable DeepSeek thinking, not
+      // just remove the effort knob.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-v4-pro',
+        reasoning: false,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'main');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+    });
+
+    it('does NOT emit thinking:disabled on a non-DeepSeek hostname', async () => {
+      // The disable shape is DeepSeek-specific. Pushing it at strict
+      // OpenAI-compat backends could trip an unknown-key 400.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toBeUndefined();
+    });
+
+    it('does NOT emit thinking:disabled on self-hosted DeepSeek (model-name fallback only)', async () => {
+      // Mirror of the round-7 reasoning_effort decision: the broader
+      // model-name detection covers self-hosted DeepSeek for content
+      // flattening, but the V4 thinking param is a wire-shape that
+      // self-hosted infra (sglang/vllm) may not accept. Hostname-only.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-sglang.example.com:8000/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toBeUndefined();
+    });
+
+    it('emits enable_thinking:false on DashScope hostname when includeThoughts is false', async () => {
+      // Regression for #4501: qwen3 hybrid models (e.g. qwen3.5-flash)
+      // default to thinking-on. Provider buildRequest never auto-injects
+      // `enable_thinking`, so a previous guarded `'enable_thinking' in typed`
+      // check never fired and side-queries burned reasoning tokens (24-95x
+      // output bloat in production). The disable must be emitted explicitly.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      // Provider passes the request through unchanged — simulates the
+      // common case where the user has not configured
+      // `extra_body.enable_thinking` (so the field never appears on the
+      // wire body unless we add it here).
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false on DashScope hostname when reasoning is configured to false', async () => {
+      // Config-level opt-out (`reasoning: false`) should also disable
+      // qwen3 thinking, mirroring the DeepSeek pair above.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+        reasoning: false,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'main');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false on QWEN_OAUTH with the default coder-model', async () => {
+      // QWEN_OAUTH is the default auth flow for first-time users and
+      // ships with `model: 'coder-model'` (DEFAULT_QWEN_MODEL in
+      // config/models.ts — aliased to Qwen 3.6 Plus hybrid). The string
+      // doesn't start with `qwen`, so the gate must special-case it;
+      // otherwise the exact regression that #4501 fixes (side-queries
+      // burning reasoning tokens on the default flow) remains live.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'https://some-oauth-issued-endpoint.example/v1',
+        model: 'coder-model',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'coder-model',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hi' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false on internal alibaba-inc.com hostname', async () => {
+      // Internal Alibaba domains proxy to DashScope-compatible APIs and
+      // are treated as DashScope by design (provider/dashscope.ts:75-78).
+      // Cover the internal-origin path explicitly so a future tightening
+      // of the hostname rules does not silently drop coverage for
+      // internal users.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://gateway.alibaba-inc.com/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hi' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('does NOT emit enable_thinking on a non-DashScope hostname', async () => {
+      // `enable_thinking` is a qwen-specific extension. Pushing it at a
+      // strict OpenAI-compatible backend could trip an unknown-key 400
+      // and would also pollute logs with a meaningless field. Mirror of
+      // the DeepSeek negative test above.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('disables qwen thinking via chat_template_kwargs on a non-DashScope endpoint (vLLM/SGLang)', async () => {
+      // Self-hosted OpenAI-compatible servers render the chat template
+      // server-side and read the thinking switch from `chat_template_kwargs`,
+      // silently ignoring a top-level `enable_thinking`. A qwen model on such
+      // an endpoint must therefore get the switch nested, not top-level — and
+      // any top-level `enable_thinking: true` a provider preset injected via
+      // extra_body must be stripped so it can't contradict the opt-out.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true, // Simulates extra_body injection
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('disables coder-model thinking via chat_template_kwargs on a non-DashScope endpoint', async () => {
+      // `coder-model` is the QWEN_OAUTH default, but a user can point it at a
+      // self-hosted endpoint. The `model === 'coder-model'` arm must reach the
+      // non-DashScope chat_template_kwargs path just like a `qwen*` model.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'coder-model',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'coder-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('merges enable_thinking into pre-existing chat_template_kwargs on a non-DashScope endpoint', async () => {
+      // The non-DashScope path spreads any existing `chat_template_kwargs`
+      // before appending `enable_thinking: false`. Guard the merge so a future
+      // refactor can't silently drop user-configured kwargs.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        chat_template_kwargs: { apply_chat_template: true },
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({
+        apply_chat_template: true,
+        enable_thinking: false,
+      });
+    });
+
+    it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
+      // DashScope's compatible-mode endpoint routes multiple model families
+      // (qwen3, GLM, DeepSeek). Hostname alone is not enough — GLM uses
+      // `extra_body.thinking.enabled` and DeepSeek-on-DashScope uses
+      // `thinking: { type: 'disabled' }`, so sending `enable_thinking` is
+      // at best a no-op and at worst forwarded upstream and rejected.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('gates on the wire model, not config: qwen config + non-qwen request.model does NOT emit', async () => {
+      // buildRequest ships `context.model` (= request.model || config.model).
+      // A qwen *config* with a non-qwen *request* model must gate on the
+      // request model — otherwise the qwen-only field leaks to the non-qwen
+      // routing that is actually on the wire (e.g. GLM rejecting it upstream).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5', // request-level override to a non-qwen wire model
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('gates on the wire model, not config: non-qwen config + qwen request.model emits false', async () => {
+      // The mirror direction: a non-qwen *config* with a qwen *request* model
+      // must still emit the disable signal, since the wire model is qwen and
+      // would otherwise keep thinking-on (the #4501 regression).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash', // request-level override to a qwen wire model
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false when baseUrl is unset (DashScope default)', async () => {
+      // `isDashScopeProvider` treats a missing baseUrl as DashScope
+      // (`dashscope.ts:49` returns true for `!baseUrl`). A fresh install
+      // that hasn't run the setup wizard hits this path. All other
+      // positive tests above explicitly set baseUrl, so pin this
+      // implicit-default branch separately to detect future tightening
+      // of the `!baseUrl` early-return.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      delete (mockContentGeneratorConfig as { baseUrl?: string }).baseUrl;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
     it('should handle errors and log them', async () => {
       // Arrange
       const request: GenerateContentParameters = {
@@ -530,6 +1429,33 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should redact proxy credentials before request errors reach the error handler', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const testError = new Error(
+        'connect ECONNREFUSED token@proxy.local:8080',
+      );
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
+
+      await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+        'connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
+
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'connect ECONNREFUSED <redacted>@proxy.local:8080',
+        }),
+        expect.any(Object),
+        request,
+      );
+      expect(testError.message).not.toContain('token@');
+    });
+
     it('should pass abort signal to OpenAI client when provided', async () => {
       const abortController = new AbortController();
       const request: GenerateContentParameters = {
@@ -548,10 +1474,38 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, 'test-id');
 
-      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({ signal: abortController.signal }),
+      // The pipeline wraps the caller's signal in a per-request child
+      // to isolate OpenAI SDK listener leaks, so the SDK receives a
+      // child AbortSignal, not the original.
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal).not.toBe(abortController.signal);
+    });
+
+    it('should propagate parent abort to SDK child signal', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      let capturedSignal: AbortSignal | undefined;
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal: AbortSignal }) => {
+          capturedSignal = opts.signal;
+          abortController.abort();
+          return { choices: [{ message: { content: 'ok' } }] };
+        },
       );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      await pipeline.execute(request, 'test-id');
+      expect(capturedSignal!.aborted).toBe(true);
     });
   });
 
@@ -633,7 +1587,7 @@ describe('ContentGenerationPipeline', () => {
           stream_options: { include_usage: true },
         }),
         expect.objectContaining({
-          signal: undefined,
+          signal: expect.any(AbortSignal),
         }),
       );
     });
@@ -725,17 +1679,18 @@ describe('ContentGenerationPipeline', () => {
       );
 
       // Assert
-      // The stream should handle the error internally - errors during iteration don't propagate to the consumer
-      // Instead, they are handled internally by the pipeline
+      // The error propagates to the consumer via the async generator;
+      // errorHandler.handle() is also called internally by the pipeline.
       const results = [];
+      let caughtError: unknown;
       try {
         for await (const result of resultGenerator) {
           results.push(result);
         }
       } catch (error) {
-        // This is expected - the error should propagate from the stream processing
-        expect(error).toBe(testError);
+        caughtError = error;
       }
+      expect(caughtError).toBe(testError);
 
       expect(results).toHaveLength(0); // No results due to error
       expect(mockErrorHandler.handle).toHaveBeenCalledWith(
@@ -743,6 +1698,73 @@ describe('ContentGenerationPipeline', () => {
         expect.any(Object),
         request,
       );
+    });
+
+    it('should redact proxy credentials from stream creation errors', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const testError = new Error('407 via http://user:pass@proxy.local');
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockRejectedValue(testError);
+
+      await expect(
+        pipeline.executeStream(request, userPromptId),
+      ).rejects.toThrow('407 via http://<redacted>@proxy.local');
+
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: '407 via http://<redacted>@proxy.local',
+        }),
+        expect.any(Object),
+        request,
+      );
+      expect(testError.message).not.toContain('user:pass');
+    });
+
+    it('should redact proxy credentials before stream errors reach the error handler', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const testError = new Error(
+        'connect ECONNREFUSED token@proxy.local:8080',
+      );
+
+      const mockStream = {
+        [Symbol.asyncIterator]: () => ({
+          next: vi.fn().mockRejectedValue(testError),
+        }),
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'connect ECONNREFUSED <redacted>@proxy.local:8080',
+        }),
+        expect.any(Object),
+        request,
+      );
+      expect(testError.message).not.toContain('token@');
     });
 
     it('should throw StreamContentError when stream chunk contains error_finish', async () => {
@@ -790,6 +1812,45 @@ describe('ContentGenerationPipeline', () => {
       expect(mockConverter.convertOpenAIChunkToGemini).not.toHaveBeenCalled();
     });
 
+    it('should redact proxy credentials from StreamContentError messages', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            choices: [
+              {
+                delta: {
+                  content: 'connect ECONNREFUSED token@proxy.local:8080',
+                },
+                finish_reason: 'error_finish',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
     it('should pass abort signal to OpenAI client for streaming requests', async () => {
       const abortController = new AbortController();
       const request: GenerateContentParameters = {
@@ -820,10 +1881,112 @@ describe('ContentGenerationPipeline', () => {
         // Consume stream
       }
 
-      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({ signal: abortController.signal }),
+      // Per-request child signal isolates SDK listener leaks
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal).not.toBe(abortController.signal);
+    });
+
+    it('should abort child signal after stream is fully consumed', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Hello' }, finish_reason: 'stop' }],
+          };
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
       );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const sdkSignal = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][1]?.signal as AbortSignal;
+      expect(sdkSignal.aborted).toBe(false);
+
+      for await (const _result of resultGenerator) {
+        // Consume stream
+      }
+
+      expect(sdkSignal.aborted).toBe(true);
+    });
+
+    it('should abort child signal when consumer breaks early', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'a' }, finish_reason: null }],
+          };
+          yield {
+            id: 'chunk-2',
+            choices: [{ delta: { content: 'b' }, finish_reason: 'stop' }],
+          };
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const sdkSignal = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][1]?.signal as AbortSignal;
+
+      for await (const _result of resultGenerator) {
+        break;
+      }
+
+      expect(sdkSignal.aborted).toBe(true);
+    });
+
+    it('should abort child signal when SDK create() throws', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      let capturedSignal: AbortSignal | undefined;
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal: AbortSignal }) => {
+          capturedSignal = opts.signal;
+          throw new Error('network failure');
+        },
+      );
+
+      await expect(
+        pipeline.executeStream(request, 'test-id'),
+      ).rejects.toThrow();
+
+      expect(capturedSignal!.aborted).toBe(true);
     });
 
     it('should merge finishReason and usageMetadata from separate chunks', async () => {
@@ -1777,6 +2940,914 @@ describe('ContentGenerationPipeline', () => {
       // Should only yield the final response (empty ones are filtered)
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalGeminiResponse);
+    });
+  });
+
+  describe('openaiRequestCaptureContext integration', () => {
+    it('forwards the provider-enhanced request to the active capture', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+        created: 0,
+        model: 'test-model',
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      // Provider injects extra_body and metadata, mimicking real DashScope behavior.
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { thinking: { type: 'enabled' } },
+        metadata: { user_id: 'abc' },
+      }));
+
+      let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+      await openaiRequestCaptureContext.run(
+        (built) => {
+          captured = built;
+        },
+        () => pipeline.execute(request, 'p'),
+      );
+
+      expect(captured).toBeDefined();
+      // The captured request must be the same object passed to the SDK.
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        captured,
+        expect.anything(),
+      );
+      expect(captured).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: mockMessages,
+          extra_body: { thinking: { type: 'enabled' } },
+          metadata: { user_id: 'abc' },
+        }),
+      );
+    });
+
+    it('captures the streaming request including stream/stream_options', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const fakeStream = (async function* () {
+        // empty stream
+      })();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        fakeStream,
+      );
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { enable_thinking: true },
+      }));
+
+      let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+      await openaiRequestCaptureContext.run(
+        (built) => {
+          captured = built;
+        },
+        async () => {
+          const stream = await pipeline.executeStream(request, 'p');
+          for await (const _ of stream) {
+            // drain
+          }
+        },
+      );
+
+      expect(captured).toBeDefined();
+      expect(captured).toEqual(
+        expect.objectContaining({
+          stream: true,
+          stream_options: { include_usage: true },
+          extra_body: { enable_thinking: true },
+        }),
+      );
+    });
+
+    it('isolates concurrent captures', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+        created: 0,
+        model: 'test-model',
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      let n = 0;
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { call_index: ++n },
+      }));
+
+      const runOne = async () => {
+        let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+        await openaiRequestCaptureContext.run(
+          (built) => {
+            captured = built;
+          },
+          () => pipeline.execute(request, 'p'),
+        );
+        return captured;
+      };
+
+      const [a, b] = await Promise.all([runOne(), runOne()]);
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+      // Each call's capture must have received its own object —
+      // the outer AsyncLocalStorage stores must not bleed across awaits.
+      const aExtra = (a as unknown as { extra_body: { call_index: number } })
+        .extra_body;
+      const bExtra = (b as unknown as { extra_body: { call_index: number } })
+        .extra_body;
+      expect(aExtra).not.toEqual(bExtra);
+    });
+  });
+
+  describe('stream inactivity timeout', () => {
+    // A stream whose `next()` is gated by the test: it stays pending until
+    // `push()` / `end()` is called, letting us simulate a silent (stalled)
+    // stream under fake timers.
+    function gatedStream() {
+      let resolveNext:
+        | ((r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => void)
+        | null = null;
+      let rejectNext: ((err: unknown) => void) | null = null;
+      const buffered: OpenAI.Chat.ChatCompletionChunk[] = [];
+      let ended = false;
+      let failure: { error: unknown } | null = null;
+      let returned = false;
+      const deliver = (r: IteratorResult<OpenAI.Chat.ChatCompletionChunk>) => {
+        const r2 = resolveNext;
+        resolveNext = null;
+        rejectNext = null;
+        r2?.(r);
+      };
+      return {
+        push(chunk: OpenAI.Chat.ChatCompletionChunk) {
+          if (resolveNext) deliver({ done: false, value: chunk });
+          else buffered.push(chunk);
+        },
+        error(error: unknown) {
+          failure = { error };
+          const reject = rejectNext;
+          resolveNext = null;
+          rejectNext = null;
+          reject?.(error);
+        },
+        end() {
+          ended = true;
+          if (resolveNext) deliver({ done: true, value: undefined as never });
+        },
+        wasReturned() {
+          return returned;
+        },
+        stream: {
+          [Symbol.asyncIterator]() {
+            return {
+              next(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+                if (buffered.length) {
+                  return Promise.resolve({
+                    done: false,
+                    value: buffered.shift()!,
+                  });
+                }
+                if (failure) {
+                  return Promise.reject(failure.error);
+                }
+                if (ended) {
+                  return Promise.resolve({
+                    done: true,
+                    value: undefined as never,
+                  });
+                }
+                return new Promise((res, rej) => {
+                  resolveNext = res;
+                  rejectNext = rej;
+                });
+              },
+              return(): Promise<
+                IteratorResult<OpenAI.Chat.ChatCompletionChunk>
+              > {
+                returned = true;
+                ended = true;
+                if (resolveNext) {
+                  deliver({ done: true, value: undefined as never });
+                }
+                return Promise.resolve({
+                  done: true,
+                  value: undefined as never,
+                });
+              },
+            };
+          },
+        },
+      };
+    }
+
+    function chunk(text: string): OpenAI.Chat.ChatCompletionChunk {
+      return {
+        id: 'c',
+        choices: [{ delta: { content: text } }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+    }
+
+    function streamingRequest(signal?: AbortSignal): GenerateContentParameters {
+      return {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        ...(signal ? { config: { abortSignal: signal } } : {}),
+      } as GenerateContentParameters;
+    }
+
+    function buildPipeline(streamIdleTimeoutMs?: number) {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      return new ContentGenerationPipeline(mockConfig);
+    }
+
+    beforeEach(() => {
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        () => {
+          const r = new GenerateContentResponse();
+          r.candidates = [
+            { content: { parts: [{ text: 'x' }], role: 'model' } },
+          ];
+          return r;
+        },
+      );
+      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
+      // dev/CI shell so the default-timeout tests aren't silently overridden.
+      // Env-specific tests re-stub it; afterEach unstubs everything.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    it('aborts and throws ETIMEDOUT when the stream is silent past the idle timeout', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect((err as Error).message).toBe(
+        'No stream activity for 1000ms after 0 chunks ' +
+          '(stream lifetime: 1000ms). Set QWEN_STREAM_IDLE_TIMEOUT_MS ' +
+          'to increase this window (or 0 to disable it).',
+      );
+      expect(err).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
+      expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('includes the idle detail and env override hint in timeout errors', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      const message = (err as Error).message;
+      expect(message).toContain('No stream activity for 1000ms after 0 chunks');
+      expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+    });
+
+    it('uses the default stream idle timeout when no override is configured', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline();
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect(err).toMatchObject({
+        code: 'ETIMEDOUT',
+        idleMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        chunksReceived: 0,
+        streamLifetimeMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+      });
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('swallows the orphaned SDK next() rejection after an idle timeout', async () => {
+      const pendingSdkNext: {
+        reject?: (err: unknown) => void;
+      } = {};
+      const stream = {
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+              return new Promise((_res, rej) => {
+                pendingSdkNext.reject = rej;
+              });
+            },
+            return(): Promise<IteratorResult<OpenAI.Chat.ChatCompletionChunk>> {
+              return Promise.resolve({
+                done: true,
+                value: undefined as never,
+              });
+            },
+          };
+        },
+      };
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(stream);
+      const unhandled: unknown[] = [];
+      const handler = (err: unknown) => unhandled.push(err);
+      process.on('unhandledRejection', handler);
+
+      try {
+        const p = buildPipeline(1000);
+        const gen = await p.executeStream(streamingRequest(), 'id');
+        const captured = (async () => {
+          for await (const _ of gen) {
+            /* drain */
+          }
+        })().catch((e: unknown) => e);
+
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(await captured).toMatchObject({
+          code: 'ETIMEDOUT',
+          chunksReceived: 0,
+        });
+
+        const sdkAbort = new Error('aborted by SDK');
+        sdkAbort.name = 'AbortError';
+        expect(pendingSdkNext.reject).toBeDefined();
+        pendingSdkNext.reject!(sdkAbort);
+        pendingSdkNext.reject = undefined;
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
+    });
+
+    it('aborts the SDK signal on idle timeout without a parent abort signal', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      let sdkSignal: AbortSignal | undefined;
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          sdkSignal = opts.signal;
+          return Promise.resolve(gated.stream);
+        },
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await captured).toMatchObject({ code: 'ETIMEDOUT' });
+      expect(sdkSignal?.aborted).toBe(true);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('delivers chunks then throws ETIMEDOUT when the stream stalls after some output', async () => {
+      const gated = gatedStream();
+      gated.push(chunk('hello')); // one chunk, then silence
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const results: GenerateContentResponse[] = [];
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await captured).toMatchObject({
+        code: 'ETIMEDOUT',
+        chunksReceived: 1,
+      });
+      expect(results).toHaveLength(1);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('resets the timer on each chunk and completes a slow-but-active stream', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const results: GenerateContentResponse[] = [];
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      // Three chunks, each 800ms apart (< 1000ms idle) → total 2400ms but
+      // never idle for a full second, so the watchdog must not trip.
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(chunk('a'));
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(800);
+      gated.end();
+      await consume;
+      expect(results).toHaveLength(2);
+      // Late advance after completion must not produce a delayed throw.
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    it('closes the guarded SDK iterator when the consumer breaks early', async () => {
+      const gated = gatedStream();
+      gated.push(chunk('hello'));
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+
+      for await (const _ of gen) {
+        break;
+      }
+
+      expect(gated.wasReturned()).toBe(true);
+      expect(sdkSignal?.aborted).toBe(true);
+    });
+
+    it('propagates mid-stream errors without converting them to ETIMEDOUT', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      const results: GenerateContentResponse[] = [];
+      gated.push(chunk('hello'));
+      const consume = (async () => {
+        for await (const r of gen) results.push(r);
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      const networkError = new Error('network down');
+      gated.error(networkError);
+      const err = await captured;
+      expect(err).toBe(networkError);
+      expect(results).toHaveLength(1);
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        networkError,
+        expect.anything(),
+        expect.anything(),
+      );
+
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    it('propagates a user AbortError (not ETIMEDOUT) when the parent signal is aborted', async () => {
+      const ac = new AbortController();
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(streamingRequest(ac.signal), 'id');
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })();
+      const captured = consume.catch((e: unknown) => e);
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = (await captured) as { name?: string; code?: string };
+      expect(err.name).toBe('AbortError');
+      expect(err.code).not.toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('is disabled when streamIdleTimeoutMs <= 0 (no timeout fires)', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(0);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(600000);
+      expect(settled).toBe(false);
+      gated.end(); // unblock so the test doesn't leak a pending stream
+      await consume;
+    });
+
+    it('honors a custom streamIdleTimeoutMs value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Not yet at 5000ms → must not have tripped.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(settled).toBe(false);
+      // Cross 5000ms → trips.
+      await vi.advanceTimersByTimeAsync(1000);
+      await consume;
+      expect(settled).toBe(true);
+      expect(gated.wasReturned()).toBe(true);
+    });
+
+    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
+      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
+      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
+      // WITHOUT the code. If the inactivity timeout were routed through it, the
+      // retryable-transport classification (which reads err.code) would be lost.
+      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
+        (error: unknown) => {
+          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
+            throw new Error('stripped'); // the production failure mode
+          }
+          throw error;
+        },
+      );
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      expect((err as { code?: string }).code).toBe('ETIMEDOUT');
+      expect(gated.wasReturned()).toBe(true);
+      // Proves the bypass: the handler (which would strip the code) is skipped.
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no explicit streamIdleTimeoutMs → env applies
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // tripped at 3000ms from the env
+    });
+
+    it('lets an explicit streamIdleTimeoutMs config take precedence over the env', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '1000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000); // config 5000 wins over env 1000
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(1000); // env value — must NOT trip
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(4000); // reach the config value (5000)
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores a malformed QWEN_STREAM_IDLE_TIMEOUT_MS and falls back to the default', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, 'not-a-number');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; invalid env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // The effective timeout must be the default: not tripped just before it
+      // (so a malformed value did not become 0/NaN and fire immediately), and
+      // tripped exactly at it (so the default — not some other value — is used).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores an oversized QWEN_STREAM_IDLE_TIMEOUT_MS (beyond the timer ceiling)', async () => {
+      // A value above the JS timer ceiling must be rejected (fall back to the
+      // default), not used verbatim. If it were used, the watchdog would be
+      // scheduled ~24.8 days out, so advancing only to the default would never
+      // trip it — asserting it trips AT the default proves the value was
+      // rejected. (In real Node such a delay is silently compressed to 1ms,
+      // which would make the watchdog fire almost immediately.)
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '9999999999');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; oversized env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // not before the default → not used verbatim
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects a non-decimal QWEN_STREAM_IDLE_TIMEOUT_MS (hex/scientific) and uses the default', async () => {
+      // Number('0x10') === 16; a strict decimal-integer check must reject it so
+      // a typo can't silently become a 16ms timeout.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0x10');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; non-decimal env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // would have tripped at 16ms if '0x10' parsed
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects an out-of-range config streamIdleTimeoutMs and falls back', async () => {
+      // A config value above the timer ceiling would overflow setTimeout; it
+      // must be rejected (fall back to env/default), not used verbatim.
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1); // oversized config
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default (config rejected)
+    });
+
+    it('accepts the exact MAX_STREAM_IDLE_TIMEOUT_MS boundary value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // The exact ceiling must be accepted (not rejected as out-of-range).
+      // Guards against an off-by-one changing `<=` to `<`.
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Must NOT trip at the default (which would mean the ceiling was rejected).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('falls back from an invalid config to the env value (config→env cascade)', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '4000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // Config is oversized → rejected; env = 4000 → used (not default).
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at 4000ms from the env (not default)
+    });
+
+    it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; env=0 → disabled
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Well past the default — must NOT trip (watchdog disabled).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('disables the watchdog with a negative config value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(-1); // negative → disabled (idleMs > 0 guard)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
     });
   });
 });

@@ -28,6 +28,12 @@ const debugLogger = createDebugLogger('MESSAGE_REWRITE');
  *   4. Rewritten text is emitted as agent_message_chunk with _meta.rewritten=true
  */
 const DEFAULT_REWRITE_TIMEOUT_MS = 30_000;
+// Intentionally empty: earlier revisions stripped backgroundTask/source/
+// qwenDiscreteMessage from rewritten messages, but those keys are required
+// downstream for discrete-message routing (see qwenSessionUpdateHandler).
+// Kept as an explicit extension point — add a key here to drop it from a
+// rewritten message's _meta.
+const REWRITE_META_EXCLUDED_KEYS = new Set<string>([]);
 
 export class MessageRewriteMiddleware {
   private readonly turnBuffer: TurnBuffer;
@@ -35,6 +41,7 @@ export class MessageRewriteMiddleware {
   private readonly target: MessageRewriteConfig['target'];
   private readonly timeoutMs: number;
   private turnIndex = 0;
+  private turnMeta: Record<string, unknown> | undefined;
 
   constructor(
     config: Config,
@@ -82,14 +89,21 @@ export class MessageRewriteMiddleware {
     await this.sendUpdate(update);
 
     // Accumulate for turn-end rewriting
+    let didAccumulate = false;
     if (updateType === 'agent_thought_chunk') {
       if (this.target === 'thought' || this.target === 'all') {
         this.turnBuffer.appendThought(text);
+        didAccumulate = true;
       }
     } else if (updateType === 'agent_message_chunk') {
       if (this.target === 'message' || this.target === 'all') {
         this.turnBuffer.appendMessage(text);
+        didAccumulate = true;
       }
+    }
+
+    if (didAccumulate) {
+      this.captureTurnMeta(updateRecord);
     }
   }
 
@@ -108,6 +122,8 @@ export class MessageRewriteMiddleware {
    */
   async flushTurn(signal?: AbortSignal): Promise<void> {
     const content = this.turnBuffer.flush();
+    const turnMeta = this.turnMeta;
+    this.turnMeta = undefined;
     if (!content) return;
 
     this.turnIndex++;
@@ -137,6 +153,7 @@ export class MessageRewriteMiddleware {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: rewritten },
             _meta: {
+              ...turnMeta,
               rewritten: true,
               turnIndex: turnIdx,
             },
@@ -148,6 +165,26 @@ export class MessageRewriteMiddleware {
         }
       })(),
     );
+  }
+
+  private captureTurnMeta(update: Record<string, unknown>): void {
+    const meta = update['_meta'];
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+      return;
+    }
+
+    const safeMeta = Object.fromEntries(
+      Object.entries(meta as Record<string, unknown>).filter(
+        ([key]) => !REWRITE_META_EXCLUDED_KEYS.has(key),
+      ),
+    );
+
+    if (Object.keys(safeMeta).length === 0) return;
+
+    this.turnMeta = {
+      ...this.turnMeta,
+      ...safeMeta,
+    };
   }
 
   /**

@@ -8,11 +8,18 @@ import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { getInstallationInfo } from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
-import type { HistoryItem } from '../ui/types.js';
+import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
+import { performStandaloneUpdate } from './standalone-update.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
+
+const UPDATE_SUCCESS_MESSAGE =
+  'Update successful! Please restart Qwen Code to use the new version. ' +
+  'Switching model providers before restarting may not work correctly.';
+const UPDATE_FAILED_MESSAGE =
+  'Automatic update failed. Please try updating manually.';
 
 export function handleAutoUpdate(
   info: UpdateObject | null,
@@ -43,6 +50,27 @@ export function handleAutoUpdate(
     message: combinedMessage,
   });
 
+  if (
+    installationInfo.isStandalone &&
+    installationInfo.standaloneDir &&
+    isAutoUpdateEnabled
+  ) {
+    performStandaloneUpdate(installationInfo.standaloneDir, info.update.latest)
+      .then((result) => {
+        const message =
+          result === 'deferred'
+            ? 'Update downloaded. It will be applied after you exit this session.'
+            : 'Update successful! The new version will be used on your next run.';
+        updateEventEmitter.emit('update-success', { message });
+      })
+      .catch((err: Error) => {
+        updateEventEmitter.emit('update-failed', {
+          message: `Automatic update failed: ${err.message}. Re-run the installer to update manually.`,
+        });
+      });
+    return;
+  }
+
   // Don't automatically run the update if auto-update is disabled or no update command
   if (!installationInfo.updateCommand || !isAutoUpdateEnabled) {
     return;
@@ -65,33 +93,32 @@ export function handleAutoUpdate(
   updateProcess.on('close', (code) => {
     if (code === 0) {
       updateEventEmitter.emit('update-success', {
-        message:
-          'Update successful! The new version will be used on your next run.',
+        message: UPDATE_SUCCESS_MESSAGE,
       });
     } else {
       updateEventEmitter.emit('update-failed', {
-        message: `Automatic update failed. Please try updating manually. (command: ${updateCommand}, stderr: ${errorOutput.trim()})`,
+        message: `${UPDATE_FAILED_MESSAGE} (command: ${updateCommand}, stderr: ${errorOutput.trim()})`,
       });
     }
   });
 
   updateProcess.on('error', (err) => {
     updateEventEmitter.emit('update-failed', {
-      message: `Automatic update failed. Please try updating manually. (error: ${err.message})`,
+      message: `${UPDATE_FAILED_MESSAGE} (error: ${err.message})`,
     });
   });
   return updateProcess;
 }
 
 export function setUpdateHandler(
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   setUpdateInfo: (info: UpdateObject | null) => void,
   isIdleRef: { current: boolean } = { current: true },
 ) {
   let successfullyInstalled = false;
-  const pendingNotifications: Array<Omit<HistoryItem, 'id'>> = [];
+  const pendingNotifications: HistoryItemWithoutId[] = [];
 
-  const addItemOrDefer = (item: Omit<HistoryItem, 'id'>) => {
+  const addItemOrDefer = (item: HistoryItemWithoutId) => {
     if (isIdleRef.current) {
       addItem(item, Date.now());
     } else {
@@ -113,20 +140,20 @@ export function setUpdateHandler(
     }, 60000);
   };
 
-  const handleUpdateFailed = () => {
+  const handleUpdateFailed = (data?: { message?: string }) => {
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.ERROR,
-      text: `Automatic update failed. Please try updating manually`,
+      text: data?.message ?? UPDATE_FAILED_MESSAGE,
     });
   };
 
-  const handleUpdateSuccess = () => {
+  const handleUpdateSuccess = (data?: { message?: string }) => {
     successfullyInstalled = true;
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.INFO,
-      text: `Update successful! The new version will be used on your next run.`,
+      text: data?.message ?? UPDATE_SUCCESS_MESSAGE,
     });
   };
 

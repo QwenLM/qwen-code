@@ -1,0 +1,320 @@
+.content {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.content > :first-child {
+  margin-top: 0;
+}
+
+.content > :last-child {
+  margin-bottom: 0;
+}
+
+.content strong,
+.content b {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6 {
+  margin-bottom: 0.75rem;
+  color: var(--foreground);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.content h1 {
+  margin-top: 1.5rem;
+  font-size: 18px;
+}
+
+.content h2 {
+  margin-top: 1.25rem;
+  font-size: 16px;
+}
+
+.content h3 {
+  margin-top: 1rem;
+  font-size: 15px;
+}
+
+.content h4,
+.content h5,
+.content h6 {
+  margin-top: 0.75rem;
+  font-size: 14px;
+}
+
+.content h5,
+.content h6 {
+  font-weight: 500;
+}
+
+.content p {
+  margin: 0 0 1rem;
+}
+
+.content ul,
+.content ol {
+  margin: 0.5rem 0 1rem;
+  padding-left: 1.5rem;
+  list-style-position: outside;
+}
+
+.content ul {
+  list-style-type: disc;
+}
+
+.content ol {
+  padding-left: 2.25rem;
+  list-style-type: decimal;
+}
+
+.content li {
+  margin-bottom: 0.5rem;
+}
+
+.content li > p:first-child {
+  display: inline;
+  margin: 0;
+}
+
+.content li > p + p {
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.content li > ul,
+.content li > ol {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+  padding-left: 1rem;
+}
+
+.content li > ol {
+  padding-left: 1.75rem;
+}
+
+.content li::marker {
+  color: var(--muted-foreground);
+}
+
+.content blockquote {
+  margin: 1.5rem 0;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--border);
+  color: var(--muted-foreground);
+  font-style: normal;
+}
+
+.content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1rem 0;
+}
+
+.inlineCode {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  font-weight: 500;
+  margin: 0 2px;
+  padding: 2px 4px;
+  background: var(--secondary);
+  box-shadow: 0 0 0 0.5px var(--border);
+  border-radius: 3px;
+  color: var(--foreground);
+}
+
+.link {
+  color: var(--agent-blue-500);
+  text-decoration: none;
+}
+
+.link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tableWrapper {
+  position: relative;
+  overflow-x: auto;
+  margin: 1.5rem 0;
+  width: 100%;
+}
+
+.table {
+  border-collapse: collapse;
+  display: table;
+  table-layout: auto;
+  font-size: 14px;
+  width: 100%;
+  max-width: 100%;
+}
+
+.table th,
+.table td {
+  border: 1px solid var(--border);
+  padding: 0.6rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  background: transparent;
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 1.5rem 0;
+  display: block;
+}
+
+.codeBlock {
+  margin: 8px 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 0.5px solid var(--border);
+  border-radius: 4px;
+}
+
+.codeBlockHeader {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--subtle-bg);
+  border-bottom: 0.5px solid var(--border);
+}
+
+.codeBlockLang {
+  font-size: 12px;
+  color: var(--foreground);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.codeBlockCopy {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.codeBlockCopy:hover {
+  background: var(--subtle-bg-strong);
+  color: var(--foreground);
+}
+
+.codeBlockContent {
+  max-width: 100%;
+  max-height: none;
+  padding: 8px 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--secondary);
+}
+
+.codeBlockContent pre {
+  margin: 0;
+}
+
+.codeBlockContent code {
+  font-family: var(--font-mono);
+}
+
+.codeBlockPlain {
+  color: var(--muted-foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.codeBlockContent :global(.shiki) {
+  background: transparent !important;
+  padding: 0;
+  margin: 0;
+}
+
+.codeBlockContent :global(.shiki) code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mermaidBlock {
+  margin: 8px 0;
+  padding: 16px;
+  background: var(--popover);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  text-align: center;
+  line-height: normal;
+  overflow-wrap: normal;
+}
+
+.mermaidBlock.mermaidInline {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+
+.mermaidBlock :global(svg) {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaidBlock :global(foreignObject p) {
+  margin: 0;
+}
+
+.mermaidBlock :global(foreignObject div) {
+  line-height: normal;
+}
+
+.mermaidLoading {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-style: italic;
+  padding: 20px;
+}
+
+.mermaidActions {
+  display: flex;
+  gap: 4px;
+}
+
+.content :global(.katex-display) {
+  margin: 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.content :global(.katex) {
+  font-size: 1.1em;
+}

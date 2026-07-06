@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockConfigChangeHandlers,
@@ -23,8 +23,18 @@ const {
   mockWriteCodingPlanConfig,
   mockWriteModelProvidersConfig,
   mockClearPersistedAuth,
+  mockApplyProviderInstallPlanToFile,
+  mockSnapshotSettingsForRollback,
+  mockRestoreSettingsSnapshot,
   slashCommandNotificationCallbackRef,
+  endTurnCallbackRef,
+  streamChunkCallbackRef,
+  permissionRequestCallbackRef,
+  askUserQuestionCallbackRef,
+  mockShowInformationMessage,
+  mockWindowState,
   mockQwenAgentManagerInstances,
+  mockClipboardWriteText,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
@@ -70,6 +80,11 @@ const {
   mockWriteCodingPlanConfig: vi.fn(() => ({})),
   mockWriteModelProvidersConfig: vi.fn(),
   mockClearPersistedAuth: vi.fn(),
+  mockApplyProviderInstallPlanToFile: vi.fn().mockResolvedValue(undefined),
+  mockSnapshotSettingsForRollback: vi.fn<() => Record<string, unknown> | null>(
+    () => null,
+  ),
+  mockRestoreSettingsSnapshot: vi.fn(),
   slashCommandNotificationCallbackRef: {
     current: undefined as
       | ((event: {
@@ -80,11 +95,32 @@ const {
         }) => void)
       | undefined,
   },
+  endTurnCallbackRef: {
+    current: undefined as
+      | ((reason?: string, source?: string) => void)
+      | undefined,
+  },
+  streamChunkCallbackRef: {
+    current: undefined as ((chunk: string) => void) | undefined,
+  },
+  permissionRequestCallbackRef: {
+    current: undefined as ((request: unknown) => Promise<string>) | undefined,
+  },
+  askUserQuestionCallbackRef: {
+    current: undefined as
+      | ((request: unknown) => Promise<{ optionId: string }>)
+      | undefined,
+  },
+  mockShowInformationMessage: vi.fn<
+    (message: string, ...items: string[]) => Thenable<string | undefined>
+  >(() => Promise.resolve(undefined)),
+  mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
   }>,
+  mockClipboardWriteText: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -100,6 +136,11 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
 });
 
 vi.mock('vscode', () => ({
+  ExtensionMode: {
+    Production: 1,
+    Development: 2,
+    Test: 3,
+  },
   ConfigurationTarget: {
     Global: 'global',
   },
@@ -111,11 +152,16 @@ vi.mock('vscode', () => ({
   },
   env: {
     openExternal: mockOpenExternal,
+    clipboard: {
+      writeText: mockClipboardWriteText,
+    },
   },
   window: {
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
+    showInformationMessage: mockShowInformationMessage,
+    state: mockWindowState,
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
@@ -135,6 +181,9 @@ vi.mock('../../services/settingsWriter.js', () => ({
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
   clearPersistedAuth: mockClearPersistedAuth,
+  applyProviderInstallPlanToFile: mockApplyProviderInstallPlanToFile,
+  snapshotSettingsForRollback: mockSnapshotSettingsForRollback,
+  restoreSettingsSnapshot: mockRestoreSettingsSnapshot,
 }));
 
 vi.mock('../../services/qwenAgentManager.js', () => ({
@@ -145,7 +194,9 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     createNewSession = vi.fn();
     setModelFromUi = vi.fn();
     onMessage = vi.fn();
-    onStreamChunk = vi.fn();
+    onStreamChunk = vi.fn((cb: (chunk: string) => void) => {
+      streamChunkCallbackRef.current = cb;
+    });
     onThoughtChunk = vi.fn();
     onModeInfo = vi.fn();
     onModeChanged = vi.fn();
@@ -175,15 +226,22 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         slashCommandNotificationCallbackRef.current = callback;
       },
     );
-    onEndTurn = vi.fn();
+    onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
+      endTurnCallbackRef.current = cb;
+    });
     onToolCall = vi.fn();
     onPlan = vi.fn();
     onPermissionRequest = vi.fn(
       (callback: (request: unknown) => Promise<string>) => {
         this.permissionRequestCallback = callback;
+        permissionRequestCallbackRef.current = callback;
       },
     );
-    onAskUserQuestion = vi.fn();
+    onAskUserQuestion = vi.fn(
+      (callback: (request: unknown) => Promise<{ optionId: string }>) => {
+        askUserQuestionCallbackRef.current = callback;
+      },
+    );
     onDisconnected = vi.fn();
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt = vi.fn();
@@ -201,6 +259,8 @@ vi.mock('../../services/conversationStore.js', () => ({
       id: 'conversation-1',
       messages: [],
     });
+    addMessage = vi.fn().mockResolvedValue(undefined);
+    getCurrentConversationId = vi.fn(() => null);
   },
 }));
 
@@ -263,6 +323,25 @@ vi.mock('../utils/imageHandler.js', () => ({
   createImagePathResolver: mockCreateImagePathResolver,
 }));
 
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    exec: vi.fn((_cmd: string, cb?: (err: Error | null) => void) => {
+      cb?.(null);
+    }),
+    execFile: vi.fn(
+      (_file: string, _args?: string[], cb?: (err: Error | null) => void) => {
+        if (typeof _args === 'function') {
+          (_args as unknown as (err: Error | null) => void)(null);
+        } else {
+          cb?.(null);
+        }
+      },
+    ),
+  };
+});
+
 vi.mock('../../utils/authErrors.js', () => ({
   isAuthenticationRequiredError: vi.fn(() => false),
 }));
@@ -271,11 +350,14 @@ vi.mock('../../utils/errorMessage.js', () => ({
   getErrorMessage: vi.fn((error: unknown) => String(error)),
 }));
 
-import { WebViewProvider } from './WebViewProvider.js';
+import { WebViewProvider, resolveQwenCliEntryPath } from './WebViewProvider.js';
 import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 
 const createConfigChangeEvent = (...affectedSections: string[]) => ({
   affectsConfiguration: (section: string) => affectedSections.includes(section),
@@ -285,6 +367,38 @@ type WebViewMessageHandler = (message: {
   type: string;
   data?: unknown;
 }) => Promise<void>;
+
+describe('resolveQwenCliEntryPath', () => {
+  it('uses the source dev entry when the extension runs in development mode', () => {
+    const tempRoot = mkdtempSync(path.join(tmpdir(), 'qwen-vscode-dev-'));
+    try {
+      const extensionRoot = path.join(
+        tempRoot,
+        'packages',
+        'vscode-ide-companion',
+      );
+      const devEntry = path.join(tempRoot, 'scripts', 'dev.js');
+      mkdirSync(extensionRoot, { recursive: true });
+      mkdirSync(path.dirname(devEntry), { recursive: true });
+      writeFileSync(devEntry, '');
+
+      expect(
+        resolveQwenCliEntryPath({ fsPath: extensionRoot } as never, 2),
+      ).toBe(devEntry);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the bundled CLI outside development mode', () => {
+    expect(
+      resolveQwenCliEntryPath(
+        { fsPath: '/extension-root' } as never,
+        undefined,
+      ),
+    ).toBe('/extension-root/dist/qwen-cli/cli.js');
+  });
+});
 
 /**
  * Create a mock webview + provider and attach them.
@@ -334,6 +448,15 @@ async function setupAttachedProvider(options?: {
 
 beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
+  endTurnCallbackRef.current = undefined;
+  streamChunkCallbackRef.current = undefined;
+  permissionRequestCallbackRef.current = undefined;
+  askUserQuestionCallbackRef.current = undefined;
+  mockWindowState.focused = true;
+  mockShowInformationMessage.mockReset();
+  mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
+  mockClipboardWriteText.mockReset();
+  mockClipboardWriteText.mockResolvedValue(undefined);
 });
 
 describe('WebViewProvider.attachToView', () => {
@@ -435,6 +558,40 @@ describe('WebViewProvider.attachToView', () => {
         ],
         requestId: 7,
       },
+    });
+  });
+
+  it('reports clipboard copy success back to the requesting webview', async () => {
+    const { messageHandler, postMessage } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    await messageHandler?.({
+      type: 'copyToClipboard',
+      data: { text: 'copy me', requestId: 'copy-1' },
+    });
+
+    expect(mockClipboardWriteText).toHaveBeenCalledWith('copy me');
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboardResult',
+      data: { requestId: 'copy-1', success: true },
+    });
+  });
+
+  it('reports clipboard copy failures back to the requesting webview', async () => {
+    mockClipboardWriteText.mockRejectedValueOnce(new Error('denied'));
+    const { messageHandler, postMessage } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    await messageHandler?.({
+      type: 'copyToClipboard',
+      data: { text: 'copy me', requestId: 'copy-1' },
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboardResult',
+      data: { requestId: 'copy-1', success: false, error: 'denied' },
     });
   });
 
@@ -1201,5 +1358,625 @@ describe('WebViewProvider initial model inheritance', () => {
       { autoAuthenticate: true },
     );
     expect(agentManager.setModelFromUi).toHaveBeenCalledWith('glm-5');
+  });
+});
+
+describe('Notification & dot indicator', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockConfigGet.mockImplementation((key: string, defaultValue?: unknown) => {
+      if (key === 'dotIndicator') {
+        return true;
+      }
+      if (key === 'notifications') {
+        return true;
+      }
+      return defaultValue;
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows orange dot and notification when a long task completes while panel is not active', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // Simulate stream chunk to set agentStartTime
+    streamChunkCallbackRef.current?.('chunk');
+
+    // Advance time past 20s threshold
+    vi.advanceTimersByTime(25_000);
+
+    // Trigger endTurn
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Orange dot should be set
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+
+    // Notification should be shown
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('does not show notification for short tasks (< 20s)', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(5_000); // only 5s
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Orange dot should still appear (no duration requirement for dot)
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+
+    // But NO notification for short task
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not show notification when user is watching the panel', async () => {
+    const mockPanel = {
+      active: true,
+      visible: true,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = true;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // No dot (panel is active)
+    expect(mockPanel.iconPath).toBeUndefined();
+    // No notification (user is watching)
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows blue dot and notification for permission requests when panel is not active', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // Trigger permission request — don't await, it blocks on user response
+    void permissionRequestCallbackRef.current?.({
+      toolCall: { title: 'Bash' },
+      options: [],
+    });
+
+    // Blue dot
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+
+    // Notification with tool name
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Needs your permission to use Bash.',
+      'Show',
+    );
+  });
+
+  it('blue dot takes priority over orange dot', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // First: task completes, orange dot
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+
+    // Then: permission request, should upgrade to blue
+    void permissionRequestCallbackRef.current?.({
+      toolCall: { title: 'Read' },
+      options: [],
+    });
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+
+    // Another endTurn should NOT downgrade back to orange
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+  });
+
+  it('does not send duplicate idle notifications for multi-turn tasks', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+
+    // First endTurn (intermediate)
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+
+    // Second endTurn (final) — should NOT fire another notification
+    endTurnCallbackRef.current?.('end_turn');
+    expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show idle notification for background notification turns', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn', 'background_notification');
+
+    expect(mockPanel.webview.postMessage).toHaveBeenCalledWith({
+      type: 'streamEnd',
+      data: expect.objectContaining({
+        reason: 'end_turn',
+        source: 'background_notification',
+      }),
+    });
+    expect(mockShowInformationMessage).not.toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('does not notify when notifications setting is disabled', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue?: unknown) => {
+      if (key === 'notifications') {
+        return false;
+      }
+      if (key === 'dotIndicator') {
+        return true;
+      }
+      return defaultValue;
+    });
+
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Dot should still appear
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-orange.png'),
+      }),
+    );
+    // But no notification
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('cancellation resets agentStartTime so the next short task does not trigger phantom notification', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    // Start a task
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(30_000);
+
+    // User sends a new message (resets timer)
+    await messageHandler?.({ type: 'sendMessage', data: { text: 'hello' } });
+
+    // Short task starts and completes quickly
+    streamChunkCallbackRef.current?.('chunk2');
+    vi.advanceTimersByTime(2_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Should NOT send notification (only 2s)
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not show dot when dotIndicator setting is disabled', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue?: unknown) => {
+      if (key === 'dotIndicator') {
+        return false;
+      }
+      if (key === 'notifications') {
+        return true;
+      }
+      return defaultValue;
+    });
+
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // Dot should NOT appear (setting disabled)
+    expect(mockPanel.iconPath).toBeUndefined();
+    // But notification should still fire
+    expect(mockShowInformationMessage).toHaveBeenCalled();
+  });
+
+  it('notifies when VS Code is focused but panel is not visible', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = true; // VS Code focused
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // User is in VS Code but not looking at the panel — should notify
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('notifies when VS Code is not focused but panel is visible', async () => {
+    const mockPanel = {
+      active: false,
+      visible: true,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false; // VS Code not focused
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn');
+
+    // User left VS Code — should notify even though panel is visible
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+
+  it('shows blue dot and notification for askUserQuestion when panel is not active', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    // Trigger askUserQuestion — don't await, it blocks on user response
+    void askUserQuestionCallbackRef.current?.({
+      questions: [{ question: 'Which option?' }],
+    });
+
+    // Blue dot
+    expect(mockPanel.iconPath).toEqual(
+      expect.objectContaining({
+        fsPath: expect.stringContaining('icon-blue.png'),
+      }),
+    );
+
+    // Notification without tool name (generic message)
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
+  });
+});
+
+describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSnapshotSettingsForRollback.mockReturnValue(null);
+  });
+
+  // Minimal real-ish provider config + inputs so the real buildInstallPlan
+  // (core is not mocked beyond Storage) produces a valid plan.
+  const providerConfig = {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    protocol: 'openai',
+    baseUrl: 'https://api.deepseek.com',
+    envKey: 'DEEPSEEK_API_KEY',
+    models: [{ id: 'deepseek-v4-flash' }],
+    modelNamePrefix: 'DeepSeek',
+  } as unknown as Parameters<WebViewProvider['handleAuthInteractive']>[0];
+  const inputs = {
+    baseUrl: 'https://api.deepseek.com',
+    apiKey: 'sk-bad-key',
+    modelIds: ['deepseek-v4-flash'],
+  } as unknown as Parameters<WebViewProvider['handleAuthInteractive']>[1];
+
+  function makeProvider() {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    // Avoid touching the real webview pipe.
+    (
+      provider as unknown as { sendMessageToWebView: () => void }
+    ).sendMessageToWebView = vi.fn();
+    return provider;
+  }
+
+  it('restores the snapshot when the reconnect leaves authState !== true', async () => {
+    const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
+    mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
+
+    const provider = makeProvider();
+    // doInitializeAgentConnection runs but the backend rejects the key, so
+    // authState stays false.
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = false;
+    });
+
+    await (
+      provider as unknown as {
+        handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+      }
+    ).handleAuthInteractive(providerConfig, inputs);
+
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledTimes(1);
+    expect(mockRestoreSettingsSnapshot).toHaveBeenCalledWith(snapshot);
+  });
+
+  it('disconnects the agent after rolling back rejected credentials', async () => {
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      env: { OPENAI_API_KEY: 'sk-old' },
+    });
+
+    const provider = makeProvider();
+    const disconnect = vi.fn();
+    (
+      provider as unknown as {
+        agentManager: { disconnect: () => void };
+        agentInitialized: boolean;
+      }
+    ).agentManager = { disconnect } as never;
+    (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+      true;
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      // Reconnect happened (sets agentInitialized true) but auth rejected.
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+        true;
+      (provider as unknown as { authState: boolean }).authState = false;
+    });
+
+    await (
+      provider as unknown as {
+        handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+      }
+    ).handleAuthInteractive(providerConfig, inputs);
+
+    // Bad-key agent must be torn down so later actions don't hit it.
+    expect(disconnect).toHaveBeenCalled();
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(false);
+  });
+
+  it('does NOT restore when the reconnect authenticates (authState === true)', async () => {
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      env: { OPENAI_API_KEY: 'sk-old' },
+    });
+
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+
+    await (
+      provider as unknown as {
+        handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+      }
+    ).handleAuthInteractive(providerConfig, inputs);
+
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('swallows a rollback write failure so the authError message still sends', async () => {
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      env: { OPENAI_API_KEY: 'sk-old' },
+    });
+    // restore itself throws (e.g. EPERM on Windows renameSync).
+    mockRestoreSettingsSnapshot.mockImplementation(() => {
+      throw new Error('EPERM: rename failed');
+    });
+
+    const provider = makeProvider();
+    const sendToWebView = (
+      provider as unknown as { sendMessageToWebView: ReturnType<typeof vi.fn> }
+    ).sendMessageToWebView;
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+        authState: boolean;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = false;
+    });
+
+    await expect(
+      (
+        provider as unknown as {
+          handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+        }
+      ).handleAuthInteractive(providerConfig, inputs),
+    ).resolves.toBeUndefined();
+
+    // The rollback throw must not prevent the user-facing authError.
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'authError' }),
+    );
+  });
+
+  it('rolls back + disconnects + reports authError when doInitializeAgentConnection throws (outer catch)', async () => {
+    // The outer catch handles unexpected exceptions (disk errors, partial
+    // writes) — the path where rollback is most likely to also be needed.
+    const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
+    mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
+
+    const provider = makeProvider();
+    const sendToWebView = (
+      provider as unknown as { sendMessageToWebView: ReturnType<typeof vi.fn> }
+    ).sendMessageToWebView;
+    const disconnect = vi.fn();
+    (
+      provider as unknown as { agentManager: { disconnect: () => void } }
+    ).agentManager = { disconnect } as never;
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      // Partial init: agent process spawned (agentInitialized=true) then a
+      // post-connect step throws.
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+        true;
+      throw new Error('disk exploded mid-reconnect');
+    });
+
+    await expect(
+      (
+        provider as unknown as {
+          handleAuthInteractive: (c: unknown, i: unknown) => Promise<void>;
+        }
+      ).handleAuthInteractive(providerConfig, inputs),
+    ).resolves.toBeUndefined();
+
+    // (1) snapshot restored, (2) the half-connected stale-credential agent is
+    // torn down, (3) authError with "Configuration failed", (4) resolved
+    // without throwing (asserted above).
+    expect(mockRestoreSettingsSnapshot).toHaveBeenCalledWith(snapshot);
+    expect(disconnect).toHaveBeenCalled();
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(false);
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'authError',
+        data: expect.objectContaining({
+          message: expect.stringContaining('Configuration failed'),
+        }),
+      }),
+    );
   });
 });

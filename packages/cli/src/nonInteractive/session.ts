@@ -8,7 +8,12 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  detectTurnInterruption,
+  SendMessageType,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+} from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -32,12 +37,37 @@ import {
   isControlCancel,
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
+import type { LoadedSettings } from '../config/settings.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
+import {
+  finalizeStartupProfile,
+  profileCheckpoint,
+} from '../utils/startupProfiler.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
+interface MonitorStartedQueueItem {
+  task_id: string;
+  tool_use_id?: string;
+  description: string;
+}
+
+interface MonitorQueueItem {
+  displayText: string;
+  modelText: string;
+  sdkNotification: {
+    task_id: string;
+    tool_use_id?: string;
+    status: string;
+  };
+}
+
 class Session {
   private userMessageQueue: CLIUserMessage[] = [];
+  private monitorStartedQueue: MonitorStartedQueueItem[] = [];
+  private monitorQueue: MonitorQueueItem[] = [];
+  private pendingContinueTurn: boolean = false;
+  private continueTurnInProgress: boolean = false;
   private abortController: AbortController;
   private config: Config;
   private sessionId: string;
@@ -53,6 +83,9 @@ class Session {
   private processingPromise: Promise<void> | null = null;
   private isShuttingDown: boolean = false;
   private configInitialized: boolean = false;
+  private monitorNotificationsRegistered: boolean = false;
+  private monitorRegistrationsRegistered: boolean = false;
+  private settings: LoadedSettings;
 
   // Single initialization promise that resolves when session is ready for user messages.
   // Created lazily once initialization actually starts.
@@ -60,8 +93,13 @@ class Session {
   private initializationResolve: (() => void) | null = null;
   private initializationReject: ((error: Error) => void) | null = null;
 
-  constructor(config: Config, initialPrompt?: CLIUserMessage) {
+  constructor(
+    config: Config,
+    initialPrompt?: CLIUserMessage,
+    settings: LoadedSettings = createMinimalSettings(),
+  ) {
     this.config = config;
+    this.settings = settings;
     this.sessionId = config.getSessionId();
     this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
@@ -108,12 +146,99 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // Bracket `config.initialize()` with the same profiler checkpoints
+      // the non-stream-json branch in `gemini.tsx` uses so the
+      // `config_initialize_dur` derived phase shows up in stream-json
+      // startup profiles. `profileCheckpoint` is a no-op when
+      // `QWEN_CODE_PROFILE_STARTUP` is unset, so this adds zero overhead
+      // off the profiling path. Without these, stream-json profiles read
+      // as missing the initialize phase entirely, which made the MCP
+      // discovery timings look like they happened "before init".
+      profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
+      profileCheckpoint('config_initialize_end');
+      // Stream-json sessions feed prompts straight to the model after init.
+      // Under progressive MCP availability `initialize()` returns before
+      // MCP servers settle, so we must explicitly await discovery here —
+      // otherwise the first prompt would see only built-in tools.
+      await this.config.waitForMcpReady();
+      // Surface MCP failures on stderr — same rationale as gemini.tsx's
+      // non-interactive branch: per-server errors are caught inside
+      // `discoverAllMcpToolsIncremental` and never reach a TTY otherwise,
+      // so a script using stream-json with broken MCP config would
+      // silently run with only built-in tools.
+      // Defensive against tests that pass a stubbed Config without
+      // `getFailedMcpServerNames`.
+      const failedMcpServers =
+        typeof this.config.getFailedMcpServerNames === 'function'
+          ? this.config.getFailedMcpServerNames()
+          : [];
+      if (failedMcpServers.length > 0) {
+        process.stderr.write(
+          `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect.\n`,
+        );
+      }
+      // Finalize the startup profile here so `config_initialize_*` and the
+      // MCP discovery events captured during init/discovery make it into
+      // the on-disk profile. gemini.tsx's stream-json branch deliberately
+      // skips finalize because the profiler's `finalized` guard would
+      // otherwise suppress every event emitted during the
+      // `Session.ensureConfigInitialized` flow above.
+      finalizeStartupProfile(this.config.getSessionId());
       this.configInitialized = true;
+      this.registerMonitorRegistrations();
+      this.registerMonitorNotifications();
     } catch (error) {
       debugLogger.error('[Session] Failed to initialize config:', error);
       throw error;
     }
+  }
+
+  private registerMonitorNotifications(): void {
+    if (this.monitorNotificationsRegistered) {
+      return;
+    }
+
+    const registry = this.config.getMonitorRegistry();
+    registry.setNotificationCallback((displayText, modelText, meta) => {
+      if (this.isShuttingDown || this.abortController.signal.aborted) {
+        return;
+      }
+      if (meta.status === 'running' && typeof registry.get === 'function') {
+        const entry = registry.get(meta.monitorId);
+        if (!entry || entry.status !== 'running') return;
+      }
+      this.enqueueMonitorNotification({
+        displayText,
+        modelText,
+        sdkNotification: {
+          task_id: meta.monitorId,
+          tool_use_id: meta.toolUseId,
+          status: meta.status,
+        },
+      });
+    });
+    this.monitorNotificationsRegistered = true;
+  }
+
+  private registerMonitorRegistrations(): void {
+    if (this.monitorRegistrationsRegistered) {
+      return;
+    }
+
+    const registry = this.config.getMonitorRegistry();
+    registry.setRegisterCallback((entry) => {
+      if (this.isShuttingDown || this.abortController.signal.aborted) {
+        return;
+      }
+      this.enqueueMonitorStarted({
+        task_id: entry.monitorId,
+        tool_use_id: entry.toolUseId,
+        description: entry.description,
+      });
+    });
+    this.monitorRegistrationsRegistered = true;
   }
 
   /**
@@ -159,8 +284,10 @@ class Session {
       streamJson: this.outputAdapter,
       sessionId: this.sessionId,
       abortSignal: this.abortController.signal,
+      settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
+      onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
     this.dispatcher = new ControlDispatcher(this.controlContext);
     this.controlService = new ControlService(
@@ -330,37 +457,203 @@ class Session {
     const promptId = this.getNextPromptId();
 
     try {
-      await runNonInteractive(
-        this.config,
-        createMinimalSettings(),
-        input,
-        promptId,
-        {
-          abortController: this.abortController,
-          adapter: this.outputAdapter,
-          controlService: this.controlService ?? undefined,
-        },
-      );
+      await runNonInteractive(this.config, this.settings, input, promptId, {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      });
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
     }
   }
 
-  private async processUserMessageQueue(): Promise<void> {
+  /**
+   * Handle a continue_last_turn control request: classify the last turn
+   * from chat history and, when it was interrupted, schedule a
+   * continuation turn on the work queue. Returns the control reply
+   * payload; the continuation itself runs serialized with user messages.
+   */
+  private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
+    await this.waitForInitialization();
+
+    if (this.isShuttingDown || this.abortController.signal.aborted) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: session is shutting down',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: gemini client is not ready',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const chat = geminiClient.getChat();
+    const historyTail =
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+      chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+    const detection = detectTurnInterruption(historyTail);
+    debugLogger.info('[Session] requestContinueLastTurn detection', {
+      sessionId: this.sessionId,
+      kind: detection.kind,
+    });
+    if (detection.kind === 'none') {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: no interrupted turn',
+      );
+      return { accepted: false, interruption: 'none' };
+    }
+    if (this.pendingContinueTurn || this.continueTurnInProgress) {
+      debugLogger.debug(
+        '[Session] continue_last_turn rejected: continuation already pending',
+        { kind: detection.kind },
+      );
+      return { accepted: false, interruption: detection.kind };
+    }
+
+    this.pendingContinueTurn = true;
+    this.ensureProcessingStarted();
+    debugLogger.info('[Session] continue_last_turn accepted', {
+      sessionId: this.sessionId,
+      kind: detection.kind,
+    });
+    return { accepted: true, interruption: detection.kind };
+  }
+
+  /**
+   * Run a scheduled continuation turn. The authoritative interruption
+   * re-detection happens inside runNonInteractive (history may have moved
+   * since the request was accepted); a turn that became clean by then is
+   * a no-op result message.
+   */
+  private async processContinueTurn(): Promise<void> {
+    this.continueTurnInProgress = true;
+    let resultAlreadyEmitted = false;
+    try {
+      await this.waitForInitialization();
+
+      const promptId = this.getNextPromptId();
+      await runNonInteractive(this.config, this.settings, '', promptId, {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        continueInterrupted: true,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+        onResultEmitted: () => {
+          resultAlreadyEmitted = true;
+        },
+      });
+    } catch (error) {
+      debugLogger.error('[Session] Continue turn execution error:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (resultAlreadyEmitted) {
+        // A result was already flushed before the failure, so we can't emit a
+        // terminal error result without breaking the one-result contract.
+        // Surface a structured diagnostic instead of a silent stop so SDK
+        // consumers still see that the continuation failed mid-stream.
+        this.outputAdapter.emitSystemMessage('continue_turn_failed', {
+          error: message,
+        });
+        return;
+      }
+      throw new Error(`Continue turn failed: ${message}`, { cause: error });
+    } finally {
+      this.continueTurnInProgress = false;
+    }
+  }
+
+  private async processMonitorNotificationBatch(
+    batch: MonitorQueueItem[],
+  ): Promise<void> {
+    await this.waitForInitialization();
+
+    for (const item of batch) {
+      this.outputAdapter.emitUserMessage([{ text: item.displayText }]);
+      this.outputAdapter.emitSystemMessage(
+        'task_notification',
+        item.sdkNotification,
+      );
+    }
+
+    const combinedModelText = batch.map((n) => n.modelText).join('\n\n');
+    const combinedDisplayText = batch.map((n) => n.displayText).join('; ');
+
+    const promptId = this.getNextPromptId();
+    await runNonInteractive(
+      this.config,
+      this.settings,
+      combinedModelText,
+      promptId,
+      {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        sendMessageType: SendMessageType.Notification,
+        notificationDisplayText: combinedDisplayText,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      },
+    );
+  }
+
+  private async processPendingWork(): Promise<void> {
     if (this.isShuttingDown || this.abortController.signal.aborted) {
       return;
     }
 
     while (
-      this.userMessageQueue.length > 0 &&
+      (this.pendingContinueTurn ||
+        this.userMessageQueue.length > 0 ||
+        this.monitorStartedQueue.length > 0 ||
+        this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.abortController.signal.aborted
     ) {
-      const userMessage = this.userMessageQueue.shift()!;
+      if (this.pendingContinueTurn) {
+        this.pendingContinueTurn = false;
+        try {
+          await this.processContinueTurn();
+        } catch (error) {
+          debugLogger.error('[Session] Error processing continue turn:', error);
+          this.emitErrorResult(error);
+        }
+        continue;
+      }
+
+      if (this.userMessageQueue.length > 0) {
+        const userMessage = this.userMessageQueue.shift()!;
+        try {
+          await this.processUserMessage(userMessage);
+        } catch (error) {
+          debugLogger.error('[Session] Error processing user message:', error);
+          this.emitErrorResult(error);
+        }
+        continue;
+      }
+
+      const started = this.monitorStartedQueue.shift();
+      if (started) {
+        this.outputAdapter.emitSystemMessage('task_started', started);
+        continue;
+      }
+
+      if (this.monitorQueue.length === 0) {
+        continue;
+      }
+      const batch = this.monitorQueue.splice(0);
       try {
-        await this.processUserMessage(userMessage);
+        await this.processMonitorNotificationBatch(batch);
       } catch (error) {
-        debugLogger.error('[Session] Error processing user message:', error);
+        debugLogger.error(
+          '[Session] Error processing monitor notification batch:',
+          error,
+        );
         this.emitErrorResult(error);
       }
     }
@@ -371,15 +664,28 @@ class Session {
     this.ensureProcessingStarted();
   }
 
+  private enqueueMonitorStarted(started: MonitorStartedQueueItem): void {
+    this.monitorStartedQueue.push(started);
+    this.ensureProcessingStarted();
+  }
+
+  private enqueueMonitorNotification(notification: MonitorQueueItem): void {
+    this.monitorQueue.push(notification);
+    this.ensureProcessingStarted();
+  }
+
   private ensureProcessingStarted(): void {
     if (this.processingPromise) {
       return;
     }
 
-    this.processingPromise = this.processUserMessageQueue().finally(() => {
+    this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        this.userMessageQueue.length > 0 &&
+        (this.pendingContinueTurn ||
+          this.userMessageQueue.length > 0 ||
+          this.monitorStartedQueue.length > 0 ||
+          this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
         !this.abortController.signal.aborted
       ) {
@@ -457,18 +763,74 @@ class Session {
         debugLogger.error('[Session] Error in user message processing:', error);
       }
     }
+
+    // 4. A continuation accepted before shutdown may never have run: the work
+    // loop's `!isShuttingDown` guard skips it once shutdown begins, so an SDK
+    // consumer that received `{ accepted: true }` would wait forever. Emit a
+    // terminal error result so it learns the continuation was abandoned.
+    if (this.pendingContinueTurn) {
+      this.pendingContinueTurn = false;
+      this.emitErrorResult(
+        new Error('Continuation abandoned: session shut down before it ran'),
+      );
+    }
   }
 
   private async shutdown(): Promise<void> {
     debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
+    this.abortTaskRegistries();
+    this.stopMonitorCallbacks();
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
+    this.abortTaskRegistries();
 
+    this.finishShutdown();
+  }
+
+  private async drainAndShutdown(): Promise<void> {
+    debugLogger.debug('[Session] Draining pending work before shutdown');
+
+    // Abort monitors and stop callbacks first, then drain anything already
+    // queued so EOF does not remain coupled to monitor process lifetime.
+    this.abortTaskRegistries();
+    this.stopMonitorCallbacks();
+    await this.waitForAllPendingWork();
+    this.abortTaskRegistries();
+
+    this.finishShutdown();
+  }
+
+  private abortTaskRegistries(): void {
+    this.config.getMonitorRegistry().abortAll({ notify: false });
+    this.config.getBackgroundShellRegistry().abortAll();
+    this.config.getBackgroundTaskRegistry().abortAll();
+  }
+
+  private finishShutdown(): void {
     this.dispatcher?.shutdown();
     this.cleanupSignalHandlers();
+  }
+
+  private stopMonitorCallbacks(): void {
+    if (
+      !this.monitorNotificationsRegistered &&
+      !this.monitorRegistrationsRegistered
+    ) {
+      return;
+    }
+
+    const registry = this.config.getMonitorRegistry();
+    if (this.monitorNotificationsRegistered) {
+      registry.setNotificationCallback(undefined);
+      this.monitorNotificationsRegistered = false;
+    }
+    if (this.monitorRegistrationsRegistered) {
+      registry.setRegisterCallback(undefined);
+      this.monitorRegistrationsRegistered = false;
+    }
   }
 
   private cleanupSignalHandlers(): void {
@@ -565,9 +927,7 @@ class Session {
         this.dispatcher.markInputClosed();
       }
 
-      // Wait for all pending work before shutdown
-      await this.waitForAllPendingWork();
-      await this.shutdown();
+      await this.drainAndShutdown();
     } catch (error) {
       debugLogger.error('[Session] Error:', error);
       await this.shutdown();
@@ -606,6 +966,7 @@ function extractUserMessageText(message: CLIUserMessage): string | null {
 export async function runNonInteractiveStreamJson(
   config: Config,
   input: string,
+  settings: LoadedSettings = createMinimalSettings(),
 ): Promise<void> {
   let initialPrompt: CLIUserMessage | undefined = undefined;
   if (input && input.trim().length > 0) {
@@ -621,6 +982,6 @@ export async function runNonInteractiveStreamJson(
     };
   }
 
-  const manager = new Session(config, initialPrompt);
+  const manager = new Session(config, initialPrompt, settings);
   await manager.run();
 }

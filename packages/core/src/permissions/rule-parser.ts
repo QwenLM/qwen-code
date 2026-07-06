@@ -52,6 +52,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Edit: 'edit',
   EditTool: 'edit',
 
+  // Notebook Edit tool — also matched by "Edit" meta-category rules
+  notebook_edit: 'notebook_edit',
+  NotebookEdit: 'notebook_edit',
+  NotebookEditTool: 'notebook_edit',
+
   // Write File tool — also matched by "Edit" meta-category rules
   write_file: 'write_file',
   WriteFile: 'write_file',
@@ -83,8 +88,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // TodoWrite tool
+  // TodoList tool (wire name todo_write; class TodoWriteTool)
   todo_write: 'todo_write',
+  TodoList: 'todo_write',
+  // Legacy display name (renamed from "TodoWrite")
   TodoWrite: 'todo_write',
   TodoWriteTool: 'todo_write',
 
@@ -92,6 +99,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   web_fetch: 'web_fetch',
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
+
+  // ReadMcpResource tool
+  read_mcp_resource: 'read_mcp_resource',
+  ReadMcpResource: 'read_mcp_resource',
+  ReadMcpResourceTool: 'read_mcp_resource',
 
   // Agent (subagent) tool
   agent: 'agent',
@@ -113,19 +125,32 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ExitPlanMode: 'exit_plan_mode',
   ExitPlanModeTool: 'exit_plan_mode',
 
+  // EnterPlanMode tool
+  enter_plan_mode: 'enter_plan_mode',
+  EnterPlanMode: 'enter_plan_mode',
+  EnterPlanModeTool: 'enter_plan_mode',
+
   // LSP tool
   lsp: 'lsp',
   Lsp: 'lsp',
   LspTool: 'lsp',
+
+  // Monitor tool
+  monitor: 'monitor',
+  Monitor: 'monitor',
+  MonitorTool: 'monitor',
 
   // Legacy edit tool name
   replace: 'edit',
 };
 
 /**
- * Shell tool canonical names.
+ * Shell tool canonical names. These use command-style rule specifiers.
  */
-const SHELL_TOOL_NAMES = new Set(['run_shell_command']);
+export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'run_shell_command',
+  'monitor',
+]);
 
 /**
  * File-reading tools — "Read" rules apply to all of these (best-effort).
@@ -145,7 +170,7 @@ const READ_TOOLS = new Set([
  *
  * Per Claude Code docs: "Edit rules apply to all built-in tools that edit files."
  */
-const EDIT_TOOLS = new Set(['edit', 'write_file']);
+const EDIT_TOOLS = new Set(['edit', 'write_file', 'notebook_edit']);
 
 /**
  * WebFetch tools.
@@ -188,6 +213,8 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  *
  * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
  * "Edit" → resolves to "edit", but also covers write_file
+ * "Bash" → resolves to "run_shell_command", but also covers monitor
+ * "Monitor" → resolves to "monitor" only; it does not cover shell
  */
 export function toolMatchesRuleToolName(
   ruleToolName: string,
@@ -202,6 +229,12 @@ export function toolMatchesRuleToolName(
   }
   // "Edit" → covers all EDIT_TOOLS
   if (ruleToolName === 'edit' && EDIT_TOOLS.has(contextToolName)) {
+    return true;
+  }
+  // "Bash" (run_shell_command) → also covers monitor so that existing
+  // `Bash(...)` allow rules are not silently bypassed by switching to
+  // the monitor tool.  Monitor-only rules do NOT cover shell.
+  if (ruleToolName === 'run_shell_command' && contextToolName === 'monitor') {
     return true;
   }
   return false;
@@ -303,18 +336,23 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Edit meta-category
   edit: 'Edit',
   write_file: 'Edit',
+  notebook_edit: 'Edit',
   // Shell
   run_shell_command: 'Bash',
+  // Monitor
+  monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
+  enter_plan_mode: 'EnterPlanMode',
 };
 
 /**
@@ -337,7 +375,12 @@ export function getRuleDisplayName(canonicalToolName: string): string {
  * Directory-targeted tools (list_directory, grep_search, glob) already receive
  * a directory path, so they use it as-is.
  */
-const FILE_TARGETED_TOOLS = new Set(['read_file', 'edit', 'write_file']);
+const FILE_TARGETED_TOOLS = new Set([
+  'read_file',
+  'edit',
+  'write_file',
+  'notebook_edit',
+]);
 
 /**
  * Build minimum-scope permission rule strings from a permission check context.
@@ -419,13 +462,15 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Read: 'read files',
   Edit: 'edit files',
   Bash: 'run commands',
+  Monitor: 'monitor commands',
   WebFetch: 'fetch from',
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
-  TodoWrite: 'write todos',
+  TodoList: 'write todos',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
+  EnterPlanMode: 'enter plan mode',
 };
 
 /**
@@ -494,9 +539,13 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
         parts.push(`${verb} in ${cleanPath}`);
         break;
       }
-      case 'command':
-        parts.push(`run '${specifier}' commands`);
+      case 'command': {
+        const cmdVerb = DISPLAY_NAME_TO_VERB[displayName] ?? 'run';
+        // Extract just the verb word (e.g. "run commands" → "run", "monitor commands" → "monitor")
+        const verbWord = cmdVerb.split(' ')[0]!;
+        parts.push(`${verbWord} '${specifier}' commands`);
         break;
+      }
       case 'domain':
         parts.push(`${verb} ${specifier}`);
         break;
@@ -518,7 +567,7 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
 
 /**
  * Split a compound shell command into its individual simple commands

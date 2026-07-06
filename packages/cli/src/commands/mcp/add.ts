@@ -149,7 +149,12 @@ async function addMcpServer(
         args: args?.map(String),
         env: env?.reduce(
           (acc, curr) => {
-            const [key, value] = curr.split('=');
+            const separator = curr.indexOf('=');
+            if (separator === -1) {
+              return acc;
+            }
+            const key = curr.slice(0, separator);
+            const value = curr.slice(separator + 1);
             if (key && value) {
               acc[key] = value;
             }
@@ -297,11 +302,7 @@ export const addCommand: CommandModule = {
         // Auto-detect transport from URL if not explicitly specified
         if (!argv['transport']) {
           const commandOrUrl = argv['commandOrUrl'] as string;
-          if (
-            commandOrUrl &&
-            (commandOrUrl.startsWith('http://') ||
-              commandOrUrl.startsWith('https://'))
-          ) {
+          if (commandOrUrl && /^https?:\/\//i.test(commandOrUrl)) {
             argv['transport'] = 'http';
           } else {
             argv['transport'] = 'stdio';

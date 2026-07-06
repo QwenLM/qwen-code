@@ -3,8 +3,19 @@
   "compilerOptions": {
     "outDir": "dist",
     "jsx": "react-jsx",
+    "baseUrl": ".",
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
+      "@qwen-code/qwen-code-core/*": ["../core/src/*"],
+      "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"],
+      "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],
+      "@qwen-code/audio-capture/*": ["../audio-capture/src/*"],
+      "@qwen-code/sdk": ["../sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/*": ["../sdk-typescript/src/*"]
+    }
   },
   "include": [
     "index.ts",
@@ -31,6 +42,8 @@
     "src/nonInteractiveCli.test.ts",
     "src/services/FileCommandLoader.test.ts",
     "src/services/prompt-processors/argumentProcessor.test.ts",
+    "src/serve/auth.test.ts",
+    "src/serve/server.test.ts",
     "src/utils/cleanup.test.ts",
     "src/utils/handleAutoUpdate.test.ts",
     "src/utils/startupWarnings.test.ts",
@@ -78,7 +91,6 @@
     "src/ui/hooks/useGeminiStream.test.tsx",
     "src/ui/hooks/useKeypress.test.ts",
     "src/ui/hooks/usePhraseCycler.test.ts",
-    "src/ui/hooks/vim.test.ts",
     "src/ui/utils/computeStats.test.ts",
     "src/ui/themes/theme.test.ts",
     "src/validateNonInterActiveAuth.test.ts",
@@ -87,9 +99,13 @@
   ],
   "references": [
     { "path": "../core" },
+    { "path": "../acp-bridge" },
+    { "path": "../audio-capture" },
+    { "path": "../sdk-typescript/tsconfig.reference.json" },
     { "path": "../channels/base" },
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
-    { "path": "../channels/dingtalk" }
+    { "path": "../channels/dingtalk" },
+    { "path": "../channels/feishu" }
   ]
 }

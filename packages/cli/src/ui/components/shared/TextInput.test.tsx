@@ -14,9 +14,12 @@ vi.mock('../../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
 }));
 
+vi.mock('../../hooks/usePreferredEditor.js');
+
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: { accent: 'cyan' },
+    background: { primary: '#1E1E1E' },
     status: { error: 'red' },
   },
 }));
@@ -138,6 +141,19 @@ describe('TextInput', () => {
       handler(makeKey({ name: 'return', shift: true, sequence: '\r' }));
 
       expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    it('ellipsizes long single-line values in the middle when enabled', () => {
+      const { lastFrame } = render(
+        <TextInput
+          value="sk-token-plan-abcdefghijklmnopqrstuvwxyz0123456789"
+          onChange={onChange}
+          inputWidth={20}
+          ellipsizeOverflow
+        />,
+      );
+
+      expect(lastFrame()).toContain('sk-token-...23456789');
     });
   });
 });

@@ -18,6 +18,7 @@
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { ApprovalMode } from '../config/config.js';
+import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { OverlayFs } from './overlayFs.js';
 
 export interface ToolGateResult {
@@ -47,6 +48,8 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.MEMORY,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
+  ToolNames.ENTER_PLAN_MODE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.WEB_FETCH,
 ]);
 
@@ -76,6 +79,7 @@ export async function evaluateToolCall(
   if (WRITE_TOOLS.has(toolName)) {
     if (
       approvalMode === ApprovalMode.AUTO_EDIT ||
+      approvalMode === ApprovalMode.AUTO ||
       approvalMode === ApprovalMode.YOLO
     ) {
       return { action: 'redirect', reason: `write_tool:${toolName}` };
@@ -117,10 +121,11 @@ async function resolveReadPaths(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
 ): Promise<void> {
-  const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
-  for (const key of pathKeys) {
+  for (const key of PATH_ARG_KEYS) {
     if (typeof args[key] === 'string') {
-      args[key] = overlayFs.resolveReadPath(args[key] as string);
+      args[key] = overlayFs.resolveReadPath(
+        unescapePath(String(args[key]).trim()),
+      );
       return;
     }
   }
@@ -134,11 +139,11 @@ export async function rewritePathArgs(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
 ): Promise<void> {
-  // Common path argument names used by Edit and WriteFile tools
-  const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
-  for (const key of pathKeys) {
+  for (const key of PATH_ARG_KEYS) {
     if (typeof args[key] === 'string') {
-      args[key] = await overlayFs.redirectWrite(args[key] as string);
+      args[key] = await overlayFs.redirectWrite(
+        unescapePath(String(args[key]).trim()),
+      );
       return;
     }
   }

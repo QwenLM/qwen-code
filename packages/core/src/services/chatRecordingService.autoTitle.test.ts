@@ -99,6 +99,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       getModel: vi.fn().mockReturnValue('qwen-plus'),
       getFastModel: vi.fn(() => fastModelValue),
       isInteractive: vi.fn().mockReturnValue(true),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       getDebugMode: vi.fn().mockReturnValue(false),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn().mockReturnValue({
@@ -290,6 +291,38 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
     expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
     expect(findCustomTitleRecord()).toBeUndefined();
+  });
+
+  it('triggers in ACP (daemon) mode even though isInteractive is false', async () => {
+    vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    mockOk('Fix login button');
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalled();
+    const record = findCustomTitleRecord();
+    expect(record).toBeDefined();
+    expect((record!.systemPayload as { customTitle: string }).customTitle).toBe(
+      'Fix login button',
+    );
+  });
+
+  it('does not trigger in headless CLI mode (non-interactive, non-ACP)', async () => {
+    vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(false);
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
   });
 
   it('prevents concurrent in-flight generations across rapid turns', async () => {

@@ -11,6 +11,7 @@
 
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { t } from '../i18n/index.js';
 import type {
   CommandContext,
   CommandSource,
@@ -37,6 +38,7 @@ import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
 export interface CommandDefinition {
   prompt: string;
   description?: string;
+  argumentHint?: string;
   whenToUse?: string;
   disableModelInvocation?: boolean;
 }
@@ -112,15 +114,20 @@ export function createSlashCommandFromDefinition(
   return {
     name: baseCommandName,
     description,
+    modelDescription: description,
     kind: CommandKind.FILE,
     extensionName,
     source: (extensionName
       ? 'plugin-command'
       : 'skill-dir-command') as CommandSource,
-    sourceLabel: extensionName ? `Plugin: ${extensionName}` : 'Custom',
+    sourceLabel: extensionName
+      ? `${t('Extension:')} ${extensionName}`
+      : t('Custom'),
+    sourceDetail: extensionName ? 'extension' : 'custom',
     modelInvocable: definition.disableModelInvocation
       ? false
       : !extensionName || !!(definition.description || definition.whenToUse),
+    argumentHint: definition.argumentHint,
     whenToUse: definition.whenToUse,
     action: async (
       context: CommandContext,
