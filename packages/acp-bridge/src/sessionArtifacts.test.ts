@@ -1490,6 +1490,37 @@ describe('SessionArtifactStore', () => {
     expect(repeated.changes).toEqual([]);
   });
 
+  it('filters prototype metadata keys without changing object prototype', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-prototype-metadata',
+      workspaceCwd: workspace,
+    });
+    const metadata = JSON.parse(
+      '{"__proto__":null,"constructor":"blocked","prototype":"blocked","safe":"ok"}',
+    ) as Record<string, string | number | boolean | null>;
+
+    const created = await store.upsertMany([
+      {
+        title: 'Link',
+        url: 'https://example.com/prototype-metadata',
+        metadata,
+      },
+    ]);
+    const normalized = created.changes[0]?.artifact?.metadata;
+
+    expect(normalized).toEqual({ safe: 'ok' });
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(normalized, '__proto__')).toBe(
+      false,
+    );
+    expect(
+      Object.prototype.hasOwnProperty.call(normalized, 'constructor'),
+    ).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(normalized, 'prototype')).toBe(
+      false,
+    );
+  });
+
   it('rejects non-finite metadata numbers', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-finite-metadata',

@@ -2034,6 +2034,9 @@ function normalizeMetadata(
   }
   const normalized: Record<string, string | number | boolean | null> = {};
   for (const [key, value] of Object.entries(metadata)) {
+    if (isPrototypeMetadataKey(key)) {
+      continue;
+    }
     if (!key) {
       throw new SessionArtifactValidationError(
         'metadata keys must not be empty',
@@ -2090,6 +2093,10 @@ function normalizeMetadata(
     );
   }
   return normalized;
+}
+
+function isPrototypeMetadataKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 function normalizeRetention(

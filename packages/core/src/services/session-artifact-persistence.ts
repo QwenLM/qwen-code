@@ -529,6 +529,7 @@ function normalizeMetadata(
   if (!isRecord(value)) return undefined;
   const normalized: Record<string, string | number | boolean | null> = {};
   for (const [key, item] of Object.entries(value)) {
+    if (isPrototypeMetadataKey(key)) continue;
     if (
       item === null ||
       typeof item === 'string' ||
@@ -544,6 +545,10 @@ function normalizeMetadata(
     return undefined;
   }
   return normalized;
+}
+
+function isPrototypeMetadataKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 function normalizeLiteral<T extends string>(

@@ -289,6 +289,41 @@ describe('session artifact persistence records', () => {
     expect(restored?.artifacts[0]).not.toHaveProperty('metadata');
   });
 
+  it('filters prototype metadata keys during restore normalization', () => {
+    const restored = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'created',
+            artifactId: 'prototype-metadata',
+            artifact: artifact('s1', 'https://example.com/prototype', {
+              metadata: JSON.parse(
+                '{"__proto__":null,"constructor":"blocked","prototype":"blocked","safe":"ok"}',
+              ) as Record<string, string | number | boolean | null>,
+            }),
+          },
+        ],
+      }),
+    ]);
+    const metadata = restored?.artifacts[0]?.metadata;
+
+    expect(metadata).toEqual({ safe: 'ok' });
+    expect(Object.getPrototypeOf(metadata)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(metadata, '__proto__')).toBe(
+      false,
+    );
+    expect(Object.prototype.hasOwnProperty.call(metadata, 'constructor')).toBe(
+      false,
+    );
+    expect(Object.prototype.hasOwnProperty.call(metadata, 'prototype')).toBe(
+      false,
+    );
+  });
+
   it('drops malformed content refs during restore normalization', () => {
     const pinned = artifact('s1', 'https://example.com/pinned', {
       retention: 'pinned',
