@@ -14020,6 +14020,24 @@ describe('runQwenServe SIGINT handler', () => {
 });
 
 describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  function makeInjectedWorkspaceRuntime(): WorkspaceRuntime {
+    const bridge = fakeBridge();
+    const fsFactory = {
+      forRequest: vi.fn(() => ({ marker: 'registry-fs' })),
+    } as unknown as WorkspaceFileSystemFactory;
+    return {
+      workspaceId: 'ws-registry',
+      workspaceCwd: '/work/registry-primary',
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge,
+      workspaceService: {} as DaemonWorkspaceService,
+      routeFileSystemFactory: fsFactory,
+      clientMcpSenderRegistry: {},
+    } as WorkspaceRuntime;
+  }
+
   it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
     const { createServeApp } = await import('./server.js');
     const app = createServeApp(
@@ -14124,20 +14142,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
 
   it('uses an injected workspace registry as the primary runtime source', async () => {
     const { createServeApp } = await import('./server.js');
-    const bridge = fakeBridge();
-    const fsFactory = { forRequest: vi.fn(() => ({ marker: 'registry-fs' })) };
-    const runtime = {
-      workspaceId: 'ws-registry',
-      workspaceCwd: '/work/registry-primary',
-      primary: true,
-      trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
-      bridge,
-      workspaceService: {} as DaemonWorkspaceService,
-      routeFileSystemFactory:
-        fsFactory as unknown as WorkspaceFileSystemFactory,
-      clientMcpSenderRegistry: {},
-    } as WorkspaceRuntime;
+    const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
     const app = createServeApp(
@@ -14157,7 +14162,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
 
     expect(locals.workspaceRegistry).toBe(registry);
     expect(locals.boundWorkspace).toBe('/work/registry-primary');
-    expect(locals.fsFactory).toBe(fsFactory);
+    expect(locals.fsFactory).toBe(runtime.routeFileSystemFactory);
 
     const res = await request(app)
       .get('/capabilities')
@@ -14167,21 +14172,55 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     expect(res.body.features).toContain('workspace_reload');
   });
 
+  it('accepts matching runtime deps when a workspace registry is injected', async () => {
+    const { createServeApp } = await import('./server.js');
+    const runtime = makeInjectedWorkspaceRuntime();
+    const registry = createWorkspaceRegistry([runtime]);
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          bridge: runtime.bridge,
+          workspace: runtime.workspaceService,
+          fsFactory: runtime.routeFileSystemFactory,
+          clientMcpSenderRegistry: runtime.clientMcpSenderRegistry,
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).not.toThrow();
+  });
+
+  it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
+    const { createServeApp } = await import('./server.js');
+    const runtime = makeInjectedWorkspaceRuntime();
+    const registry = createWorkspaceRegistry([runtime]);
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+          clientMcpOverWs: true,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          bridge: runtime.bridge,
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).not.toThrow();
+  });
+
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
     const { createServeApp } = await import('./server.js');
-    const runtime = {
-      workspaceId: 'ws-registry',
-      workspaceCwd: '/work/registry-primary',
-      primary: true,
-      trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
-      bridge: fakeBridge(),
-      workspaceService: {} as DaemonWorkspaceService,
-      routeFileSystemFactory: {
-        forRequest: vi.fn(() => ({ marker: 'registry-fs' })),
-      } as unknown as WorkspaceFileSystemFactory,
-      clientMcpSenderRegistry: {},
-    } as WorkspaceRuntime;
+    const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
     expect(() =>
