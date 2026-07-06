@@ -53,7 +53,11 @@ async function mount(
   tasks: MockTask[],
   opts: {
     onOpenSession?: (sessionId: string) => void;
-    onRunPrompt?: (prompt: string, sessionId: string | null) => void;
+    onRunPrompt?: (
+      prompt: string,
+      sessionId: string | null,
+    ) => void | Promise<void>;
+    onError?: (error: unknown, message: string) => void;
   } = {},
 ) {
   actions.listScheduledTasks.mockResolvedValue(tasks);
@@ -69,7 +73,7 @@ async function mount(
           onRunPrompt={opts.onRunPrompt ?? vi.fn()}
           onCreateViaChat={vi.fn()}
           onOpenSession={opts.onOpenSession}
-          onError={vi.fn()}
+          onError={opts.onError ?? vi.fn()}
         />
       </I18nProvider>,
     );
@@ -224,6 +228,47 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     expect(onRunPrompt).toHaveBeenCalledWith('legacy', null);
+  });
+
+  it('does NOT record the run when the bound session fails to open', async () => {
+    // onRunPrompt rejects (session archived/deleted): the prompt never ran, so
+    // the run must not be recorded — otherwise history shows a phantom run.
+    const onRunPrompt = vi.fn().mockRejectedValue(new Error('archived'));
+    const onError = vi.fn();
+    await mount([baseTask({ sessionId: 'sess-9', prompt: 'do it' })], {
+      onRunPrompt,
+      onError,
+    });
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+    expect(actions.runScheduledTask).not.toHaveBeenCalled(); // no phantom record
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it('serializes run now: a second click while one is pending is ignored', async () => {
+    // Hold the first run pending (session still switching), then click again —
+    // the button is disabled + the handler guards, so no second prompt/record.
+    let resolveRun: (() => void) | undefined;
+    const onRunPrompt = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+    await mount([baseTask({ sessionId: 'sess-9', prompt: 'do it' })], {
+      onRunPrompt,
+    });
+    const btn = document.querySelector('[aria-label="Run now"]');
+    click(btn);
+    await flush(); // first run pending → button disabled
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    click(btn); // ignored while pending
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledTimes(1);
+    resolveRun?.();
+    await flush();
+    expect(actions.runScheduledTask).toHaveBeenCalledTimes(1); // one record
   });
 });
 

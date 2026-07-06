@@ -654,4 +654,67 @@ describe('scheduled-tasks routes', () => {
     expect(patch.body.recurring).toBe(true);
     expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
   });
+
+  it('rejects re-enabling an archive-disabled task via PATCH (409, no write)', async () => {
+    // Disabled BY archiving its session — re-enabling here would show it enabled
+    // while the session stays archived and can't fire. Must unarchive instead.
+    await seedTask({
+      id: 'arch1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: false,
+      disabledByArchive: true,
+      sessionId: 'sess-arch',
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/arch1')
+      .send({ enabled: true });
+    expect(patch.status).toBe(409);
+    expect(patch.body.code).toBe('task_session_archived');
+    // The file was not mutated — the task stays disabled with its marker.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].enabled).toBe(false);
+  });
+
+  it('still allows re-enabling a user-disabled task (no archive marker) via PATCH', async () => {
+    // enabled:false WITHOUT disabledByArchive = the user's own off switch.
+    await seedTask({
+      id: 'usr1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: false,
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/usr1')
+      .send({ enabled: true });
+    expect(patch.status).toBe(200);
+    expect(patch.body.enabled).toBe(true);
+  });
+
+  it('lets an archive-disabled task be edited in other ways (cron) without re-enabling', async () => {
+    // Only enabled:true is blocked; a cron edit that leaves it disabled is fine.
+    await seedTask({
+      id: 'arch2',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: false,
+      disabledByArchive: true,
+      sessionId: 'sess-arch2',
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/arch2')
+      .send({ cron: '30 8 * * *' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.cron).toBe('30 8 * * *');
+    expect(patch.body.enabled).toBe(false); // still disabled
+  });
 });

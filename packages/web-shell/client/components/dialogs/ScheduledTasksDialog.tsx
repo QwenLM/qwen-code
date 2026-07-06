@@ -49,7 +49,10 @@ interface ScheduledTasksDialogProps {
   /** Manual "run now": execute the task's prompt in its bound session (so it
    * lands in the same transcript as its scheduled runs), or in the current
    * session for an unbound task. The App wiring switches to that session. */
-  onRunPrompt: (prompt: string, sessionId: string | null) => void;
+  onRunPrompt: (
+    prompt: string,
+    sessionId: string | null,
+  ) => void | Promise<void>;
   /** Switch to the chat view with the composer primed to describe a task, so
    * the agent can create it conversationally via its cron_create tool. */
   onCreateViaChat: () => void;
@@ -85,6 +88,10 @@ export function ScheduledTasksDialog({
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // The task whose manual "run now" is mid-flight (switching to its session +
+  // enqueuing). Serialized to one at a time so overlapping runs can't drop a
+  // prompt on the App's single bound-run latch.
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
 
   // Create / edit form. `editingId` null = create, otherwise the id of the
   // task being edited (the form is dual-mode — same fields, different verb).
@@ -254,20 +261,36 @@ export function ScheduledTasksDialog({
 
   const handleRunNow = useCallback(
     async (task: DaemonScheduledTask) => {
-      // Record the trigger first (updates lastFiredAt + run history) and reload
-      // so the card reflects it, THEN execute the prompt in the task's bound
-      // session (the App wiring switches to it). A record failure is surfaced
-      // but doesn't block the run — same as a scheduled fire, which records the
-      // trigger regardless of the turn's outcome.
+      // Serialize: only one manual run in flight. The App holds a single pending
+      // bound-run latch, so overlapping runs could drop a prompt — and we don't
+      // want two records for two clicks that resolve to one run.
+      if (runningTaskId !== null) return;
+      setRunningTaskId(task.id);
       try {
+        // Enqueue the prompt FIRST — onRunPrompt resolves once it's actually
+        // sent in the task's (bound) session, and REJECTS if that session can't
+        // be opened. Only after a successful enqueue do we record the run, so a
+        // failed session load never leaves a false "ran" entry in the history.
+        await onRunPrompt(task.prompt, task.sessionId);
+      } catch (err) {
+        onError(err, t('scheduledTasks.error.runFailed'));
+        return; // the run never happened — do not record it
+      } finally {
+        // Re-enable the controls as soon as the enqueue settles; recording the
+        // run below is a fast follow-up that shouldn't keep the row disabled.
+        setRunningTaskId(null);
+      }
+      try {
+        // Record the trigger (updates lastFiredAt + run history) and reload so
+        // the card reflects it. The prompt already ran; a record failure is
+        // surfaced but the history still catches up on the next refresh.
         await actions.runScheduledTask(task.id);
         await reload();
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));
       }
-      onRunPrompt(task.prompt, task.sessionId);
     },
-    [actions, onError, onRunPrompt, reload, t],
+    [actions, onError, onRunPrompt, reload, runningTaskId, t],
   );
 
   const handleDelete = useCallback(
@@ -566,6 +589,7 @@ export function ScheduledTasksDialog({
                     type="button"
                     className={styles.iconAction}
                     onClick={() => void handleRunNow(task)}
+                    disabled={runningTaskId !== null}
                     title={t('scheduledTasks.runNow')}
                     aria-label={t('scheduledTasks.runNow')}
                   >

@@ -439,12 +439,24 @@ export function registerScheduledTasksRoutes(
 
     let found = false;
     let updated: DurableCronTask | undefined;
+    let blockedByArchive = false;
     try {
       await updateCronTasks(boundWorkspace, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A task disabled BY archiving its session (`disabledByArchive`) can't
+        // be re-enabled through this generic PATCH: its bound session is still
+        // archived and can't fire, so flipping `enabled: true` here would show
+        // an enabled task with a countdown that never runs. The task/session
+        // lifecycle must stay coupled — the caller has to unarchive the session
+        // (which clears the marker and reloads it). Reject and leave the file
+        // untouched.
+        if (patch.enabled === true && current.disabledByArchive === true) {
+          blockedByArchive = true;
+          return tasks; // no write
+        }
         const next: DurableCronTask = { ...current, ...patch };
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
@@ -489,6 +501,14 @@ export function registerScheduledTasksRoutes(
       res.status(500).json({
         error: 'Failed to update scheduled task',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedByArchive) {
+      res.status(409).json({
+        error:
+          'This task was disabled by archiving its session; unarchive the session to re-enable it.',
+        code: 'task_session_archived',
       });
       return;
     }

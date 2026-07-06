@@ -230,6 +230,10 @@ function TodoContextsProvider({
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_TOASTS = 4;
+// Cap on how long a manual "run now" waits for its bound session to become
+// active before giving up, so the scheduled-tasks UI can't stay stuck disabled
+// if the switch never completes.
+const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
@@ -2444,26 +2448,59 @@ export function App({
   // own session (so manual and scheduled runs share one transcript); an unbound
   // task runs in the current session. Switching sessions is async, so a latch
   // holds the prompt until the target session is fully active before sending.
+  //
+  // Returns a promise that resolves once the prompt is actually ENQUEUED and
+  // rejects if the bound session can't be opened (archived/deleted), supersedes,
+  // or times out — so the caller only records the run after it truly happened,
+  // never on a failed session switch. Only one bound run waits at a time.
   const pendingBoundRunRef = useRef<{
     sessionId: string;
     prompt: string;
+    resolve: () => void;
+    reject: (err: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
   } | null>(null);
+  const clearPendingBoundRun = useCallback((sessionId: string) => {
+    const cur = pendingBoundRunRef.current;
+    if (cur && cur.sessionId === sessionId) {
+      clearTimeout(cur.timer);
+      pendingBoundRunRef.current = null;
+    }
+  }, []);
   const runTaskManually = useCallback(
-    (prompt: string, sessionId: string | null) => {
+    (prompt: string, sessionId: string | null): Promise<void> => {
       setMainView('chat');
       if (!sessionId) {
-        sendPrompt(prompt).catch((error: unknown) =>
-          reportError(error, 'Failed to run scheduled task'),
-        );
-        return;
+        // Unbound: runs in the current session — resolves when enqueued.
+        return sendPrompt(prompt).then(() => undefined);
       }
-      pendingBoundRunRef.current = { sessionId, prompt };
-      loadSidebarSession(sessionId).catch((error: unknown) => {
+      // A newer bound run supersedes an older one still waiting on the latch;
+      // reject the old promise so its caller doesn't record a dropped run.
+      const prev = pendingBoundRunRef.current;
+      if (prev) {
+        clearTimeout(prev.timer);
         pendingBoundRunRef.current = null;
-        reportError(error, 'Failed to open session');
+        prev.reject(new Error('superseded by another run'));
+      }
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          clearPendingBoundRun(sessionId);
+          reject(new Error('Timed out switching to the task session'));
+        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
+        pendingBoundRunRef.current = {
+          sessionId,
+          prompt,
+          resolve,
+          reject,
+          timer,
+        };
+        loadSidebarSession(sessionId).catch((error: unknown) => {
+          clearPendingBoundRun(sessionId);
+          reject(error);
+        });
       });
     },
-    [sendPrompt, loadSidebarSession, reportError],
+    [sendPrompt, loadSidebarSession, clearPendingBoundRun],
   );
   useEffect(() => {
     const pending = pendingBoundRunRef.current;
@@ -2473,10 +2510,15 @@ export function App({
       !connection.loadingTranscript &&
       !connection.catchingUp
     ) {
+      clearTimeout(pending.timer);
       pendingBoundRunRef.current = null;
+      // The session is active — enqueue the prompt and resolve at that point
+      // (the run has happened). A send error is surfaced but no longer un-does
+      // the record, matching a scheduled fire's "recorded when fired" contract.
       sendPrompt(pending.prompt).catch((error: unknown) =>
         reportError(error, 'Failed to run scheduled task'),
       );
+      pending.resolve();
     }
   }, [
     connection.sessionId,
