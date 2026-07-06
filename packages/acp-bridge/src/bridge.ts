@@ -26,6 +26,7 @@ import {
   DAEMON_TRACESTATE_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
+  normalizeSnapshotPayload,
   ShellExecutionService,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -2831,31 +2832,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ): RebuiltSessionArtifactSnapshot | undefined => {
     const candidate = (state as { artifactSnapshot?: unknown })
       .artifactSnapshot;
-    if (
-      candidate &&
-      typeof candidate === 'object' &&
-      !Array.isArray(candidate) &&
-      (candidate as { v?: unknown }).v ===
-        SESSION_ARTIFACT_PERSISTENCE_VERSION &&
-      Array.isArray((candidate as { artifacts?: unknown }).artifacts)
-    ) {
-      const snapshot = candidate as Partial<RebuiltSessionArtifactSnapshot>;
-      return {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId:
-          typeof snapshot.sessionId === 'string' ? snapshot.sessionId : '',
-        sequence: typeof snapshot.sequence === 'number' ? snapshot.sequence : 0,
-        artifacts: snapshot.artifacts ?? [],
-        tombstonedIds: Array.isArray(snapshot.tombstonedIds)
-          ? snapshot.tombstonedIds
-          : [],
-        stickyEphemeralIds: Array.isArray(snapshot.stickyEphemeralIds)
-          ? snapshot.stickyEphemeralIds
-          : [],
-        warnings: Array.isArray(snapshot.warnings) ? snapshot.warnings : [],
-      };
-    }
-    return undefined;
+    const warnings: string[] = [];
+    const snapshot = normalizeSnapshotPayload(candidate, warnings);
+    if (!snapshot) return undefined;
+    const snapshotWarnings = Array.isArray(
+      (candidate as { warnings?: unknown }).warnings,
+    )
+      ? (candidate as { warnings: unknown[] }).warnings
+          .filter(
+            (warning): warning is string =>
+              typeof warning === 'string' && warning.length <= 1000,
+          )
+          .slice(-500)
+      : [];
+    return {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: snapshot.sessionId,
+      sequence: snapshot.sequence,
+      artifacts: snapshot.artifacts,
+      tombstonedIds: snapshot.tombstonedIds ?? [],
+      stickyEphemeralIds: snapshot.stickyEphemeralIds ?? [],
+      warnings: [...warnings, ...snapshotWarnings],
+    };
   };
 
   const artifactSnapshotUnavailableReason = (

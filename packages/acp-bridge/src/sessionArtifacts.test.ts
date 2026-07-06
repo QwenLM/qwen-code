@@ -2838,6 +2838,63 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('restores workspace artifacts with stat-only content checks', async () => {
+    const workspacePath = 'restore-stat-only.txt';
+    const content = 'same content';
+    await fs.writeFile(path.join(workspace, workspacePath), content);
+    const stat = await fs.stat(path.join(workspace, workspacePath));
+    const id = stableSessionArtifactId(
+      's11-restore-workspace-stat-only',
+      `workspace:${workspacePath}`,
+    );
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-workspace-stat-only',
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId: 's11-restore-workspace-stat-only',
+      sequence: 1,
+      artifacts: [
+        {
+          id,
+          kind: 'file',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Restored workspace file',
+          workspacePath,
+          sizeBytes: stat.size,
+          metadata: {
+            'qwen.workspace.sha256': createHash('sha256')
+              .update(content)
+              .digest('hex'),
+            'qwen.workspace.mtimeMs': stat.mtimeMs - 1,
+          },
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+          persistedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id,
+          status: 'changed',
+          persistenceWarning: 'metadata_only_restore',
+        },
+      ],
+    });
+  });
+
   it('keeps live artifacts when a non-empty restore snapshot fully fails', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's11-restore-fail-closed',
@@ -2873,7 +2930,6 @@ describe('SessionArtifactStore', () => {
     });
 
     expect(warnings).toEqual([
-      'skipped artifact with mismatched id bad-id',
       'artifact snapshot restore failed; kept existing live artifacts',
     ]);
     await expect(store.list()).resolves.toMatchObject({
@@ -2930,7 +2986,6 @@ describe('SessionArtifactStore', () => {
     });
 
     expect(warnings).toEqual([
-      'skipped artifact with mismatched id bad-id',
       'artifact snapshot restore partially failed; restored 1/2 artifacts; kept existing live artifacts',
     ]);
     await expect(store.list()).resolves.toMatchObject({
@@ -2977,10 +3032,9 @@ describe('SessionArtifactStore', () => {
       warnings: [],
     });
 
-    expect(warnings[0]).toContain('url must use http or https');
-    expect(warnings).toContain(
+    expect(warnings).toEqual([
       'artifact snapshot restore failed; kept existing live artifacts',
-    );
+    ]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {

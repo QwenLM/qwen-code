@@ -1331,6 +1331,45 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('normalizes artifact snapshots returned by session restore', async () => {
+    const sessionId = 'persisted-artifact-normalize';
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts: [{ malformed: true }],
+                tombstonedIds: ['x'.repeat(201)],
+                stickyEphemeralIds: ['y'.repeat(201)],
+                warnings: ['kept warning', 'z'.repeat(1001), 123],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    expect(loaded.artifactWarnings).toEqual([
+      'skipped artifact without id/title',
+      'kept warning',
+    ]);
+    await expect(
+      bridge.getSessionArtifacts(loaded.sessionId),
+    ).resolves.toMatchObject({
+      warnings: ['skipped artifact without id/title', 'kept warning'],
+      artifacts: [],
+    });
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const bridge = makeBridge({

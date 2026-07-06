@@ -521,8 +521,8 @@ export class SessionArtifactStore {
     if (!snapshot) return [];
     return this.enqueue(async () => {
       const warnings = [...(snapshot?.warnings ?? [])];
+      const baselineWarnings = [...warnings];
       const previousState = this.cloneState();
-      const warningCountBeforeRestore = warnings.length;
       const preservedLiveEphemeralArtifacts = options.preserveLiveEphemeral
         ? Array.from(this.artifacts.values())
             .filter((artifact) => artifact.retention === 'ephemeral')
@@ -561,6 +561,7 @@ export class SessionArtifactStore {
             {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
+              hashWorkspaceContent: false,
             },
           );
           if (
@@ -611,16 +612,17 @@ export class SessionArtifactStore {
       if (
         snapshot.artifacts.length > 0 &&
         restoredCount < snapshot.artifacts.length &&
-        warnings.length > warningCountBeforeRestore
+        warnings.length > baselineWarnings.length
       ) {
         this.restoreState(previousState);
-        warnings.push(
+        const rollbackWarnings = [
+          ...baselineWarnings,
           restoredCount === 0
             ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
             : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; restored ${restoredCount}/${snapshot.artifacts.length} artifacts; kept existing live artifacts`,
-        );
-        this.setLastRestoreWarnings(warnings);
-        return warnings;
+        ];
+        this.setLastRestoreWarnings(rollbackWarnings);
+        return rollbackWarnings;
       }
       for (const artifact of preservedLiveEphemeralArtifacts) {
         if (
@@ -969,6 +971,7 @@ export class SessionArtifactStore {
     options: {
       metadataBudget?: 'user' | 'persisted';
       workspaceExpected?: WorkspaceStatusExpected;
+      hashWorkspaceContent?: boolean;
     } = {},
   ): Promise<NormalizedArtifact> {
     if (!input || typeof input !== 'object') {
@@ -1019,6 +1022,7 @@ export class SessionArtifactStore {
       ? await this.getInitialWorkspaceStatus(
           workspacePath,
           options.workspaceExpected,
+          { hashContent: options.hashWorkspaceContent !== false },
         )
       : undefined;
     if (workspaceStatus?.escaped) {
@@ -1145,6 +1149,7 @@ export class SessionArtifactStore {
   private async getInitialWorkspaceStatus(
     workspacePath: string,
     expected?: WorkspaceStatusExpected,
+    options: { hashContent: boolean } = { hashContent: true },
   ): Promise<{
     status: DaemonSessionArtifactStatus;
     sizeBytes?: number;
@@ -1158,6 +1163,7 @@ export class SessionArtifactStore {
         workspacePath,
         this.getRealWorkspaceCwd(),
         expected,
+        options,
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -2291,6 +2297,7 @@ async function getWorkspaceStatus(
   workspacePath: string,
   realWorkspaceCwd: Promise<string>,
   expected?: WorkspaceStatusExpected,
+  options: { hashContent: boolean } = { hashContent: true },
 ): Promise<{
   status: DaemonSessionArtifactStatus;
   sizeBytes?: number;
@@ -2340,6 +2347,13 @@ async function getWorkspaceStatus(
           };
         }
         if (stat.size > MAX_WORKSPACE_HASH_BYTES) {
+          return {
+            status: expectedSha256 ? 'changed' : 'available',
+            sizeBytes: stat.size,
+            mtimeMs: stat.mtimeMs,
+          };
+        }
+        if (!options.hashContent) {
           return {
             status: expectedSha256 ? 'changed' : 'available',
             sizeBytes: stat.size,
