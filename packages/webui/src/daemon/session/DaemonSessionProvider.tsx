@@ -1219,7 +1219,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               error: undefined,
-              errorStatus: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
           }
         } catch (error) {
@@ -1265,7 +1268,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
-              setConnection({ status: 'error', error: message, errorStatus });
+              setConnection((current) => ({
+                ...current,
+                status: 'error',
+                sessionId: undefined,
+                error: message,
+                errorStatus,
+                capabilities: capabilities ?? current.capabilities,
+              }));
               return;
             }
             setConnection((current) => ({
@@ -1295,18 +1305,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (!autoReconnect) {
             session = undefined;
             sessionRef.current = undefined;
-            setConnection({
+            setConnection((current) => ({
+              ...current,
               status: 'error',
               error: message,
-              errorStatus,
-            });
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+            }));
             return;
           }
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
             error: message,
-            errorStatus,
+            errorStatus: resolveConnectionErrorStatus(
+              errorStatus,
+              current.errorStatus,
+            ),
             loadingTranscript: undefined,
           }));
         }
@@ -1434,7 +1451,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
           const errorStatus = extractHttpStatus(error);
-          const missingSession = errorStatus === 404 || errorStatus === 410;
+          const missingSession = isMissingSessionHttpStatus(errorStatus);
+          if (missingSession) {
+            const deadSessionId = session.sessionId;
+            const active = activePromptsRef.current.get(deadSessionId);
+            active?.controller.abort();
+            activePromptsRef.current.delete(deadSessionId);
+            sessionRef.current = undefined;
+          }
           setConnection((current) =>
             current.sessionId === session.sessionId
               ? {
@@ -2053,9 +2077,23 @@ function isTerminalSessionHttpError(error: unknown): boolean {
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
 }
 
+function isMissingSessionHttpStatus(status: number | undefined): boolean {
+  return status === 404 || status === 410;
+}
+
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
+}
+
+function resolveConnectionErrorStatus(
+  nextStatus: number | undefined,
+  currentStatus: number | undefined,
+): number | undefined {
+  return (
+    nextStatus ??
+    (isMissingSessionHttpStatus(currentStatus) ? currentStatus : undefined)
+  );
 }
 
 function extractHttpStatus(error: unknown): number | undefined {
