@@ -150,6 +150,15 @@ export { getActiveSseCount } from './routes/sse-events.js';
  */
 let warnedDefaultTrust = false;
 
+function describeRegistryPrimaryForConflict(
+  registry: WorkspaceRegistry,
+): string {
+  return (
+    `registry primary cwd=${JSON.stringify(registry.primary.workspaceCwd)}, ` +
+    `workspaceId=${JSON.stringify(registry.primary.workspaceId)}`
+  );
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -325,20 +334,27 @@ export function createServeApp(
     deps.boundWorkspace !== injectedWorkspaceRegistry.primary.workspaceCwd
   ) {
     throw new Error(
-      'createServeApp: workspaceRegistry conflicts with deps.boundWorkspace.',
+      'createServeApp: workspaceRegistry conflicts with ' +
+        `deps.boundWorkspace: ${describeRegistryPrimaryForConflict(
+          injectedWorkspaceRegistry,
+        )}; deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}.`,
     );
   }
   if (injectedWorkspaceRegistry && deps.bridge) {
     if (deps.bridge !== injectedWorkspaceRegistry.primary.bridge) {
       throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.bridge.',
+        'createServeApp: workspaceRegistry conflicts with deps.bridge: ' +
+          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
+          'deps.bridge is a different object.',
       );
     }
   }
   if (injectedWorkspaceRegistry && deps.workspace) {
     if (deps.workspace !== injectedWorkspaceRegistry.primary.workspaceService) {
       throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.workspace.',
+        'createServeApp: workspaceRegistry conflicts with deps.workspace: ' +
+          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
+          'deps.workspace is a different object.',
       );
     }
   }
@@ -348,7 +364,9 @@ export function createServeApp(
       injectedWorkspaceRegistry.primary.routeFileSystemFactory
     ) {
       throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.fsFactory.',
+        'createServeApp: workspaceRegistry conflicts with deps.fsFactory: ' +
+          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
+          'deps.fsFactory is a different object.',
       );
     }
   }
@@ -358,7 +376,10 @@ export function createServeApp(
       injectedWorkspaceRegistry.primary.clientMcpSenderRegistry
     ) {
       throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.clientMcpSenderRegistry.',
+        'createServeApp: workspaceRegistry conflicts with ' +
+          'deps.clientMcpSenderRegistry: ' +
+          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
+          'deps.clientMcpSenderRegistry is a different object.',
       );
     }
   }

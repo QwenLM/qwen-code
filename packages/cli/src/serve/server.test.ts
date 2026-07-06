@@ -14197,7 +14197,9 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
           boundWorkspace: '/work/other',
         } as Parameters<typeof createServeApp>[2],
       ),
-    ).toThrow(/workspaceRegistry conflicts with deps\.boundWorkspace/);
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.boundWorkspace: .*registry primary cwd="\/work\/registry-primary".*workspaceId="ws-registry".*deps\.boundWorkspace="\/work\/other"/,
+    );
 
     expect(() =>
       createServeApp(
@@ -14212,7 +14214,9 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
           bridge: fakeBridge(),
         } as Parameters<typeof createServeApp>[2],
       ),
-    ).toThrow(/workspaceRegistry conflicts with deps\.bridge/);
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.bridge: .*workspaceId="ws-registry".*deps\.bridge is a different object/,
+    );
 
     expect(() =>
       createServeApp(
@@ -14227,7 +14231,9 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
           workspace: {} as DaemonWorkspaceService,
         } as Parameters<typeof createServeApp>[2],
       ),
-    ).toThrow(/workspaceRegistry conflicts with deps\.workspace/);
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.workspace: .*workspaceId="ws-registry".*deps\.workspace is a different object/,
+    );
 
     expect(() =>
       createServeApp(
@@ -14244,7 +14250,9 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
           } as unknown as WorkspaceFileSystemFactory,
         } as Parameters<typeof createServeApp>[2],
       ),
-    ).toThrow(/workspaceRegistry conflicts with deps\.fsFactory/);
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.fsFactory: .*workspaceId="ws-registry".*deps\.fsFactory is a different object/,
+    );
 
     expect(() =>
       createServeApp(
@@ -14259,7 +14267,9 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
           clientMcpSenderRegistry: {},
         } as Parameters<typeof createServeApp>[2],
       ),
-    ).toThrow(/workspaceRegistry conflicts with deps\.clientMcpSenderRegistry/);
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.clientMcpSenderRegistry: .*workspaceId="ws-registry".*deps\.clientMcpSenderRegistry is a different object/,
+    );
   });
 
   it('passes custom ignore files through resolveBridgeFsFactory', async () => {

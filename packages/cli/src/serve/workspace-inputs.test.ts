@@ -57,13 +57,16 @@ describe('resolveSingleWorkspaceInput', () => {
     );
   });
 
-  it('rejects nested explicit workspaces', () => {
+  it('rejects nested explicit workspaces in either order', () => {
     const root = makeScratch();
     const parent = path.join(root, 'parent');
     const child = path.join(parent, 'child');
     fs.mkdirSync(child, { recursive: true });
 
     expect(() => resolveSingleWorkspaceInput([parent, child])).toThrow(
+      NestedWorkspaceInputError,
+    );
+    expect(() => resolveSingleWorkspaceInput([child, parent])).toThrow(
       NestedWorkspaceInputError,
     );
   });
