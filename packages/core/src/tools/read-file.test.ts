@@ -28,6 +28,7 @@ vi.mock('../utils/pdf.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/pdf.js')>();
   return {
     ...actual,
+    getPDFPageCount: async () => 31,
     isPdftotextAvailable: async () => true,
   };
 });
@@ -750,6 +751,7 @@ describe('ReadFileTool', () => {
 
         expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
         expect(String(result.llmContent).length).toBeLessThan(1000);
+        expect(result.llmContent).toContain('has 31 pages');
         expect(result.llmContent).toContain("Use the 'pages' parameter");
       });
 

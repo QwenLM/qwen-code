@@ -62,7 +62,8 @@ export function buildPDFTextTooLargeGuidance(
   estimatedTokens: number,
   pagesUsed?: string,
 ): string {
-  if (pagesUsed && /^\d+$/.test(pagesUsed.trim())) {
+  const pageRange = pagesUsed ? parsePDFPageRange(pagesUsed) : null;
+  if (pageRange && pageRange.firstPage === pageRange.lastPage) {
     return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.`;
   }
   return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.`;
