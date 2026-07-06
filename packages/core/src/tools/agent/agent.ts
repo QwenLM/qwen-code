@@ -2135,26 +2135,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // This is not redundant with registry.register() below — that call
       // remains the authoritative race guard, but by then the launch path
       // has already run hooks and created a child agent.
-      if (shouldRunInBackground) {
-        try {
-          this.config
-            .getBackgroundTaskRegistry()
-            .assertCanStartBackgroundAgent();
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          this.updateDisplay(
-            {
-              status: 'failed',
-              terminateReason: errorMessage,
-            },
-            updateOutput,
-          );
-          return {
-            llmContent: errorMessage,
-            returnDisplay: this.currentDisplay!,
-          };
-        }
+      try {
+        this.config.getBackgroundTaskRegistry().assertCanStartBackgroundAgent();
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        this.updateDisplay(
+          {
+            status: 'failed',
+            terminateReason: errorMessage,
+          },
+          updateOutput,
+        );
+        return {
+          llmContent: errorMessage,
+          returnDisplay: this.currentDisplay!,
+        };
       }
 
       // ── Optional worktree isolation (Phase 1: provision) ──────────

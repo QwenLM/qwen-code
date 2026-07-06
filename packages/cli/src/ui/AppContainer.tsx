@@ -277,6 +277,54 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   });
 }
 
+function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
+  return pendingHistoryItems.some(
+    (item) =>
+      item.type === MessageType.COMPRESSION && item.compression.isPending,
+  );
+}
+
+export function isInputActiveForState({
+  initError,
+  isProcessing,
+  hasPendingCompression,
+  streamingState,
+}: {
+  initError: unknown;
+  isProcessing: boolean;
+  hasPendingCompression: boolean;
+  streamingState: StreamingState;
+}) {
+  return (
+    !initError &&
+    (!isProcessing || hasPendingCompression) &&
+    (streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.Responding)
+  );
+}
+
+export function shouldDrainMessageQueue({
+  isConfigInitialized,
+  streamingState,
+  isProcessing,
+  dialogsVisible,
+  messageQueueLength,
+}: {
+  isConfigInitialized: boolean;
+  streamingState: StreamingState;
+  isProcessing: boolean;
+  dialogsVisible: boolean;
+  messageQueueLength: number;
+}) {
+  return (
+    isConfigInitialized &&
+    streamingState === StreamingState.Idle &&
+    !isProcessing &&
+    !dialogsVisible &&
+    messageQueueLength > 0
+  );
+}
+
 function getResponseCandidateTokens(
   pendingGeminiHistoryItems: HistoryItemWithoutId[],
 ): number {
@@ -875,6 +923,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  // Live content-area height, kept in a ref so useGeminiStream (called above the
+  // point where availableTerminalHeight is computed) can read the current value
+  // when bounding the pending item's rendered height. terminalWidthRef pairs
+  // with it so the commit loop reads width and height consistently (both live).
+  const availableTerminalHeightRef = useRef(0);
+  const terminalWidthRef = useRef(0);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1664,6 +1718,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
     logger,
+    availableTerminalHeightRef,
+    terminalWidthRef,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -2085,6 +2141,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
       if (
         streamingState === StreamingState.Idle &&
+        !isProcessing &&
         isSlashCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
@@ -2097,6 +2154,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addMessage,
       agentViewState,
       streamingState,
+      isProcessing,
       submitQuery,
       handleSlashCommand,
       config,
@@ -2134,6 +2192,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
   const hasExecutingTool = isToolExecuting(pendingHistoryItems);
+  const hasPendingCompression = isCompressionPending(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, hasExecutingTool);
@@ -2327,15 +2386,16 @@ export const AppContainer = (props: AppContainerProps) => {
    * Determines if the input prompt should be active and accept user input.
    * Input is disabled during:
    * - Initialization errors
-   * - Slash command processing
+   * - Slash command processing, except pending compression where input can queue
    * - Tool confirmations (WaitingForConfirmation state)
    * - Any future streaming states not explicitly allowed
    */
-  const isInputActive =
-    !initError &&
-    !isProcessing &&
-    (streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.Responding);
+  const isInputActive = isInputActiveForState({
+    initError,
+    isProcessing,
+    hasPendingCompression,
+    streamingState,
+  });
 
   const isFocused = useFocus();
   useBracketedPaste();
@@ -2732,6 +2792,9 @@ export const AppContainer = (props: AppContainerProps) => {
       mainContentHeightReservation -
       tabBarHeight,
   );
+  // Expose to useGeminiStream (called earlier) for rendered-height-aware commit.
+  availableTerminalHeightRef.current = availableTerminalHeight;
+  terminalWidthRef.current = terminalWidth;
 
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
@@ -3624,10 +3687,17 @@ export const AppContainer = (props: AppContainerProps) => {
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
     if (queueDrainingRef.current) return;
-    if (!isConfigInitialized) return;
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisible) return;
-    if (messageQueue.length === 0) return;
+    if (
+      !shouldDrainMessageQueue({
+        isConfigInitialized,
+        streamingState,
+        isProcessing,
+        dialogsVisible,
+        messageQueueLength: messageQueue.length,
+      })
+    ) {
+      return;
+    }
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
     const plainPrompts = drainQueue();
@@ -3643,6 +3713,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [
     isConfigInitialized,
     streamingState,
+    isProcessing,
     dialogsVisible,
     messageQueue,
     drainQueue,

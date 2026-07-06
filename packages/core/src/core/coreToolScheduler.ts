@@ -222,21 +222,7 @@ const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 
-/**
- * Builds the failure ToolResult surfaced when a tool call exceeds the
- * execution timeout. Reported as a normal tool error so the model can adapt
- * (narrow scope, retry, etc.) instead of the session hanging.
- */
-function createToolTimeoutResult(timeoutMs: number): ToolResult {
-  const message =
-    `Tool execution timed out after ${Math.round(timeoutMs / 1000)}s. ` +
-    `The tool may be stuck or operating on too large a scope.`;
-  return {
-    llmContent: message,
-    returnDisplay: message,
-    error: { message, type: ToolErrorType.EXECUTION_TIMEOUT },
-  };
-}
+
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
 const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
@@ -250,6 +236,29 @@ const TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED =
 const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
 const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
 const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
+
+// Timeout-specific observability constants — distinguish timeouts from
+// generic tool errors in OTel traces.
+const TOOL_FAILURE_KIND_TIMEOUT = 'timeout';
+const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
+
+/**
+ * Builds the failure ToolResult surfaced when a tool call exceeds the
+ * execution timeout. Reported as a normal tool error so the model can adapt
+ * (narrow scope, retry, etc.) instead of the session hanging.
+ */
+function createToolTimeoutResult(timeoutMs: number): ToolResult {
+  const display =
+    timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`;
+  const message =
+    `Tool execution timed out after ${display}. ` +
+    `The tool may be stuck or operating on too large a scope.`;
+  return {
+    llmContent: message,
+    returnDisplay: message,
+    error: { message, type: ToolErrorType.EXECUTION_TIMEOUT },
+  };
+}
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -3603,15 +3612,21 @@ export class CoreToolScheduler {
       this.config,
       `Qwen Code is executing tool ${canonicalName}`,
     );
+    let removeParentAbortForward: (() => void) | undefined;
     try {
       let promise: Promise<ToolResult>;
 
       // Per-tool-call execution timeout. Disabled by default (experimental):
       // set QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS to a positive number of
       // milliseconds to cap how long a single tool call may run.
-      const toolExecutionTimeoutMs = parsePositiveIntegerEnv(
-        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'],
-        0,
+      // Cap at 2^31-1 to avoid setTimeout integer overflow (Node truncates
+      // larger values to 1ms with TimeoutOverflowWarning).
+      const toolExecutionTimeoutMs = Math.min(
+        parsePositiveIntegerEnv(
+          process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'],
+          0,
+        ),
+        2_147_483_647,
       );
 
       // When a timeout is active, run the tool under a derived AbortSignal so
@@ -3623,7 +3638,7 @@ export class CoreToolScheduler {
       // long-lived parent (turn) signal across tool calls.
       let execSignal = signal;
       let timeoutController: AbortController | undefined;
-      let removeParentAbortForward: (() => void) | undefined;
+
       if (toolExecutionTimeoutMs > 0) {
         timeoutController = new AbortController();
         execSignal = timeoutController.signal;
@@ -3701,8 +3716,9 @@ export class CoreToolScheduler {
               // tool ignores the abort. A later settle from `promise` is a
               // no-op once this wrapper Promise has already resolved.
               timeoutController?.abort(
-                new Error(
+                new DOMException(
                   `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
+                  'TimeoutError',
                 ),
               );
               resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
@@ -3726,13 +3742,17 @@ export class CoreToolScheduler {
       // exec sub-span ends UNSET, matching setToolSpanCancelled on the
       // parent (#4212, #4302 review).
       const aborted = signal.aborted;
+      const isTimeout =
+        !aborted && toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
       endToolExecutionSpan(execSpan, {
         success: toolResult.error === undefined && !aborted,
         error: aborted
           ? TOOL_SPAN_STATUS_TOOL_CANCELLED
-          : toolResult.error
-            ? TOOL_SPAN_STATUS_TOOL_ERROR
-            : undefined,
+          : isTimeout
+            ? TOOL_SPAN_STATUS_TOOL_TIMEOUT
+            : toolResult.error
+              ? TOOL_SPAN_STATUS_TOOL_ERROR
+              : undefined,
         cancelled: aborted,
       });
       if (aborted) {
@@ -4202,11 +4222,19 @@ export class CoreToolScheduler {
           failureHookArtifacts,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
-        setToolSpanFailure(
-          span,
-          TOOL_FAILURE_KIND_TOOL_ERROR,
-          TOOL_SPAN_STATUS_TOOL_ERROR,
-        );
+        if (toolResult.error.type === ToolErrorType.EXECUTION_TIMEOUT) {
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TIMEOUT,
+            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
+          );
+        } else {
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TOOL_ERROR,
+            TOOL_SPAN_STATUS_TOOL_ERROR,
+          );
+        }
       }
     } catch (executionError: unknown) {
       const errorMessage =
@@ -4333,6 +4361,7 @@ export class CoreToolScheduler {
         );
       }
     } finally {
+      removeParentAbortForward?.();
       sleepInhibitorHandle.release();
     }
   }

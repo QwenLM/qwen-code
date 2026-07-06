@@ -65,10 +65,17 @@ const GLOBAL_DUPLICATE_THRESHOLD = 6;
 // trip the detector (3 cycles = 6 calls: A B A B A B).
 const ALTERNATING_PATTERN_CYCLES = 3;
 
-// Hard per-turn tool call cap. Always-on circuit breaker — not gated by
-// skipLoopDetection. If a single turn exceeds this many tool calls the
-// turn is halted regardless of loop-detection configuration.
-const TURN_TOOL_CALL_CAP = 100;
+// Default hard per-turn tool call cap. Circuit breaker against runaway
+// turns that no pattern detector catches (e.g. the model varies arguments
+// on every call). Not gated by skipLoopDetection, but configurable via the
+// `model.maxToolCallsPerTurn` setting (values <= 0 disable the cap) and
+// suppressed by an explicit in-session disable. A "turn" for cap purposes
+// is one model turn plus its ToolResult continuations; a blocking Stop-hook
+// continuation (e.g. a /goal iteration) starts a fresh budget via
+// loopDetector.reset() in client.ts, so the cap bounds each iteration
+// rather than an entire goal chain — which is what keeps 100 sufficient
+// for legitimate work.
+export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 
 /**
  * Service for detecting and preventing infinite loops in AI responses.
@@ -127,8 +134,9 @@ export class LoopDetectionService {
   private recentToolCallKeys: string[] = [];
 
   // Total tool calls emitted in the current turn. Always-on circuit breaker;
-  // exceeds TURN_TOOL_CALL_CAP → hard-stop. Accumulates across ToolResult
-  // continuations within a turn (reset() only runs for top-level interactions).
+  // exceeds the configured per-turn cap → hard-stop. Accumulates across
+  // ToolResult continuations within a turn (reset() only runs for top-level
+  // interactions).
   private turnToolCallTotal = 0;
 
   // Rollback floor for turnToolCallTotal: the committed total as of the last
@@ -254,7 +262,9 @@ export class LoopDetectionService {
    * config default. Enforces three guards: the consecutive-identical tool-call
    * loop, the shell inspection-command stagnation loop, and the per-turn
    * tool-call cap. Call this before the gated heuristic checks so none of the
-   * guards can be bypassed by configuration.
+   * guards can be bypassed by `skipLoopDetection`. All three honor an
+   * explicit in-session disable; the cap is additionally tunable via the
+   * `model.maxToolCallsPerTurn` setting.
    */
   checkAlwaysOnSafeties(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected) {
@@ -290,10 +300,10 @@ export class LoopDetectionService {
     // identical call returns an identical result, so it is never productive.
     // Promoted here from the opt-in tier so it protects every user regardless
     // of the `skipLoopDetection` config default: the DashScope server rejects
-    // this pattern with a 400 (issue #5019) far below the per-turn cap (100),
-    // so the gated default left users unprotected. It still honors an explicit
-    // in-session disable — the user's active "stop detecting" choice — whereas
-    // the per-turn cap below honors nothing.
+    // this pattern with a 400 (issue #5019) far below the per-turn cap, so
+    // the gated default left users unprotected. Like the per-turn cap below,
+    // it honors an explicit in-session disable — the user's active "stop
+    // detecting" choice.
     if (!this.disabledForSession && this.checkToolCallLoop(event.value)) {
       this.loopDetected = true;
       return true;
@@ -307,7 +317,7 @@ export class LoopDetectionService {
       return true;
     }
 
-    if (this.checkTurnToolCallCap()) {
+    if (!this.disabledForSession && this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
     }
@@ -773,14 +783,15 @@ export class LoopDetectionService {
   }
 
   /**
-   * Always-on hard cap: if the turn exceeds TURN_TOOL_CALL_CAP tool calls
-   * the turn is halted. This is a safety net independent of
-   * skipLoopDetection and fires on the very next tool call that pushes the
-   * total past the cap, not retroactively.
+   * Per-turn hard cap: if the turn exceeds the configured maximum number of
+   * tool calls (getMaxToolCallsPerTurn — already resolved to an effective
+   * value, Infinity when disabled) the turn is halted. This is a safety net
+   * independent of skipLoopDetection and fires on the very next tool call
+   * that pushes the total past the cap, not retroactively.
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    if (this.turnToolCallTotal > TURN_TOOL_CALL_CAP) {
+    if (this.turnToolCallTotal > this.config.getMaxToolCallsPerTurn()) {
       this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
       logLoopDetected(
         this.config,

@@ -6,6 +6,7 @@
 
 export {
   canonicalizeWorkspace,
+  canonicalizeWorkspaces,
   hasSuspiciousPathPattern,
   resolveWithinWorkspace,
   type Intent,

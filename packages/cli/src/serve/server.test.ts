@@ -49,6 +49,7 @@ import {
   Storage,
   TrustGateError,
   type Extension,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -200,6 +201,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
+  'workspace_memory_forget',
+  'workspace_memory_dream',
   'workspace_agents',
   'workspace_agent_generate',
   'workspace_env',
@@ -214,6 +217,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_close',
   'session_archive',
   'session_metadata',
+  'session_organization',
+  'session_export',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
   // guardrail surface (`--mcp-client-budget`, `clientCount` /
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
@@ -564,6 +569,20 @@ interface FakeBridgeOpts {
     filesTouched: string[];
     touchedScopes: Array<'user' | 'project'>;
   }>;
+  workspaceMemoryForgetImpl?: (request: { query: string }) => Promise<{
+    summary?: string;
+    removedEntries: Array<{
+      topic: 'user' | 'feedback' | 'project' | 'reference';
+      summary: string;
+      filePath: string;
+    }>;
+    touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+  }>;
+  workspaceMemoryDreamImpl?: () => Promise<{
+    summary?: string;
+    touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+    dedupedEntries: number;
+  }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
@@ -696,6 +715,8 @@ interface FakeBridge extends AcpSessionBridge {
     content: string;
     contextMode: 'workspace' | 'clean';
   }>;
+  workspaceMemoryForgetCalls: Array<{ query: string }>;
+  workspaceMemoryDreamCalls: number;
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
@@ -792,6 +813,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
+  const workspaceMemoryForgetCalls: FakeBridge['workspaceMemoryForgetCalls'] =
+    [];
+  let workspaceMemoryDreamCalls = 0;
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
@@ -833,6 +857,20 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summary: 'remembered',
       filesTouched: [],
       touchedScopes: [],
+    }));
+  const workspaceMemoryForgetImpl =
+    opts.workspaceMemoryForgetImpl ??
+    (async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+    }));
+  const workspaceMemoryDreamImpl =
+    opts.workspaceMemoryDreamImpl ??
+    (async () => ({
+      summary: 'dreamed',
+      touchedTopics: [],
+      dedupedEntries: 0,
     }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
@@ -1270,6 +1308,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     generateSessionRecapCalls,
     forkCalls,
     workspaceMemoryRememberCalls,
+    workspaceMemoryForgetCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1284,6 +1323,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceMcpCalls() {
       return workspaceMcpCalls;
+    },
+    get workspaceMemoryDreamCalls() {
+      return workspaceMemoryDreamCalls;
     },
     get workspaceSkillsCalls() {
       return workspaceSkillsCalls;
@@ -1548,6 +1590,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async runWorkspaceMemoryRemember(request) {
       workspaceMemoryRememberCalls.push(request);
       return workspaceMemoryRememberImpl(request);
+    },
+    async runWorkspaceMemoryForget(request) {
+      workspaceMemoryForgetCalls.push(request);
+      return workspaceMemoryForgetImpl(request);
+    },
+    async runWorkspaceMemoryDream() {
+      workspaceMemoryDreamCalls++;
+      return workspaceMemoryDreamImpl();
     },
     async isWorkspaceMemoryRememberAvailable() {
       return true;
@@ -5844,7 +5894,11 @@ describe('createServeApp', () => {
         });
         const calls = action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
         expect(calls).toEqual([
-          { sessionId: 'persisted-1', workspaceCwd: WS_BOUND },
+          {
+            sessionId: 'persisted-1',
+            workspaceCwd: WS_BOUND,
+            ...(action === 'load' ? { historyReplay: 'response' } : {}),
+          },
         ]);
       }
     });
@@ -5868,7 +5922,41 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.state).toEqual({ configOptions: [] });
       expect(bridge.loadCalls).toEqual([
-        { sessionId: 'persisted-2', workspaceCwd: '/work/a' },
+        {
+          sessionId: 'persisted-2',
+          workspaceCwd: '/work/a',
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
+    it('surfaces partial response-mode replay details from load', async () => {
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-load',
+          state: {},
+          partial: true,
+          replayError: 'replay boom',
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-partial/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body.partial).toBe(true);
+      expect(res.body.replayError).toBe('replay boom');
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-partial',
+          workspaceCwd: realpathSync.native(process.cwd()),
+          historyReplay: 'response',
+        },
       ]);
     });
 
@@ -5887,6 +5975,7 @@ describe('createServeApp', () => {
           {
             sessionId: 'persisted-1',
             workspaceCwd: realpathSync.native(process.cwd()),
+            ...(action === 'load' ? { historyReplay: 'response' } : {}),
             clientId: 'client-1',
           },
         ]);
@@ -6755,6 +6844,559 @@ describe('createServeApp', () => {
       } finally {
         listSessionsSpy.mockRestore();
       }
+    });
+
+    it('lists organized sessions pinned first and filters by custom group', async () => {
+      const olderPinnedId = '550e8400-e29b-41d4-a716-446655440000';
+      const newerId = '550e8400-e29b-41d4-a716-446655440001';
+      await writeStoredSession({
+        sessionId: olderPinnedId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'older pinned',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: newerId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T13:00:00.000Z',
+        prompt: 'newer unpinned',
+        mtime: new Date('2026-05-17T13:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND, token: 'secret' },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const auth = (req: request.Test): request.Test =>
+        req
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
+      const groupRes = await auth(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'Frontend', color: 'blue' });
+      expect(groupRes.status).toBe(201);
+      const groupId = groupRes.body.group.id as string;
+
+      const organizationRes = await auth(
+        request(app).patch(`/session/${olderPinnedId}/organization`),
+      ).send({ isPinned: true, groupId });
+      expect(organizationRes.status).toBe(200);
+
+      const organized = await auth(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(
+        organized.body.sessions.map((s: { sessionId: string }) => s.sessionId),
+      ).toEqual([olderPinnedId, newerId]);
+      expect(organized.body.sessions[0]).toMatchObject({
+        sessionId: olderPinnedId,
+        isPinned: true,
+        groupId,
+      });
+
+      const filtered = await auth(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=${encodeURIComponent(groupId)}`,
+        ),
+      );
+      expect(filtered.status).toBe(200);
+      expect(filtered.body.sessions).toEqual([
+        expect.objectContaining({ sessionId: olderPinnedId, groupId }),
+      ]);
+    });
+
+    it('updates and deletes session groups through REST', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const groupRes = await host(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'Frontend', color: 'blue' });
+      expect(groupRes.status).toBe(201);
+      const groupId = groupRes.body.group.id as string;
+
+      const updateRes = await host(
+        request(app).patch(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/session-groups/${encodeURIComponent(groupId)}`,
+        ),
+      ).send({ name: 'UI', color: 'purple', order: 4 });
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.group).toMatchObject({
+        id: groupId,
+        name: 'UI',
+        color: 'purple',
+        order: 4,
+      });
+
+      const organizationRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ isPinned: true, groupId });
+      expect(organizationRes.status).toBe(200);
+
+      const deleteRes = await host(
+        request(app).delete(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/session-groups/${encodeURIComponent(groupId)}`,
+        ),
+      );
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body).toEqual({ deleted: true });
+
+      const groupsRes = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      );
+      expect(groupsRes.status).toBe(200);
+      expect(groupsRes.body.groups).toEqual([]);
+
+      const organized = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=ungrouped`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          groupId: null,
+          isPinned: true,
+        }),
+      ]);
+    });
+
+    it('returns session organization errors for invalid REST inputs', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const invalidView = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=recent`,
+        ),
+      );
+      expect(invalidView.status).toBe(400);
+      expect(invalidView.body.code).toBe('invalid_session_view');
+
+      const groupWithoutOrganizedView = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?group=pinned`,
+        ),
+      );
+      expect(groupWithoutOrganizedView.status).toBe(400);
+      expect(groupWithoutOrganizedView.body.code).toBe(
+        'invalid_session_group_filter',
+      );
+
+      const groupRes = await host(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'Backend', color: 'blue' });
+      expect(groupRes.status).toBe(201);
+
+      const duplicateGroup = await host(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'backend', color: 'green' });
+      expect(duplicateGroup.status).toBe(409);
+      expect(duplicateGroup.body.code).toBe('group_name_conflict');
+
+      const invalidOrganizationBody = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ isPinned: 'yes' });
+      expect(invalidOrganizationBody.status).toBe(400);
+      expect(invalidOrganizationBody.body.code).toBe(
+        'invalid_session_organization',
+      );
+
+      const invalidColorBody = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ color: 'pink' });
+      expect(invalidColorBody.status).toBe(400);
+      expect(invalidColorBody.body).toMatchObject({
+        code: 'invalid_session_organization',
+        field: 'color',
+      });
+
+      const unknownGroupFilter = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=missing-group`,
+        ),
+      );
+      expect(unknownGroupFilter.status).toBe(404);
+      expect(unknownGroupFilter.body.code).toBe('group_not_found');
+
+      const unknownGroupAssignment = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ groupId: 'missing-group' });
+      expect(unknownGroupAssignment.status).toBe(404);
+      expect(unknownGroupAssignment.body.code).toBe('group_not_found');
+
+      const missingSession = await host(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440099/organization',
+        ),
+      ).send({ isPinned: true });
+      expect(missingSession.status).toBe(404);
+    });
+
+    it('assigns a quick color tag through REST and surfaces it in organized lists', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const assignRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ color: 'green' });
+      expect(assignRes.status).toBe(200);
+      expect(assignRes.body).toMatchObject({
+        sessionId,
+        color: 'green',
+        groupId: null,
+      });
+
+      const organized = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({ sessionId, color: 'green', groupId: null }),
+      ]);
+
+      // Picking "Ungrouped" (or a named group) clears the color tag.
+      const clearRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ color: null });
+      expect(clearRes.status).toBe(200);
+      expect(clearRes.body.color).toBeNull();
+    });
+
+    it('paginates organized sessions with opaque cursors', async () => {
+      for (let i = 0; i < 4; i++) {
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`,
+          cwd: WS_BOUND,
+          timestamp: `2026-05-17T12:0${i}:00.000Z`,
+          prompt: `organized ${i}`,
+          mtime: new Date(`2026-05-17T12:1${i}:00.000Z`),
+        });
+      }
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const page1 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&size=2`,
+        ),
+      );
+      expect(page1.status).toBe(200);
+      expect(page1.body.sessions).toHaveLength(2);
+      expect(page1.body.nextCursor).toEqual(expect.any(String));
+
+      const insertedSessionId = '550e8400-e29b-41d4-a716-446655449999';
+      await writeStoredSession({
+        sessionId: insertedSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:09:00.000Z',
+        prompt: 'organized inserted',
+        mtime: new Date('2026-05-17T12:19:00.000Z'),
+      });
+
+      const page2 = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&size=2&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(page2.status).toBe(200);
+      expect(page2.body.sessions).toHaveLength(2);
+      expect(page2.body.nextCursor).toBeUndefined();
+
+      const allIds = [...page1.body.sessions, ...page2.body.sessions].map(
+        (session: { sessionId: string }) => session.sessionId,
+      );
+      expect(new Set(allIds).size).toBe(4);
+      expect(allIds).not.toContain(insertedSessionId);
+
+      const mismatchedCursor = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&group=pinned&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(mismatchedCursor.status).toBe(400);
+      expect(mismatchedCursor.body.code).toBe('invalid_cursor');
+      expect(mismatchedCursor.body.error).toContain(
+        'not a valid organized cursor',
+      );
+
+      const invalidCursor = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&cursor=not-a-cursor`,
+        ),
+      );
+      expect(invalidCursor.status).toBe(400);
+      expect(invalidCursor.body.code).toBe('invalid_cursor');
+      expect(invalidCursor.body.error).toContain(
+        'not a valid organized cursor',
+      );
+    });
+
+    it('reports organized session truncation in the response', async () => {
+      const items: SessionListItem[] = Array.from(
+        { length: 50_001 },
+        (_, i) => {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, 0, i),
+          ).toISOString();
+          return {
+            sessionId: `session-${i}`,
+            cwd: WS_BOUND,
+            startTime: timestamp,
+            mtime: Date.parse(timestamp),
+            prompt: `prompt ${i}`,
+            filePath: `/tmp/session-${i}.jsonl`,
+          };
+        },
+      );
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items,
+          nextCursor: 1,
+          hasMore: true,
+        });
+
+      try {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toHaveLength(20);
+        expect(res.body.truncated).toBe(true);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('stops organized session scans when a cursor page is empty', async () => {
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items: [],
+          nextCursor: 1,
+          hasMore: true,
+        });
+
+      try {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toEqual([]);
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('allows session organization mutations on loopback without a token', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const groupRes = await host(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'Local', color: 'green' });
+      expect(groupRes.status).toBe(201);
+
+      const organizationRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ isPinned: true, groupId: groupRes.body.group.id });
+      expect(organizationRes.status).toBe(200);
+
+      const organized = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=pinned`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          isPinned: true,
+          groupId: groupRes.body.group.id,
+        }),
+      ]);
+    });
+
+    it('applies organization metadata to live-only sessions in organized lists', async () => {
+      const liveId = '550e8400-e29b-41d4-a716-446655440099';
+      const liveSummary = {
+        sessionId: liveId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        updatedAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({
+        listImpl: () => [liveSummary],
+        summaryImpl: () => liveSummary,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND, token: 'secret' },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const auth = (req: request.Test): request.Test =>
+        req
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
+      const groupRes = await auth(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'Frontend', color: 'blue' });
+      expect(groupRes.status).toBe(201);
+
+      const organizationRes = await auth(
+        request(app).patch(`/session/${liveId}/organization`),
+      ).send({ isPinned: true, groupId: groupRes.body.group.id });
+      expect(organizationRes.status).toBe(200);
+
+      const organized = await auth(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: liveId,
+          isPinned: true,
+          groupId: groupRes.body.group.id,
+        }),
+      ]);
+
+      const pinned = await auth(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=pinned`,
+        ),
+      );
+      expect(pinned.status).toBe(200);
+      expect(pinned.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: liveId,
+          isPinned: true,
+          groupId: groupRes.body.group.id,
+        }),
+      ]);
     });
 
     it('excludes live sessions from subsequent pages to prevent cross-page duplicates', async () => {
@@ -9440,6 +10082,168 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('GET /session/:id/export', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+    let wsDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-session-export-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      wsDir = realpathSync(runtimeDir);
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeExportSession(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+    ): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      const records = [
+        {
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-28T12:00:00.000Z',
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'hello export' }],
+          },
+          cwd: wsDir,
+        },
+        {
+          uuid: `${sessionId}-assistant-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-05-28T12:00:01.000Z',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ text: 'export response' }],
+          },
+          cwd: wsDir,
+          model: 'qwen-test',
+        },
+      ];
+      const body = records.map((record) => JSON.stringify(record)).join('\n');
+      await fsp.writeFile(path.join(chatsDir, `${sessionId}.jsonl`), body);
+    }
+
+    function createExportApp() {
+      return createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: wsDir,
+      });
+    }
+
+    it('exports HTML by default as an attachment', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeExportSession(sid);
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('text/html');
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['content-disposition']).toMatch(
+        /^attachment; filename="qwen-code-export-.+\.html"$/,
+      );
+      expect(res.text).toContain('id="chat-data"');
+      expect(res.text).toContain('hello export');
+      expect(res.text).toContain('export response');
+    });
+
+    it.each([
+      ['md', 'text/markdown', '# Chat Session Export'],
+      ['json', 'application/json', '"sessionId":'],
+      ['jsonl', 'application/jsonl', '"type":"session_metadata"'],
+    ])('exports %s format', async (format, mimeType, marker) => {
+      const sid = `55555555-bbbb-cccc-dddd-${format.padEnd(12, '0')}`;
+      await writeExportSession(sid);
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export?format=${format}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain(mimeType);
+      expect(res.headers['content-disposition']).toContain(`.${format}"`);
+      expect(res.text).toContain(marker);
+      expect(res.text).toContain('hello export');
+      if (format === 'json') {
+        expect(res.body.metadata.channel).toBe('daemon');
+      }
+    });
+
+    it('rejects invalid export format', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeExportSession(sid);
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export?format=pdf`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_export_format',
+        format: 'pdf',
+      });
+    });
+
+    it('returns 404 for missing sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        sessionId: sid,
+      });
+    });
+
+    it('returns session_archived for archived sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeExportSession(sid, 'archived');
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
+    });
+  });
+
   describe('POST /sessions/delete', () => {
     let previousRuntimeDir: string | undefined;
     let runtimeDir: string;
@@ -12005,17 +12809,10 @@ describe('runQwenServe', () => {
     }
   });
 
-  it('honors deps.fsFactory override (#4175 PR 19 follow-up #2)', async () => {
-    // The injection point exists so embedded callers (other tools
-    // wrapping the daemon, future runtime locality contracts) can
-    // swap in a remote-fronting factory. This test asserts
-    // `runQwenServe` does NOT silently shadow a caller-supplied
-    // factory with its built-in default. A regression that ignored
-    // `deps.fsFactory` and fell back to the built-in factory would
-    // resolve `a.txt` against `process.cwd()`, find no such file,
-    // and return 404 `path_not_found`. The sentinel-throwing
-    // factory ensures we see 400 with `sentinel-from-fake-factory`
-    // in the body — proof the override actually drives the request.
+  it('keeps deps.fsFactory override out of REST routes', async () => {
+    // The bridge can use an injected multi-root factory, but REST routes
+    // still serialize primary-relative paths. Pin that REST gets the
+    // primary-only factory built by runQwenServe instead of the injected one.
     const sentinelMessage = 'sentinel-from-fake-factory';
     const fsFactory: WorkspaceFileSystemFactory = {
       assertCanWrite: () => {},
@@ -12059,21 +12856,28 @@ describe('runQwenServe', () => {
       }),
     };
     const bridge = fakeBridge();
-    handle = await runQwenServe(
-      {
-        hostname: '127.0.0.1',
-        port: 0,
-        mode: 'http-bridge',
-        workspace: process.cwd(),
-      },
-      { bridge, fsFactory },
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-rest-fs-'),
     );
-    const port = (handle.server.address() as { port: number }).port;
-    const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; errorKind: string };
-    expect(body.errorKind).toBe('parse_error');
-    expect(body.error).toContain(sentinelMessage);
+    try {
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsFactory },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { error: string; errorKind: string };
+      expect(body.errorKind).toBe('path_not_found');
+      expect(body.error).not.toContain(sentinelMessage);
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
   });
 
   it('trust snapshot defaults to true (operator-chosen workspace)', async () => {
@@ -12138,7 +12942,7 @@ describe('runQwenServe', () => {
         './fs/index.js'
       );
       const factory = createWorkspaceFileSystemFactory({
-        boundWorkspace: wsRoot,
+        boundWorkspaces: [wsRoot],
         trusted: false,
         emit: () => undefined,
       });
@@ -13261,7 +14065,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       await fsp.writeFile(path.join(tmp, 'agent.txt'), 'agent');
 
       const factory = resolveBridgeFsFactory({
-        boundWorkspace: tmp,
+        boundWorkspaces: [tmp],
         trusted: true,
         customIgnoreFiles: ['.cursorignore'],
       });

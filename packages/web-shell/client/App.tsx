@@ -36,7 +36,10 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
-import type { EditorHandle } from './hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  EditorHandle,
+} from './hooks/useComposerCore';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -61,6 +64,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
@@ -73,7 +77,11 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
-import { getLocalCommands } from './constants/localCommands';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
@@ -97,6 +105,11 @@ import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  decodeVisionModelForPicker,
+  encodeVisionModelForSetting,
+  extractBareModelId,
+} from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
@@ -164,6 +177,8 @@ import {
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
   type WebShellTaskInfo,
+  type WebShellAtProvider,
+  type WebShellComposerTagIconMap,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -218,6 +233,14 @@ const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
 
+/** Maps each ModelDialogMode to its i18n title key — single source of truth. */
+const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
+  main: 'model.select',
+  fast: 'model.setFast',
+  voice: 'model.setVoice',
+  vision: 'model.setVision',
+};
+
 function isVisibleComposerModel(model: { id: string }): boolean {
   return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
 }
@@ -254,6 +277,7 @@ interface SendPromptOptionsWithRetry {
   images?: PromptImage[];
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
+  commitComposerAccepted?: ComposerSubmitCommit;
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -314,6 +338,11 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
 }
 
+export type SessionChangeEvent =
+  | { type: 'rename'; sessionId: string; newName: string }
+  | { type: 'submit'; sessionId: string; prompt: string; queued: boolean }
+  | { type: 'turn_complete'; sessionId: string; error?: Error };
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
@@ -353,6 +382,10 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Additional @ mention categories shown alongside built-in files/extensions. */
+  atProviders?: readonly WebShellAtProvider[];
+  /** Icon URLs for custom composer tag kinds used by @ mention chips. */
+  composerTagIcons?: WebShellComposerTagIconMap;
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
@@ -393,6 +426,18 @@ export interface WebShellProps {
   composerInput?: WebShellComposerInput;
   /** Replay key for composerInput. */
   composerInputVersion?: number;
+  /** Called when a session-level event occurs (rename, submit, turn complete). */
+  onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called before a prompt is submitted. Return a Promise — the prompt is held
+   * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
+   * `sessionId` is `undefined` when the session has not yet been created (deferred).
+   * Also called for queued prompts (submitted while a turn is streaming).
+   */
+  onSubmitBefore?: (params: {
+    sessionId: string | undefined;
+    prompt: string;
+  }) => Promise<void>;
 }
 
 type SessionActionsWithCreate = {
@@ -744,6 +789,8 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  atProviders,
+  composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -766,6 +813,8 @@ export function App({
   onComposerReady,
   composerInput,
   composerInputVersion,
+  onSessionChange,
+  onSubmitBefore,
 }: WebShellProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -1143,6 +1192,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showDaemonStatusDialog, setShowDaemonStatusDialog] = useState(false);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -1284,6 +1334,33 @@ export function App({
     }
     return createSessionPromiseRef.current;
   }, [sessionActions]);
+  const onSubmitBeforeRef = useRef(onSubmitBefore);
+  onSubmitBeforeRef.current = onSubmitBefore;
+  const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
+  const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(
+    () => () => {
+      if (delayedReloadTimerRef.current !== null) {
+        clearTimeout(delayedReloadTimerRef.current);
+      }
+    },
+    [],
+  );
+  const dispatchSessionChange = useCallback(
+    (event: SessionChangeEvent) => {
+      onSessionChange?.(event);
+      setSessionListReloadToken((n) => n + 1);
+    },
+    [onSessionChange],
+  );
+  // Ref-stable handle so that useCallback hooks (sendPrompt, enqueuePrompt,
+  // turn_complete effect) don't need dispatchSessionChange in their dep arrays.
+  // Without this, an unstable onSessionChange prop would cause those callbacks
+  // to be recreated on every render, cascading into downstream effect chains.
+  const dispatchSessionChangeRef = useRef(dispatchSessionChange);
+  dispatchSessionChangeRef.current = dispatchSessionChange;
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -1292,10 +1369,14 @@ export function App({
         optimisticUserMessage?: boolean;
         retry?: boolean;
         clearComposerOnPromptStart?: boolean;
+        commitComposerAccepted?: ComposerSubmitCommit;
       },
     ) => {
-      clearFollowup();
       const isUserPrompt = !text.trimStart().startsWith('/');
+      const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
+      const previousLastSubmittedImages = lastSubmittedImagesRef.current;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
@@ -1303,9 +1384,37 @@ export function App({
       }
       setShowRetryHint(false);
       const shouldShowPreparing = !connectionRef.current.sessionId;
-      if (shouldShowPreparing) {
+      if (onSubmitBeforeRef.current) {
+        setIsPreparingPrompt(true);
+        try {
+          await onSubmitBeforeRef.current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          });
+        } catch (err) {
+          console.warn(
+            '[web-shell] onSubmitBefore rejected, prompt cancelled',
+            err,
+          );
+          setIsPreparingPrompt(false);
+          // Restore retry-critical refs so Ctrl+Y doesn't resend the
+          // cancelled prompt.
+          lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
+          lastSubmittedImagesRef.current = previousLastSubmittedImages;
+          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+          setShowRetryHint(previousShowRetryHint);
+          return;
+        }
+        // Only reset if session already exists; otherwise keep true and let
+        // ensureSessionForPrompt's finally block handle it.
+        if (!shouldShowPreparing) {
+          setIsPreparingPrompt(false);
+        }
+      }
+      if (!onSubmitBeforeRef.current && shouldShowPreparing) {
         setIsPreparingPrompt(true);
       }
+      clearFollowup();
       try {
         await ensureSessionForPrompt();
       } finally {
@@ -1318,8 +1427,28 @@ export function App({
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
       };
-      if (opts?.clearComposerOnPromptStart) {
+      if (opts?.commitComposerAccepted) {
+        opts.commitComposerAccepted();
+      } else if (opts?.clearComposerOnPromptStart) {
         editorRef.current?.clear();
+      }
+      const sessionIdAfterEnsure = connectionRef.current.sessionId;
+      if (sessionIdAfterEnsure && text.trim()) {
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId: sessionIdAfterEnsure,
+          prompt: text,
+          queued: false,
+        });
+        // Schedule an additional delayed reload to account for daemon-side
+        // session registration lag — the immediate reload above may return
+        // a list that doesn't yet include the newly created session.
+        if (delayedReloadTimerRef.current !== null) {
+          clearTimeout(delayedReloadTimerRef.current);
+        }
+        delayedReloadTimerRef.current = setTimeout(() => {
+          setSessionListReloadToken((n) => n + 1);
+        }, 2000);
       }
       const result = await (
         sessionActions.sendPrompt as (
@@ -1347,6 +1476,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    showDaemonStatusDialog ||
     showExtensionsDialog ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
@@ -1383,7 +1513,7 @@ export function App({
   const {
     queuedPrompts,
     queuedTexts,
-    enqueuePrompt,
+    enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
     editQueuedPrompt,
@@ -1401,6 +1531,61 @@ export function App({
     notifySuccess,
     t,
   });
+
+  const enqueuePrompt = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      onComplete?: () => void,
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
+      if (onSubmitBeforeRef.current) {
+        onSubmitBeforeRef
+          .current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          })
+          .then(() => {
+            const result = rawEnqueuePrompt(text, images, onComplete);
+            if (result !== false) {
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
+            }
+            const sessionId = connectionRef.current.sessionId;
+            if (sessionId && text.trim()) {
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId,
+                prompt: text,
+                queued: true,
+              });
+            }
+          })
+          .catch((err: unknown) => {
+            console.warn(
+              '[web-shell] onSubmitBefore rejected queued prompt, cancelled',
+              err,
+            );
+          });
+        return false;
+      }
+      const result = rawEnqueuePrompt(text, images, onComplete);
+      const sessionId = connectionRef.current.sessionId;
+      if (sessionId && text.trim()) {
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId,
+          prompt: text,
+          queued: true,
+        });
+      }
+      return result;
+    },
+    [rawEnqueuePrompt],
+  );
 
   useEffect(() => {
     logSessionNoticesHook(notices);
@@ -1650,6 +1835,19 @@ export function App({
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentVisionModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'visionModel',
+    )?.values.effective;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
+  })();
+  const currentFastModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'fastModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
@@ -1697,7 +1895,7 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(command)
+      sendPrompt(command, undefined)
         .then(refreshSettings)
         .catch((error: unknown) => {
           handleLanguageChange(previousLanguage);
@@ -1813,6 +2011,35 @@ export function App({
     onStreamingStateChange?.(streamingState);
   }, [streamingState, onStreamingStateChange]);
 
+  // Reads retryableTurnErrorIdRef which is set by the blocks effect above.
+  // Declaration order matters: this effect must run after the blocks effect
+  // so that within the same render, the ref is already updated before we read it.
+  const prevStreamingForTurnCompleteRef = useRef(streamingState);
+  const streamingSessionIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevStreamingForTurnCompleteRef.current;
+    prevStreamingForTurnCompleteRef.current = streamingState;
+    if (streamingState !== 'idle') {
+      streamingSessionIdRef.current = connectionRef.current.sessionId;
+    }
+    if (prev !== 'idle' && streamingState === 'idle') {
+      const sessionId = connectionRef.current.sessionId;
+      // Only fire if the session that was streaming is still the active one.
+      // Session switches reset streamingState to idle, which must not produce
+      // a spurious turn_complete for the new session.
+      if (!sessionId || sessionId !== streamingSessionIdRef.current) return;
+      const turnError =
+        retryableTurnErrorIdRef.current != null
+          ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
+          : undefined;
+      dispatchSessionChangeRef.current?.({
+        type: 'turn_complete',
+        sessionId,
+        error: turnError,
+      });
+    }
+  }, [streamingState]);
+
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
@@ -1844,6 +2071,26 @@ export function App({
     lastNotifiedSessionIdRef.current = connection.sessionId;
     onSessionIdChange?.(connection.sessionId);
   }, [connection.sessionId, onSessionIdChange]);
+
+  const lastRenameSessionRef = useRef<string | undefined>(undefined);
+  const lastRenameNameRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    const displayName = connection.displayName;
+    if (!sessionId || !displayName) return;
+    if (sessionId !== lastRenameSessionRef.current) {
+      lastRenameSessionRef.current = sessionId;
+      lastRenameNameRef.current = displayName;
+      return;
+    }
+    if (displayName === lastRenameNameRef.current) return;
+    lastRenameNameRef.current = displayName;
+    dispatchSessionChangeRef.current?.({
+      type: 'rename',
+      sessionId,
+      newName: displayName,
+    });
+  }, [connection.sessionId, connection.displayName]);
 
   useEffect(() => {
     const nextGoal = getLatestActiveGoalFromBlocks(blocks);
@@ -2144,15 +2391,23 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      opts?: { sendToDaemon?: boolean },
+      opts?: {
+        sendToDaemon?: boolean;
+        commitComposerAccepted?: ComposerSubmitCommit;
+      },
     ) => {
       const goalArg = text.replace(/^\/goal\b/i, '').trim();
       const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
-        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(text, images, {
           clearComposerOnPromptStart,
+          commitComposerAccepted: deferComposerCommit
+            ? opts?.commitComposerAccepted
+            : undefined,
         }).catch((error: unknown) => {
           reportError(error, 'Failed to send /goal command');
         });
@@ -2202,7 +2457,11 @@ export function App({
   const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
+    (
+      text: string,
+      images?: PromptImage[],
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -2222,10 +2481,15 @@ export function App({
         errorMessage: string,
         opts?: { optimisticUserMessage?: boolean; retry?: boolean },
       ) => {
-        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(promptText, promptImages, {
           ...opts,
           clearComposerOnPromptStart,
+          commitComposerAccepted: deferComposerCommit
+            ? commitComposerAccepted
+            : undefined,
         }).catch((error: unknown) => reportError(error, errorMessage));
         return clearComposerOnPromptStart ? false : true;
       };
@@ -2234,7 +2498,14 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) {
+              return enqueuePrompt(
+                text,
+                images,
+                undefined,
+                commitComposerAccepted,
+              );
+            }
             return submitPromptFromEditor(
               text,
               images,
@@ -2256,7 +2527,9 @@ export function App({
               }
               return blockLocalCommandDuringTurn();
             }
-            return handleGoalSlashCommand(text, images);
+            return handleGoalSlashCommand(text, images, {
+              commitComposerAccepted,
+            });
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -2318,10 +2591,14 @@ export function App({
               const nextLanguage = normalizeLanguage(languageArg);
               handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
+                const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
                 const clearComposerOnPromptStart =
-                  !connectionRef.current.sessionId;
+                  !connectionRef.current.sessionId || deferComposerCommit;
                 sendPrompt(`/language ui ${nextLanguage}`, undefined, {
                   clearComposerOnPromptStart,
+                  commitComposerAccepted: deferComposerCommit
+                    ? commitComposerAccepted
+                    : undefined,
                 })
                   .then(() => sessionActions.refreshCommands())
                   .catch((error: unknown) => {
@@ -2406,7 +2683,14 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
               return submitPromptFromEditor(
                 text,
                 images,
@@ -2574,7 +2858,14 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
               return submitPromptFromEditor(
                 text,
                 images,
@@ -2820,7 +3111,14 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
               return submitPromptFromEditor(
                 text,
                 images,
@@ -3009,7 +3307,9 @@ export function App({
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+        }
         return submitPromptFromEditor(text, images, 'Failed to send command');
       } else if (text.startsWith('!')) {
         if (promptBlocked) {
@@ -3024,7 +3324,9 @@ export function App({
         });
         return true;
       } else {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+        }
         return submitPromptFromEditor(text, images, 'Failed to send message');
       }
     },
@@ -3062,8 +3364,12 @@ export function App({
   );
 
   const handleEditorSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
-      const accepted = handleSubmit(text, images);
+    (
+      text: string,
+      images?: PromptImage[],
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
+      const accepted = handleSubmit(text, images, commitComposerAccepted);
       if (accepted !== false) {
         resumeChatBottomFollow('smooth');
       }
@@ -3304,6 +3610,9 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
+      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
+      // ACP format. The model picker strips the (authType) suffix before
+      // calling this handler.
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
@@ -3313,7 +3622,10 @@ export function App({
 
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'voiceModel', modelId).catch(
+      // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
+      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      const bareModelId = extractBareModelId(modelId);
+      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
@@ -3322,25 +3634,41 @@ export function App({
 
   const handleVisionModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'visionModel', modelId).catch(
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveVisionModelSelection() expects `authType:modelId`.
+      const encoded = encodeVisionModelForSetting(modelId);
+      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
     [reportError, setWorkspaceSetting, t],
   );
 
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
+    main: handleModelSelect,
+    fast: handleFastModelSelect,
+    voice: handleVoiceModelSelect,
+    vision: handleVisionModelSelect,
+  };
+
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    )
       .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
+        const skillKey = skillDescriptionKey(command.name);
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: command.description || t('skills.run'),
+          description: skillKey
+            ? t(skillKey)
+            : command.description || t('skills.run'),
         };
       });
   }, [connection.commands, connection.skills, hiddenCommands, t]);
@@ -3463,15 +3791,7 @@ export function App({
           )}
           {modelDialogMode && (
             <DialogShell
-              title={
-                modelDialogMode === 'fast'
-                  ? t('model.setFast')
-                  : modelDialogMode === 'voice'
-                    ? t('model.setVoice')
-                    : modelDialogMode === 'vision'
-                      ? t('model.setVision')
-                      : t('model.select')
-              }
+              title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
@@ -3479,17 +3799,17 @@ export function App({
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
                 currentModelId={
-                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                  modelDialogMode === 'voice'
+                    ? currentVoiceModel
+                    : modelDialogMode === 'vision'
+                      ? currentVisionModel
+                      : modelDialogMode === 'fast'
+                        ? currentFastModel
+                        : undefined
                 }
                 onSelect={(modelId) => {
-                  if (modelDialogMode === 'fast') {
-                    handleFastModelSelect(modelId);
-                  } else if (modelDialogMode === 'voice') {
-                    handleVoiceModelSelect(modelId);
-                  } else if (modelDialogMode === 'vision') {
-                    handleVisionModelSelect(modelId);
-                  } else {
-                    handleModelSelect(modelId);
+                  if (modelDialogMode) {
+                    modelHandlers[modelDialogMode](modelId);
                   }
                   setModelDialogMode(null);
                 }}
@@ -3518,6 +3838,16 @@ export function App({
               onClose={() => setShowToolsDialog(false)}
             >
               <ToolsDialog />
+            </DialogShell>
+          )}
+          {showDaemonStatusDialog && (
+            <DialogShell
+              title={t('daemon.title')}
+              size="xl"
+              allowFullscreen
+              onClose={() => setShowDaemonStatusDialog(false)}
+            >
+              <DaemonStatusDialog />
             </DialogShell>
           )}
           {showExtensionsDialog && (
@@ -3753,10 +4083,15 @@ export function App({
                     closeMobileDrawer();
                     setShowSettingsDialog(true);
                   }}
+                  onOpenDaemonStatus={() => {
+                    closeMobileDrawer();
+                    setShowDaemonStatusDialog(true);
+                  }}
                   onNewSession={createNewSession}
                   onLoadSession={loadSidebarSession}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
+                  sessionListReloadToken={sessionListReloadToken}
                 />
               </div>
             )}
@@ -3921,6 +4256,8 @@ export function App({
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      atProviders={atProviders}
+                      composerTagIcons={composerTagIcons}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
                       onPopQueuedMessages={editLastQueuedPrompt}

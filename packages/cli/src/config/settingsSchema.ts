@@ -17,6 +17,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -1275,6 +1276,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  modelFallbacks: {
+    type: 'string',
+    label: 'Model Fallbacks',
+    category: 'Model',
+    requiresRestart: true,
+    default: '',
+    description:
+      'Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: "qwen-plus,qwen-turbo". Set via CLI with --fallback-model.',
+    showInDialog: true,
+  },
+
   voiceModel: {
     type: 'string',
     label: 'Voice Model',
@@ -1415,7 +1427,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.',
+          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap, see model.maxToolCallsPerTurn) still runs regardless of this setting.',
+        showInDialog: false,
+      },
+      maxToolCallsPerTurn: {
+        type: 'number',
+        label: 'Max Tool Calls Per Turn',
+        category: 'Model',
+        requiresRestart: false,
+        default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        description:
+          'Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {

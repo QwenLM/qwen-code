@@ -77,19 +77,23 @@ export class SessionRouter {
     chatId: string,
     threadId?: string,
     cwd?: string,
+    isGroup?: boolean,
   ): Promise<string> {
     const key = this.routingKey(channelName, senderId, chatId, threadId);
     let failedCreateWaits = 0;
     for (;;) {
       const existing = this.toSession.get(key);
       if (existing) {
+        this.promoteTargetToGroup(existing, isGroup);
         return existing;
       }
 
       const creating = this.creatingSessions.get(key);
       if (creating) {
         try {
-          return await creating;
+          const sessionId = await creating;
+          this.promoteTargetToGroup(sessionId, isGroup);
+          return sessionId;
         } catch (err) {
           if (this.creatingSessions.get(key) === creating) {
             this.creatingSessions.delete(key);
@@ -119,6 +123,7 @@ export class SessionRouter {
             senderId,
             chatId,
             threadId,
+            isGroup,
           });
           this.toCwd.set(sessionId, sessionCwd);
           this.persist();
@@ -247,6 +252,17 @@ export class SessionRouter {
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
     return sessionId;
+  }
+
+  private promoteTargetToGroup(
+    sessionId: string,
+    isGroup: boolean | undefined,
+  ): void {
+    const current = this.toTarget.get(sessionId);
+    if (!current) return;
+    if (current.isGroup === true || isGroup !== true) return;
+    this.toTarget.set(sessionId, { ...current, isGroup: true });
+    this.persist();
   }
 
   /** Get all session entries for crash recovery. */

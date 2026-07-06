@@ -15,6 +15,7 @@ import type {
   PromptRequest,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
@@ -71,6 +72,12 @@ import {
   InvalidRewindTargetError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
+import {
+  LOAD_REPLAY_BULK_MODE,
+  LOAD_REPLAY_META_KEY,
+  LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_VERSION,
+} from './bridgeTypes.js';
 import type {
   BridgeSession,
   BridgeRestoreSessionRequest,
@@ -85,6 +92,11 @@ import type {
   BridgeDaemonStatusSnapshot,
   ChangeSessionCwdRequest,
   ChangeSessionCwdResult,
+  BridgeAutoMemoryTopic,
+  BridgeWorkspaceMemoryDreamResult,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetResult,
+  BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './bridgeTypes.js';
@@ -134,6 +146,113 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
     return { ...request, _meta: nextMeta };
   },
 };
+
+const KNOWN_SESSION_UPDATE_TYPES = new Set([
+  'user_message_chunk',
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'available_commands_update',
+  'current_mode_update',
+  'config_option_update',
+  'session_info_update',
+  'usage_update',
+]);
+const MAX_BULK_REPLAY_UPDATES = 10_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBulkReplayUpdate(value: unknown): value is SessionUpdate {
+  if (!isRecord(value)) return false;
+  const updateType = value['sessionUpdate'];
+  return (
+    typeof updateType === 'string' && KNOWN_SESSION_UPDATE_TYPES.has(updateType)
+  );
+}
+
+function describeLoadReplayValue(value: unknown): string {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function extractLoadReplayResponse(state: BridgeSessionState): {
+  state: BridgeSessionState;
+  updates: SessionUpdate[];
+  partial?: true;
+  replayError?: string;
+} {
+  const meta = isRecord(state._meta) ? state._meta : undefined;
+  const replay = meta?.[LOAD_REPLAY_META_KEY];
+  if (replay === undefined) return { state, updates: [] };
+  if (!isRecord(replay) || replay['v'] !== LOAD_REPLAY_VERSION) {
+    const version = isRecord(replay) ? replay['v'] : undefined;
+    throw new Error(
+      `Invalid qwen.session.loadReplay payload ` +
+        `(type=${describeLoadReplayValue(replay)}, version=${JSON.stringify(version)})`,
+    );
+  }
+  const rawUpdates = replay['updates'];
+  if (!Array.isArray(rawUpdates)) {
+    throw new Error(
+      `Invalid qwen.session.loadReplay updates ` +
+        `(version=${LOAD_REPLAY_VERSION}, count=not-array)`,
+    );
+  }
+  if (rawUpdates.length > MAX_BULK_REPLAY_UPDATES) {
+    throw new Error(
+      `qwen.session.loadReplay updates exceed limit ` +
+        `(${rawUpdates.length} > ${MAX_BULK_REPLAY_UPDATES})`,
+    );
+  }
+  const partial = replay['partial'];
+  if (partial !== undefined && partial !== true) {
+    throw new Error(
+      `Invalid qwen.session.loadReplay partial ` +
+        `(version=${LOAD_REPLAY_VERSION}, partial=${JSON.stringify(partial)})`,
+    );
+  }
+  const replayError = replay['replayError'];
+  if (replayError !== undefined && typeof replayError !== 'string') {
+    throw new Error(
+      `Invalid qwen.session.loadReplay replayError ` +
+        `(version=${LOAD_REPLAY_VERSION}, replayError=${describeLoadReplayValue(replayError)})`,
+    );
+  }
+  const invalidUpdateIndex = rawUpdates.findIndex(
+    (update) => !isBulkReplayUpdate(update),
+  );
+  if (invalidUpdateIndex !== -1) {
+    const invalidUpdate = rawUpdates[invalidUpdateIndex];
+    const discriminator = isRecord(invalidUpdate)
+      ? invalidUpdate['sessionUpdate']
+      : undefined;
+    throw new Error(
+      `Invalid qwen.session.loadReplay update at index ${invalidUpdateIndex} ` +
+        `(version=${LOAD_REPLAY_VERSION}, count=${rawUpdates.length}, ` +
+        `sessionUpdate=${JSON.stringify(discriminator)})`,
+    );
+  }
+
+  const nextMeta = { ...(meta ?? {}) };
+  delete nextMeta[LOAD_REPLAY_META_KEY];
+  const cleanState: BridgeSessionState = { ...state };
+  if (Object.keys(nextMeta).length > 0) {
+    cleanState._meta = nextMeta;
+  } else {
+    delete cleanState._meta;
+  }
+  return {
+    state: cleanState,
+    updates: rawUpdates,
+    ...(partial === true ? { partial: true as const } : {}),
+    ...(typeof replayError === 'string' ? { replayError } : {}),
+  };
+}
 
 /**
  * Stage 1 HTTP->ACP bridge factory + supporting helpers.
@@ -207,6 +326,15 @@ interface ChannelInfo {
    * channel instead of attaching a new `.then()` to `channel.exited` per poll.
    */
   statusClosedReject?: Promise<never>;
+  /**
+   * Latest self-reported ACP-child resource sample (rss/cpu), refreshed by the
+   * daemon's metrics sampler via `refreshChildResource`. Kept on the channel so
+   * it drops automatically on a channel swap — the sampler always reads the
+   * live channel's cache.
+   */
+  childRssBytes?: number;
+  childCpuPercent?: number;
+  childResourceAt?: number;
   /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
@@ -398,6 +526,9 @@ interface SessionEntry {
    * had an ACP load/resume response, so attaches return `state: {}`.
    */
   restoreState?: BridgeSessionState;
+  /** Response-mode `session/load` can return a partial replay prefix. */
+  restoreReplayPartial?: true;
+  restoreReplayError?: string;
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
@@ -484,6 +615,101 @@ function parseWorkspaceMemoryRememberResult(
     ...(summary === undefined ? {} : { summary }),
     filesTouched: filesTouched as string[],
     touchedScopes: touchedScopes as Array<'user' | 'project'>,
+  };
+}
+
+function isBridgeAutoMemoryTopic(
+  value: unknown,
+): value is BridgeAutoMemoryTopic {
+  return (
+    value === 'user' ||
+    value === 'feedback' ||
+    value === 'project' ||
+    value === 'reference'
+  );
+}
+
+function parseWorkspaceMemoryForgetMatch(
+  value: unknown,
+): BridgeWorkspaceMemoryForgetMatch | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !isBridgeAutoMemoryTopic(record['topic']) ||
+    typeof record['summary'] !== 'string' ||
+    typeof record['filePath'] !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    topic: record['topic'],
+    summary: record['summary'],
+    filePath: record['filePath'],
+  };
+}
+
+function parseWorkspaceMemoryForgetResult(
+  response: unknown,
+): BridgeWorkspaceMemoryForgetResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory forget response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const removedEntries = record['removedEntries'];
+  const touchedTopics = record['touchedTopics'];
+  const parsedRemovedEntries = Array.isArray(removedEntries)
+    ? removedEntries.map(parseWorkspaceMemoryForgetMatch)
+    : [];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(removedEntries) ||
+    parsedRemovedEntries.some((entry) => entry === null) ||
+    !Array.isArray(touchedTopics) ||
+    !touchedTopics.every(isBridgeAutoMemoryTopic)
+  ) {
+    throw new Error('Malformed workspace memory forget response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    removedEntries: parsedRemovedEntries as BridgeWorkspaceMemoryForgetMatch[],
+    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+  };
+}
+
+function parseWorkspaceMemoryDreamResult(
+  response: unknown,
+): BridgeWorkspaceMemoryDreamResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory dream response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const touchedTopics = record['touchedTopics'];
+  const dedupedEntries = record['dedupedEntries'];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(touchedTopics) ||
+    !touchedTopics.every(isBridgeAutoMemoryTopic) ||
+    typeof dedupedEntries !== 'number' ||
+    !Number.isFinite(dedupedEntries)
+  ) {
+    throw new Error('Malformed workspace memory dream response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+    dedupedEntries,
   };
 }
 
@@ -1253,6 +1479,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   interface InFlightRestore {
     action: 'load' | 'resume';
+    historyReplay: 'stream' | 'response';
     promise: Promise<BridgeRestoredSession>;
     /**
      * Synchronous reservation slot for callers that coalesce onto this
@@ -1405,6 +1632,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // unreachable.
         opts.clientMcpSender,
         (sessionId) => sessionIds.has(sessionId),
+        // Daemon token-burn accounting: forward per-round token usage observed
+        // at the session/update fan-in to the daemon host's metrics ring via
+        // the telemetry seam. Optional-chained so non-daemon callers (tests,
+        // Mode A) that wire no `tokenUsage` metric are a silent no-op.
+        (inputTokens, outputTokens, durationMs) =>
+          telemetry.metrics?.tokenUsage?.(
+            inputTokens,
+            outputTokens,
+            durationMs,
+          ),
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -1971,6 +2208,76 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return response as unknown as T;
   };
 
+  // Daemon Status child-resource: poll the live child's `workspaceResource`
+  // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
+  // fires this fire-and-forget, then reads the cache synchronously — keeping the
+  // async round-trip off the sampler's hot path.
+  const STALE_CHILD_RESOURCE_MS = 30_000;
+  // In-flight guard: `requestWorkspaceStatus` waits up to `initTimeoutMs` (10s),
+  // longer than the 5s sample cadence — so without this a degraded child (the
+  // exact case the chart should surface) would accumulate concurrent polls and
+  // pile more load onto an already-struggling pipe. At most one outstanding poll.
+  let childResourceRefreshing = false;
+  const refreshChildResource = async (): Promise<void> => {
+    if (childResourceRefreshing) return;
+    const info = liveChannelInfo();
+    if (!info) return;
+    childResourceRefreshing = true;
+    try {
+      const res = await requestWorkspaceStatus<{
+        rssBytes?: unknown;
+        cpuPercent?: unknown;
+      }>(SERVE_STATUS_EXT_METHODS.workspaceResource, () => ({}));
+      // A channel swap during the await would otherwise stamp a dead channel;
+      // only write if this is still the live one.
+      if (liveChannelInfo() !== info) return;
+      // `typeof NaN === 'number'` is true, so also require finiteness at this
+      // trust boundary — a misbehaving child returning NaN would otherwise be
+      // cached and read as NaN before the sampler's finiteGauge() catches it.
+      if (typeof res.rssBytes === 'number' && Number.isFinite(res.rssBytes)) {
+        info.childRssBytes = res.rssBytes;
+      }
+      if (
+        typeof res.cpuPercent === 'number' &&
+        Number.isFinite(res.cpuPercent)
+      ) {
+        // Clamp on receive too — enforce the [0,100] JSDoc invariant here, not
+        // only on the child's send side.
+        info.childCpuPercent = Math.min(100, Math.max(0, res.cpuPercent));
+      }
+      info.childResourceAt = Date.now();
+    } catch (err) {
+      // Child unreachable / mid-swap — keep the last good cache (or nothing
+      // before the first success). The staleness guard in the reader drops it
+      // once it ages out, so a stuck child reads 0 rather than a frozen value.
+      // Log at debug so an operator watching child rss/cpu flatline to 0 can
+      // tell "the poll is failing" apart from "the child is genuinely idle".
+      teeServeDebugLine(
+        `child-resource refresh failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      childResourceRefreshing = false;
+    }
+  };
+  const getChildResourceSnapshot = ():
+    | { rssBytes: number; cpuPercent: number }
+    | undefined => {
+    const info = liveChannelInfo();
+    if (!info || info.childResourceAt === undefined) return undefined;
+    // Staleness: a child that goes unresponsive without a channel swap would
+    // otherwise show its last-good rss/cpu forever (a zombie looking healthy).
+    // Drop the reading once it ages past the window so the chart reads 0.
+    if (Date.now() - info.childResourceAt > STALE_CHILD_RESOURCE_MS) {
+      return undefined;
+    }
+    return {
+      rssBytes: info.childRssBytes ?? 0,
+      cpuPercent: info.childCpuPercent ?? 0,
+    };
+  };
+
   const requestSessionStatus = async <T>(
     sessionId: string,
     method: string,
@@ -2257,6 +2564,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sessionId: string,
     workspaceCwd: string,
     events = createSessionEventBus(),
+    options: { drainEarlyEvents?: boolean } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -2286,10 +2594,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     byId.set(entry.sessionId, entry);
     touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
-    // Drain any guardrail events that fired during this session's
-    // `newSession` handler (before this entry registered) onto the
-    // freshly-created EventBus. Idempotent on unknown sessionIds.
-    ci.client.drainEarlyEvents(entry.sessionId, entry);
+    if (options.drainEarlyEvents !== false) {
+      // Drain any guardrail events that fired during this session's
+      // `newSession` handler (before this entry registered) onto the
+      // freshly-created EventBus. Idempotent on unknown sessionIds.
+      ci.client.drainEarlyEvents(entry.sessionId, entry);
+    }
     return entry;
   };
 
@@ -2398,22 +2708,41 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   };
 
   const replayFieldsFor = (
-    entry: { events: EventBus },
+    entry: Pick<
+      SessionEntry,
+      'events' | 'restoreReplayPartial' | 'restoreReplayError'
+    >,
     action: 'load' | 'resume',
   ): Pick<
     BridgeRestoredSession,
-    'compactedReplay' | 'liveJournal' | 'lastEventId'
+    | 'compactedReplay'
+    | 'liveJournal'
+    | 'lastEventId'
+    | 'partial'
+    | 'replayError'
   > => {
+    const replayStatus =
+      action === 'load' && entry.restoreReplayPartial === true
+        ? {
+            partial: true as const,
+            ...(typeof entry.restoreReplayError === 'string'
+              ? { replayError: entry.restoreReplayError }
+              : {}),
+          }
+        : {};
     const snapshot = entry.events.snapshotReplay();
-    if (!snapshot) return { lastEventId: entry.events.lastEventId };
+    if (!snapshot) {
+      return { lastEventId: entry.events.lastEventId, ...replayStatus };
+    }
     if (action === 'load') {
       return {
         compactedReplay: snapshot.compactedTurns,
         liveJournal: snapshot.liveJournal,
         lastEventId: snapshot.lastEventId,
+        ...replayStatus,
       };
     }
-    return { lastEventId: snapshot.lastEventId };
+    return { lastEventId: snapshot.lastEventId, ...replayStatus };
   };
 
   async function restoreSession(
@@ -2424,6 +2753,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+    const historyReplay =
+      action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
 
     const existing = byId.get(req.sessionId);
     if (existing) {
@@ -2451,7 +2782,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // a watermark — mixing the two on a shared EventBus would give
       // the resume client unexpected replay data or the load client a
       // missing snapshot. Same-action coalescing is unaffected.
-      if (action !== inFlight.action) {
+      if (
+        action !== inFlight.action ||
+        historyReplay !== inFlight.historyReplay
+      ) {
         throw new RestoreInProgressError(
           req.sessionId,
           inFlight.action,
@@ -2544,6 +2878,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // race-loser case only.
       transportClosed.catch(() => {});
       let state: BridgeSessionState;
+      let replayUpdates: SessionUpdate[] = [];
+      let replayPartial: true | undefined;
+      let replayError: string | undefined;
       try {
         if (action === 'load') {
           state = await Promise.race([
@@ -2557,6 +2894,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // intentionally has no `mcpServers` field for the
                 // same reason.
                 mcpServers: [],
+                ...(historyReplay === 'response'
+                  ? {
+                      _meta: {
+                        [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
+                      },
+                    }
+                  : {}),
               }),
               initTimeoutMs,
               'loadSession',
@@ -2576,6 +2920,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
             transportClosed,
           ]);
+        }
+        if (action === 'load' && historyReplay === 'response') {
+          const extracted = extractLoadReplayResponse(state);
+          state = extracted.state;
+          replayUpdates = extracted.updates;
+          replayPartial = extracted.partial;
+          replayError = extracted.replayError;
         }
       } catch (err) {
         restoreEvents.close();
@@ -2626,9 +2977,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.sessionId,
         workspaceKey,
         restoreEvents,
+        { drainEarlyEvents: replayUpdates.length === 0 },
       );
       entry.restoreState = state;
+      if (replayPartial === true) {
+        entry.restoreReplayPartial = true;
+      }
+      if (replayError !== undefined) {
+        entry.restoreReplayError = replayError;
+      }
       seedSnapshotCaches(entry, state);
+      if (replayUpdates.length > 0) {
+        await ci.client.seedSessionUpdates(entry, replayUpdates);
+        ci.client.drainEarlyEvents(entry.sessionId, entry);
+      }
       const clientId = registerClient(entry, req.clientId);
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -2664,6 +3026,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingRestoreEvents.delete(req.sessionId);
       if (!registeredEntry) {
         restoreEvents.close();
+        let removedRestoreEntry = false;
+        if (byId.get(req.sessionId)?.events === restoreEvents) {
+          byId.delete(req.sessionId);
+          ci?.sessionIds.delete(req.sessionId);
+          removedRestoreEntry = true;
+        }
+        if (removedRestoreEntry && ci && hasNoChannelWork(ci)) {
+          ci.emptyReapPending = true;
+          ci.isDying = true;
+        }
         // On restore failure, purge any guardrail events that the
         // child buffered during this restore window AND re-tombstone
         // the id. Without this, a subsequent successful restore for
@@ -2677,7 +3049,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     });
 
-    inFlightRestores.set(req.sessionId, { action, promise, coalesceState });
+    inFlightRestores.set(req.sessionId, {
+      action,
+      historyReplay,
+      promise,
+      coalesceState,
+    });
     try {
       return await promise;
     } finally {
@@ -2846,6 +3223,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     get sessionCount() {
       return byId.size;
     },
+
+    get pendingPromptTotal() {
+      // Queue-depth gauge for the Daemon Status "Queued" chart: count only
+      // prompts still waiting in the per-session FIFO (`state === 'queued'`),
+      // NOT the running one. `pendingPromptCount` bundles running + queued, so
+      // summing it would overstate backpressure by the number of in-flight
+      // prompts and shadow the separate "Active tasks" line. Cheap: each list
+      // is bounded by maxPendingPromptsPerSession.
+      let total = 0;
+      for (const entry of byId.values()) {
+        for (const pending of entry.pendingPromptList) {
+          if (pending.state === 'queued') total += 1;
+        }
+      }
+      return total;
+    },
+
+    // Daemon Status child-resource: sync cache read for the sampler + the async
+    // refresh it fires each tick to update that cache.
+    getChildResourceSnapshot,
+    refreshChildResource,
 
     get activePromptCount() {
       return activePromptCounter;
@@ -3612,6 +4010,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return entry.events.lastEventId;
     },
 
+    getSessionReplaySnapshot(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.events.snapshotReplay();
+    },
+
     respondToPermission(requestId, response, context) {
       // Legacy workspace-level vote route. Look up the session via
       // mediator's resolved+pending peek, forward to session-scoped
@@ -4255,6 +4659,56 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } finally {
         if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace memory remember');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryForget(
+      request: BridgeWorkspaceMemoryForgetRequest,
+    ): Promise<BridgeWorkspaceMemoryForgetResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
+                { ...request, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
+          ),
+        );
+        return parseWorkspaceMemoryForgetResult(response);
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'workspace memory forget');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryDream(): Promise<BridgeWorkspaceMemoryDreamResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
+                { cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
+          ),
+        );
+        return parseWorkspaceMemoryDreamResult(response);
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'workspace memory dream');
         }
       }
     },

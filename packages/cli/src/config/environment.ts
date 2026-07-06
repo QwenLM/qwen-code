@@ -193,8 +193,12 @@ export function getHomeEnvFallbackVars(
  * - ~/.qwen/.env
  * - ~/.env
  * - <QWEN_HOME>/.env (when set)
+ *
+ * Exported so `settings-cache.ts` can re-run the exact same discovery when
+ * validating its fingerprint; keep the discovery semantics in this single
+ * implementation.
  */
-function findEnvFiles(
+export function findEnvFiles(
   settings: Settings,
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
@@ -371,7 +375,10 @@ export function loadEnvironment(
             continue;
           }
 
-          if (!Object.hasOwn(process.env, key)) {
+          const existingValue = process.env[key];
+          const isEffectivelyUnset =
+            !Object.hasOwn(process.env, key) || existingValue === '';
+          if (isEffectivelyUnset) {
             process.env[key] = parsedEnv[key];
             dotEnvSourcedKeys.add(key);
           }
@@ -395,7 +402,14 @@ export function loadEnvironment(
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
         continue;
       }
-      if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
+      // Allow settings.env to fill in when process.env has the key but its
+      // value is empty string — an empty export (e.g. `DASHSCOPE_API_KEY=`
+      // in a Docker env file) is functionally missing yet blocks the normal
+      // no-override check because Object.hasOwn returns true.
+      const existingValue = process.env[key];
+      const isEffectivelyUnset =
+        !Object.hasOwn(process.env, key) || existingValue === '';
+      if (isEffectivelyUnset && typeof value === 'string') {
         process.env[key] = value;
         settingsEnvSourcedKeys.add(key);
       }
@@ -473,7 +487,8 @@ export function reloadEnvironment(
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (typeof value !== 'string') continue;
-      if (newDotEnvKeys.has(key)) continue;
+      const dotEnvValue = newDotEnvKeys.get(key);
+      if (dotEnvValue !== undefined && dotEnvValue !== '') continue;
       // When .env read failed, use the snapshot as the shadow set so
       // settings.env keys that were previously shadowed by .env don't
       // accidentally overwrite the still-live .env values in process.env.
@@ -515,6 +530,7 @@ export function reloadEnvironment(
   // This unconditional write is necessary because ACP children inherit
   // daemon env without tracking, so the tracking-based guard would miss them.
   for (const [key, value] of newDotEnvKeys) {
+    if (value === '' && newSettingsEnvKeys.has(key)) continue;
     if (process.env[key] !== value) {
       updatedKeys.push(key);
     }

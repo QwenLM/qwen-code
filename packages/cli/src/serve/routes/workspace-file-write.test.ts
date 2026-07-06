@@ -46,7 +46,7 @@ async function makeHarness(opts?: {
   const workspace = canonicalizeWorkspace(wsDir);
   const events: BridgeEvent[] = [];
   const fsFactory = createWorkspaceFileSystemFactory({
-    boundWorkspace: workspace,
+    boundWorkspaces: [workspace],
     trusted: opts?.trusted ?? true,
     emit: (e) => events.push(e),
   });

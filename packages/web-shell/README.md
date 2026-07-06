@@ -103,6 +103,48 @@ export function App() {
 | `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                           |
 | `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发 |
 
+## 可选图表 Renderer
+
+`WebShell` 支持宿主通过 `customization.markdown.renderCodeBlock` 接管特定
+fenced code block 的渲染。图表类场景可以注册内置的
+`echarts-fulldata` renderer：
+
+```tsx
+import { createEchartsFullDataRenderer } from '@qwen-code/web-shell';
+
+<WebShellWithProviders
+  markdown={{
+    renderCodeBlock: createEchartsFullDataRenderer({
+      loadEcharts: () => window.echarts,
+      resolveDataRef: async (ref, meta) =>
+        loadControlledChartDataset(ref, meta),
+    }),
+  }}
+/>;
+```
+
+renderer 会把 `echarts-fulldata` code block 替换为图表卡片，并内置图表/数据
+icon 切换；ECharts runtime 由宿主通过 `loadEcharts` 提供。若启用
+`data.kind="ref"` envelope，数据只能通过宿主提供的 `resolveDataRef` 解析，
+renderer 不会自己读取 URL 或本地路径。
+
+如果需要让模型主动输出 `echarts-fulldata` block，宿主应在自己的 skills 来源中
+提供对应 skill，并且只在确认当前 Web Shell 宿主已经注册 renderer 时启用。
+`@qwen-code/web-shell` 不内置或自动加载这个 skill；可从
+`packages/web-shell/docs/examples/qwencode-viz/SKILL.md` 复制模板到宿主的
+`.qwen/skills/qwencode-viz/SKILL.md`，或通过宿主自己的 skill 注入机制提供等价
+说明。
+
+`echarts-fulldata` 的 block body 可以是旧版纯 JSON ECharts option，也可以是
+`{ "version": 1, "data": ..., "option": ... }` envelope。新版 inline envelope
+使用 `data.dimensions: string[]` 和 `data.source` array-of-arrays；renderer 会先
+normalize 成原生 ECharts option，并注入 `option.dataset`，再渲染图表和数据视图。
+新版 ref envelope 必须使用受控 `artifact://` 或 `session-file://` ref，并提供
+`data.format`（`csv` 或 `json`）和 `data.dimensions`，这些元信息会传给宿主的
+`resolveDataRef(ref, meta)`。
+宿主应使用 `JSON.parse` 解析，不能用 `eval`、`new Function` 或 script injection
+执行模型生成内容。
+
 ## 架构说明
 
 ```text

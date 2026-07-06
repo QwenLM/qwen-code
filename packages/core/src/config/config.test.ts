@@ -19,6 +19,7 @@ import {
   matchesAnyServerPattern,
 } from './config.js';
 import { Storage } from './storage.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1013,6 +1014,118 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getModelFallbacks', () => {
+    it('returns empty array by default when unset', () => {
+      expect(new Config(baseParams).getModelFallbacks()).toEqual([]);
+    });
+
+    it('returns empty array when set to undefined', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: undefined,
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('returns empty array when set to empty array', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [],
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('accepts an array of model IDs', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('caps at 3 entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            'model-a',
+            'model-b',
+            'model-c',
+            'model-d',
+            'model-e',
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+
+    it('deduplicates entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo', 'qwen-plus'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('trims whitespace from entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['  qwen-plus  ', ' qwen-turbo '],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('removes blank entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['', '  ', 'qwen-plus', '', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('deduplicates after trimming', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', ' qwen-plus ', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('returns a readonly array', () => {
+      const config = new Config({
+        ...baseParams,
+        modelFallbacks: ['qwen-plus'],
+      });
+      const fallbacks = config.getModelFallbacks();
+      // The returned array should be readonly (TypeScript enforces this,
+      // but verify the reference is stable)
+      expect(fallbacks).toEqual(['qwen-plus']);
+    });
+
+    it('caps at 3 after deduplication and blank removal', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            '',
+            'model-a',
+            'model-a', // duplicate
+            '',
+            'model-b',
+            'model-c',
+            'model-d', // 4th unique, should be dropped
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+  });
+
   it('wires file history snapshot updates to chat recording', async () => {
     const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
     const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
@@ -1850,6 +1963,158 @@ describe('Server Config (config.ts)', () => {
       servers: [],
       initializationError: 'LSP client is not initialized',
     });
+  });
+
+  it('should no-op LSP reinitialize when disabled or unavailable', async () => {
+    const disabledConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: false },
+    });
+    await expect(disabledConfig.reinitializeLsp()).resolves.toBeUndefined();
+
+    const noClientConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+    await expect(noClientConfig.reinitializeLsp()).resolves.toBeUndefined();
+  });
+
+  it('should delegate LSP reinitialize to the configured client', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi.fn().mockResolvedValue(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(reinitialize).toHaveBeenCalledOnce();
+  });
+
+  it('should surface partial LSP reinitialize failures in status snapshot', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockResolvedValue(result),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+  });
+
+  it('should surface LSP reinitialize failures in status snapshot', async () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockRejectedValue(new Error('invalid lsp json')),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+  });
+
+  it('should clear previous LSP reinitialize failures after recovery', async () => {
+    const result = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['tsserver'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('invalid lsp json'))
+      .mockResolvedValueOnce(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
+  it('should clear partial LSP reinitialize failures after full recovery', async () => {
+    const partialFailure = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const success = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['clangd'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockResolvedValueOnce(partialFailure)
+      .mockResolvedValueOnce(success);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(partialFailure);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(success);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
   });
 
   describe('initialize', () => {
@@ -4673,6 +4938,31 @@ describe('Server Config (config.ts)', () => {
         Number.POSITIVE_INFINITY,
       );
     });
+  });
+
+  describe('getMaxToolCallsPerTurn', () => {
+    it('should return the default cap when unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getMaxToolCallsPerTurn()).toBe(
+        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+      );
+    });
+
+    it('should use a custom maxToolCallsPerTurn if provided', () => {
+      const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
+      expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it.each([0, -1])(
+      'should return infinity (cap disabled) when set to %d',
+      (capValue) => {
+        const config = new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: capValue,
+        });
+        expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
   });
 
   describe('getClearContextOnIdle', () => {

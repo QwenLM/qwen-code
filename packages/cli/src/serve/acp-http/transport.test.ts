@@ -16,7 +16,10 @@ import type {
   BridgeSessionSummary,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type {
+  BridgeEvent,
+  SessionReplaySnapshot,
+} from '@qwen-code/acp-bridge/eventBus';
 import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
@@ -156,6 +159,15 @@ class FakeBridge {
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
   spawnClientId: string | undefined = 'client-1';
+  loadRequests: Array<{
+    sessionId: string;
+    historyReplay?: string;
+    clientId?: string;
+  }> = [];
+  replaySnapshot: SessionReplaySnapshot | undefined;
+  loadState: Record<string, unknown> = { replayed: true };
+  loadPartial: true | undefined;
+  loadReplayError: string | undefined;
 
   closedSessions: string[] = [];
 
@@ -175,7 +187,12 @@ class FakeBridge {
 
   loadShouldThrow = false;
 
-  async loadSession(req: { sessionId: string }) {
+  async loadSession(req: {
+    sessionId: string;
+    historyReplay?: string;
+    clientId?: string;
+  }) {
+    this.loadRequests.push(req);
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -183,8 +200,14 @@ class FakeBridge {
       workspaceCwd: '/ws',
       attached: this.loadAttached,
       clientId: 'client-load',
-      state: { replayed: true },
+      state: this.loadState,
+      ...(this.loadPartial ? { partial: this.loadPartial } : {}),
+      ...(this.loadReplayError ? { replayError: this.loadReplayError } : {}),
     };
+  }
+
+  getSessionReplaySnapshot(_sessionId: string) {
+    return this.replaySnapshot;
   }
 
   async resumeSession(req: { sessionId: string }) {
@@ -286,6 +309,17 @@ class FakeBridge {
 
   listWorkspaceSessions() {
     return this.workspaceSessions;
+  }
+
+  getSessionSummary(sessionId: string) {
+    const summary = this.workspaceSessions.find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (summary) return summary;
+    if (sessionId === 'sess-1') {
+      return { sessionId, workspaceCwd: '/ws' };
+    }
+    throw new Error(`Session not found: ${sessionId}`);
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
@@ -450,6 +484,12 @@ class FakeBridge {
   }
   async runWorkspaceMemoryRemember() {
     return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  }
+  async runWorkspaceMemoryForget() {
+    return { summary: 'forgot', removedEntries: [], touchedTopics: [] };
+  }
+  async runWorkspaceMemoryDream() {
+    return { summary: 'dreamed', touchedTopics: [], dedupedEntries: 0 };
   }
   async isWorkspaceMemoryRememberAvailable() {
     return true;
@@ -973,6 +1013,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
+  it('initialize advertises image capability at _meta.imageCapability', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { imageCapability: Record<string, unknown> };
+      };
+    };
+    expect(result.agentCapabilities._meta.imageCapability).toEqual({
+      autoHandlesWrongModel: true,
+      maxBytes: 10380902,
+      maxImagesPerTurn: 4,
+    });
+  });
+
   it('initialize advertises _qwen/workspace/permissions methods', async () => {
     const { body } = await initializeRaw();
     const result = body['result'] as {
@@ -1003,6 +1057,30 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
+  it('initialize advertises session organization methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/update_organization',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/list',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/create',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/update',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/delete',
+    );
+  });
+
   it('initialize advertises _qwen/workspace/setup-github', async () => {
     const { body } = await initializeRaw();
     const result = body['result'] as {
@@ -1027,6 +1105,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/memory/remember/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream/get',
     );
   });
 
@@ -2978,6 +3068,352 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sess = await openStream(connId, 'loaded-1');
     expect(sess.status).toBe(200);
     await sess.body?.cancel(); // release the long-lived SSE socket
+  });
+
+  it('session/load reports partial replay status under qwen _meta', async () => {
+    bridge.loadState = {
+      replayed: true,
+      _meta: { qwen: { existing: 'kept' }, other: { value: 1 } },
+    };
+    bridge.loadPartial = true;
+    bridge.loadReplayError = 'replay boom';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: {
+        replayed: boolean;
+        partial?: boolean;
+        replayError?: string;
+        _meta?: {
+          qwen?: {
+            existing?: string;
+            sessionLoadReplay?: {
+              partial?: boolean;
+              replayError?: string;
+            };
+          };
+          other?: { value?: number };
+        };
+      };
+    }>;
+    expect(frame.id).toBe(20);
+    expect(frame.result).not.toHaveProperty('partial');
+    expect(frame.result).not.toHaveProperty('replayError');
+    expect(frame.result._meta).toEqual({
+      qwen: {
+        existing: 'kept',
+        sessionLoadReplay: {
+          partial: true,
+          replayError: 'replay boom',
+        },
+      },
+      other: { value: 1 },
+    });
+  });
+
+  it('session/load uses response-mode and replays the snapshot on initial session stream attach', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 3,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'model_switched',
+          data: { modelId: 'qwen3' },
+        } as BridgeEvent,
+      ],
+      liveJournal: [
+        {
+          v: 1,
+          id: 3,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [reply] = (await loadReply) as Array<{
+      id: number;
+      result: { replayed: boolean; compactedReplay?: unknown };
+    }>;
+    expect(reply).toMatchObject({
+      id: 20,
+      result: { replayed: true },
+    });
+    expect(reply.result).not.toHaveProperty('compactedReplay');
+    expect(bridge.loadRequests).toHaveLength(1);
+    expect(bridge.loadRequests[0]).toMatchObject({
+      sessionId: 'loaded-1',
+      clientId: clientIdForConnection(connId),
+      historyReplay: 'response',
+    });
+
+    const sess = await openStream(connId, 'loaded-1');
+    const framesPromise = takeFrames(sess, 4, 1000);
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls[0]).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 3,
+    });
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      method: string;
+      params: {
+        update?: { sessionUpdate?: string };
+        kind?: string;
+      };
+    }>;
+    expect(frames).toHaveLength(4);
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'model_switched', data: { modelId: 'qwen3' } },
+    });
+    expect(frames[2]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[3]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+  });
+
+  it('defers prompt replies until initial load replay completes', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 1,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const sess = await openStream(connId, 'loaded-1');
+    const framesPromise = takeFrames(sess, 3, 1000);
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'session/prompt',
+      params: {
+        sessionId: 'loaded-1',
+        prompt: [{ type: 'text', text: 'hi' }],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      id?: number;
+      method?: string;
+      params?: { kind?: string; update?: { sessionUpdate?: string } };
+      result?: { stopReason?: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+    expect(frames[2]).toMatchObject({
+      id: 21,
+      result: { stopReason: 'end_turn' },
+    });
+  });
+
+  it('continues initial load replay from Last-Event-ID after reconnect', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const firstStream = await openStream(connId, 'loaded-1');
+    const [firstFrame] = (await takeFrames(firstStream, 1, 1000)) as Array<{
+      method: string;
+      params: { update?: { sessionUpdate?: string } };
+    }>;
+    expect(firstFrame).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk' } },
+    });
+    const subscribeCountBeforeReconnect = bridge.subscribeCalls.length;
+
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'loaded-1',
+        'last-event-id': '1',
+      },
+    });
+    const framesPromise = takeFrames(resumed, 2, 1000);
+    await waitUntil(
+      () => bridge.subscribeCalls.length > subscribeCountBeforeReconnect,
+    );
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 2,
+    });
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      method: string;
+      params: { kind?: string; update?: { sessionUpdate?: string } };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+  });
+
+  it('does not rewind initial replay subscription behind Last-Event-ID', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'loaded-1',
+        'last-event-id': '5',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 5,
+    });
+    await resumed.body?.cancel();
   });
 
   it('session/resume owns the session + replies state', async () => {
@@ -5850,6 +6286,298 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frames[0]).toMatchObject({ result: { v: 1, tools: [] } });
     });
 
+    it('session organization methods persist groups and organized list state', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 70,
+          method: '_qwen/workspace/session_groups/create',
+          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string; name: string; color: string } };
+        };
+        const group = createFrame.result.group;
+        expect(group).toMatchObject({ name: 'Frontend', color: 'blue' });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 71,
+          method: '_qwen/session/update_organization',
+          params: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 72,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: group.id,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: group.id,
+              },
+            ],
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 73,
+          method: '_qwen/workspace/session_groups/delete',
+          params: { workspaceCwd: '/ws', groupId: group.id },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { deleted: true },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 74,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: null,
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/update_organization assigns a color echoed by session/list', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440011';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'purple' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'purple', groupId: null },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 81,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [{ sessionId, color: 'purple', groupId: null }],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list group=ungrouped excludes color-tagged sessions', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        // Tag the session with a color and no named group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'red', groupId: null },
+        });
+
+        // A color tag is its own sidebar bucket, so the session is not
+        // "ungrouped" even though it belongs to no named group. The server
+        // filter must agree with that taxonomy for REST/ACP consumers.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list group=<id> excludes sessions that also carry a color tag', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440013';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/session_groups/create',
+          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string } };
+        };
+        const groupId = createFrame.result.group.id;
+
+        // An SDK/API consumer can set both groupId and color in one update —
+        // the core store keeps both. The sidebar gives color precedence, so the
+        // named-group filter must not surface this session under the group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, groupId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, groupId, color: 'red' },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 86,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: groupId,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list rejects group filter without organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 75,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          group: 'pinned',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 75,
+        error: {
+          code: -32602,
+          message: '`group` requires `view` to be "organized"',
+        },
+      });
+    });
+
+    it.each([
+      {
+        params: { isPinned: true },
+        message: '`sessionId` is required',
+      },
+      {
+        params: { sessionId: 'session-1', isPinned: 'yes' },
+        message: '`isPinned` must be a boolean',
+      },
+      {
+        params: { sessionId: 'session-1', groupId: 1 },
+        message: '`groupId` must be a string or null',
+      },
+      {
+        params: { sessionId: 'session-1', color: 'pink' },
+        message: '`color` must be a supported color or null',
+      },
+    ])(
+      '_qwen/session/update_organization rejects invalid params: $message',
+      async ({ params, message }) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 76,
+          method: '_qwen/session/update_organization',
+          params,
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 76,
+          error: {
+            code: -32602,
+            message,
+          },
+        });
+      },
+    );
+
     it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -6297,6 +7025,101 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(completed.result).toMatchObject({
           status: 'completed',
           result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'old preference' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/workspace/memory/forget/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'forgot' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget rejects oversized queries', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'x'.repeat(64 * 1024 + 1) },
+        });
+        const frame = (await reader.next()) as {
+          error: { code: number; message: string };
+        };
+        expect(frame.error.code).toBe(-32602);
+        expect(frame.error.message).toContain('`query` exceeds');
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/dream queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/dream',
+          params: {},
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/dream/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'dreamed' },
         });
       } finally {
         reader.close();

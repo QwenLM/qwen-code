@@ -72,6 +72,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['workspace', 'clean'],
   },
+  workspace_memory_forget: { since: 'v1' },
+  workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
@@ -91,6 +93,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
+  session_organization: { since: 'v1' },
+  session_export: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a

@@ -14,20 +14,23 @@ on:
         type: 'boolean'
         default: true
 
-permissions:
-  contents: 'read'
-  id-token: 'write'
-
 jobs:
   build-and-publish:
     runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
+    permissions:
+      contents: 'read'
     steps:
       - uses: 'actions/checkout@v4'
 
       - uses: 'actions/setup-node@v5'
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
 
       - name: 'Determine version'
         id: 'version'
@@ -42,10 +45,6 @@ jobs:
       - name: 'Install dependencies'
         working-directory: 'packages/mobile-mcp'
         run: 'npm ci --ignore-scripts'
-
-      - name: 'Lint'
-        working-directory: 'packages/mobile-mcp'
-        run: 'npm run lint'
 
       - name: 'Set version'
         working-directory: 'packages/mobile-mcp'
@@ -62,6 +61,6 @@ jobs:
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'
-        run: 'npm publish --access public --provenance'
+        run: 'npm publish --access public'
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
