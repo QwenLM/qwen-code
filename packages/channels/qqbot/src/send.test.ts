@@ -1811,4 +1811,53 @@ describe('replyMsgId cleanup timer', () => {
     saveSpy.mockRestore();
     ch.disconnect();
   });
+
+  it('calls reconnectWithRetry after 10 consecutive token refresh failures', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['tokenExpiresAt'] = Date.now() + 120_000;
+    chp['ws'] = {
+      close: vi.fn(),
+      readyState: 1,
+    };
+    chp['_reconnectId'] = 'rc-1';
+
+    // spy on reconnectWithRetry
+    const reconnectSpy = vi.fn();
+    chp['reconnectWithRetry'] = reconnectSpy;
+    const disconnectSpy = vi.fn().mockImplementation(() => {
+      chp['disposed'] = true;
+    });
+    const origDisconnect = chp['disconnect'];
+    chp['disconnect'] = disconnectSpy;
+
+    // Always fail token fetch
+    mockFetchAccessToken.mockRejectedValue(new Error('auth failed'));
+
+    (chp['scheduleTokenRefresh'] as () => void).call(ch);
+
+    // Initial delay: min(120k*0.8, max(120k-30k, 10k)) = min(96k, max(90k, 10k)) = 90k
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(1);
+
+    // Advance through 10 retries (10 × 60s = 600s)
+    for (let i = 1; i <= 10; i++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mockFetchAccessToken).toHaveBeenCalledTimes(i + 1);
+    }
+
+    // After 11 failures total, exhaustion triggers disconnect
+    expect(disconnectSpy).toHaveBeenCalled();
+
+    // 1s reconnect timer → reconnectWithRetry
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(reconnectSpy).toHaveBeenCalled();
+
+    // Restore disconnect to avoid side effects
+    chp['disconnect'] = origDisconnect;
+    ch.disconnect();
+  });
 });

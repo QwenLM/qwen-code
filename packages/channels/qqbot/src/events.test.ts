@@ -924,4 +924,84 @@ describe('群管理事件', () => {
       expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(0);
     });
   });
+
+  describe('INVALID_SESSION recovery', () => {
+    it('sets readyTimeout on re-IDENTIFY and triggers ws.close(4002) + connectReject if READY never arrives', () => {
+      vi.useFakeTimers();
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const wsClose = vi.fn();
+      const wsSend = vi.fn();
+      chp['ws'] = {
+        close: wsClose,
+        send: wsSend,
+        readyState: 1, // WebSocket.OPEN
+      };
+      const connectReject = vi.fn();
+      chp['connectReject'] = connectReject;
+
+      // Simulate INVALID_SESSION (op=9)
+      pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+      // Verify re-IDENTIFY was sent
+      expect(wsSend).toHaveBeenCalled();
+
+      // Verify readyTimeout was set (30s)
+      expect(chp['readyTimeout']).not.toBeNull();
+
+      // Advance time past the 30s timeout
+      vi.advanceTimersByTime(30_000);
+
+      // Verify WS closed with code 4002
+      expect(wsClose).toHaveBeenCalledWith(4002);
+
+      // Verify connectReject was invoked with timeout error
+      expect(connectReject).toHaveBeenCalledWith(
+        new Error('Timed out waiting for READY'),
+      );
+      expect(chp['connectReject']).toBeNull();
+
+      ch.disconnect();
+    });
+
+    it('readyTimeout does not fire if READY arrives before 30s', () => {
+      vi.useFakeTimers();
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const wsClose = vi.fn();
+      const wsSend = vi.fn();
+      chp['ws'] = {
+        close: wsClose,
+        send: wsSend,
+        readyState: 1,
+      };
+      chp['connectReject'] = vi.fn();
+
+      // Simulate INVALID_SESSION (op=9)
+      pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+      const timeoutBefore = chp['readyTimeout'];
+      expect(timeoutBefore).not.toBeNull();
+
+      // Simulate READY arriving before timeout
+      pvt['handleGatewayMessage'](
+        { op: 0, t: 'READY', s: 1, d: { session_id: 'sess-new' } },
+        () => {},
+      );
+
+      // Verify the old timeout was cleared
+      const timeoutAfter = chp['readyTimeout'];
+      expect(timeoutAfter).toBeNull();
+
+      // Advance past 30s — should NOT fire
+      vi.advanceTimersByTime(30_000);
+      expect(wsClose).not.toHaveBeenCalled();
+
+      ch.disconnect();
+    });
+  });
 });

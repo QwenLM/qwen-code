@@ -1465,19 +1465,13 @@ export class QQChannel extends ChannelBase {
               this.disconnect();
               this.reconnectTimer = setTimeout(() => {
                 this.isReconnecting = false;
-                // Ensure disposed is false before connect — disconnect()
-                // sets it to true, and any disposed guard between now and
-                // connect()'s own `this.disposed = false` would block it.
-                this.disposed = false;
-                this.connect().catch((err: unknown) => {
-                  process.stderr.write(
-                    `[QQ:${this.name}] FATAL: reconnect after token exhaustion failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}
-`,
-                  );
-                });
+                // Use reconnectWithRetry instead of bare connect() —
+                // gives exponential backoff + maxReconnectAttempts guard,
+                // preventing zombie state where the channel is permanently
+                // offline after token exhaustion.
+                this.reconnectWithRetry();
               }, 1000);
               this.reconnectTimer.unref?.();
-              return;
             }
             this.tokenRefreshTimer = setTimeout(() => {
               this.fetchToken().catch((e2) => {
