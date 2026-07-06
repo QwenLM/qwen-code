@@ -349,6 +349,9 @@ export function parseServeFastPathArgs(
       const read = readOptionValue(argv, i, inlineValue);
       if (!read) return { kind: 'fallback' };
       i = read.nextIndex;
+      if (stringTarget === 'workspace' && options.workspace !== undefined) {
+        return { kind: 'fallback' };
+      }
       setServeOption(options, stringTarget, read.value);
       continue;
     }

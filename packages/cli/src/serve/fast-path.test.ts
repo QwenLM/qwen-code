@@ -546,6 +546,18 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('falls back to the full parser for repeatable --workspace values', () => {
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--workspace',
+        '/tmp/primary',
+        '--workspace',
+        '/tmp/secondary',
+      ]),
+    ).toEqual({ kind: 'fallback' });
+  });
+
   it('parses Windows bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       'C:\\repo\\dist\\cli.js',
