@@ -1736,6 +1736,38 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('shows an error when extension content auto-refresh fails', async () => {
+      vi.mocked(refreshExtensionContentRuntime).mockRejectedValueOnce(
+        new Error('refresh failed'),
+      );
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionContentChanged('content changed');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.ERROR,
+            text: 'Failed to refresh extension content: refresh failed. Run /reload-plugins to apply updates.',
+          },
+          expect.any(Number),
+        );
+      });
+    });
+
     it('skips content auto-refresh while package reload is needed', async () => {
       const extensionRefreshState = new ExtensionRefreshState();
       const result = setupProcessorHook(
@@ -1762,6 +1794,33 @@ describe('useSlashCommandProcessor', () => {
         {
           type: MessageType.INFO,
           text: 'Extensions changed on disk. Run /reload-plugins to apply updates.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('shows a retry message when extension reload fails', async () => {
+      const extensionRefreshState = new ExtensionRefreshState();
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        extensionRefreshState,
+      );
+      await waitFor(() => {
+        expect(result.current.slashCommands).toBeDefined();
+      });
+
+      act(() => {
+        extensionRefreshState.markExtensionsReloadFailed();
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Extension reload did not complete. Run /reload-plugins to try again.',
         },
         expect.any(Number),
       );

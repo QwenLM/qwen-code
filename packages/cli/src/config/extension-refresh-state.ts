@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { AppEvent } from '../utils/events.js';
 
 const SUPPRESS_AFTER_MS = 1000;
+export const EXTENSION_RELOAD_FAILED_REASON = 'extension reload failed';
 
 export class ExtensionRefreshState {
   private extensionRefreshNeeded = false;
@@ -87,7 +88,7 @@ export class ExtensionRefreshState {
     this.events.emit(AppEvent.ExtensionsReloadStarted);
   }
 
-  markExtensionsReloadFailed(reason = 'extension reload failed'): void {
+  markExtensionsReloadFailed(reason = EXTENSION_RELOAD_FAILED_REASON): void {
     this.extensionRefreshNeeded = true;
     this.reloadInProgress = false;
     this.changedDuringReload = false;

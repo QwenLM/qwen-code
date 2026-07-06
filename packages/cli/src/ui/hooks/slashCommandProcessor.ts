@@ -59,7 +59,10 @@ import { parseSlashCommand } from '../../utils/commands.js';
 import { AppEvent } from '../../utils/events.js';
 import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
-import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import {
+  EXTENSION_RELOAD_FAILED_REASON,
+  ExtensionRefreshState,
+} from '../../config/extension-refresh-state.js';
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
@@ -609,14 +612,19 @@ export const useSlashCommandProcessor = (
   }, [config, isConfigInitialized, reloadCommands]);
 
   useEffect(() => {
-    const listener = () => {
+    const listener = (reason?: unknown) => {
       clearPendingExtensionContentRefresh();
       addItem(
         {
           type: MessageType.INFO,
-          text: t(
-            'Extensions changed on disk. Run /reload-plugins to apply updates.',
-          ),
+          text:
+            reason === EXTENSION_RELOAD_FAILED_REASON
+              ? t(
+                  'Extension reload did not complete. Run /reload-plugins to try again.',
+                )
+              : t(
+                  'Extensions changed on disk. Run /reload-plugins to apply updates.',
+                ),
         },
         Date.now(),
       );

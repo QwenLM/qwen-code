@@ -1089,7 +1089,6 @@ export class ExtensionManager {
     cwd?: string,
     previousExtensionConfig?: ExtensionConfig,
   ): Promise<Extension> {
-    const endMutation = this.beginMutation('installExtension');
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
       currentDir,
@@ -1104,6 +1103,7 @@ export class ExtensionManager {
     let tempDir: string | undefined;
     let convertedSourcePath: string | undefined;
 
+    const endMutation = this.beginMutation('installExtension');
     try {
       if (!this.isWorkspaceTrusted) {
         throw new Error(
