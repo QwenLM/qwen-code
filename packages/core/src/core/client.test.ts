@@ -950,6 +950,11 @@ describe('Gemini Client (client.ts)', () => {
         SessionStartSource.Resume,
         SessionStartSource.Clear,
       ]);
+      expect(
+        sessionStartProfilerMocks.profilers[1].finish,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ extraHistoryLength: 1 }),
+      );
       for (const profiler of sessionStartProfilerMocks.profilers) {
         expect(profiler.finish).toHaveBeenCalledTimes(1);
       }
