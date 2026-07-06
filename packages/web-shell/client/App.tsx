@@ -860,7 +860,7 @@ export function App({
       // the drawer on the first Escape.
       if (
         isEditableTarget(target) &&
-        !target?.closest('[data-mobile-drawer]')
+        !target?.closest('[data-sidebar-shell]')
       ) {
         return;
       }
@@ -872,12 +872,12 @@ export function App({
     document.body.style.overflow = 'hidden';
     const preventScroll = (e: TouchEvent) => {
       // Allow native scrolling inside the drawer panel (e.g. the session list).
-      // The dim backdrop also lives under [data-mobile-drawer], so exclude it:
+      // The dim backdrop also lives under [data-sidebar-shell], so exclude it:
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = e.target as HTMLElement | null;
       if (
-        el?.closest('[data-mobile-drawer]') &&
+        el?.closest('[data-sidebar-shell]') &&
         !el.closest(`.${styles.mobileBackdrop}`)
       ) {
         return;
@@ -1243,10 +1243,46 @@ export function App({
   // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
   // of Settings by someone else's prompt.
   useEffect(() => {
-    if (approvalOverlayActive && activePanel) {
-      setActivePanel(null);
+    if (!approvalOverlayActive) return;
+    // The approval overlay renders in the chat footer; dismiss anything layered
+    // over it so it's visible and actionable instead of trapped behind a
+    // backdrop — the panel itself and any DialogShell sub-dialog opened from it
+    // (model picker, approval-mode picker). Leaving the approval-mode picker up
+    // is also a security hole: the user could pick "yolo" and silently
+    // auto-approve a tool call they never saw (handleSetMode auto-approves
+    // pendingApprovalRef.current).
+    if (activePanel) setActivePanel(null);
+    if (modelDialogMode) setModelDialogMode(null);
+    if (showApprovalModeDialog) setShowApprovalModeDialog(false);
+  }, [
+    approvalOverlayActive,
+    activePanel,
+    modelDialogMode,
+    showApprovalModeDialog,
+  ]);
+  // Once the effect above uncovers the approval, the overlay is the topmost
+  // surface but the just-unmounted panel Back button dropped focus to <body>.
+  // Move focus onto the overlay when it becomes visible so keyboard/AT users
+  // land on it. Only for ToolApproval: it drives keyboard entirely through a
+  // window listener, so focusing its (tabindex=-1) wrapper is safe and gives AT
+  // a landing spot without confirming (Enter arms first, confirms second — a
+  // focused button would confirm on the first press). AskUserQuestion instead
+  // manages its own focus across its options/input, so stealing focus to the
+  // wrapper would break its arrow-key navigation.
+  const approvalOverlayRef = useRef<HTMLDivElement | null>(null);
+  const toolApprovalOverlayVisible =
+    pendingToolApproval !== null &&
+    !activePanel &&
+    modelDialogMode === null &&
+    !showApprovalModeDialog;
+  const prevToolApprovalOverlayVisibleRef = useRef(toolApprovalOverlayVisible);
+  useEffect(() => {
+    const wasVisible = prevToolApprovalOverlayVisibleRef.current;
+    prevToolApprovalOverlayVisibleRef.current = toolApprovalOverlayVisible;
+    if (toolApprovalOverlayVisible && !wasVisible) {
+      approvalOverlayRef.current?.focus();
     }
-  }, [approvalOverlayActive, activePanel]);
+  }, [toolApprovalOverlayVisible]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
@@ -3603,7 +3639,7 @@ export function App({
         // Escape is being handled inside the sidebar. Scope the panel close to
         // Escape originating outside the sidebar drawer.
         const target = e.target as HTMLElement | null;
-        if (!target?.closest('[data-mobile-drawer]')) {
+        if (!target?.closest('[data-sidebar-shell]')) {
           e.preventDefault();
           live.closePanel();
         }
@@ -3699,15 +3735,24 @@ export function App({
       // Model IDs from the picker arrive as bare model IDs (baseModelId), not
       // ACP format. The model picker strips the (authType) suffix before
       // calling this handler.
+      //
+      // Close the panel before sending: unlike the vision/voice pickers (silent
+      // setWorkspaceSetting), `/model --fast` runs a real turn whose response
+      // lands in the message list. With the panel open the chat is hidden, so
+      // that response would pile up behind it and surprise the user on close.
+      // Closing first returns them to the chat to see it in context (matching
+      // the pre-panel modal behavior).
+      closePanel();
       sendPrompt(`/model --fast ${modelId}`)
         .then(() => {
           // sendPrompt resolves only after the `/model --fast` turn *completes*
           // (actions.ts → waitForAcceptedPromptCompletion), so the change is
           // already applied here — this reload reads the new value, not a stale
-          // one. It's needed because the command path, unlike the
-          // setWorkspaceSetting pickers (vision/voice), doesn't bump the
-          // settingsVersion signal that auto-reloads the still-mounted panel.
-          reloadWorkspaceSettings();
+          // one. It keeps the workspace-settings state fresh for the next time
+          // Settings is opened (the command path, unlike setWorkspaceSetting,
+          // doesn't bump the settingsVersion signal). Guard its own rejection —
+          // the .catch below only covers sendPrompt.
+          reloadWorkspaceSettings().catch(() => {});
         })
         .catch((error: unknown) => {
           reportError(error, 'Failed to switch fast model');
@@ -3715,6 +3760,7 @@ export function App({
     },
     [
       blockLocalCommandDuringTurn,
+      closePanel,
       sendPrompt,
       streamingState,
       reportError,
@@ -4129,7 +4175,7 @@ export function App({
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
               <div
-                data-mobile-drawer=""
+                data-sidebar-shell=""
                 {...(mobileDrawerOpen
                   ? { role: 'dialog', 'aria-modal': 'true' as const }
                   : {})}
@@ -4227,27 +4273,25 @@ export function App({
                     </div>
                   </div>
                   <div className={styles.panelBody} key={activePanel}>
-                    <div className={styles.panelBodyInner}>
-                      {activePanel === 'settings' ? (
-                        <SettingsMessage
-                          settingsState={workspaceSettingsState}
-                          embedded
-                          onLanguageChange={handleSettingsLanguageChange}
-                          onThemeChange={handleThemeChange}
-                          chatWidthMode={chatWidthMode}
-                          onChatWidthModeChange={handleChatWidthModeChange}
-                          onSubDialog={(key) => {
-                            if (key === 'fastModel') setModelDialogMode('fast');
-                            else if (key === 'visionModel')
-                              setModelDialogMode('vision');
-                            else if (key === 'tools.approvalMode')
-                              setShowApprovalModeDialog(true);
-                          }}
-                        />
-                      ) : (
-                        <DaemonStatusDialog />
-                      )}
-                    </div>
+                    {activePanel === 'settings' ? (
+                      <SettingsMessage
+                        settingsState={workspaceSettingsState}
+                        embedded
+                        onLanguageChange={handleSettingsLanguageChange}
+                        onThemeChange={handleThemeChange}
+                        chatWidthMode={chatWidthMode}
+                        onChatWidthModeChange={handleChatWidthModeChange}
+                        onSubDialog={(key) => {
+                          if (key === 'fastModel') setModelDialogMode('fast');
+                          else if (key === 'visionModel')
+                            setModelDialogMode('vision');
+                          else if (key === 'tools.approvalMode')
+                            setShowApprovalModeDialog(true);
+                        }}
+                      />
+                    ) : (
+                      <DaemonStatusDialog />
+                    )}
                   </div>
                 </section>
               )}
@@ -4257,6 +4301,11 @@ export function App({
                     ? `${styles.chatViewWrap} ${styles.chatViewHidden}`
                     : styles.chatViewWrap
                 }
+                // `display:none` already drops this subtree from the a11y tree in
+                // Chromium, but that's a browser detail, not an ARIA guarantee;
+                // mark it hidden explicitly so AT can't wander into the stale
+                // chat / hidden composer while a panel is shown.
+                aria-hidden={activePanel ? true : undefined}
               >
                 <WebShellCustomizationProvider value={customization}>
                   <CompactModeContext.Provider value={compactMode}>
@@ -4353,7 +4402,12 @@ export function App({
                       </div>
                     )}
                     {pendingToolApproval && (
-                      <div className={styles.approvalOverlay}>
+                      <div
+                        ref={approvalOverlayRef}
+                        tabIndex={-1}
+                        data-testid="approval-overlay"
+                        className={styles.approvalOverlay}
+                      >
                         <ToolApproval
                           request={pendingToolApproval}
                           onConfirm={handleConfirm}
@@ -4362,7 +4416,12 @@ export function App({
                       </div>
                     )}
                     {pendingAskUserApproval && (
-                      <div className={styles.approvalOverlay}>
+                      <div
+                        ref={approvalOverlayRef}
+                        tabIndex={-1}
+                        data-testid="approval-overlay"
+                        className={styles.approvalOverlay}
+                      >
                         <AskUserQuestion
                           request={pendingAskUserApproval}
                           onConfirm={handleConfirm}

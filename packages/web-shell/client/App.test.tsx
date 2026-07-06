@@ -220,6 +220,20 @@ vi.mock('./components/MessageList', async () => {
   };
 });
 
+// Render DialogShell as an observable container so tests can detect an open
+// sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
+vi.mock('./components/dialogs/DialogShell', async () => {
+  const React = await import('react');
+  return {
+    DialogShell: (props: { children?: React.ReactNode }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'dialog-shell' },
+        props.children,
+      ),
+  };
+});
+
 vi.mock('./components/sidebar/WebShellSidebar', async () => {
   const React = await import('react');
   return {
@@ -263,7 +277,6 @@ mockComponent('./components/panels/TodoPanel', 'TodoPanel');
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
-mockComponent('./components/dialogs/DialogShell', 'DialogShell');
 mockComponent('./components/dialogs/ModelDialog', 'ModelDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
@@ -737,6 +750,89 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+  });
+
+  it('dismisses an open sub-dialog (model picker) when an approval becomes pending', async () => {
+    // A DialogShell sub-dialog left open would sit (backdrop) over the approval
+    // overlay in the chat footer, hiding it — and, for the approval-mode picker,
+    // let the user yolo-approve an unseen tool call. /model (no arg) opens the
+    // picker; an approval must dismiss it.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/model';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('moves focus to the approval overlay when it appears', async () => {
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    const overlay = document.querySelector('[data-testid="approval-overlay"]');
+    expect(overlay).not.toBeNull();
+    expect(document.activeElement).toBe(overlay);
+  });
+
+  it('closes the panel on Escape from outside the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+
+    await act(async () => {
+      panel?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('keeps the panel open on Escape originating inside the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    await act(async () => {
+      sidebar?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+  });
+
+  it('marks the composer dormant (dialogOpen) while a panel replaces the chat', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
   });
 

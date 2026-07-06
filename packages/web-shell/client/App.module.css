@@ -408,13 +408,6 @@
   padding: 16px 20px;
 }
 
-/* Fill the chat pane width and left-align the content (like the chat's wide
-   mode) instead of centering it in a narrow column — the Settings grid and the
-   Daemon Status card grid both expand to use the available width. */
-.panelBodyInner {
-  width: 100%;
-}
-
 /* The chat view (message list + composer) stays mounted while a panel is shown,
    just hidden — so the composer keeps its unsent draft and attachments instead
    of losing them on unmount. */
