@@ -87,11 +87,12 @@ Controls how conversation sessions are managed:
 
 Channel memory lets an authorized channel member save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
 
-Commands:
+Natural-language examples:
 
-- `/remember-channel <text>` saves a memory line for the current chat or thread.
-- `/channel-memory` shows saved memory for the current chat or thread.
-- `/forget-channel confirm` clears saved memory for the current chat or thread.
+- `记住：默认使用 staging 环境` saves memory for the current chat or thread.
+- `你记一下以后回复前要说 1122` saves the extracted durable memory.
+- `你现在都记住了什么` shows saved memory for the current chat or thread.
+- `把这个群的记忆清空` starts the clear flow; `确认清空记忆` confirms it.
 
 Only users listed in `allowedUsers` can read, write, or clear channel memory. If `allowedUsers` is empty, channel memory commands are disabled for everyone.
 

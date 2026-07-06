@@ -2,6 +2,7 @@ import { basename, join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
+  ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
@@ -27,6 +28,7 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
+  PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
 import type {
   AvailableCommand,
@@ -38,6 +40,10 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
+import {
+  parseChannelMemoryIntent,
+  type ChannelMemoryIntent,
+} from './channel-memory-intent.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -54,6 +60,9 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
+const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
+const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
+  /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
 /** Sentinel message for the loop-prompt timeout rejection; matched by identity below. */
 const LOOP_TIMED_OUT_MESSAGE = 'loop timed out';
 
@@ -61,6 +70,7 @@ export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
   channelMemory?: ChannelMemoryCallbacks;
+  memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   /**
    * Set when a channel owns a supplied router and should consume bridge
    * events directly.
@@ -175,6 +185,7 @@ export abstract class ChannelBase {
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
+  private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private groupHistory: GroupHistoryStore;
   private readonly loopController?: ChannelLoopController;
   private instructedSessions: Set<string> = new Set();
@@ -253,6 +264,7 @@ export abstract class ChannelBase {
     this.identity = Object.freeze(this.resolveIdentity(name, config));
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
+    this.memoryIntentClassifier = options?.memoryIntentClassifier;
     this.groupHistory = new GroupHistoryStore(
       options?.groupHistoryPath ??
         join(
@@ -1235,129 +1247,6 @@ export abstract class ChannelBase {
       return true;
     });
 
-    this.registerCommand('remember-channel', async (envelope, args) => {
-      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
-        return true;
-      }
-      if (envelope.isGroup) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Channel memory cannot be changed in group chats.',
-        );
-        return true;
-      }
-      if (args.trim() === '') {
-        await this.sendMessage(
-          envelope.chatId,
-          'Usage: /remember-channel <text>',
-        );
-        return true;
-      }
-      const channelMemory = await this.getChannelMemory(envelope);
-      if (!channelMemory) {
-        return true;
-      }
-      try {
-        await channelMemory.appendChannelMemory(
-          this.channelMemoryTarget(envelope),
-          args.trim(),
-        );
-      } catch (error) {
-        const message = this.channelMemoryErrorMessage(error);
-        this.logChannelMemoryError('save', envelope, message);
-        await this.sendMessage(
-          envelope.chatId,
-          `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
-        );
-        return true;
-      }
-      this.invalidateSessionContext(envelope);
-      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
-      return true;
-    });
-
-    this.registerCommand('channel-memory', async (envelope) => {
-      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
-        return true;
-      }
-      if (envelope.isGroup) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Channel memory cannot be shown in group chats.',
-        );
-        return true;
-      }
-      const channelMemory = await this.getChannelMemory(envelope);
-      if (!channelMemory) {
-        return true;
-      }
-      let text: string;
-      try {
-        text = (
-          await channelMemory.readChannelMemory(
-            this.channelMemoryTarget(envelope),
-          )
-        ).trim();
-      } catch (error) {
-        const message = this.channelMemoryErrorMessage(error);
-        this.logChannelMemoryError('read', envelope, message);
-        await this.sendMessage(
-          envelope.chatId,
-          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
-        );
-        return true;
-      }
-      await this.sendMessage(
-        envelope.chatId,
-        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
-      );
-      return true;
-    });
-
-    this.registerCommand('forget-channel', async (envelope, args) => {
-      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
-        return true;
-      }
-      if (envelope.isGroup) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Channel memory cannot be changed in group chats.',
-        );
-        return true;
-      }
-      if (args.toLowerCase() !== 'confirm') {
-        await this.sendMessage(
-          envelope.chatId,
-          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
-        );
-        return true;
-      }
-      const channelMemory = await this.getChannelMemory(envelope);
-      if (!channelMemory) {
-        return true;
-      }
-      let result: { changed: boolean };
-      try {
-        result = await channelMemory.clearChannelMemory(
-          this.channelMemoryTarget(envelope),
-        );
-      } catch (error) {
-        const message = this.channelMemoryErrorMessage(error);
-        this.logChannelMemoryError('clear', envelope, message);
-        await this.sendMessage(
-          envelope.chatId,
-          `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
-        );
-        return true;
-      }
-      this.invalidateSessionContext(envelope);
-      await this.sendMessage(
-        envelope.chatId,
-        result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
-      );
-      return true;
-    });
-
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
@@ -1367,9 +1256,6 @@ export abstract class ChannelBase {
           : '/clear — Clear your session (aliases: /reset, /new)',
         '/who — Show current session & workspace',
         '/status — Show session info',
-        '/remember-channel <text> — Save memory for this chat',
-        '/channel-memory — Show memory for this chat',
-        '/forget-channel confirm — Clear memory for this chat',
       ];
 
       // Platform-specific commands (registered by adapters, not shared ones)
@@ -1380,9 +1266,6 @@ export abstract class ChannelBase {
         'new',
         'who',
         'status',
-        'remember-channel',
-        'channel-memory',
-        'forget-channel',
       ]);
       const platformCmds = [...this.commands.keys()].filter(
         (c) => !sharedCmds.has(c),
@@ -1965,6 +1848,139 @@ export abstract class ChannelBase {
     return this.channelMemory;
   }
 
+  private async handleChannelMemoryIntent(
+    envelope: Envelope,
+    intent: ChannelMemoryIntent,
+  ): Promise<void> {
+    if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+      return;
+    }
+
+    if (intent.kind === 'clear_request') {
+      await this.sendMessage(
+        envelope.chatId,
+        'This clears channel memory for this chat. Say "确认清空记忆" to proceed.',
+      );
+      return;
+    }
+
+    const channelMemory = await this.getChannelMemory(envelope);
+    if (!channelMemory) {
+      return;
+    }
+
+    if (intent.kind === 'remember') {
+      try {
+        await channelMemory.appendChannelMemory(
+          this.channelMemoryTarget(envelope),
+          intent.text,
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('save', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      return;
+    }
+
+    if (intent.kind === 'list') {
+      let text: string;
+      try {
+        text = (
+          await channelMemory.readChannelMemory(
+            this.channelMemoryTarget(envelope),
+          )
+        ).trim();
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('read', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      await this.sendMessage(
+        envelope.chatId,
+        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
+      );
+      return;
+    }
+
+    let result: { changed: boolean };
+    try {
+      result = await channelMemory.clearChannelMemory(
+        this.channelMemoryTarget(envelope),
+      );
+    } catch (error) {
+      const message = this.channelMemoryErrorMessage(error);
+      this.logChannelMemoryError('clear', envelope, message);
+      await this.sendMessage(
+        envelope.chatId,
+        `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
+      );
+      return;
+    }
+    this.invalidateSessionContext(envelope);
+    await this.sendMessage(
+      envelope.chatId,
+      result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
+    );
+  }
+
+  private shouldClassifyChannelMemoryIntent(text: string): boolean {
+    const normalized = text.replace(PROMPT_UNSAFE_INVISIBLES, '').trim();
+    return (
+      this.memoryIntentClassifier !== undefined &&
+      !normalized.startsWith('/') &&
+      CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE.test(normalized)
+    );
+  }
+
+  private async classifyChannelMemoryIntent(
+    text: string,
+  ): Promise<ChannelMemoryIntent | null> {
+    if (!this.memoryIntentClassifier) {
+      return null;
+    }
+
+    let classified;
+    try {
+      classified =
+        await this.memoryIntentClassifier.classifyChannelMemoryIntent(text);
+    } catch (error) {
+      process.stderr.write(
+        `[${this.name}] channel memory intent classifier failed: ${sanitizeLogText(
+          this.channelMemoryErrorMessage(error),
+          200,
+        )}\n`,
+      );
+      return null;
+    }
+
+    if (classified.confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE) {
+      return null;
+    }
+
+    if (classified.intent === 'remember') {
+      const memory = classified.memory?.trim();
+      return memory ? { kind: 'remember', text: memory } : null;
+    }
+    if (classified.intent === 'list') {
+      return { kind: 'list' };
+    }
+    if (classified.intent === 'clear_all') {
+      return { kind: 'clear_request' };
+    }
+    return null;
+  }
+
   private channelMemoryErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
@@ -2347,6 +2363,18 @@ export abstract class ChannelBase {
       if (result.pairingCode !== undefined) {
         await this.onPairingRequired(envelope.chatId, result.pairingCode);
       }
+      return;
+    }
+
+    let memoryIntent = parseChannelMemoryIntent(envelope.text);
+    if (
+      !memoryIntent &&
+      this.shouldClassifyChannelMemoryIntent(envelope.text)
+    ) {
+      memoryIntent = await this.classifyChannelMemoryIntent(envelope.text);
+    }
+    if (memoryIntent) {
+      await this.handleChannelMemoryIntent(envelope, memoryIntent);
       return;
     }
 
