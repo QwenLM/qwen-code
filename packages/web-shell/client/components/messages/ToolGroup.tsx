@@ -1,5 +1,12 @@
-import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  memo,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -18,6 +25,7 @@ import {
 } from '../../utils/todos';
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { TodoEventSummary, TodoFullList } from './TodoView';
+import { Markdown } from './Markdown';
 import {
   formatDurationMs,
   formatElapsed,
@@ -53,12 +61,9 @@ interface ToolGroupProps {
   tools: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
-  shellOutputMaxLines?: number;
 }
 
-const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
-
-function hasExpandableContent(tool: ACPToolCall): boolean {
+export function hasExpandableContent(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
@@ -186,61 +191,33 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   return result.reverse().join('\n');
 }
 
-const MAX_BASH_LINE_CHARS = 150;
-const MAX_READ_LINES = 25;
-
 // A description longer than this is likely ellipsised on a normal-width row, so
 // the row becomes expandable to re-flow the full text into a wrapped block.
 const DESCRIPTION_EXPAND_THRESHOLD = 60;
+const MAX_MARKDOWN_READ_CHARS = 200_000;
+const MAX_MARKDOWN_READ_LINES = 1000;
+const READ_LANGUAGE_ALIASES: Record<string, string> = {
+  cjs: 'javascript',
+  cts: 'typescript',
+  h: 'c',
+  hpp: 'cpp',
+  js: 'javascript',
+  jsx: 'jsx',
+  mjs: 'javascript',
+  mts: 'typescript',
+  py: 'python',
+  rb: 'ruby',
+  sh: 'bash',
+  ts: 'typescript',
+  tsx: 'tsx',
+  yml: 'yaml',
+};
 
-export function resolveShellOutputMaxLines(
-  settings: readonly DaemonSettingDescriptor[],
-): number {
-  const setting = settings.find((s) => s.key === 'ui.shellOutputMaxLines');
-  const value = setting?.values.effective;
-  const raw =
-    typeof value === 'number' ? value : DEFAULT_SHELL_OUTPUT_MAX_LINES;
-  return Math.max(0, Math.floor(raw || 0));
-}
-
-function truncateLine(line: string, max: number): string {
-  if (line.length <= max) return line;
-  return line.slice(0, max) + ' …';
-}
-
-function ExpandedBashOutput({
-  tool,
-  maxLines,
-}: {
-  tool: ACPToolCall;
-  maxLines: number;
-}) {
-  const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
+function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const output = useMemo(() => extractText(tool) || '', [tool]);
-  const lines = useMemo(() => output.split('\n'), [output]);
-  const isLong = maxLines > 0 && lines.length > maxLines;
-  const hiddenLinesCount = Math.max(0, lines.length - maxLines);
-  const hasTruncatedLine = useMemo(
-    () => lines.some((l) => l.length > MAX_BASH_LINE_CHARS),
-    [lines],
-  );
-  const expandable = isLong || hasTruncatedLine;
-  const displayText = useMemo(() => {
-    if (showAll) return output;
-    if (isLong) {
-      return [
-        `... first ${hiddenLinesCount} lines hidden ...`,
-        ...lines
-          .slice(-maxLines)
-          .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
-      ].join('\n');
-    }
-    return lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n');
-  }, [hiddenLinesCount, isLong, lines, maxLines, output, showAll]);
   const ansiSegments = useMemo(
-    () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
-    [displayText],
+    () => (hasAnsi(output) ? parseAnsi(output) : null),
+    [output],
   );
 
   return (
@@ -259,53 +236,59 @@ function ExpandedBashOutput({
                 {seg.text}
               </span>
             ))
-          : displayText}
+          : output}
       </pre>
-      {expandable && (
-        <button
-          className={styles.expandBtn}
-          onClick={() => setShowAll(!showAll)}
-          aria-expanded={showAll}
-        >
-          {showAll
-            ? t('tool.showLess')
-            : isLong
-              ? t('tool.showAll', { count: lines.length })
-              : t('tool.showFullLines')}
-        </button>
-      )}
     </div>
   );
 }
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
-  const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
   const content = useMemo(() => extractText(tool) || '', [tool]);
-  const lines = useMemo(() => content.split('\n'), [content]);
-  const isLong = lines.length > MAX_READ_LINES;
-  const displayText = useMemo(
-    () =>
-      isLong && !showAll ? lines.slice(0, MAX_READ_LINES).join('\n') : content,
-    [content, isLong, lines, showAll],
-  );
+  const language = languageForPath(getReadFilePath(tool));
+  const plainText =
+    language === 'text' ||
+    content.length > MAX_MARKDOWN_READ_CHARS ||
+    exceedsLineLimit(content, MAX_MARKDOWN_READ_LINES);
 
   return (
     <div className={styles.expandedRead}>
-      <pre className={styles.expandedOutput}>{displayText}</pre>
-      {isLong && (
-        <button
-          className={styles.expandBtn}
-          onClick={() => setShowAll(!showAll)}
-          aria-expanded={showAll}
-        >
-          {showAll
-            ? t('tool.showLess')
-            : t('tool.linesTotal', { count: lines.length })}
-        </button>
+      {plainText ? (
+        <pre className={styles.expandedOutput}>{content}</pre>
+      ) : (
+        <Markdown content={fencedCodeBlock(language, content)} />
       )}
     </div>
   );
+}
+
+function getReadFilePath(tool: ACPToolCall): string {
+  const filePath = tool.args?.file_path ?? tool.args?.path;
+  return typeof filePath === 'string' ? filePath : '';
+}
+
+function exceedsLineLimit(text: string, maxLines: number): boolean {
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 && ++lines > maxLines) return true;
+  }
+  return false;
+}
+
+export function languageForPath(filePath: string): string {
+  const ext = filePath.split(/[?#]/, 1)[0]?.split('.').pop()?.toLowerCase();
+  if (!ext || ext === filePath.toLowerCase()) return 'text';
+  if (ext === 'mermaid' || ext === 'mmd') return 'text';
+  const language = READ_LANGUAGE_ALIASES[ext] ?? ext;
+  return /^[\w+.#-]+$/.test(language) ? language : 'text';
+}
+
+export function fencedCodeBlock(language: string, code: string): string {
+  const longestFence =
+    code
+      .match(/~{3,}/g)
+      ?.reduce((max, fence) => Math.max(max, fence.length), 0) ?? 0;
+  const fence = '~'.repeat(Math.max(3, longestFence + 1));
+  return `${fence}${language}\n${code}\n${fence}`;
 }
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
@@ -319,6 +302,26 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
       ) : (
         <pre className={styles.expandedOutput}>{text}</pre>
       )}
+    </div>
+  );
+}
+
+function ToolExpandedCard({
+  title,
+  detail,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={styles.expandedCard}>
+      <div className={styles.expandedCardHeader}>
+        <span className={styles.expandedCardTitle}>{title}</span>
+        {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
+      </div>
+      {children && <div className={styles.expandedCardBody}>{children}</div>}
     </div>
   );
 }
@@ -345,20 +348,24 @@ function TodoToolBody({
   tool,
   todos,
   expanded,
+  title,
 }: {
   tool: ACPToolCall;
   todos: TodoItem[];
   expanded: boolean;
+  title: string;
 }) {
   const timeline = useContext(TodoTimelineContext);
   const events = timeline.get(tool.callId)?.events ?? [];
-  return (
-    <div className={styles.todoBody}>
-      {expanded ? (
+  return expanded ? (
+    <ToolExpandedCard title={title}>
+      <div className={styles.todoBody}>
         <TodoFullList todos={todos} />
-      ) : (
-        <TodoEventSummary todos={todos} events={events} />
-      )}
+      </div>
+    </ToolExpandedCard>
+  ) : (
+    <div className={styles.todoBody}>
+      <TodoEventSummary todos={todos} events={events} />
     </div>
   );
 }
@@ -367,8 +374,11 @@ interface ToolLineProps {
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
   workspaceCwd?: string;
-  shellOutputMaxLines?: number;
   summaryOnly?: boolean;
+  forceExpanded?: boolean;
+  forceExpandable?: boolean;
+  hideHeader?: boolean;
+  hideCollapsedOutput?: boolean;
 }
 
 function getAgentDisplayInfo(
@@ -468,6 +478,7 @@ function ExpandedAskUserQuestionOutput({ tool }: { tool: ACPToolCall }) {
 export function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
   const name = tool.toolName.toLowerCase();
   if (isSubAgentToolCall(tool)) return 'agent';
+  if (isAskUserQuestionToolName(tool.toolName)) return 'ask';
   if (isShellToolName(name)) return 'shell';
   if (isWebFetchToolName(name)) return 'fetch';
   if (isTodoWriteToolName(name)) return 'todo';
@@ -542,9 +553,99 @@ export function formatToolGroupSummary(
     });
   }
 
+  const summary = formatCompletedToolSummary(tools, t);
+  if (summary) return summary;
+
   return t('toolGroup.summary', {
     count: tools.length,
   });
+}
+
+export function formatSingleToolSummary(
+  tool: ACPToolCall,
+  t: ReturnType<typeof useI18n>['t'],
+  workspaceCwd?: string,
+): string {
+  if (isTodoWriteToolName(tool.toolName)) {
+    return t('toolGroup.summary.updatedTodos', { count: 1 });
+  }
+  if (isAskUserQuestionToolName(tool.toolName)) {
+    return t('toolGroup.summary.askedUser', { count: 1 });
+  }
+
+  const displayName = localizeToolDisplayName(tool.toolName, t);
+  const description = truncateText(getToolDescription(tool, workspaceCwd), 120);
+  return [displayName, description].filter(Boolean).join(' ');
+}
+
+export function formatRunningSingleToolSummary(
+  tool: ACPToolCall,
+  t: ReturnType<typeof useI18n>['t'],
+  duration?: string,
+  workspaceCwd?: string,
+): string {
+  return t('toolGroup.running', {
+    name: formatSingleToolSummary(tool, t, workspaceCwd),
+    count: 1,
+    duration: duration ?? '',
+  });
+}
+
+function formatCompletedToolSummary(
+  tools: ACPToolCall[],
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  let edited = 0;
+  let commands = 0;
+  let read = 0;
+  let searched = 0;
+  let todos = 0;
+  let asked = 0;
+  let other = 0;
+
+  for (const tool of tools) {
+    const name = tool.toolName.toLowerCase();
+    if (isShellToolName(name)) {
+      commands++;
+    } else if (
+      name === 'edit' ||
+      name === 'editfile' ||
+      name === 'write' ||
+      name === 'write_file' ||
+      name === 'writefile'
+    ) {
+      edited++;
+    } else if (name === 'read' || name === 'read_file' || name === 'readfile') {
+      read++;
+    } else if (
+      name === 'grep' ||
+      name === 'grep_search' ||
+      name === 'search' ||
+      name === 'glob' ||
+      name === 'web_search' ||
+      name === 'websearch'
+    ) {
+      searched++;
+    } else if (isTodoWriteToolName(name)) {
+      todos++;
+    } else if (isAskUserQuestionToolName(name)) {
+      asked++;
+    } else {
+      other++;
+    }
+  }
+
+  const parts = [
+    edited ? t('toolGroup.summary.editedFiles', { count: edited }) : '',
+    commands ? t('toolGroup.summary.ranCommands', { count: commands }) : '',
+    read ? t('toolGroup.summary.readFiles', { count: read }) : '',
+    searched ? t('toolGroup.summary.searched', { count: searched }) : '',
+    todos ? t('toolGroup.summary.updatedTodos', { count: todos }) : '',
+    asked ? t('toolGroup.summary.askedUser') : '',
+    other ? t('toolGroup.summary.otherTools', { count: other }) : '',
+  ].filter(Boolean);
+
+  return parts.join(' ');
 }
 
 export function hasActiveTool(tools: ACPToolCall[]): boolean {
@@ -679,6 +780,27 @@ function TodoIcon() {
   );
 }
 
+function AskUserIcon() {
+  return (
+    <svg
+      className={styles.chatSummaryToolIcon}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M3.4 3.2h7.2c.7 0 1.25.55 1.25 1.25v3.4c0 .7-.55 1.25-1.25 1.25H7.5L4.5 11V9.1H3.4c-.7 0-1.25-.55-1.25-1.25v-3.4c0-.7.55-1.25 1.25-1.25Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function AgentIcon() {
   return (
     <svg
@@ -702,6 +824,7 @@ function AgentIcon() {
 function ToolSummaryIcon({ tool }: { tool: ACPToolCall }) {
   const kind = getToolHeaderKind(tool);
   if (kind === 'agent') return <AgentIcon />;
+  if (kind === 'ask') return <AskUserIcon />;
   if (kind === 'edit' || kind === 'write') return <PencilIcon />;
   if (kind === 'fetch') return <WebFetchIcon />;
   if (kind === 'read') return <FileIcon />;
@@ -767,8 +890,11 @@ function areToolLinePropsEqual(
 ): boolean {
   if (prev.approval?.id !== next.approval?.id) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   if (prev.summaryOnly !== next.summaryOnly) return false;
+  if (prev.forceExpanded !== next.forceExpanded) return false;
+  if (prev.forceExpandable !== next.forceExpandable) return false;
+  if (prev.hideHeader !== next.hideHeader) return false;
+  if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -816,13 +942,16 @@ export const ToolLine = memo(function ToolLine({
   tool,
   approval,
   workspaceCwd,
-  shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
   summaryOnly = false,
+  forceExpanded = false,
+  forceExpandable = false,
+  hideHeader = false,
+  hideCollapsedOutput = false,
 }: ToolLineProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [expanded, setExpanded] = useState(
-    () => !compactMode && shouldAutoExpand(tool),
+    () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
   );
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
@@ -830,12 +959,14 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(compactMode ? false : shouldAutoExpand(tool));
+      setExpanded(
+        forceExpanded || (compactMode ? false : shouldAutoExpand(tool)),
+      );
       // A new tool identity (or compact-mode toggle) resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [compactMode, tool.callId, tool.toolName],
+    [compactMode, forceExpanded, tool.callId, tool.toolName],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -853,10 +984,15 @@ export const ToolLine = memo(function ToolLine({
   // user chose, driven from their own panel) and failures stay open so the
   // error output remains visible.
   useEffect(() => {
-    if (!isAgent && tool.status === 'completed' && !userToggledRef.current) {
+    if (
+      !forceExpanded &&
+      !isAgent &&
+      tool.status === 'completed' &&
+      !userToggledRef.current
+    ) {
       setExpanded(false);
     }
-  }, [isAgent, tool.status]);
+  }, [forceExpanded, isAgent, tool.status]);
 
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
@@ -876,31 +1012,41 @@ export const ToolLine = memo(function ToolLine({
     ]
       .filter(Boolean)
       .join(' · ');
-    const showExpanded = expanded || !!hasApproval || !!hasSubToolApproval;
+    const showExpanded =
+      forceExpanded || expanded || !!hasApproval || !!hasSubToolApproval;
+    const panel = (
+      <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+    );
     return (
       <div className={styles.line}>
-        <div
-          className={`${styles.lineMain} ${styles.lineExpandable}`}
-          onClick={() => setExpanded(!expanded)}
-        >
-          <StatusIcon status={isComplete ? info.status : tool.status} />
-          <span className={styles.lineName}>{displayName}</span>
-          <ToolHeaderExtra
-            info={{
-              kind: 'agent',
-              tool,
-              displayName,
-              description: info.description
-                ? truncateText(info.description, 60)
-                : '',
-              elapsed: isComplete ? completeMeta : runningMeta,
-              workspaceCwd,
-            }}
-          />
-        </div>
+        {!hideHeader && (
+          <div
+            className={`${styles.lineMain} ${styles.lineExpandable}`}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <StatusIcon status={isComplete ? info.status : tool.status} />
+            <span className={styles.lineName}>{displayName}</span>
+            <ToolHeaderExtra
+              info={{
+                kind: 'agent',
+                tool,
+                displayName,
+                description: info.description
+                  ? truncateText(info.description, 60)
+                  : '',
+                elapsed: isComplete ? completeMeta : runningMeta,
+                workspaceCwd,
+              }}
+            />
+          </div>
+        )}
         {showExpanded && (
           <div className={styles.lineDetail}>
-            <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+            {hideHeader ? (
+              <div className={styles.expandedAgentCard}>{panel}</div>
+            ) : (
+              panel
+            )}
           </div>
         )}
       </div>
@@ -922,107 +1068,153 @@ export const ToolLine = memo(function ToolLine({
   const todoCompleted = todoItems
     ? todoItems.filter((td) => td.status === 'completed').length
     : 0;
+  const isShell = isShellToolName(name);
+  const isSearch =
+    name === 'grep' ||
+    name === 'grep_search' ||
+    name === 'search' ||
+    name === 'glob';
+  const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
   // A row expands when it has a todo list to reveal, detail output
   // (bash/diff/read content), or a description long enough to be ellipsised.
   // When a long description is expanded we move it out of the header into a
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
-  const expandable = isTodo
-    ? hasTodoList
-    : hasExpandableContent(tool) || descExpandable;
-  const relocateDescription = expanded && descExpandable;
+  const expandable =
+    !forceExpanded &&
+    (forceExpandable ||
+      (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
   // Whether the expanded row renders a kind-specific detail view. When it does
   // not (e.g. grep/glob/web_fetch with a long description), keep the result
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
+  const showDescriptionInDetail = expanded && descExpandable;
+  const useMarkdownDetail = isRead;
+  const hideDescriptionInHeader =
+    showDescriptionInDetail && !isShell && !isSearch && !isRead;
+  const expandedCardDetail = description;
+  const showExpandedSummaryPanel =
+    !isTodo && expanded && !detailView && (showDescriptionInDetail || result);
 
   return (
     <div className={styles.line}>
-      <div
-        className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
-        title={
-          expandable
-            ? expanded
-              ? t('tool.collapseHint')
-              : t('tool.expand')
-            : undefined
-        }
-        aria-expanded={expandable ? expanded : undefined}
-        role={expandable ? 'button' : undefined}
-        tabIndex={expandable ? 0 : undefined}
-        onClick={
-          expandable
-            ? () => {
-                userToggledRef.current = true;
-                setExpanded((value) => !value);
-              }
-            : undefined
-        }
-        onKeyDown={
-          expandable
-            ? (event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return;
-                event.preventDefault();
-                userToggledRef.current = true;
-                setExpanded((value) => !value);
-              }
-            : undefined
-        }
-      >
-        <StatusIcon status={tool.status} />
-        <span className={styles.lineName}>{displayName}</span>
-        {isTodo && hasTodoList && (
-          <span className={styles.todoProgress}>
-            {todoCompleted}/{todoItems!.length}
-          </span>
-        )}
-        <ToolHeaderExtra
-          info={{
-            kind: getToolHeaderKind(tool),
-            tool,
-            displayName,
-            // A todo row carries its checklist in the body below; a redundant
-            // "Update Todos" description and the instant write duration would
-            // only clutter the header next to the progress count.
-            description: isTodo || relocateDescription ? '' : description,
-            elapsed: isTodo ? '' : elapsed,
-            workspaceCwd,
-          }}
-        />
-      </div>
+      {!hideHeader && (
+        <div
+          className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
+          title={
+            expandable
+              ? expanded
+                ? t('tool.collapseHint')
+                : t('tool.expand')
+              : undefined
+          }
+          aria-expanded={expandable ? expanded : undefined}
+          role={expandable ? 'button' : undefined}
+          tabIndex={expandable ? 0 : undefined}
+          onClick={
+            expandable
+              ? () => {
+                  userToggledRef.current = true;
+                  setExpanded((value) => !value);
+                }
+              : undefined
+          }
+          onKeyDown={
+            expandable
+              ? (event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return;
+                  event.preventDefault();
+                  userToggledRef.current = true;
+                  setExpanded((value) => !value);
+                }
+              : undefined
+          }
+        >
+          <StatusIcon status={tool.status} />
+          <span className={styles.lineName}>{displayName}</span>
+          {isTodo && hasTodoList && (
+            <span className={styles.todoProgress}>
+              {todoCompleted}/{todoItems!.length}
+            </span>
+          )}
+          <ToolHeaderExtra
+            info={{
+              kind: getToolHeaderKind(tool),
+              tool,
+              displayName,
+              // A todo row carries its checklist in the body below; a redundant
+              // "Update Todos" description and the instant write duration would
+              // only clutter the header next to the progress count.
+              description: isTodo || hideDescriptionInHeader ? '' : description,
+              elapsed: isTodo ? '' : elapsed,
+              workspaceCwd,
+            }}
+          />
+        </div>
+      )}
       {(!summaryOnly || expanded) && isTodo && hasTodoList && (
-        <TodoToolBody tool={tool} todos={todoItems!} expanded={expanded} />
+        <TodoToolBody
+          tool={tool}
+          todos={todoItems!}
+          expanded={expanded}
+          title={displayName}
+        />
       )}
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
       {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
         <div className={styles.lineOutput}>{result}</div>
       )}
-      {relocateDescription && (
-        <div className={styles.lineFullArg}>{description}</div>
+      {showExpandedSummaryPanel && (
+        <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+          {result && (
+            <div
+              className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
+            >
+              {result}
+            </div>
+          )}
+        </ToolExpandedCard>
       )}
       {!isTodo &&
+        !hideCollapsedOutput &&
         result &&
+        !showExpandedSummaryPanel &&
         (!expanded || !detailView) &&
         (!summaryOnly || expanded) && (
-          <div className={styles.lineOutput}>{result}</div>
+          <div
+            className={
+              expanded
+                ? `${styles.lineOutput} ${styles.expandedLineOutput}`
+                : styles.lineOutput
+            }
+          >
+            {result}
+          </div>
         )}
       {!isTodo && expanded && detailView && (
-        <div className={styles.lineDetail}>
-          {isShellToolName(name) && (
-            <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
-          )}
-          {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedEditContent tool={tool} />
-          )}
-          {(name === 'edit' || name === 'write' || name === 'editfile') && (
-            <ExpandedEditContent tool={tool} />
-          )}
-          {(name === 'read' || name === 'read_file' || name === 'readfile') && (
+        <div
+          className={
+            useMarkdownDetail
+              ? `${styles.lineDetail} ${styles.markdownLineDetail}`
+              : styles.lineDetail
+          }
+        >
+          {isRead ? (
             <ExpandedReadContent tool={tool} />
-          )}
-          {isAskUserQuestionToolName(tool.toolName) && (
-            <ExpandedAskUserQuestionOutput tool={tool} />
+          ) : (
+            <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+              {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
+              {(name === 'write_file' || name === 'writefile') && (
+                <ExpandedEditContent tool={tool} />
+              )}
+              {(name === 'edit' || name === 'write' || name === 'editfile') && (
+                <ExpandedEditContent tool={tool} />
+              )}
+              {isAskUserQuestionToolName(tool.toolName) && (
+                <ExpandedAskUserQuestionOutput tool={tool} />
+              )}
+            </ToolExpandedCard>
           )}
         </div>
       )}
@@ -1034,13 +1226,13 @@ export const ToolGroup = memo(function ToolGroup({
   tools,
   pendingApproval,
   workspaceCwd,
-  shellOutputMaxLines,
 }: ToolGroupProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [chatExpanded, setChatExpanded] = useState(false);
   const hasRunningTool = hasActiveTool(tools);
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
+  const singleTool = tools.length === 1 ? tools[0] : undefined;
   const summaryIconTool = tools[0] ?? activeTool;
   const liveStartedAtRef = useRef(Date.now());
   const summaryNow = useSharedNow(hasRunningTool);
@@ -1085,7 +1277,16 @@ export const ToolGroup = memo(function ToolGroup({
                 : styles.chatSummaryText
             }
           >
-            {formatToolGroupSummary(tools, t, runningDuration)}
+            {singleTool
+              ? hasRunningTool
+                ? formatRunningSingleToolSummary(
+                    singleTool,
+                    t,
+                    runningDuration,
+                    workspaceCwd,
+                  )
+                : formatSingleToolSummary(singleTool, t, workspaceCwd)
+              : formatToolGroupSummary(tools, t, runningDuration)}
           </span>
           <span
             className={
@@ -1109,8 +1310,9 @@ export const ToolGroup = memo(function ToolGroup({
                   tool={tool}
                   approval={pendingApproval}
                   workspaceCwd={workspaceCwd}
-                  shellOutputMaxLines={shellOutputMaxLines}
-                  summaryOnly
+                  summaryOnly={!singleTool}
+                  forceExpanded={!!singleTool}
+                  hideHeader={!!singleTool}
                 />
               ))}
             </div>
@@ -1128,7 +1330,6 @@ export const ToolGroup = memo(function ToolGroup({
           tool={tool}
           approval={pendingApproval}
           workspaceCwd={workspaceCwd}
-          shellOutputMaxLines={shellOutputMaxLines}
         />
       ))}
     </div>

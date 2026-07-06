@@ -72,7 +72,6 @@ import { parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
-import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
@@ -2012,7 +2011,6 @@ export function App({
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
-  const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
@@ -4432,7 +4430,10 @@ export function App({
                 </section>
               )}
               {mainView === 'scheduledTasks' && (
-                <div className={styles.fullPage} data-testid="scheduled-tasks-page">
+                <div
+                  className={styles.fullPage}
+                  data-testid="scheduled-tasks-page"
+                >
                   <div className={styles.fullPageHeader}>
                     <button
                       type="button"
@@ -4540,7 +4541,6 @@ export function App({
                           isResponding={streamingState !== 'idle'}
                           activeTurnStartedAt={activeTurnStartedAt}
                           workspaceCwd={connection.workspaceCwd || ''}
-                          shellOutputMaxLines={shellOutputMaxLines}
                           hideSessionTimeline={
                             effectiveChatWidthMode === 'wide'
                           }

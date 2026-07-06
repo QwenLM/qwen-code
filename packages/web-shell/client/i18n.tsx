@@ -1509,13 +1509,22 @@ const EN: Messages = {
   'tool.expand': 'Expand',
   'tool.collapseHint': 'Collapse',
   'tool.status.failed': 'Failed',
-  'tool.showAll': (v) => `▼ Show all (${v?.count ?? 0} lines)`,
-  'tool.showLess': '▲ Show less',
-  'tool.showFullLines': '▼ Show full lines',
-  'tool.linesTotal': (v) => `▼ ${v?.count ?? 0} lines total`,
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.editedFiles': (v) =>
+    `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranCommands': (v) =>
+    `Ran ${v?.count ?? 0} command${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.readFiles': (v) =>
+    `Read ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.searched': (v) =>
+    `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.updatedTodos': (v) =>
+    `Updated task list${v?.count === 1 ? '' : ` ${v?.count ?? 0} times`}`,
+  'toolGroup.summary.askedUser': 'Asked user',
+  'toolGroup.summary.otherTools': (v) =>
+    `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
     `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
@@ -1597,7 +1606,8 @@ const ZH: Messages = {
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
-  'toolName.grep_search': 'Grep',
+  'toolName.grep': '搜索内容',
+  'toolName.grep_search': '搜索内容',
   'toolName.glob': 'Glob',
   'toolName.run_shell_command': '运行命令',
   'toolName.todo_write': '任务清单',
@@ -1637,7 +1647,7 @@ const ZH: Messages = {
   'toolName.readfile': '读取文件',
   'toolName.write': '写入文件',
   'toolName.writefile': '写入文件',
-  'toolName.search': 'Grep',
+  'toolName.search': '搜索内容',
   'toolName.todowrite': '任务清单',
   'toolName.savememory': '保存记忆',
   'toolName.askuserquestion': '询问用户',
@@ -3040,12 +3050,18 @@ const ZH: Messages = {
   'tool.expand': '展开',
   'tool.collapseHint': '收起',
   'tool.status.failed': '执行失败',
-  'tool.showAll': (v) => `▼ 显示全部（${v?.count ?? 0} 行）`,
-  'tool.showLess': '▲ 显示更少',
-  'tool.showFullLines': '▼ 显示完整行',
-  'tool.linesTotal': (v) => `▼ 共 ${v?.count ?? 0} 行`,
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
+  'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.searched': (v) => `已搜索 ${v?.count ?? 0} 次`,
+  'toolGroup.summary.updatedTodos': (v) =>
+    Number(v?.count ?? 0) > 1
+      ? `已更新任务清单 ${v?.count ?? 0} 次`
+      : '已更新任务清单',
+  'toolGroup.summary.askedUser': '已询问用户',
+  'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''

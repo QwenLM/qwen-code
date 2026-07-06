@@ -84,7 +84,7 @@ const assistantMsg = (id: string, content: string): Message =>
   ({ id, role: 'assistant', content, timestamp: 0 }) as Message;
 
 function item(message: Message) {
-  return <MessageItem message={message} shellOutputMaxLines={50} />;
+  return <MessageItem message={message} />;
 }
 
 describe('MessageItem error isolation', () => {

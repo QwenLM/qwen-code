@@ -24,10 +24,6 @@ import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import styles from './ChatPane.module.css';
 
-// Matches the daemon default (ui.shellOutputMaxLines). A split pane does not
-// wire the workspace settings, so use the built-in default; the setting still
-// applies in the full single-session view.
-const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 const EMPTY_COMMANDS: never[] = [];
 const EMPTY_TOOLBAR: never[] = [];
 
@@ -162,7 +158,6 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
           catchingUp={connection.catchingUp}
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
-          shellOutputMaxLines={DEFAULT_SHELL_OUTPUT_MAX_LINES}
           hideSessionTimeline
         />
       </div>
