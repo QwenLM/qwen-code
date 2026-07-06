@@ -111,6 +111,7 @@ function renderSidebar(
   overrides: Partial<{
     onOpenSettings: () => void;
     onOpenDaemonStatus: () => void;
+    onOpenScheduledTasks: () => void;
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
     sessionListReloadToken: number;
@@ -128,6 +129,7 @@ function renderSidebar(
             onCollapsedChange={noop}
             onOpenSettings={noop}
             onOpenDaemonStatus={noop}
+            onOpenScheduledTasks={noop}
             onNewSession={() => false}
             onLoadSession={noop}
             onError={noop}
