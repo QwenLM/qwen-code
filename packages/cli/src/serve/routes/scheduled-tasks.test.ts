@@ -687,23 +687,27 @@ describe('scheduled-tasks routes', () => {
     expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
   });
 
-  it('re-enabling a one-shot task leaves its anchor untouched', async () => {
-    const createdAt = 1_700_000_000_000;
-    const lastFiredAt = createdAt - (createdAt % 60_000);
+  it('re-enabling a one-shot task re-seats its anchor (not fired as missed + deleted)', async () => {
+    // A one-shot paused past its slot then re-enabled must fire at its NEXT
+    // occurrence, not be read as a missed one-shot on the next reload and
+    // silently deleted.
+    const createdAt = 1_700_000_000_000; // long past
     await seedTask({
       id: 'o1',
       cron: '0 9 1 1 *',
       prompt: 'p',
       recurring: false,
       createdAt,
-      lastFiredAt,
+      lastFiredAt: createdAt,
       enabled: false,
     });
+    const now = Date.now();
     const patch = await request(h.app)
       .patch('/scheduled-tasks/o1')
       .send({ enabled: true });
     expect(patch.status).toBe(200);
-    expect(patch.body.lastFiredAt).toBe(lastFiredAt); // unchanged (not recurring)
+    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
   });
 
   it('editing an enabled recurring task cron re-seats the anchor to now (no catch-up on save)', async () => {

@@ -63,12 +63,15 @@ export interface StartScheduledTaskKeepaliveOptions {
   boundWorkspace: string;
   /** How often to heartbeat; must be comfortably under the reaper timeout. */
   intervalMs: number;
+  /** Per-session revive timeout; defaults to KEEPALIVE_REVIVE_TIMEOUT_MS. */
+  reviveTimeoutMs?: number;
 }
 
 export function startScheduledTaskKeepalive(
   opts: StartScheduledTaskKeepaliveOptions,
 ): ScheduledTaskKeepalive {
   const { bridge, boundWorkspace, intervalMs } = opts;
+  const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
 
   // Per-session revive state: `nextAttemptAt` gates retries after failures so a
   // permanently-gone session isn't reloaded every interval; cleared on success.
@@ -76,6 +79,11 @@ export function startScheduledTaskKeepalive(
     string,
     { failures: number; nextAttemptAt: number }
   >();
+  // Sessions with a revive in flight. loadSession isn't abortable, so a
+  // timed-out revive keeps running in the background; without this guard a later
+  // tick would spawn a SECOND loadSession (a duplicate child) for it. Cleared on
+  // the load's TRUE settlement, not the timeout.
+  const reviving = new Set<string>();
 
   const tick = async (): Promise<void> => {
     let tasks;
@@ -110,20 +118,28 @@ export function startScheduledTaskKeepalive(
         // archived and it's now re-enabled: revive it so its in-child scheduler
         // resumes. Best-effort and debug-only (an expected, recoverable case).
         const state = reviveState.get(sessionId);
+        if (reviving.has(sessionId)) {
+          continue; // a prior revive is still running — don't spawn a duplicate
+        }
         if (state && Date.now() < state.nextAttemptAt) {
           continue; // still backing off from prior revive failures
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
+        const load = bridge.loadSession({
+          sessionId,
+          workspaceCwd: boundWorkspace,
+          historyReplay: 'response',
+        });
+        reviving.add(sessionId);
+        // Clear the in-flight guard on the load's TRUE settlement (not the
+        // timeout below) so a still-running load keeps blocking a duplicate.
+        void load
+          .catch(() => {})
+          .finally(() => {
+            reviving.delete(sessionId);
+          });
         try {
-          await withTimeout(
-            bridge.loadSession({
-              sessionId,
-              workspaceCwd: boundWorkspace,
-              historyReplay: 'response',
-            }),
-            KEEPALIVE_REVIVE_TIMEOUT_MS,
-            sessionId,
-          );
+          await withTimeout(load, reviveTimeoutMs, sessionId);
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {

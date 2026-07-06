@@ -164,6 +164,37 @@ describe('scheduled-task keepalive', () => {
     expect(loads).toEqual(['sess-1']); // only the first pass tried
   });
 
+  it('does not spawn a duplicate revive while a prior one is still in flight', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+    ]);
+    let releaseLoad: (() => void) | undefined;
+    const reviving = {
+      recordHeartbeat: () => {
+        throw new Error('not resident');
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
+        // Hang: loadSession isn't abortable, so it keeps running past the timeout.
+        await new Promise<void>((resolve) => {
+          releaseLoad = resolve;
+        });
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: reviving,
+      boundWorkspace: workspace,
+      intervalMs: 5, // tiny backoff so it expires quickly
+      reviveTimeoutMs: 5, // revive times out fast, but the load keeps hanging
+    });
+    await ka.tick(); // revive starts + times out at 5ms; load still hanging
+    await new Promise((r) => setTimeout(r, 30)); // let the backoff expire
+    await ka.tick(); // past backoff, but the load is still in flight → skip
+    ka.stop();
+    expect(loads).toEqual(['sess-1']); // no duplicate spawn
+    releaseLoad?.(); // let the hung load settle (cleanup)
+  });
+
   it('stop() is idempotent', async () => {
     const ka = startScheduledTaskKeepalive({
       bridge,

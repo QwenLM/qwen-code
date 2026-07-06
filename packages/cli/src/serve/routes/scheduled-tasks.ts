@@ -557,12 +557,16 @@ export function registerScheduledTasksRoutes(
             // fire a past slot (matters most for a bound task, whose catch-up runs
             // on every file-watch reload).
             next.lastFiredAt = minute;
-          } else if (!next.recurring && (cronChanged || becameOneShot)) {
+          } else if (
+            !next.recurring &&
+            (justReEnabled || cronChanged || becameOneShot)
+          ) {
             // A one-shot's anchor is createdAt. Re-seat it on a schedule change
-            // (cron edit, or recurring→one-shot) so the task fires at its NEXT
-            // occurrence — otherwise the scheduler reads its original long-past
-            // slot as a MISSED one-shot and fires + permanently deletes it. Not
-            // on a bare re-enable: a paused one-shot resumes on its own schedule.
+            // (cron edit, or recurring→one-shot) OR a re-enable so the task fires
+            // at its NEXT occurrence — otherwise the scheduler reads its original
+            // long-past slot as a MISSED one-shot and fires + permanently deletes
+            // it. A one-shot disabled past its slot then re-enabled would
+            // otherwise be silently destroyed on the next reload.
             next.createdAt = now;
             next.lastFiredAt = minute;
           }
