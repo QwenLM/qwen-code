@@ -52,11 +52,13 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
+import { cssUrlValue } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from '../components/composerTagIcons';
 import type {
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
+  WebShellComposerTagIconMap,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
   WebShellAtProvider,
@@ -511,11 +513,19 @@ export function buildComposerPrompt(
 interface InlineTagRange {
   from: number;
   to: number;
-  tag: WebShellComposerTag;
+  tag: InlineComposerTag;
 }
 
 interface InlineTagDecorationSpec {
-  tag: WebShellComposerTag;
+  tag: InlineComposerTag;
+}
+
+type InlineComposerTag = WebShellComposerTag & { iconUrl?: string };
+
+function toPublicComposerTag(tag: InlineComposerTag): WebShellComposerTag {
+  const publicTag = { ...tag };
+  delete publicTag.iconUrl;
+  return publicTag;
 }
 
 export const addInlineTagEffect = StateEffect.define<InlineTagRange>({
@@ -527,7 +537,7 @@ export const removeInlineTagEffect = StateEffect.define<{
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
 class ComposerTagWidget extends WidgetType {
-  constructor(private readonly tag: WebShellComposerTag) {
+  constructor(private readonly tag: InlineComposerTag) {
     super();
   }
 
@@ -538,7 +548,8 @@ class ComposerTagWidget extends WidgetType {
       this.tag.value === other.tag.value &&
       this.tag.kind === other.tag.kind &&
       this.tag.serialized === other.tag.serialized &&
-      this.tag.removable === other.tag.removable
+      this.tag.removable === other.tag.removable &&
+      this.tag.iconUrl === other.tag.iconUrl
     );
   }
 
@@ -549,13 +560,13 @@ class ComposerTagWidget extends WidgetType {
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
-    const iconUrl = getComposerTagIconUrl(this.tag.kind);
+    const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
 
     if (iconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
-      icon.style.setProperty('--composer-tag-icon-url', `url("${iconUrl}")`);
+      icon.style.setProperty('--composer-tag-icon-url', cssUrlValue(iconUrl));
       chip.appendChild(icon);
     }
 
@@ -674,7 +685,7 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
     .field(inlineComposerTagField)
     .between(0, view.state.doc.length, (_from, _to, value) => {
       const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
-      if (tag) tags.push(tag);
+      if (tag) tags.push(toPublicComposerTag(tag));
     });
   return tags;
 }
@@ -779,8 +790,14 @@ function createFollowupGhostExtension(suggestion: string | null) {
 
 // ---- Hook options ----
 
+export type ComposerSubmitCommit = () => void;
+
 export interface UseComposerCoreOptions {
-  onSubmit: (text: string, images?: PromptImage[]) => boolean | void;
+  onSubmit: (
+    text: string,
+    images?: PromptImage[],
+    commitAccepted?: ComposerSubmitCommit,
+  ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
@@ -801,6 +818,7 @@ export interface UseComposerCoreOptions {
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   atProviders?: readonly WebShellAtProvider[];
+  composerTagIcons?: WebShellComposerTagIconMap;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -942,6 +960,7 @@ export function useComposerCore(
     composerInput,
     composerInputVersion,
     atProviders,
+    composerTagIcons,
     editorTheme,
   } = options;
 
@@ -981,6 +1000,18 @@ export function useComposerCore(
   languageRef.current = language;
   const workspaceActionsRef = useRef(workspace?.actions);
   workspaceActionsRef.current = workspace?.actions;
+  const composerTagIconsRef = useRef(composerTagIcons);
+  composerTagIconsRef.current = composerTagIcons;
+  const resolveComposerTagIcon = useCallback(
+    (tag: WebShellComposerTag): InlineComposerTag => {
+      const iconUrl = getComposerTagIconUrl(
+        tag.kind,
+        composerTagIconsRef.current,
+      );
+      return iconUrl ? { ...tag, iconUrl } : tag;
+    },
+    [],
+  );
   const [shellMode, setShellMode] = useState(false);
   const shellModeRef = useRef(shellMode);
   shellModeRef.current = shellMode;
@@ -990,9 +1021,36 @@ export function useComposerCore(
     shellModeRef,
     workspaceActionsRef,
     providers: atProviders,
+    createInlineTagEffect: (range) =>
+      addInlineTagEffect.of({
+        ...range,
+        tag: resolveComposerTagIcon(range.tag),
+      }),
   });
   const closeAtMenuState = atMenu.close;
   const refreshAtMenuForView = atMenu.refreshForView;
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const effects: StateEffect<unknown>[] = [clearInlineTagsEffect.of()];
+    view.state
+      .field(inlineComposerTagField)
+      .between(0, view.state.doc.length, (from, to, value) => {
+        const tag = (value.spec as Partial<InlineTagDecorationSpec>).tag;
+        if (!tag) return;
+        effects.push(
+          addInlineTagEffect.of({
+            from,
+            to,
+            tag: resolveComposerTagIcon(toPublicComposerTag(tag)),
+          }),
+        );
+      });
+    if (effects.length === 1) return;
+    view.dispatch({ effects });
+  }, [composerTagIcons, resolveComposerTagIcon]);
+
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
       onDismissFollowupRef.current?.();
@@ -1395,32 +1453,39 @@ export function useComposerCore(
       const prompt = buildComposerPrompt(text, tags);
       const images = pastedImagesRef.current;
       const isShellMode = shellModeRef.current;
+      let committed = false;
+      const commitAccepted = () => {
+        if (committed) return;
+        committed = true;
+        setSlashMenu(null);
+        if (followupCompletion) {
+          onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+        }
+        onDismissFollowupRef.current?.();
+        pendingPastesRef.current.clear();
+        nextPasteIdRef.current = 1;
+        if (isShellMode) {
+          shellHistoryActionsRef.current.push(text);
+          shellHistoryActionsRef.current.reset();
+        } else {
+          historyActionsRef.current.push(text);
+          historyActionsRef.current.reset();
+        }
+        historyBrowseActiveRef.current = false;
+        setComposerTags([]);
+        setPastedImages([]);
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: '' },
+          effects: clearInlineTagsEffect.of(),
+        });
+      };
       const accepted = onSubmitRef.current(
         isShellMode ? `!${prompt}` : prompt,
         images.length > 0 ? [...images] : undefined,
+        commitAccepted,
       );
       if (accepted === false) return true;
-      setSlashMenu(null);
-      if (followupCompletion) {
-        onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-      }
-      onDismissFollowupRef.current?.();
-      pendingPastesRef.current.clear();
-      nextPasteIdRef.current = 1;
-      if (isShellMode) {
-        shellHistoryActionsRef.current.push(text);
-        shellHistoryActionsRef.current.reset();
-      } else {
-        historyActionsRef.current.push(text);
-        historyActionsRef.current.reset();
-      }
-      historyBrowseActiveRef.current = false;
-      setComposerTags([]);
-      setPastedImages([]);
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: '' },
-        effects: clearInlineTagsEffect.of(),
-      });
+      commitAccepted();
       return true;
     };
     submitTextRef.current = submitText;
@@ -2407,7 +2472,12 @@ export function useComposerCore(
           changes: { from: selection.from, to: selection.to, insert: text },
           effects:
             ranges.length > 0
-              ? ranges.map((range) => addInlineTagEffect.of(range))
+              ? ranges.map((range) =>
+                  addInlineTagEffect.of({
+                    ...range,
+                    tag: resolveComposerTagIcon(range.tag),
+                  }),
+                )
               : undefined,
           selection: { anchor: selection.from + text.length },
           scrollIntoView: true,
@@ -2428,7 +2498,7 @@ export function useComposerCore(
         return next;
       });
     },
-    [],
+    [resolveComposerTagIcon],
   );
 
   const removeTopTag = useCallback(
@@ -2531,7 +2601,7 @@ export function useComposerCore(
             addInlineTagEffect.of({
               from,
               to: from + tagText.length,
-              tag,
+              tag: resolveComposerTagIcon(tag),
             }),
           );
           from += tagText.length + 1;
@@ -2562,7 +2632,7 @@ export function useComposerCore(
         window.clearTimeout(submitTimer);
       }
     };
-  }, [composerInputVersion, submit]);
+  }, [composerInputVersion, resolveComposerTagIcon, submit]);
 
   // ---- Search state ----
 

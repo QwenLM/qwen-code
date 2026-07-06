@@ -40,10 +40,28 @@ const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
 const GROUP_MENU_MARGIN = 8;
 
+/**
+ * Palette order for the quick color-grouping buckets. Mirrors core's
+ * `GROUP_COLOR_OPTIONS`; kept as a local constant so the client never imports
+ * from core. Used both to order the color sections and as a fallback when the
+ * daemon's color catalog has not loaded yet.
+ */
+const SESSION_GROUP_COLORS: DaemonSessionGroupColor[] = [
+  'red',
+  'orange',
+  'yellow',
+  'green',
+  'blue',
+  'purple',
+];
+
 type GroupEditorMode = 'create' | 'edit';
+
+type SessionSectionKind = 'color' | 'group' | 'recent';
 
 interface SessionSection {
   id: string;
+  kind: SessionSectionKind;
   label: string;
   countLabel?: string;
   color?: DaemonSessionGroupColor;
@@ -1030,7 +1048,9 @@ export function WebShellSidebar({
             try {
               await workspaceActions.updateSessionOrganization(
                 groupEditor.targetSession.sessionId,
-                { groupId: group.id },
+                // Assigning a named group clears any color tag (single choice
+                // in the UI), matching assignSessionGroup.
+                { groupId: group.id, color: null },
               );
               void reload().catch(() => undefined);
             } catch (err) {
@@ -1169,7 +1189,10 @@ export function WebShellSidebar({
           : window.innerWidth;
       const viewportHeight =
         typeof window === 'undefined' ? rect.top + 320 : window.innerHeight;
-      const estimatedHeight = Math.min(320, 34 * (groups.length + 2) + 25);
+      const estimatedHeight = Math.min(
+        320,
+        34 * (groups.length + SESSION_GROUP_COLORS.length + 2) + 25,
+      );
       const left =
         rect.right + GROUP_MENU_MARGIN + GROUP_MENU_WIDTH <= viewportWidth
           ? rect.right + GROUP_MENU_MARGIN
@@ -1233,7 +1256,31 @@ export function WebShellSidebar({
       setGroupMenu(null);
       setSessionBusy(sessionId, true);
       workspaceActions
-        .updateSessionOrganization(sessionId, { groupId })
+        // Group and color are a single choice in the UI: assigning a named
+        // group (or "Ungrouped", groupId=null) clears any color tag.
+        .updateSessionOrganization(sessionId, { groupId, color: null })
+        .then(() => {
+          void reload().catch(() => undefined);
+        })
+        .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
+        .finally(() => {
+          setSessionBusy(sessionId, false);
+        });
+    },
+    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+  );
+
+  const assignSessionColor = useCallback(
+    (session: DaemonSessionSummary, color: DaemonSessionGroupColor | null) => {
+      const sessionId = session.sessionId;
+      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+        return;
+      }
+      setGroupMenu(null);
+      setSessionBusy(sessionId, true);
+      workspaceActions
+        // Picking a color clears any named-group assignment (single choice).
+        .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
           void reload().catch(() => undefined);
         })
@@ -1275,37 +1322,68 @@ export function WebShellSidebar({
   const sessionSections = useMemo<SessionSection[]>(() => {
     if (!organizationEnabled) return [];
     const searching = searchQuery.trim().length > 0;
+    const validGroupIds = new Set(groups.map((group) => group.id));
+    const sessionsByColor = new Map<
+      DaemonSessionGroupColor,
+      DaemonSessionSummary[]
+    >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
     for (const group of groups) {
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
     for (const session of filteredSessions) {
-      const groupSessions = session.groupId
-        ? sessionsByGroupId.get(session.groupId)
-        : undefined;
+      // Color takes precedence: the picker keeps color and group mutually
+      // exclusive, but stay defensive if a store somehow carries both.
+      if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
+        const bucket = sessionsByColor.get(session.color) ?? [];
+        bucket.push(session);
+        sessionsByColor.set(session.color, bucket);
+        continue;
+      }
+      const groupSessions =
+        session.groupId && validGroupIds.has(session.groupId)
+          ? sessionsByGroupId.get(session.groupId)
+          : undefined;
       if (groupSessions) {
         groupSessions.push(session);
       } else {
         recentSessions.push(session);
       }
     }
-    const sections: SessionSection[] = groups
-      .map((group) => {
-        const groupSessions = sessionsByGroupId.get(group.id) ?? [];
-        return {
-          id: `group:${group.id}`,
-          label: group.name,
-          countLabel: String(groupSessions.length),
-          color: group.color,
-          group,
-          sessions: groupSessions,
-        };
-      })
-      .filter((section) => !searching || section.sessions.length > 0);
+    const sections: SessionSection[] = [];
+    // Color buckets first, in palette order; only render non-empty ones so the
+    // sidebar never shows six empty color headers.
+    for (const color of SESSION_GROUP_COLORS) {
+      const colorSessions = sessionsByColor.get(color);
+      if (!colorSessions || colorSessions.length === 0) continue;
+      sections.push({
+        id: `color:${color}`,
+        kind: 'color',
+        label: t(`sidebar.groupColor.${color}`),
+        countLabel: String(colorSessions.length),
+        color,
+        sessions: colorSessions,
+      });
+    }
+    // Named groups next (kept visible even when empty, unless searching).
+    for (const group of groups) {
+      const groupSessions = sessionsByGroupId.get(group.id) ?? [];
+      if (searching && groupSessions.length === 0) continue;
+      sections.push({
+        id: `group:${group.id}`,
+        kind: 'group',
+        label: group.name,
+        countLabel: String(groupSessions.length),
+        color: group.color,
+        group,
+        sessions: groupSessions,
+      });
+    }
     if (recentSessions.length > 0) {
       sections.push({
         id: RECENT_SESSION_SECTION_ID,
+        kind: 'recent',
         label: t('sidebar.groupRecent'),
         sessions: recentSessions,
       });
@@ -1383,11 +1461,21 @@ export function WebShellSidebar({
   const deleteCandidateLabel = deleteCandidate
     ? getCompactSessionLabel(deleteCandidate)
     : '';
+  const groupMenuSelectedColor =
+    groupMenu?.session.color &&
+    SESSION_GROUP_COLORS.includes(groupMenu.session.color)
+      ? groupMenu.session.color
+      : null;
   const groupMenuSelectedGroupId =
+    !groupMenuSelectedColor &&
     groupMenu?.session.groupId &&
     groups.some((group) => group.id === groupMenu.session.groupId)
       ? groupMenu.session.groupId
       : null;
+  const menuColorOptions =
+    colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS;
+  const groupMenuUngroupedSelected =
+    groupMenuSelectedGroupId === null && groupMenuSelectedColor === null;
   const deleteGroupCandidateLabel = deleteGroupCandidate?.name ?? '';
   const canSaveGroup = groupName.trim().length > 0 && !groupBusy;
   const groupEditorTitle =
@@ -1590,8 +1678,8 @@ export function WebShellSidebar({
                             className={styles.sessionActionButton}
                             type="button"
                             disabled={busy}
-                            title={t('sidebar.organize')}
-                            aria-label={t('sidebar.organize')}
+                            title={t('sidebar.sessionGroup')}
+                            aria-label={t('sidebar.sessionGroup')}
                             onClick={(event) => openGroupMenu(event, session)}
                           >
                             <IconGroup />
@@ -1737,7 +1825,7 @@ export function WebShellSidebar({
               </span>
             </button>
             <div className={styles.sessionGroupHeaderActions}>
-              {group ? (
+              {section.kind === 'group' && group ? (
                 <>
                   <button
                     className={styles.sessionGroupActionButton}
@@ -1770,7 +1858,7 @@ export function WebShellSidebar({
                     <IconTrash />
                   </button>
                 </>
-              ) : (
+              ) : section.kind === 'recent' ? (
                 <button
                   className={styles.sessionGroupActionButton}
                   type="button"
@@ -1781,7 +1869,7 @@ export function WebShellSidebar({
                 >
                   <IconNewChat />
                 </button>
-              )}
+              ) : null}
             </div>
           </div>
           {expanded && (
@@ -1928,7 +2016,7 @@ export function WebShellSidebar({
             },
             {
               key: 'group',
-              label: t('sidebar.organize'),
+              label: t('sidebar.sessionGroup'),
               icon: <IconGroup />,
               disabled: sessionBusy,
               onSelect: () =>
@@ -2008,21 +2096,45 @@ export function WebShellSidebar({
           <button
             className={cx(
               styles.groupMenuItem,
-              groupMenuSelectedGroupId === null && styles.groupMenuItemActive,
+              groupMenuUngroupedSelected && styles.groupMenuItemActive,
             )}
             type="button"
             role="menuitemradio"
-            aria-checked={groupMenuSelectedGroupId === null}
+            aria-checked={groupMenuUngroupedSelected}
             onClick={() => assignSessionGroup(groupMenu.session, null)}
           >
             <span className={styles.groupMenuEmptyDot} />
             <span className={styles.groupMenuName}>
               {t('sidebar.groupUngrouped')}
             </span>
-            {groupMenuSelectedGroupId === null && (
+            {groupMenuUngroupedSelected && (
               <span className={styles.groupMenuCheck}>✓</span>
             )}
           </button>
+          {menuColorOptions.map((color) => {
+            const selected = groupMenuSelectedColor === color;
+            return (
+              <button
+                key={`color:${color}`}
+                className={cx(
+                  styles.groupMenuItem,
+                  selected && styles.groupMenuItemActive,
+                )}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selected}
+                onClick={() => assignSessionColor(groupMenu.session, color)}
+              >
+                <span
+                  className={cx(styles.groupMenuDot, getGroupColorClass(color))}
+                />
+                <span className={styles.groupMenuName}>
+                  {t(`sidebar.groupColor.${color}`)}
+                </span>
+                {selected && <span className={styles.groupMenuCheck}>✓</span>}
+              </button>
+            );
+          })}
           {groups.map((group) => {
             const selected = groupMenuSelectedGroupId === group.id;
             return (

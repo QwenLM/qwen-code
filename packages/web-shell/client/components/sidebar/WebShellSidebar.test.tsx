@@ -68,6 +68,7 @@ type MockSession = {
   isArchived?: boolean;
   isPinned?: boolean;
   groupId?: string | null;
+  color?: 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | null;
 };
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
@@ -280,7 +281,7 @@ describe('WebShellSidebar — session organization', () => {
     mockWorkspaceActions.listSessionGroups.mockReturnValue(
       new Promise(() => undefined),
     );
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     expect(mockUseSessions).toHaveBeenCalledWith({
       autoLoad: true,
       pageSize: 1000,
@@ -318,7 +319,7 @@ describe('WebShellSidebar — session organization', () => {
       await Promise.resolve();
     });
     const organizeButton = document.body.querySelector<HTMLButtonElement>(
-      '[aria-label="Move to group"]',
+      '[aria-label="Group"]',
     );
     expect(organizeButton).not.toBeNull();
     act(() => {
@@ -371,6 +372,12 @@ describe('WebShellSidebar — session organization', () => {
       name: 'Backend',
       color: 'green',
     });
+    // Creating a group for a session assigns it and clears any color tag —
+    // color and named group are mutually exclusive in the UI.
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { groupId: 'group-1', color: null },
+    );
     promptSpy.mockRestore();
   });
 
@@ -411,7 +418,7 @@ describe('WebShellSidebar — session organization', () => {
       await Promise.resolve();
     });
     const organizeButton = document.body.querySelector<HTMLButtonElement>(
-      '[aria-label="Move to group"]',
+      '[aria-label="Group"]',
     );
     expect(organizeButton).not.toBeNull();
     act(() => {
@@ -440,7 +447,8 @@ describe('WebShellSidebar — session organization', () => {
         }),
       );
     });
-    expect(document.activeElement?.textContent).toContain('Backend');
+    // One ArrowDown from "Ungrouped" now lands on the first color quick-pick.
+    expect(document.activeElement?.textContent).toContain('Red');
     const groupOption = Array.from(
       menu!.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Backend'));
@@ -449,10 +457,102 @@ describe('WebShellSidebar — session organization', () => {
       groupOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
+    // Assigning a named group clears any color tag (single-choice).
     expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
       '550e8400-e29b-41d4-a716-446655440000',
-      { groupId: 'group-1' },
+      { groupId: 'group-1', color: null },
     );
+  });
+
+  it('offers the six color quick-picks and assigns the chosen color', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.updateSessionOrganization.mockResolvedValue({
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      groupId: null,
+      color: 'red',
+      isPinned: false,
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const organizeButton = document.body.querySelector<HTMLButtonElement>(
+      '[aria-label="Group"]',
+    );
+    expect(organizeButton).not.toBeNull();
+    act(() => {
+      organizeButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const menu = document.body.querySelector<HTMLElement>(
+      '[role="menu"][aria-label="Group"]',
+    );
+    expect(menu).not.toBeNull();
+    const radioLabels = Array.from(
+      menu!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ).map((button) => button.textContent ?? '');
+    // Ungrouped + all six colors are offered as single-choice radios.
+    for (const name of [
+      'Ungrouped',
+      'Red',
+      'Orange',
+      'Yellow',
+      'Green',
+      'Blue',
+      'Purple',
+    ]) {
+      expect(radioLabels.some((label) => label.includes(name))).toBe(true);
+    }
+
+    const redOption = Array.from(
+      menu!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ).find((button) => button.textContent?.includes('Red'));
+    expect(redOption).not.toBeNull();
+    await act(async () => {
+      redOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // Picking a color clears any named-group assignment (single-choice).
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { color: 'red', groupId: null },
+    );
+  });
+
+  it('groups sessions into color sections ahead of the recent bucket', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockActive.sessions = [
+      makeSession('session-red', { displayName: 'Red work', color: 'red' }),
+      makeSession('session-plain', { displayName: 'Loose end', color: null }),
+    ];
+
+    const { container } = renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // A "Red" color section exists and holds the tagged session.
+    const redSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Red"]',
+    );
+    expect(redSection).not.toBeNull();
+    expect(redSection!.textContent).toContain('Red work');
+    // The untagged session falls through to the Recent bucket.
+    expect(container.textContent).toContain('Recent');
+    expect(container.textContent).toContain('Loose end');
   });
 
   it('renders organized sessions as collapsible group sections', async () => {
@@ -484,7 +584,7 @@ describe('WebShellSidebar — session organization', () => {
       }),
     ];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -535,7 +635,7 @@ describe('WebShellSidebar — session organization', () => {
       }),
     ];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -588,7 +688,7 @@ describe('WebShellSidebar — session organization', () => {
       }),
     ];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -630,7 +730,7 @@ describe('WebShellSidebar — session organization', () => {
     );
     mockActive.sessions = [makeSession('session-a'), makeSession('session-b')];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -683,7 +783,7 @@ describe('WebShellSidebar — session organization', () => {
     mockActive.sessions = [makeSession('session-a')];
     const onNewSession = vi.fn();
 
-    const container = renderSidebar(false, { onNewSession });
+    const { container } = renderSidebar(false, { onNewSession });
     await act(async () => {
       await Promise.resolve();
     });
@@ -732,7 +832,7 @@ describe('WebShellSidebar — session organization', () => {
     mockActive.sessions = [makeSession('session-a')];
     const onError = vi.fn();
 
-    const container = renderSidebar(false, { onError });
+    const { container } = renderSidebar(false, { onError });
     await act(async () => {
       await Promise.resolve();
     });

@@ -174,6 +174,39 @@ describe('ndJsonStream', () => {
     );
   });
 
+  it('reports observed sent and received messages without changing byte hooks', async () => {
+    const received = message('observed-received');
+    const sent = message('observed-sent', { value: 'ok' });
+    const receivedBytes = encoder.encode(JSON.stringify(received)).byteLength;
+    const sentBytes = encoder.encode(JSON.stringify(sent)).byteLength;
+    const onMessageReceived = vi.fn();
+    const onMessageSent = vi.fn();
+    const onMessageObserved = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([encoder.encode(`${JSON.stringify(received)}\r\n`)]),
+      { onMessageReceived, onMessageSent, onMessageObserved },
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([received]);
+    await writeOne(stream.writable, sent);
+
+    expect(onMessageReceived).toHaveBeenCalledWith(receivedBytes);
+    expect(onMessageReceived.mock.calls[0]).toHaveLength(1);
+    expect(onMessageSent).toHaveBeenCalledWith(sentBytes);
+    expect(onMessageSent.mock.calls[0]).toHaveLength(1);
+    expect(onMessageObserved).toHaveBeenCalledWith({
+      direction: 'received',
+      bytes: receivedBytes,
+      message: received,
+    });
+    expect(onMessageObserved).toHaveBeenCalledWith({
+      direction: 'sent',
+      bytes: sentBytes,
+      message: sent,
+    });
+  });
+
   it('does not let hook errors break transport', async () => {
     const received = message('received');
     const sent = message('sent');
@@ -187,6 +220,9 @@ describe('ndJsonStream', () => {
         onMessageSent: () => {
           throw new Error('sent hook failed');
         },
+        onMessageObserved: () => {
+          throw new Error('observed hook failed');
+        },
       },
     );
 
@@ -197,6 +233,7 @@ describe('ndJsonStream', () => {
   it('propagates output write errors without reporting sent bytes', async () => {
     const sent = message('write-error');
     const onMessageSent = vi.fn();
+    const onMessageObserved = vi.fn();
     const stream = ndJsonStream(
       new WritableStream<Uint8Array>({
         write() {
@@ -204,12 +241,13 @@ describe('ndJsonStream', () => {
         },
       }),
       byteStream([]),
-      { onMessageSent },
+      { onMessageSent, onMessageObserved },
     );
 
     await expect(writeOne(stream.writable, sent)).rejects.toThrow(
       'output closed',
     );
     expect(onMessageSent).not.toHaveBeenCalled();
+    expect(onMessageObserved).not.toHaveBeenCalled();
   });
 });
