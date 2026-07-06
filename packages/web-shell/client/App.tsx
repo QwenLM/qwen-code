@@ -283,6 +283,7 @@ interface SendPromptOptionsWithRetry {
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
+  onAdmitted?: () => void;
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -1495,6 +1496,7 @@ export function App({
         retry?: boolean;
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        onAdmitted?: () => void;
       },
     ) => {
       const isUserPrompt = !text.trimStart().startsWith('/');
@@ -1551,6 +1553,7 @@ export function App({
         images,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
       };
       if (opts?.commitComposerAccepted) {
         opts.commitComposerAccepted();
@@ -2467,6 +2470,35 @@ export function App({
       pendingBoundRunRef.current = null;
     }
   }, []);
+  // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
+  // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
+  // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
+  // permission-blocked run, or a closed tab, would execute in the session but
+  // never get recorded. `onAdmitted` fires at submitPrompt acceptance; if the
+  // send settles WITHOUT it (onSubmitBefore cancel) or throws before admission,
+  // reject so the caller skips recording a run that never reached the session.
+  const enqueueManualRun = useCallback(
+    (prompt: string): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        let admitted = false;
+        sendPrompt(prompt, undefined, {
+          onAdmitted: () => {
+            admitted = true;
+            resolve();
+          },
+        }).then(
+          () => {
+            if (!admitted) {
+              reject(new Error('Run was cancelled before it started'));
+            }
+          },
+          (error: unknown) => {
+            if (!admitted) reject(error);
+          },
+        );
+      }),
+    [sendPrompt],
+  );
   // Enqueue the pending bound run once its session is the current, fully-loaded
   // one — driven both by the effect below (when the session switch changes a
   // dep) AND directly after loadSidebarSession resolves (when the session was
@@ -2486,35 +2518,20 @@ export function App({
     }
     clearTimeout(pending.timer);
     pendingBoundRunRef.current = null;
-    // Resolve the latch ONLY if the prompt was actually admitted: sendPrompt
-    // returns `undefined` when cancelled before admission (e.g. an embedder's
-    // onSubmitBefore rejected), in which case nothing reached the task session
-    // and the caller must NOT record a run. A throw (session-ensure/submit
-    // failure) rejects too. The switch-timeout was cleared above, so a long turn
-    // can't trip it. (Recording happens in the dialog once this resolves.)
-    sendPrompt(pending.prompt).then(
-      (result) => {
-        if (result === undefined) {
-          pending.reject(new Error('Run was cancelled before it started'));
-        } else {
-          pending.resolve();
-        }
-      },
+    // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
+    // cleared above, so a long turn can't trip it. Recording happens in the
+    // dialog once this resolves.
+    enqueueManualRun(pending.prompt).then(
+      () => pending.resolve(),
       (error: unknown) => pending.reject(error),
     );
-  }, [sendPrompt]);
+  }, [enqueueManualRun]);
   const runTaskManually = useCallback(
     (prompt: string, sessionId: string | null): Promise<void> => {
       setMainView('chat');
       if (!sessionId) {
-        // Unbound: runs in the current session. Resolve only if admitted —
-        // `undefined` means the prompt was cancelled before admission, so the
-        // caller must not record a run.
-        return sendPrompt(prompt).then((result) => {
-          if (result === undefined) {
-            throw new Error('Run was cancelled before it started');
-          }
-        });
+        // Unbound: runs in the current session — resolves at admission.
+        return enqueueManualRun(prompt);
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
@@ -2547,7 +2564,12 @@ export function App({
           });
       });
     },
-    [sendPrompt, loadSidebarSession, clearPendingBoundRun, tryFireBoundRun],
+    [
+      enqueueManualRun,
+      loadSidebarSession,
+      clearPendingBoundRun,
+      tryFireBoundRun,
+    ],
   );
   useEffect(() => {
     tryFireBoundRun();

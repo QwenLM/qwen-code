@@ -294,6 +294,9 @@ export function createDaemonSessionActions({
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
+        // The prompt is admitted to the session here — signal it before we wait
+        // out the (possibly long) turn, so an admission-only caller can proceed.
+        options?.onAdmitted?.();
         return await waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,

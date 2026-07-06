@@ -271,10 +271,12 @@ export function ScheduledTasksDialog({
 
   const handleRunNow = useCallback(
     async (task: DaemonScheduledTask) => {
-      // Serialize: only one manual run in flight. The App holds a single pending
-      // bound-run latch, so overlapping runs could drop a prompt — and we don't
-      // want two records for two clicks that resolve to one run.
-      if (runningTaskId !== null) return;
+      // A disabled task must not run: enqueuing its prompt would EXECUTE it in
+      // its session even though the server's `/run` guard then refuses to record
+      // it — a real, unrecorded run. (Enable/unarchive it first.) Also serialize:
+      // only one manual run in flight, since the App holds a single pending
+      // bound-run latch and overlapping runs could drop a prompt.
+      if (!task.enabled || runningTaskId !== null) return;
       setRunningTaskId(task.id);
       try {
         // Enqueue the prompt FIRST — onRunPrompt resolves once it's actually
@@ -599,7 +601,7 @@ export function ScheduledTasksDialog({
                     type="button"
                     className={styles.iconAction}
                     onClick={() => void handleRunNow(task)}
-                    disabled={runningTaskId !== null}
+                    disabled={!task.enabled || runningTaskId !== null}
                     title={t('scheduledTasks.runNow')}
                     aria-label={t('scheduledTasks.runNow')}
                   >

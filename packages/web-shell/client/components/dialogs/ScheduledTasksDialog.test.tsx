@@ -230,6 +230,23 @@ describe('ScheduledTasksDialog run now', () => {
     expect(onRunPrompt).toHaveBeenCalledWith('legacy', null);
   });
 
+  it('does not run a DISABLED task (button disabled, prompt never enqueued)', async () => {
+    // The server /run guard only refuses the record — the prompt must not even
+    // be enqueued, or a disabled task would execute unrecorded.
+    const onRunPrompt = vi.fn();
+    await mount([baseTask({ enabled: false, sessionId: 'sess-9' })], {
+      onRunPrompt,
+    });
+    const btn = document.querySelector(
+      '[aria-label="Run now"]',
+    ) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    click(btn); // disabled + handler guard → no-op
+    await flush();
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+  });
+
   it('does NOT record the run when the bound session fails to open', async () => {
     // onRunPrompt rejects (session archived/deleted): the prompt never ran, so
     // the run must not be recorded — otherwise history shows a phantom run.
