@@ -65,6 +65,7 @@ import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
+import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
@@ -1193,6 +1194,10 @@ export function App({
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
   const [showDaemonStatusDialog, setShowDaemonStatusDialog] = useState(false);
+  // Main content view. The scheduled-tasks page replaces the chat pane inline
+  // (not a modal overlay), mirroring the reference design; creating or opening
+  // a chat returns to 'chat'.
+  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks'>('chat');
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -1486,7 +1491,10 @@ export function App({
     showSettingsDialog ||
     showMemoryDialog ||
     showAuthDialog;
-  const interactionBlocked = dialogOpen;
+  // Block chat interaction (composer, chat keyboard shortcuts) both when a
+  // modal is open and while a full-pane view (e.g. Scheduled Tasks) covers the
+  // chat, so keystrokes/Escape can't reach the hidden composer underneath.
+  const interactionBlocked = dialogOpen || mainView !== 'chat';
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -2939,6 +2947,10 @@ export function App({
             setShowSettingsDialog(true);
             return true;
           }
+          if (cmd === 'schedule') {
+            setMainView('scheduledTasks');
+            return true;
+          }
           if (cmd === 'context') {
             const contextArg = text.slice(match[0].length).trim().toLowerCase();
             if (
@@ -4087,15 +4099,31 @@ export function App({
                     closeMobileDrawer();
                     setShowDaemonStatusDialog(true);
                   }}
-                  onNewSession={createNewSession}
-                  onLoadSession={loadSidebarSession}
+                  onOpenScheduledTasks={() => {
+                    closeMobileDrawer();
+                    setMainView('scheduledTasks');
+                  }}
+                  onNewSession={() => {
+                    setMainView('chat');
+                    return createNewSession();
+                  }}
+                  onLoadSession={(sessionId) => {
+                    setMainView('chat');
+                    return loadSidebarSession(sessionId);
+                  }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   sessionListReloadToken={sessionListReloadToken}
                 />
               </div>
             )}
-            <div className={styles.chatPane}>
+            <div
+              className={
+                mainView === 'scheduledTasks'
+                  ? `${styles.chatPane} ${styles.chatPaneShowingPage}`
+                  : styles.chatPane
+              }
+            >
               {sidebarOptions.enabled && (
                 <button
                   type="button"
@@ -4118,6 +4146,64 @@ export function App({
                     <line x1="3" y1="18" x2="21" y2="18" />
                   </svg>
                 </button>
+              )}
+              {mainView === 'scheduledTasks' && (
+                <div className={styles.fullPage}>
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('scheduledTasks.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <ScheduledTasksDialog
+                      onRunPrompt={(taskPrompt) => {
+                        // Manual trigger reuses the normal prompt path: return
+                        // to the chat view and send the task's prompt into the
+                        // current session so the run streams in the chat.
+                        setMainView('chat');
+                        sendPrompt(taskPrompt).catch((error: unknown) => {
+                          reportError(error, 'Failed to run scheduled task');
+                        });
+                      }}
+                      onCreateViaChat={() => {
+                        // Return to chat and prime the composer so the user can
+                        // describe the task in natural language; the agent
+                        // creates it via its cron_create tool. Deferred so the
+                        // composer is mounted/visible before we focus it.
+                        setMainView('chat');
+                        window.setTimeout(() => {
+                          editorRef.current?.insertText(
+                            t('scheduledTasks.chatStarter'),
+                            { mode: 'replace' },
+                          );
+                          editorRef.current?.focus();
+                        }, 0);
+                      }}
+                      onError={reportError}
+                    />
+                  </div>
+                </div>
               )}
               <WebShellCustomizationProvider value={customization}>
                 <CompactModeContext.Provider value={compactMode}>

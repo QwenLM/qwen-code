@@ -9,6 +9,7 @@ import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
   DaemonFileStat,
+  DaemonScheduledTask,
   DaemonWorkspaceActions,
 } from './types.js';
 
@@ -454,6 +455,85 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonDirectoryListing;
     },
 
+    // Scheduled tasks (durable cron). Raw fetch like glob/stat/list — the
+    // /scheduled-tasks routes are REST-only and not yet on the DaemonClient
+    // transport, so this path only reaches the daemon over plain HTTP (the
+    // web-shell's own origin), which is exactly where the page runs.
+    async listScheduledTasks() {
+      requireClient(getClient, 'List scheduled tasks failed');
+      const url = createDaemonRequestUrl(baseUrl, '/scheduled-tasks');
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'List scheduled tasks timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'GET /scheduled-tasks'));
+      }
+      const data = (await res.json()) as { tasks?: DaemonScheduledTask[] };
+      return Array.isArray(data.tasks) ? data.tasks : [];
+    },
+
+    async createScheduledTask(req) {
+      requireClient(getClient, 'Create scheduled task failed');
+      const url = createDaemonRequestUrl(baseUrl, '/scheduled-tasks');
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify(req),
+        }),
+        'Create scheduled task timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'POST /scheduled-tasks'));
+      }
+      return (await res.json()) as DaemonScheduledTask;
+    },
+
+    async updateScheduledTask(id, patch) {
+      requireClient(getClient, 'Update scheduled task failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/scheduled-tasks/${encodeURIComponent(id)}`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'PATCH',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify(patch),
+        }),
+        'Update scheduled task timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `PATCH /scheduled-tasks/${id}`),
+        );
+      }
+      return (await res.json()) as DaemonScheduledTask;
+    },
+
+    async deleteScheduledTask(id) {
+      requireClient(getClient, 'Delete scheduled task failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/scheduled-tasks/${encodeURIComponent(id)}`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'DELETE',
+          headers: createDaemonHeaders(token),
+        }),
+        'Delete scheduled task timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `DELETE /scheduled-tasks/${id}`),
+        );
+      }
+    },
+
     async loadEnv() {
       const client = requireClient(getClient, 'Load env failed');
       return withActionTimeout(client.workspaceEnv(), 'Load env timed out');
@@ -625,6 +705,16 @@ function requireWorkspaceCwd(
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {
   const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+// Same as createDaemonHeaders but with a JSON content-type, for the
+// POST/PATCH scheduled-task writes that carry a body.
+function createDaemonJsonHeaders(token: string | undefined): HeadersInit {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
 }
