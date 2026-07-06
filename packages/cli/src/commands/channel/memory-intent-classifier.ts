@@ -80,11 +80,19 @@ export class BridgeChannelMemoryIntentClassifier
   ): Promise<ChannelMemoryIntentClassifierResult> {
     const bridge = this.getBridge();
     const sessionId = await bridge.newSession(this.cwd);
-    const response = await bridge.prompt(
-      sessionId,
-      `${CLASSIFIER_PROMPT}${JSON.stringify(text)}`,
-      {},
-    );
-    return normalizeClassifierResult(extractJsonObject(response));
+    try {
+      const response = await bridge.prompt(
+        sessionId,
+        `${CLASSIFIER_PROMPT}${JSON.stringify(text)}`,
+        {},
+      );
+      return normalizeClassifierResult(extractJsonObject(response));
+    } finally {
+      try {
+        await bridge.cancelSession(sessionId);
+      } catch {
+        // session cleanup must not mask a successful classification
+      }
+    }
   }
 }

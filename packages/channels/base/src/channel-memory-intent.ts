@@ -11,7 +11,7 @@ const REMEMBER_PATTERNS: RegExp[] = [
   /^记一下[:：,，]?\s*(.+)$/su,
   /^帮我记一下[:：,，]?\s*(.+)$/su,
   /^帮我记住[:：,，]?\s*(.+)$/su,
-  /^以后记住\s*(.+)$/su,
+  /^以后记住[:：,，]?\s*(.+)$/su,
   /^remember:\s*(.+)$/isu,
   /^remember that\s+(.+)$/isu,
 ];
