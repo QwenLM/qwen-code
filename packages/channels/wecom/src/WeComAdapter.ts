@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { constants, lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { open, writeFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
@@ -1431,7 +1431,7 @@ async function readOutboundMedia(
     throw new Error('Media path outside allowed outbound directory');
   }
 
-  const file = await open(real, 'r');
+  const file = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await file.stat();
     if (!stat.isFile())

@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -49,7 +50,7 @@ const mocks = vi.hoisted(() => {
   const openHandles: MockFileHandle[] = [];
   const lookup = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
   const decryptFile = vi.fn((buffer: Buffer, _aesKey: string) => buffer);
-  const open = vi.fn(async (_path: string, _flags: string) => {
+  const open = vi.fn(async (_path: string, _flags: string | number) => {
     const handle: MockFileHandle = {
       stat: vi.fn(async () => ({ isFile: () => true, size: 4 })),
       readFile: vi.fn(async () => Buffer.from([0x89, 0x50, 0x4e, 0x47])),
@@ -3637,7 +3638,7 @@ describe('WeComChannel', () => {
 
     expect(mocks.open).toHaveBeenCalledWith(
       realpathSync(join(dir, 'out.png')),
-      'r',
+      constants.O_RDONLY | constants.O_NOFOLLOW,
     );
     const handle = mocks.openHandles.at(-1);
     expect(handle?.stat).toHaveBeenCalled();
