@@ -1913,24 +1913,32 @@ export abstract class ChannelBase {
       return;
     }
 
-    let result: { changed: boolean };
-    try {
-      result = await channelMemory.clearChannelMemory(
-        this.channelMemoryTarget(envelope),
-      );
-    } catch (error) {
-      const message = this.channelMemoryErrorMessage(error);
-      this.logChannelMemoryError('clear', envelope, message);
+    if (intent.kind === 'clear_confirm') {
+      let result: { changed: boolean };
+      try {
+        result = await channelMemory.clearChannelMemory(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('clear', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
       await this.sendMessage(
         envelope.chatId,
-        `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
       );
       return;
     }
-    this.invalidateSessionContext(envelope);
-    await this.sendMessage(
-      envelope.chatId,
-      result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
+
+    const unhandled: never = intent;
+    throw new Error(
+      `Unhandled channel memory intent: ${JSON.stringify(unhandled)}`,
     );
   }
 
