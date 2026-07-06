@@ -733,6 +733,22 @@ describe('WeComChannel', () => {
     expect(mocks.instances).toHaveLength(1);
   });
 
+  it('does not reconnect when disconnect emits a disconnected event', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+    oldClient.off = undefined as unknown as MockWSClient['off'];
+    oldClient.disconnect.mockImplementationOnce(() => {
+      oldClient.emit('disconnected', 'closed');
+    });
+
+    channel.disconnect();
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(mocks.instances).toHaveLength(1);
+  });
+
   it('resets exhausted kick retry cycles before SDK-disconnect fallback reconnect', async () => {
     vi.useFakeTimers();
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
@@ -3481,6 +3497,32 @@ describe('WeComChannel', () => {
       expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
     }
     expect(chunks.join('')).toContain('outro');
+  });
+
+  it('does not switch fence type when splitting a long fenced line', async () => {
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    const imagePath = join(dir, 'out.png');
+    writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    const text = `intro\n\`\`\`text\n${'a'.repeat(3790)}~~~[IMAGE: ${imagePath}]${'b'.repeat(100)}\n\`\`\``;
+
+    await channel.sendMessage('chat-1', text);
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(client.sendMediaMessage).not.toHaveBeenCalled();
+    expect(chunks.length).toBeGreaterThan(1);
+    expect((chunks.join('\n').match(/~~~/g) ?? []).length).toBe(1);
+    for (const chunk of chunks) {
+      expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
+    }
   });
 
   it('resolves relative outbound image paths from channel cwd', async () => {

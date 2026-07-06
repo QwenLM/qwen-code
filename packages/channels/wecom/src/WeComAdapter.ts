@@ -1341,7 +1341,7 @@ function splitMarkdownChunks(text: string): string[] {
       const nextCodeFence =
         token === codeFence
           ? undefined
-          : isFenceToken(token)
+          : !codeFence && isFenceToken(token)
             ? token
             : codeFence;
       const addition = needsLineBreak && current ? `\n${token}` : token;
