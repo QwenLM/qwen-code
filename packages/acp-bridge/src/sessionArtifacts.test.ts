@@ -1545,6 +1545,37 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'url' });
   });
 
+  it('rejects external urls with secret-like query or fragment', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-url-secrets',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Signed link',
+            url: 'https://example.com/report?access_token=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Fragment token',
+            url: 'https://example.com/report#access_token=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+  });
+
   it('accepts line whitespace in descriptions but not titles', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-line-whitespace',
@@ -1739,7 +1770,7 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
-  it('rejects dangling symlinks that point outside the workspace', async () => {
+  it('rejects absolute dangling symlinks that point outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's6-dangling-symlink',
       workspaceCwd: workspace,
@@ -1993,6 +2024,87 @@ describe('SessionArtifactStore', () => {
     } finally {
       realpathSpy.mockRestore();
     }
+  });
+
+  it('marks workspace artifacts missing when the file is swapped before open', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-open-swap',
+      workspaceCwd: workspace,
+    });
+    const target = path.join(workspace, 'swap.txt');
+    const replacement = path.join(workspace, 'swap-replacement.txt');
+    await fs.writeFile(target, 'before');
+    const created = await store.upsertMany([
+      { title: 'Swap', workspacePath: 'swap.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const realTarget = await fs.realpath(target);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const originalLstat = fs.lstat.bind(fs);
+    let swapped = false;
+    const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (entry) => {
+      const stat = await originalLstat(entry);
+      if (!swapped && String(entry) === realTarget) {
+        swapped = true;
+        await fs.writeFile(replacement, 'after');
+        await fs.rename(replacement, target);
+      }
+      return stat;
+    });
+
+    try {
+      const artifact = await store.get(artifactId);
+      expect(artifact).toMatchObject({ id: artifactId, status: 'missing' });
+      expect(artifact).not.toHaveProperty('workspacePath');
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects workspace paths that become symlinks before open', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-open-nofollow',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'loop.txt'), 'content');
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (entry) => {
+      if (String(entry).endsWith('loop.txt')) {
+        throw Object.assign(new Error('too many symbolic links'), {
+          code: 'ELOOP',
+        });
+      }
+      throw new Error('unexpected open');
+    });
+
+    try {
+      await expect(
+        store.upsertMany([{ title: 'Loop', workspacePath: 'loop.txt' }], {
+          strict: true,
+        }),
+      ).rejects.toMatchObject({ field: 'workspacePath' });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('rejects relative dangling symlinks that point outside the workspace', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-dangling-symlink',
+      workspaceCwd: workspace,
+    });
+    await fs.symlink(
+      '../outside-missing.txt',
+      path.join(workspace, 'dangling'),
+    );
+
+    await expect(
+      store.upsertMany([{ title: 'Dangling', workspacePath: 'dangling' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
   it('uses cached workspace status while the refresh ttl is fresh', async () => {

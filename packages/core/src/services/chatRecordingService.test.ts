@@ -1145,6 +1145,35 @@ describe('ChatRecordingService', () => {
       expect(third.parentUuid).toBe(second.uuid);
     });
 
+    it('does not append a strict artifact record after a previous strict write failed', async () => {
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('corrupt journal'))
+        .mockResolvedValue(undefined);
+
+      await expect(
+        chatRecordingService.recordSessionArtifactEvent({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        }),
+      ).rejects.toThrow('corrupt journal');
+
+      await expect(
+        chatRecordingService.recordSessionArtifactSnapshot({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        }),
+      ).rejects.toThrow('corrupt journal');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
     it('keeps artifact journal records out of the active conversation chain', async () => {
       chatRecordingService.recordUserMessage([{ text: 'before artifact' }]);
       await chatRecordingService.flush();

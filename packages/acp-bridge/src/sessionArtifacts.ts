@@ -903,7 +903,7 @@ export class SessionArtifactStore {
         } else if (change.reason === 'eviction') {
           this.stickyEphemeralIds.delete(change.artifactId);
         } else if (change.reason === 'unpin_to_ephemeral') {
-          this.stickyEphemeralIds.add(change.artifactId);
+          this.rememberStickyEphemeral(change.artifactId);
         }
         continue;
       }
@@ -912,6 +912,16 @@ export class SessionArtifactStore {
         this.tombstonedClientIds.delete(change.artifactId);
         this.stickyEphemeralIds.delete(change.artifactId);
       }
+    }
+  }
+
+  private rememberStickyEphemeral(artifactId: string): void {
+    this.stickyEphemeralIds.delete(artifactId);
+    this.stickyEphemeralIds.add(artifactId);
+    while (this.stickyEphemeralIds.size > MAX_STICKY_EPHEMERAL_IDS) {
+      const oldest = this.stickyEphemeralIds.values().next().value;
+      if (oldest === undefined) break;
+      this.stickyEphemeralIds.delete(oldest);
     }
   }
 
@@ -2102,6 +2112,12 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
       'url',
     );
   }
+  if (hasSecretLikeUrlComponent(parsed)) {
+    throw new SessionArtifactValidationError(
+      'url must not include secret-like query or fragment',
+      'url',
+    );
+  }
   if (
     parsed.protocol !== 'http:' &&
     parsed.protocol !== 'https:' &&
@@ -2115,6 +2131,22 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
     );
   }
   return parsed.href;
+}
+
+function hasSecretLikeUrlComponent(parsed: URL): boolean {
+  for (const key of parsed.searchParams.keys()) {
+    if (isSecretLikeUrlText(key)) {
+      return true;
+    }
+  }
+  const fragment = parsed.hash.slice(1);
+  return fragment !== '' && isSecretLikeUrlText(fragment);
+}
+
+function isSecretLikeUrlText(value: string): boolean {
+  return /(?:^|[-_.])(token|secret|password|passwd|pwd|cookie|authorization|credential|signature|sig|api[-_]?key|access[-_]?key)(?:$|[-_.=&#])/i.test(
+    value,
+  );
 }
 
 function normalizeMetadata(

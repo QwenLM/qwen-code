@@ -790,9 +790,9 @@ export class ChatRecordingService {
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
     }
-    this.writeChain = this.writeChain
-      .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record));
+    this.writeChain = this.writeChain.then(() =>
+      jsonl.writeLine(conversationFile, record),
+    );
 
     try {
       await this.writeChain;
