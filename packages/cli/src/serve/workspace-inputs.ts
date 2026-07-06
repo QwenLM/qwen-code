@@ -38,9 +38,18 @@ export class MultipleWorkspaceInputError extends Error {
   }
 }
 
+export class MissingWorkspaceInputError extends Error {
+  constructor() {
+    super('--workspace requires a value.');
+    this.name = 'MissingWorkspaceInputError';
+  }
+}
+
 function normalizeWorkspaceInputs(workspace: unknown): string[] {
   if (Array.isArray(workspace)) {
-    if (workspace.length === 0) return [process.cwd()];
+    if (workspace.length === 0) {
+      throw new MissingWorkspaceInputError();
+    }
     return workspace.map((value) => String(value));
   }
   if (workspace === undefined) return [process.cwd()];
@@ -59,14 +68,9 @@ function rejectUnsupportedMultiWorkspaceInputs(
 ): void {
   if (workspaces.length <= 1) return;
 
-  let canonicalWorkspaces: string[];
-  try {
-    canonicalWorkspaces = workspaces.map((workspace) =>
-      canonicalizeWorkspace(workspace),
-    );
-  } catch {
-    throw new MultipleWorkspaceInputError();
-  }
+  const canonicalWorkspaces = workspaces.map((workspace) =>
+    canonicalizeWorkspace(workspace),
+  );
   const seen = new Set<string>();
   for (const workspace of canonicalWorkspaces) {
     if (seen.has(workspace)) {

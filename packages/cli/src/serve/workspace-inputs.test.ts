@@ -7,9 +7,10 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DuplicateWorkspaceInputError,
+  MissingWorkspaceInputError,
   MultipleWorkspaceInputError,
   NestedWorkspaceInputError,
   resolveSingleWorkspaceInput,
@@ -39,7 +40,12 @@ describe('resolveSingleWorkspaceInput', () => {
 
   it('falls back to process.cwd() when no workspace is supplied', () => {
     expect(resolveSingleWorkspaceInput(undefined)).toBe(process.cwd());
-    expect(resolveSingleWorkspaceInput([])).toBe(process.cwd());
+  });
+
+  it('rejects an explicit empty workspace array', () => {
+    expect(() => resolveSingleWorkspaceInput([])).toThrow(
+      MissingWorkspaceInputError,
+    );
   });
 
   it('rejects duplicate canonical explicit workspaces', () => {
@@ -72,5 +78,33 @@ describe('resolveSingleWorkspaceInput', () => {
     expect(() => resolveSingleWorkspaceInput([primary, secondary])).toThrow(
       MultipleWorkspaceInputError,
     );
+  });
+
+  it('propagates canonicalization failures for explicit multi-workspace inputs', async () => {
+    const canonicalizationError = Object.assign(
+      new Error('permission denied'),
+      { code: 'EACCES' },
+    );
+    vi.resetModules();
+    vi.doMock('@qwen-code/acp-bridge/workspacePaths', () => ({
+      canonicalizeWorkspace: (workspace: string) => {
+        if (workspace === '/inaccessible') {
+          throw canonicalizationError;
+        }
+        return workspace;
+      },
+    }));
+    try {
+      const { resolveSingleWorkspaceInput } = await import(
+        './workspace-inputs.js'
+      );
+
+      expect(() =>
+        resolveSingleWorkspaceInput(['/inaccessible', '/other']),
+      ).toThrow(canonicalizationError);
+    } finally {
+      vi.doUnmock('@qwen-code/acp-bridge/workspacePaths');
+      vi.resetModules();
+    }
   });
 });

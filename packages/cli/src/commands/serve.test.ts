@@ -108,6 +108,18 @@ describe('serve command args', () => {
     expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
   });
 
+  it('rejects valueless --workspace forms', () => {
+    for (const input of [
+      '--workspace',
+      '--workspace=',
+      '--workspace /tmp/primary --workspace',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: workspace/,
+      );
+    }
+  });
+
   it('preserves repeatable --workspace values in command mode', () => {
     let captured: unknown;
     yargs([])

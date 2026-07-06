@@ -186,4 +186,19 @@ describe('createWorkspaceRegistry', () => {
       runtimes: [first, second],
     });
   });
+
+  it('propagates unexpected live session lookup errors', () => {
+    const lookupError = new Error('bridge unavailable');
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(() => {
+        throw lookupError;
+      }),
+    });
+
+    const registry = createWorkspaceRegistry([primary]);
+
+    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+  });
 });
