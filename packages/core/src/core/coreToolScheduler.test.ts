@@ -8428,6 +8428,80 @@ describe('CoreToolScheduler telemetry spans', () => {
     await schedulePromise;
   });
 
+  it('abort drain cancels scheduled siblings behind a bounced ask', async () => {
+    const aExecute = vi.fn().mockResolvedValue({
+      llmContent: 'A ok',
+      returnDisplay: 'A ok',
+    });
+    const bExecute = vi.fn().mockResolvedValue({
+      llmContent: 'B ok',
+      returnDisplay: 'B ok',
+    });
+    const tools = [
+      new MockTool({ name: 'toolA', kind: Kind.Edit, execute: aExecute }),
+      new MockTool({ name: 'toolB', kind: Kind.Edit, execute: bExecute }),
+    ];
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (req: {
+            eventName?: string;
+            input?: { tool_name?: string };
+          }) => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: 'pre-hook',
+            success: true,
+            output:
+              req.eventName === 'PreToolUse' && req.input?.tool_name === 'toolA'
+                ? { decision: 'ask', reason: 'confirm A' }
+                : {},
+          }),
+        ),
+    };
+    const abortController = new AbortController();
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      buildScheduler({
+        tools,
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'a',
+          name: 'toolA',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+        {
+          callId: 'b',
+          name: 'toolB',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+
+    abortController.abort();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const latestB = onToolCallsUpdate.mock.calls
+      .flatMap((c) => c[0] as ToolCall[])
+      .filter((tc) => tc.request.callId === 'b')
+      .at(-1);
+    expect(latestB?.status).toBe('cancelled');
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    expect(aExecute).not.toHaveBeenCalled();
+    expect(bExecute).not.toHaveBeenCalled();
+  });
+
   it('cleans bounce markers when post-ask re-execution fails before body runs', async () => {
     const tracing = await import('../telemetry/session-tracing.js');
     const runInToolSpanContext = vi.mocked(tracing.runInToolSpanContext);

@@ -1607,13 +1607,16 @@ export class CoreToolScheduler {
         // an unhandled exception (#4321 review-3 wenshao Suggestion).
         try {
           const call = this.toolCalls.find((c) => c.request.callId === callId);
-          if (call?.status !== 'awaiting_approval') {
+          if (
+            call?.status !== 'awaiting_approval' &&
+            call?.status !== 'scheduled'
+          ) {
             continue;
           }
-          // Safety-net for a tool stuck awaiting approval at abort time — e.g.
-          // one bounced by a PreToolUse 'ask' the user never answered. Do not
-          // force-terminalize executing siblings; their own abort path owns
-          // live output, failure hooks, and final status.
+          // Safety-net for a tool stuck awaiting approval, or still scheduled
+          // behind such a tool, at abort time. Do not force-terminalize
+          // executing siblings; their own abort path owns live output, failure
+          // hooks, and final status.
           this.setStatusInternal(
             callId,
             'cancelled',
