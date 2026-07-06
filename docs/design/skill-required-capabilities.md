@@ -285,6 +285,10 @@ In this renderer configuration, `loadEcharts` lets the host provide the
 approved ECharts runtime, either as a static import or a lazy-loaded module.
 `resolveDataRef` is only used for `data.kind="ref"` chart blocks; it is the
 host-owned bridge from a model-visible data reference to a trusted dataset.
+The model-facing envelope format is described by the optional skill template in
+`packages/web-shell/docs/examples/qwencode-viz/SKILL.md`; the renderer-side
+validation lives in
+`packages/web-shell/client/components/messages/EchartsFullDataBlock.tsx`.
 
 The skill file should be installed or injected only by hosts that perform this
 registration. A simple file-based integration can copy:
@@ -304,11 +308,14 @@ file as the canonical source content and expose it through that layer. In both
 cases, core does not auto-load the skill; the host owns enabling it because the
 host owns the renderer.
 
-For `data.kind="ref"` envelopes, the renderer must use a host-controlled
-`resolveDataRef(ref, meta)` implementation. The renderer should not fetch
-arbitrary URLs or evaluate model-provided JavaScript; it should parse the block
-as JSON, resolve only trusted `artifact://` or `session-file://` references, and
-inject the resolved dataset into the ECharts option before rendering.
+For `data.kind="ref"` envelopes, the built-in renderer validates that `data.ref`
+uses a normalized `artifact://` or `session-file://` reference before it calls
+the host-controlled `resolveDataRef(ref, meta)` implementation. The renderer
+also parses the block as JSON and sanitizes the ECharts option before rendering;
+it does not evaluate model-provided JavaScript, fetch arbitrary URLs, or read
+local files by itself. A custom renderer should preserve the same split:
+renderer-level JSON/ref/option validation first, host-owned artifact resolution
+second.
 
 A daemon-backed host can treat the workspace file API as one artifact backend.
 For example, the host can persist chart artifacts under a controlled workspace
