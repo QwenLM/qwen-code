@@ -430,12 +430,16 @@ The effective auth/model/credential values are chosen per field using the follow
 | -------------------------- | ----------------------------------- | ----------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------ | ---------------------- | --------------------------------- |
 | Programmatic overrides     | `/auth`                             | `/auth` input                                   | `/auth` input                                         | `/auth` input                                          | —                      | —                                 |
 | Model provider selection   | —                                   | `modelProvider.id`                              | `env[modelProvider.envKey]`                           | `modelProvider.baseUrl`                                | `modelProvider.envKey` | —                                 |
-| CLI arguments              | `--auth-type`                       | `--model`                                       | `--openai-api-key` (or provider-specific equivalents) | `--openai-base-url` (or provider-specific equivalents) | —                      | —                                 |
+| CLI arguments              | `--auth-type`                       | `--model`                                       | `--openai-api-key`                                    | `--openai-base-url`                                    | —                      | —                                 |
 | Environment variables      | —                                   | Provider-specific mapping (e.g. `OPENAI_MODEL`) | Provider-specific mapping (e.g. `OPENAI_API_KEY`)     | Provider-specific mapping (e.g. `OPENAI_BASE_URL`)     | —                      | —                                 |
 | Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                                | `security.auth.baseUrl`                                | —                      | —                                 |
 | Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3.5-plus`)      | —                                                     | —                                                      | —                      | `Config.getProxy()` if configured |
 
 \*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
+
+> [!note]
+>
+> `--openai-api-key` and `--openai-base-url` are the only credential CLI flags. They apply to the active OpenAI-compatible provider regardless of its name — there are no `--anthropic-*` / `--gemini-*` credential flags. Provider-specific credentials that aren't passed on the CLI are resolved from environment variables (see the row below).
 
 > [!warning]
 >

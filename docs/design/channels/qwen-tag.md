@@ -856,7 +856,7 @@ Group gating works: `GroupGate` uses `envelope.isMentioned`, set from `data.isIn
 
 #### Markdown / card rendering
 
-`markdown.ts` already does the platform normalization the proactive path reuses: tables → pipe text (`convertTables()`, `:44-80`), chunking at 3800 chars with fence balancing (`splitChunks()`, `:84-188`; `CHUNK_LIMIT=3800`, `:10`), title extraction sliced to 20 chars with fallback `'Reply'` (`extractTitle()`, `:190-195`). Reuse is **conditional** on the `sampleMarkdown` template accepting the same markdown subset and a body up to **~5000 chars** _(verified high — message-type doc)_; keep `CHUNK_LIMIT` ≤ that budget. Streaming interactive cards (the `TOPIC_CARD` path, `constants.d.ts:4`) — the analogue of Feishu's streaming card — are **out of scope** for the primary milestone; v1 proactive is markdown-message-based.
+`markdown.ts` already does the platform normalization the proactive path reuses: markdown table passthrough, chunking at 3800 chars with fence balancing (`splitChunks()`; `CHUNK_LIMIT=3800`), and title extraction sliced to 20 chars with fallback `'Reply'` (`extractTitle()`). Reuse is **conditional** on the `sampleMarkdown` template accepting the same markdown subset and a body up to **~5000 chars** _(verified high — message-type doc)_; keep `CHUNK_LIMIT` ≤ that budget. Streaming interactive cards (the `TOPIC_CARD` path, `constants.d.ts:4`) — the analogue of Feishu's streaming card — are **out of scope** for the primary milestone; v1 proactive is markdown-message-based.
 
 #### Feishu follow-up (concise)
 
@@ -1062,7 +1062,7 @@ Each risk maps to a phase: R1/R3/R4 are Phase 0–1, R5/R6/R11/R12 are Phase 1, 
 
 - `DingtalkAdapter.ts` — `webhooks` map (`:84`), `sendMessage()` (`:134-170`, no-webhook return `:137-141`), webhook cache (`:516-517`), `getAccessToken()` (`:172-174`), `emotionApi()` (`:188-207`, robotCode `:184`, openConversationId `:197`, empty-catch anti-pattern `:214-216`), media robotCode (`:435`), inbound `conversationId` (`:506`), mention strip (`:527-529`), `isMentioned` (`:520`), `senderName` (`:544`), `extractQuotedContext()` (`:272-298`), `chatId` (`:534`), no `threadId` (`:541-551`).
 - `proactive.ts` (new) — `sendGroupMessage()` to `POST /v1.0/robot/groupMessages/send` (`robotCode`+`openConversationId`+`msgKey:'sampleMarkdown'`+`msgParam` JSON-string), `tokenManager` (v1.0 `oauth2/accessToken`, ~7200 s TTL, timer + 401 refresh), `chatId→openConversationId` conversion fallback.
-- `markdown.ts` — `convertTables()` (`:44-80`), `splitChunks()` (`:84-188`), `CHUNK_LIMIT=3800` (`:10`; ≤ the ~5000-char `sampleMarkdown` budget), `extractTitle()` (`:190-195`), `normalizeDingTalkMarkdown()` (`:198-201`).
+- `markdown.ts` — table passthrough, `splitChunks()`, `CHUNK_LIMIT=3800` (≤ the ~5000-char `sampleMarkdown` budget), `extractTitle()`, `normalizeDingTalkMarkdown()`.
 - `media.ts` — `downloadMedia` header (`:39`), body `:42`.
 - SDK: `client.mjs` gettoken (`:85-87`), reconnect (`:157-163`), event/callback split (`:14-19,35-37,58-61,241-257`); `constants.d.ts` `sessionWebhookExpiredTime` (`:13`), `robotCode` (`:19`), `TOPIC_CARD` (`:4`).
 
