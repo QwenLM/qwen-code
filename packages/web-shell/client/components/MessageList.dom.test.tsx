@@ -18,15 +18,18 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      isLocateFlashing,
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      isLocateFlashing?: boolean;
     }) =>
       React.createElement(
         'div',
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
         },
         message.role === 'thinking'
           ? React.createElement('button', {
@@ -456,6 +459,13 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    await nextFrame();
+
+    const targetMessage = c.querySelector('[data-testid="msg-u2"]');
+    expect(targetMessage?.getAttribute('data-locate-flashing')).toBe('true');
+    expect(targetMessage?.closest('[data-index]')?.className).not.toMatch(
+      /flash/i,
+    );
     scrollIntoView.mockRestore();
     rectSpy.mockRestore();
   });

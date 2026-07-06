@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { isSafeImageSrc } from './Markdown';
 import { useI18n } from '../../i18n';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
 interface UserMessageImage {
@@ -18,11 +19,13 @@ interface UserMessageImage {
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  isLocateFlashing?: boolean;
 }
 
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  isLocateFlashing = false,
 }: UserMessageProps) {
   const { t } = useI18n();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -50,7 +53,11 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={styles.chatMessageRow}>
-      <div className={styles.chatBubble}>
+      <div
+        className={`${styles.chatBubble}${
+          isLocateFlashing ? ` ${flashStyles.flash}` : ''
+        }`}
+      >
         <div
           ref={contentRef}
           className={`${styles.chatContent} ${

@@ -47,6 +47,7 @@ import {
   type ToolHeaderKind,
   useWebShellCustomization,
 } from '../../customization';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
@@ -54,6 +55,7 @@ interface ToolGroupProps {
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   shellOutputMaxLines?: number;
+  isLocateFlashing?: boolean;
 }
 
 const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
@@ -719,9 +721,11 @@ const getCompactDisplayStatus = getAgentDisplayStatus;
 function CompactToolGroup({
   tools,
   workspaceCwd,
+  isLocateFlashing = false,
 }: {
   tools: ACPToolCall[];
   workspaceCwd?: string;
+  isLocateFlashing?: boolean;
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
@@ -735,7 +739,11 @@ function CompactToolGroup({
       : formatElapsed(activeTool.startTime, activeTool.endTime);
 
   return (
-    <div className={styles.compactGroup}>
+    <div
+      className={`${styles.compactGroup}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       <div className={styles.compactHeader}>
         <StatusIcon status={overallStatus} />
         <span className={styles.lineName}>{displayName}</span>
@@ -1035,6 +1043,7 @@ export const ToolGroup = memo(function ToolGroup({
   pendingApproval,
   workspaceCwd,
   shellOutputMaxLines,
+  isLocateFlashing = false,
 }: ToolGroupProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
@@ -1058,12 +1067,18 @@ export const ToolGroup = memo(function ToolGroup({
   }, [hasRunningTool, activeTool?.callId]);
 
   if (showCompact) {
-    return <CompactToolGroup tools={tools} workspaceCwd={workspaceCwd} />;
+    return (
+      <CompactToolGroup
+        tools={tools}
+        workspaceCwd={workspaceCwd}
+        isLocateFlashing={isLocateFlashing}
+      />
+    );
   }
 
   if (!hasApprovalTool) {
     return (
-      <div>
+      <div className={isLocateFlashing ? flashStyles.flash : undefined}>
         <button
           type="button"
           className={styles.chatSummary}
@@ -1121,7 +1136,11 @@ export const ToolGroup = memo(function ToolGroup({
   }
 
   return (
-    <div className={styles.group}>
+    <div
+      className={`${styles.group}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       {tools.map((tool) => (
         <ToolLine
           key={tool.callId}
