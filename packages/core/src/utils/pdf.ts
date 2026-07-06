@@ -5,6 +5,7 @@
  */
 
 import { execFile, type ExecFileOptions } from 'node:child_process';
+import { estimateTextTokens } from './request-tokenizer/textTokenizer.js';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
 export const PDF_FULL_TEXT_PAGE_LIMIT = 10;
@@ -13,6 +14,8 @@ export const PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES = 100 * 1024;
 export const PDF_TEXT_RESULT_MAX_TOKENS = 12_000;
 const PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS = 64;
 const PDF_TEXT_RESULT_CHARS_PER_TOKEN = 4;
+export const PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE =
+  'pdftotext is not installed. Install poppler-utils to enable PDF text extraction (e.g. `apt-get install poppler-utils` or `brew install poppler`).';
 // Upper bound on a page number we're willing to forward to pdftotext.
 // Sits well below Number.MAX_SAFE_INTEGER so arithmetic in validation
 // (e.g. lastPage - firstPage + 1) stays exact, and well above any real
@@ -41,8 +44,8 @@ export function shouldRequirePDFPageRange(
 
 export function estimatePDFTextOutputTokens(text: string): number {
   return Math.ceil(
-    (text.length + PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS) /
-      PDF_TEXT_RESULT_CHARS_PER_TOKEN,
+    estimateTextTokens(text) +
+      PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS / PDF_TEXT_RESULT_CHARS_PER_TOKEN,
   );
 }
 
@@ -57,7 +60,11 @@ export function buildLargePDFGuidance(
 export function buildPDFTextTooLargeGuidance(
   displayName: string,
   estimatedTokens: number,
+  pagesUsed?: string,
 ): string {
+  if (pagesUsed && /^\d+$/.test(pagesUsed.trim())) {
+    return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.`;
+  }
   return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.`;
 }
 
@@ -276,8 +283,7 @@ export async function extractPDFText(
   if (!available) {
     return {
       success: false,
-      error:
-        'pdftotext is not installed. Install poppler-utils to enable PDF text extraction (e.g. `apt-get install poppler-utils` or `brew install poppler`).',
+      error: PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
     };
   }
 

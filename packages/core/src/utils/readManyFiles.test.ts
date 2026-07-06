@@ -17,17 +17,19 @@ import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
-import { getPDFPageCount } from './pdf.js';
+import { getPDFPageCount, isPdftotextAvailable } from './pdf.js';
 
 vi.mock('./pdf.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./pdf.js')>();
   return {
     ...actual,
     getPDFPageCount: vi.fn(),
+    isPdftotextAvailable: vi.fn(),
   };
 });
 
 const mockGetPDFPageCount = vi.mocked(getPDFPageCount);
+const mockIsPdftotextAvailable = vi.mocked(isPdftotextAvailable);
 
 /** Helper to convert PartListUnion to string for test assertions */
 function contentToString(parts: PartListUnion): string {
@@ -103,6 +105,8 @@ describe('readManyFiles', () => {
   beforeEach(async () => {
     mockGetPDFPageCount.mockReset();
     mockGetPDFPageCount.mockResolvedValue(null);
+    mockIsPdftotextAvailable.mockReset();
+    mockIsPdftotextAvailable.mockResolvedValue(true);
     tempRootDir = nodeFs.realpathSync(
       await fs.mkdtemp(path.join(os.tmpdir(), 'read-many-files-test-')),
     );
@@ -232,6 +236,7 @@ describe('readManyFiles', () => {
       expect(content.length).toBeLessThan(1000);
       expect(mockGetPDFPageCount).toHaveBeenCalledTimes(1);
       expect(mockGetPDFPageCount).toHaveBeenCalledWith(absolutePath);
+      expect(mockIsPdftotextAvailable).toHaveBeenCalledTimes(1);
 
       const status = cache.check(nodeFs.statSync(absolutePath));
       expect(status.state).toBe('fresh');

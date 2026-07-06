@@ -27,7 +27,9 @@ import {
   estimatePDFTextOutputTokens,
   extractPDFText,
   getPDFPageCount,
+  isPdftotextAvailable,
   parsePDFPageRange,
+  PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
   PDF_TEXT_RESULT_MAX_TOKENS,
   shouldRequirePDFPageRange,
 } from './pdf.js';
@@ -1011,13 +1013,29 @@ export async function processSingleFileContent(
     // pdftotext until the 30s timeout.
     const willExtractPdfText =
       fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
+    if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
+      return {
+        llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Split the document into smaller files before retrying.`,
+        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_EXTRACTION_MAX_MB}MB).`,
+        error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
     if (willExtractPdfText && !pages) {
-      const pageCount =
-        fileSizeInMB > PDF_EXTRACTION_MAX_MB
-          ? null
-          : await getPDFPageCount(filePath);
+      const pageCount = await getPDFPageCount(filePath);
       const requirement = shouldRequirePDFPageRange(pageCount, stats.size);
+      debugLogger.debug(
+        `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pageCount ?? 'unknown'}, required=${requirement.required}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
+      );
       if (requirement.required) {
+        if (!(await isPdftotextAvailable())) {
+          return {
+            llmContent: `[Cannot extract text from PDF: "${displayName}". ${PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE}]`,
+            returnDisplay: `Failed to read pdf: ${relativePathForDisplay}`,
+            error: PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
+            errorType: ToolErrorType.READ_CONTENT_FAILURE,
+          };
+        }
         const guidance = buildLargePDFGuidance(displayName, requirement);
         const returnDisplay =
           largePdfBehavior === 'reference'
@@ -1035,14 +1053,6 @@ export async function processSingleFileContent(
           stats,
         };
       }
-    }
-    if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
-      return {
-        llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document.`,
-        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_EXTRACTION_MAX_MB}MB).`,
-        error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
-        errorType: ToolErrorType.FILE_TOO_LARGE,
-      };
     }
     if (fileSizeInMB > 9.9 && !willExtractPdfText) {
       return {
@@ -1262,7 +1272,15 @@ export async function processSingleFileContent(
             const guidance = buildPDFTextTooLargeGuidance(
               displayName,
               estimatedTokens,
+              pages,
             );
+            if (!pages && largePdfBehavior === 'reference') {
+              return {
+                llmContent: guidance,
+                returnDisplay: `Referenced large PDF: ${relativePathForDisplay}`,
+                stats,
+              };
+            }
             return {
               llmContent: guidance,
               returnDisplay: `PDF text too large: ${relativePathForDisplay}`,

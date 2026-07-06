@@ -13,6 +13,8 @@ import {
   resetPdftotextCache,
   shouldRequirePDFPageRange,
   estimatePDFTextOutputTokens,
+  buildLargePDFGuidance,
+  buildPDFTextTooLargeGuidance,
 } from './pdf.js';
 
 vi.mock('node:child_process', () => ({
@@ -121,8 +123,42 @@ describe('pdf utilities', () => {
       });
     });
 
-    it('estimates dense PDF text output tokens using the same char ratio as prompt estimation', () => {
+    it('estimates dense ASCII PDF text output tokens with wrapper allowance', () => {
       expect(estimatePDFTextOutputTokens('x'.repeat(64_000))).toBe(16_016);
+    });
+
+    it('estimates dense non-ASCII PDF text conservatively', () => {
+      expect(estimatePDFTextOutputTokens('\u4e00'.repeat(45_000))).toBe(49_517);
+    });
+
+    it('builds exact page-range guidance for pdfinfo-backed and heuristic counts', () => {
+      expect(
+        buildLargePDFGuidance('paper.pdf', {
+          required: true,
+          effectivePageCount: 42,
+          hadPdfInfo: true,
+        }),
+      ).toBe(
+        "PDF \"paper.pdf\" has 42 pages, which is too many to read at once. Use the 'pages' parameter to read a specific page range such as '1-5'. Maximum 20 pages per request.",
+      );
+      expect(
+        buildLargePDFGuidance('scan.pdf', {
+          required: true,
+          effectivePageCount: 21,
+          hadPdfInfo: false,
+        }),
+      ).toBe(
+        "PDF \"scan.pdf\" appears to have about 21 pages, which is too many to read at once. Use the 'pages' parameter to read a specific page range such as '1-5'. Maximum 20 pages per request.",
+      );
+    });
+
+    it('builds exact dense-text guidance for range and single-page reads', () => {
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345)).toBe(
+        "PDF text extracted from \"paper.pdf\" is too large to return safely (12345 estimated tokens; limit 12000). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.",
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1')).toBe(
+        'PDF text extracted from "paper.pdf" is too large to return safely (12345 estimated tokens; limit 12000). The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.',
+      );
     });
   });
 
