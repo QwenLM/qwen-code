@@ -463,6 +463,9 @@ describe('handleGroup', () => {
 
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isMentioned']).toBe(true);
+    expect(env['text']).toContain('[atMention=true]');
     expect(replyMsgId.get('group-openid-1')?.msgId).toBe('msg-group-001');
   });
 
@@ -708,13 +711,16 @@ describe('群管理事件', () => {
       ] as Map<string, string>;
       const replyMsgId = (ch as unknown as Record<string, unknown>)[
         'replyMsgId'
-      ] as Map<string, string>;
+      ] as Map<string, { msgId: string; timestamp: number }>;
       const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
         'groupActiveMsgEnabled'
       ] as Map<string, boolean>;
 
       chatTypeMap.set('group-del-1', 'group');
-      replyMsgId.set('group-del-1', 'msg-xyz');
+      replyMsgId.set('group-del-1', {
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
       groupActiveMsgEnabled.set('group-del-1', true);
 
       const evt: GroupDelRobotEvent = {

@@ -667,13 +667,11 @@ export class QQChannel extends ChannelBase {
       process.off('beforeExit', this.beforeExitHook);
       this.beforeExitHook = null;
     }
-    // Clean up cron buffers
-    if (this.qqConfig['cron-msg-experimental']) {
-      for (const [, entry] of this.cronBuffer) {
-        if (entry.timer) clearTimeout(entry.timer);
-      }
-      this.cronBuffer.clear();
+    // Clean up cron buffers (always, regardless of config flag)
+    for (const [, entry] of this.cronBuffer) {
+      if (entry.timer) clearTimeout(entry.timer);
     }
+    this.cronBuffer.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.readyTimeout) {
@@ -2244,14 +2242,12 @@ export class QQChannel extends ChannelBase {
         this.streamState.delete(sid);
       }
     }
-    // Clean up cron buffers targeting this group
-    if (this.qqConfig['cron-msg-experimental']) {
-      for (const [sid, entry] of this.cronBuffer) {
-        const target = this.router.getTarget(sid);
-        if (target?.chatId === groupId) {
-          if (entry.timer) clearTimeout(entry.timer);
-          this.cronBuffer.delete(sid);
-        }
+    // Clean up cron buffers targeting this group (always, regardless of config flag)
+    for (const [sid, entry] of this.cronBuffer) {
+      const target = this.router.getTarget(sid);
+      if (target?.chatId === groupId) {
+        if (entry.timer) clearTimeout(entry.timer);
+        this.cronBuffer.delete(sid);
       }
     }
     this.saveQQState();
