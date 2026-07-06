@@ -444,6 +444,46 @@ describe('session artifact persistence records', () => {
     );
   });
 
+  it('remaps forked tombstone changes that omit artifact metadata', () => {
+    const source = artifact('source-session', 'https://example.com/deleted');
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 7,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          { action: 'created', artifactId: source.id, artifact: source },
+          {
+            action: 'removed',
+            artifactId: source.id,
+            reason: 'explicit',
+          },
+        ],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+
+    const forkedId = stableSessionArtifactId(
+      'forked-session',
+      'url:https://example.com/deleted',
+    );
+    expect(remapped.changes).toMatchObject([
+      {
+        action: 'created',
+        artifactId: forkedId,
+        artifact: { id: forkedId },
+      },
+      {
+        action: 'removed',
+        artifactId: forkedId,
+        reason: 'explicit',
+      },
+    ]);
+  });
+
   it('remaps forked snapshot payloads and drops bare tombstone state', () => {
     const source = artifact('source-session', 'https://example.com/snapshot', {
       retention: 'pinned',

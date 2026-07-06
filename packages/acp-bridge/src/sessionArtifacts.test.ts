@@ -169,6 +169,49 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('prevents one client from upserting another client retained artifact', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-upsert-owner',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Client A link',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-owned',
+        metadata: { owner: 'a' },
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await expect(
+      store.upsertMany([
+        {
+          title: 'Client B rewrite',
+          source: 'client',
+          clientId: 'client-b',
+          url: 'https://example.com/client-owned',
+          metadata: { owner: 'b' },
+          retention: 'restorable',
+        },
+      ]),
+    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          title: 'Client A link',
+          clientId: 'client-a',
+          metadata: { owner: 'a' },
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
   it('does not write live client ids into durable artifact records', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
@@ -2164,9 +2207,35 @@ describe('SessionArtifactStore', () => {
     expect(suppressed.changes).toEqual([]);
 
     const explicitClient = await store.upsertMany([
-      { ...input, source: 'client' },
+      {
+        ...input,
+        source: 'client',
+        clientId: 'client-a',
+        retention: 'restorable',
+      },
     ]);
-    expect(explicitClient.changes).toMatchObject([{ action: 'created' }]);
+    expect(explicitClient.changes).toEqual([]);
+  });
+
+  it('keeps restore warnings visible on the artifact list', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-warnings',
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId: 's11-restore-warnings',
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: ['skipped corrupt artifact record'],
+    });
+
+    await expect(store.list()).resolves.toMatchObject({
+      warnings: ['skipped corrupt artifact record'],
+    });
   });
 
   it('clears durable artifacts but preserves live ephemerals for rewind without a snapshot', async () => {

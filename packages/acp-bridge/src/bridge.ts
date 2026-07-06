@@ -2698,31 +2698,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ) {
     return {
       recordEvent: async (payload: unknown): Promise<void> => {
-        await withTimeout(
-          connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
-            {
-              sessionId,
-              kind: 'event',
-              payload,
-            },
-          ),
-          PERSIST_TIMEOUT_MS,
-          'sessionArtifactPersist(event)',
+        await connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+          {
+            sessionId,
+            kind: 'event',
+            payload,
+          },
         );
       },
       recordSnapshot: async (payload: unknown): Promise<void> => {
-        await withTimeout(
-          connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
-            {
-              sessionId,
-              kind: 'snapshot',
-              payload,
-            },
-          ),
-          PERSIST_TIMEOUT_MS,
-          'sessionArtifactPersist(snapshot)',
+        await connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+          {
+            sessionId,
+            kind: 'snapshot',
+            payload,
+          },
         );
       },
     };
@@ -3144,6 +3136,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         clientId,
         createdAt: entry.createdAt,
         state,
+        ...(artifactRestoreWarnings.length > 0
+          ? { artifactWarnings: artifactRestoreWarnings }
+          : {}),
         hasActivePrompt: entry.promptActive,
         ...replayFieldsFor(entry, action),
       };

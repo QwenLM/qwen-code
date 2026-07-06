@@ -58,6 +58,7 @@ const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
 const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
+const MAX_TOMBSTONED_IDS = 500;
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -82,7 +83,7 @@ export interface SessionArtifactInput extends ToolArtifactLike {
   clientId?: string;
 }
 
-type LegacySessionArtifactInput = Omit<SessionArtifactInput, 'retention'> & {
+type RestoreSessionArtifactInput = Omit<SessionArtifactInput, 'retention'> & {
   retention?: SessionArtifactRetention;
 };
 
@@ -212,7 +213,9 @@ export class SessionArtifactStore {
   private realWorkspaceCwdPromise?: Promise<string>;
   private operationQueue: Promise<void> = Promise.resolve();
   private readonly tombstonedIds = new Set<string>();
+  private readonly tombstonedClientIds = new Map<string, string | undefined>();
   private readonly stickyEphemeralIds = new Set<string>();
+  private lastRestoreWarnings: string[] = [];
 
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
@@ -236,6 +239,9 @@ export class SessionArtifactStore {
           .map(toPublicArtifact),
         generatedAt: new Date().toISOString(),
         limits: { maxArtifacts: this.maxArtifacts },
+        ...(this.lastRestoreWarnings.length > 0
+          ? { warnings: [...this.lastRestoreWarnings] }
+          : {}),
       };
     });
   }
@@ -319,6 +325,9 @@ export class SessionArtifactStore {
             continue;
           }
 
+          this.denyCrossClientMutation('upsert', existing.id, existing, {
+            clientId: artifact.clientId,
+          });
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
             if (updated.artifact.id !== existing.id) {
@@ -346,7 +355,11 @@ export class SessionArtifactStore {
           ...(await this.persistChanges(changes, persistenceStrict)),
         );
       } catch (error) {
-        if (validationStrict || persistenceStrict) {
+        if (
+          validationStrict ||
+          persistenceStrict ||
+          error instanceof SessionArtifactAuthorizationError
+        ) {
           this.restoreState(before);
         }
         throw error;
@@ -471,6 +484,7 @@ export class SessionArtifactStore {
       let restoredCount = 0;
       this.artifacts.clear();
       this.tombstonedIds.clear();
+      this.tombstonedClientIds.clear();
       this.stickyEphemeralIds.clear();
       if (snapshot) {
         this.insertSeq = 0;
@@ -548,6 +562,7 @@ export class SessionArtifactStore {
         warnings.push(
           'artifact snapshot restore failed; kept existing live artifacts',
         );
+        this.setLastRestoreWarnings(warnings);
         return warnings;
       }
       for (const artifact of preservedLiveEphemeralArtifacts) {
@@ -567,6 +582,7 @@ export class SessionArtifactStore {
         warnings.push('restored artifact list pruned to live limit');
         warnings.push(...(await this.persistChanges(evicted, false)));
       }
+      this.setLastRestoreWarnings(warnings);
       return warnings;
     });
   }
@@ -604,7 +620,9 @@ export class SessionArtifactStore {
     durableEventsSinceSnapshot: number;
     consecutiveSnapshotFailures: number;
     tombstonedIds: Set<string>;
+    tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
+    lastRestoreWarnings: string[];
   } {
     return {
       artifacts: new Map(
@@ -619,7 +637,9 @@ export class SessionArtifactStore {
       durableEventsSinceSnapshot: this.durableEventsSinceSnapshot,
       consecutiveSnapshotFailures: this.consecutiveSnapshotFailures,
       tombstonedIds: new Set(this.tombstonedIds),
+      tombstonedClientIds: new Map(this.tombstonedClientIds),
       stickyEphemeralIds: new Set(this.stickyEphemeralIds),
+      lastRestoreWarnings: [...this.lastRestoreWarnings],
     };
   }
 
@@ -631,7 +651,9 @@ export class SessionArtifactStore {
     durableEventsSinceSnapshot: number;
     consecutiveSnapshotFailures: number;
     tombstonedIds: Set<string>;
+    tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
+    lastRestoreWarnings: string[];
   }): void {
     this.artifacts.clear();
     for (const [id, artifact] of state.artifacts) {
@@ -646,10 +668,15 @@ export class SessionArtifactStore {
     for (const id of state.tombstonedIds) {
       this.tombstonedIds.add(id);
     }
+    this.tombstonedClientIds.clear();
+    for (const [id, clientId] of state.tombstonedClientIds) {
+      this.tombstonedClientIds.set(id, clientId);
+    }
     this.stickyEphemeralIds.clear();
     for (const id of state.stickyEphemeralIds) {
       this.stickyEphemeralIds.add(id);
     }
+    this.setLastRestoreWarnings(state.lastRestoreWarnings);
   }
 
   private async persistChanges(
@@ -709,10 +736,11 @@ export class SessionArtifactStore {
         throw error;
       }
       const reason = error instanceof Error ? error.message : String(error);
+      const artifactIds = durableChanges.map((change) => change.artifactId);
       writeStderrLine(
-        `[artifacts] session=${this.sessionId} action=persist_failed reason=${JSON.stringify(
-          reason,
-        )}`,
+        `[artifacts] session=${this.sessionId} action=persist_failed sequence=${payload.sequence} artifactIds=${JSON.stringify(
+          artifactIds,
+        )} reason=${JSON.stringify(reason)}`,
       );
       return this.downgradeDurableChanges(durableChanges);
     }
@@ -804,7 +832,7 @@ export class SessionArtifactStore {
     for (const change of changes) {
       if (change.action === 'removed') {
         if (change.reason === 'explicit') {
-          this.tombstonedIds.add(change.artifactId);
+          this.rememberTombstone(change);
           this.stickyEphemeralIds.delete(change.artifactId);
         } else if (change.reason === 'eviction') {
           this.stickyEphemeralIds.delete(change.artifactId);
@@ -815,9 +843,26 @@ export class SessionArtifactStore {
       }
       if (change.artifact && change.artifact.retention !== 'ephemeral') {
         this.tombstonedIds.delete(change.artifactId);
+        this.tombstonedClientIds.delete(change.artifactId);
         this.stickyEphemeralIds.delete(change.artifactId);
       }
     }
+  }
+
+  private rememberTombstone(change: SessionArtifactChange): void {
+    this.tombstonedIds.delete(change.artifactId);
+    this.tombstonedIds.add(change.artifactId);
+    this.tombstonedClientIds.set(change.artifactId, change.artifact?.clientId);
+    while (this.tombstonedIds.size > MAX_TOMBSTONED_IDS) {
+      const oldest = this.tombstonedIds.values().next().value;
+      if (oldest === undefined) break;
+      this.tombstonedIds.delete(oldest);
+      this.tombstonedClientIds.delete(oldest);
+    }
+  }
+
+  private setLastRestoreWarnings(warnings: readonly string[]): void {
+    this.lastRestoreWarnings = [...warnings];
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -830,7 +875,7 @@ export class SessionArtifactStore {
   }
 
   private denyCrossClientMutation(
-    action: 'remove' | 'pin' | 'unpin',
+    action: 'remove' | 'pin' | 'unpin' | 'upsert',
     artifactId: string,
     existing: StoredArtifact,
     options?: { clientId?: string },
@@ -854,7 +899,7 @@ export class SessionArtifactStore {
   }
 
   private async normalizeInput(
-    input: LegacySessionArtifactInput,
+    input: RestoreSessionArtifactInput,
     receivedSeq: number,
     trustedPublisherFromCaller: boolean,
   ): Promise<NormalizedArtifact> {
@@ -979,7 +1024,13 @@ export class SessionArtifactStore {
     if (!this.tombstonedIds.has(artifact.id)) {
       return false;
     }
-    return artifact.source !== 'client' && !artifact.retentionExplicit;
+    const tombstonedClientId = this.tombstonedClientIds.get(artifact.id);
+    return !(
+      artifact.source === 'client' &&
+      artifact.retentionExplicit &&
+      artifact.clientId !== undefined &&
+      artifact.clientId === tombstonedClientId
+    );
   }
 
   private async refreshWorkspaceStatuses(): Promise<void> {
@@ -1558,7 +1609,7 @@ function toPublicArtifact(
 
 function persistedArtifactToInput(
   artifact: PersistedSessionArtifact,
-): LegacySessionArtifactInput {
+): RestoreSessionArtifactInput {
   return {
     title: artifact.title,
     kind: artifact.kind,

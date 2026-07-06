@@ -1301,7 +1301,7 @@ describe('createAcpSessionBridge', () => {
                     updatedAt: '2026-07-04T00:00:00.000Z',
                   },
                 ],
-                warnings: [],
+                warnings: ['skipped corrupt artifact record'],
               },
             }) as LoadSessionResponse,
         }).channel,
@@ -1311,10 +1311,14 @@ describe('createAcpSessionBridge', () => {
       sessionId,
       workspaceCwd: WS_A,
     });
+    expect(loaded.artifactWarnings).toEqual([
+      'skipped corrupt artifact record',
+    ]);
 
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
     ).resolves.toMatchObject({
+      warnings: ['skipped corrupt artifact record'],
       artifacts: [
         {
           id: artifactId,

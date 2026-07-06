@@ -19,9 +19,6 @@ export type SessionArtifactRestoreState =
 
 export type SessionArtifactPersistenceWarning =
   | 'persistence_unavailable'
-  | 'content_missing'
-  | 'content_expired'
-  | 'content_hash_mismatch'
   | 'metadata_only_restore'
   | 'restore_validation_failed'
   | 'sticky_override_active';
@@ -271,6 +268,7 @@ export function remapSessionArtifactPayloadForFork(
 
   const event = normalizeEventPayload(payload, []);
   if (!event) return payload;
+  const remappedArtifactIds = new Map<string, string>();
   return {
     ...event,
     sessionId: newSessionId,
@@ -282,13 +280,24 @@ export function remapSessionArtifactPayloadForFork(
             sourceSessionId,
             newSessionId,
           );
+          remappedArtifactIds.set(change.artifactId, artifact.id);
           return {
             ...change,
             artifactId: artifact.id,
             artifact,
           };
         }
-        if (change.action === 'removed') return undefined;
+        if (change.action === 'removed') {
+          return {
+            ...change,
+            artifactId:
+              remappedArtifactIds.get(change.artifactId) ??
+              stableSessionArtifactId(
+                newSessionId,
+                `fork:${sourceSessionId}:${change.artifactId}`,
+              ),
+          };
+        }
         return change;
       })
       .filter((change) => change !== undefined),
