@@ -1453,13 +1453,13 @@ describe('restoreQQState validation filters', () => {
         replyMsgId: Map<string, { msgId: string; timestamp: number }>;
       }
     ).replyMsgId;
-    expect(replyMsgId.size).toBe(6);
+    expect(replyMsgId.size).toBe(3);
     expect(replyMsgId.get('a')?.msgId).toBe('valid-id');
     expect(replyMsgId.get('b')?.msgId).toBe('x'.repeat(128));
     expect(replyMsgId.get('f')?.msgId).toBe('');
-    expect(replyMsgId.has('c')).toBe(true);
-    expect(replyMsgId.has('d')).toBe(true);
-    expect(replyMsgId.has('e')).toBe(true);
+    expect(replyMsgId.has('c')).toBe(false);
+    expect(replyMsgId.has('d')).toBe(false);
+    expect(replyMsgId.has('e')).toBe(false);
   });
 
   it('filters replyMsgId entries with far-future timestamps', () => {
@@ -1509,13 +1509,13 @@ describe('restoreQQState validation filters', () => {
 
     const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
       .msgSeqMap;
-    expect(msgSeqMap.size).toBe(3);
+    expect(msgSeqMap.size).toBe(2);
     expect(msgSeqMap.get('a')).toBe(0);
     expect(msgSeqMap.get('b')).toBe(42);
     expect(msgSeqMap.has('c')).toBe(false);
     expect(msgSeqMap.has('d')).toBe(false);
     expect(msgSeqMap.has('e')).toBe(false);
-    expect(msgSeqMap.has('f')).toBe(true);
+    expect(msgSeqMap.has('f')).toBe(false);
     expect(msgSeqMap.has('g')).toBe(false);
   });
 
@@ -1534,12 +1534,12 @@ describe('restoreQQState validation filters', () => {
 
     const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
       .msgSeqMap;
-    expect(msgSeqMap.size).toBe(4);
+    expect(msgSeqMap.size).toBe(2);
     expect(msgSeqMap.get('e')).toBe(42);
     expect(msgSeqMap.get('f')).toBe(0);
-    // PR-D now filters Infinity/NaN via Number.isFinite; 1e999 becomes Infinity and is rejected
-    expect(msgSeqMap.has('a')).toBe(true);
-    expect(msgSeqMap.has('b')).toBe(true);
+    // Now filtered by Number.isSafeInteger: 1.5, overflow, Infinity/-Infinity all rejected
+    expect(msgSeqMap.has('a')).toBe(false);
+    expect(msgSeqMap.has('b')).toBe(false);
     expect(msgSeqMap.has('c')).toBe(false);
     expect(msgSeqMap.has('d')).toBe(false);
   });

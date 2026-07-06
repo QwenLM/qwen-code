@@ -133,7 +133,8 @@ export class QQChannel extends ChannelBase {
   private coldStart: boolean = true;
   /** Track per-group active message permission. */
   private groupActiveMsgEnabled: Map<string, boolean> = new Map();
-  /** Lazy cache for filtered, lowercased keyword triggers. */
+  /** Lazy cache for filtered, lowercased keyword triggers.
+   * Never invalidated — keywordTriggers is not modified at runtime. */
   private _keywordTriggerCache: string[] | null = null;
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
@@ -143,7 +144,7 @@ export class QQChannel extends ChannelBase {
   > = new Map();
   /** Retry count per session for cron buffer flush. */
   private cronRetryCount: Map<string, number> = new Map();
-  private static readonly MAX_CRON_RETRIES = 3;
+  private static readonly MAX_CRON_RETRIES = 1;
 
   /** Named handler for permanent textChunk listener (cron/non-prompt). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
@@ -275,7 +276,7 @@ export class QQChannel extends ChannelBase {
                     const retries =
                       (this.cronRetryCount.get(sessionId) ?? 0) + 1;
                     this.cronRetryCount.set(sessionId, retries);
-                    if (retries >= QQChannel.MAX_CRON_RETRIES) {
+                    if (retries > QQChannel.MAX_CRON_RETRIES) {
                       process.stderr.write(
                         `[QQ:${this.name}] Cron flush (size cap) exhausted retries (${QQChannel.MAX_CRON_RETRIES}) for ${sessionId}, discarding\n`,
                       );
@@ -340,7 +341,7 @@ export class QQChannel extends ChannelBase {
                     const retries =
                       (this.cronRetryCount.get(sessionId) ?? 0) + 1;
                     this.cronRetryCount.set(sessionId, retries);
-                    if (retries >= QQChannel.MAX_CRON_RETRIES) {
+                    if (retries > QQChannel.MAX_CRON_RETRIES) {
                       process.stderr.write(
                         `[QQ:${this.name}] Cron flush exhausted retries (${QQChannel.MAX_CRON_RETRIES}) for ${sessionId}, discarding\n`,
                       );
@@ -1195,23 +1196,21 @@ export class QQChannel extends ChannelBase {
           Array.isArray(arr)
             ? arr
                 .filter(([k]) => typeof k === 'string' && k.length <= 256)
+                .filter(([, v]) => {
+                  if (typeof v === 'string' && v.length <= 128) return true;
+                  if (v === null || typeof v !== 'object') return false;
+                  const o = v as Record<string, unknown>;
+                  return (
+                    typeof o['msgId'] === 'string' &&
+                    (o['msgId'] as string).length <= 128 &&
+                    typeof o['timestamp'] === 'number'
+                  );
+                })
                 .map(([k, v]) => [
                   k,
-                  typeof v === 'string' && v.length <= 128
+                  typeof v === 'string'
                     ? { msgId: v, timestamp: Date.now() }
-                    : v !== null &&
-                        typeof v === 'object' &&
-                        typeof (v as Record<string, unknown>)['msgId'] ===
-                          'string' &&
-                        ((v as Record<string, unknown>)['msgId'] as string)
-                          .length <= 128 &&
-                        typeof (v as Record<string, unknown>)['timestamp'] ===
-                          'number' &&
-                        Number.isFinite(
-                          (v as Record<string, unknown>)['timestamp'] as number,
-                        )
-                      ? (v as { msgId: string; timestamp: number })
-                      : { msgId: '', timestamp: 0 },
+                    : (v as { msgId: string; timestamp: number }),
                 ])
             : [],
         );
@@ -1224,8 +1223,9 @@ export class QQChannel extends ChannelBase {
                 ([k, v]) =>
                   typeof k === 'string' &&
                   k.length <= 256 &&
-                  Number.isFinite(v as number) &&
-                  (v as number) >= 0,
+                  typeof v === 'number' &&
+                  Number.isSafeInteger(v) &&
+                  v >= 0,
               )
             : [],
         ) as Map<string, number>;
@@ -1997,6 +1997,7 @@ export class QQChannel extends ChannelBase {
   private prepareGroupMessage(
     event: QQGroupMessageEvent,
     chatId: string,
+    { forceAtMention }: { forceAtMention?: boolean } = {},
   ): {
     isAtBot: boolean;
     isSlash: boolean;
@@ -2028,7 +2029,9 @@ export class QQChannel extends ChannelBase {
       this.extractBotOpenId(event.mentions, chatId);
     }
 
-    const isSlash = isAtBot && cleanText.startsWith('/');
+    const effectiveIsAtBot = forceAtMention ?? isAtBot;
+
+    const isSlash = effectiveIsAtBot && cleanText.startsWith('/');
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
     // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
@@ -2058,10 +2061,10 @@ export class QQChannel extends ChannelBase {
       : '';
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${suffixFromBotOpenId}`;
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${suffixFromBotOpenId}`;
 
     return {
-      isAtBot,
+      isAtBot: effectiveIsAtBot,
       isSlash,
       safeName,
       senderOpenId,
@@ -2144,33 +2147,11 @@ export class QQChannel extends ChannelBase {
     // drops when GROUP_MESSAGE_CREATE fires before GROUP_AT_MESSAGE_CREATE
     // for the same message.
 
-    const result = this.prepareGroupMessage(event, chatId);
+    const result = this.prepareGroupMessage(event, chatId, {
+      forceAtMention: true,
+    });
     if (!result) return;
-    const { isAtBot, isSlash, text, senderName, cleanText } = result;
-
-    // GROUP_AT_MESSAGE_CREATE only fires when the bot IS @mentioned, so
-    // finalIsAtBot is unconditionally true. If isAtBot (from mentions array)
-    // was false due to a platform-side mention detection quirk, still treat
-    // it as @-bot to prevent silent message drops.
-    if (!isAtBot) {
-      process.stderr.write(
-        `[QQ:${this.name}] GROUP_AT_MESSAGE_CREATE with isAtBot=false, forcing true (event type guarantees @-bot)\n`,
-      );
-    }
-    const finalIsAtBot = true;
-
-    // Fix the text template: replace [atMention=false] with [atMention=true]
-    // since the event type guarantees the message was @-bot.
-    const correctedText = !isAtBot
-      ? text.replace('[atMention=false]', '[atMention=true]')
-      : text;
-    // When finalIsAtBot is forced, also correct isSlash so slash commands like /clear are not treated as plain text.
-    // Also correct the text to use clean command form when isSlash was missed.
-    const correctedIsSlash = !isAtBot ? cleanText.startsWith('/') : isSlash;
-    const correctedTextFinal =
-      correctedIsSlash && !isSlash
-        ? sanitizePromptText(cleanText)
-        : correctedText;
+    const { isSlash, text, senderName } = result;
 
     // GROUP_AT_MESSAGE_CREATE always has finalIsAtBot=true, so @-bot
     // messages are always delivered. Log when active messages are disabled.
@@ -2199,12 +2180,12 @@ export class QQChannel extends ChannelBase {
       senderId,
       senderName,
       chatId,
-      text: correctedTextFinal,
+      text,
       messageId: event.id,
       isGroup: true,
-      isMentioned: finalIsAtBot,
-      isReplyToBot: finalIsAtBot,
-      ...(correctedIsSlash ? {} : { alreadyPrefixed: true as const }),
+      isMentioned: true,
+      isReplyToBot: true,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
