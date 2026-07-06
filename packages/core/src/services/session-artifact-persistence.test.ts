@@ -392,6 +392,41 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.artifacts[0]).toMatchObject({ clientId: 'client-a' });
   });
 
+  it('preserves near-limit user metadata with workspace hash metadata', () => {
+    const metadata = {
+      payload: 'x'.repeat(4096),
+      'qwen.workspace.sha256': 'a'.repeat(64),
+      'qwen.workspace.mtimeMs': 123,
+    };
+    while (
+      Buffer.byteLength(JSON.stringify({ payload: metadata.payload }), 'utf8') >
+      4096
+    ) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+    const restored = artifact('s1', 'https://example.com/workspace-budget', {
+      storage: 'workspace',
+      workspacePath: 'budget.txt',
+      url: undefined,
+      sizeBytes: 6,
+      metadata,
+    });
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          { action: 'created', artifactId: restored.id, artifact: restored },
+        ],
+      }),
+    ]);
+
+    expect(snapshot?.artifacts[0]?.metadata).toMatchObject(metadata);
+  });
+
   it('remaps forked payloads to the new session without carrying pinned content', () => {
     const source = artifact('source-session', 'https://example.com/report', {
       retention: 'pinned',
