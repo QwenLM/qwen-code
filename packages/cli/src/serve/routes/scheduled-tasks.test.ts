@@ -272,6 +272,26 @@ describe('scheduled-tasks routes', () => {
     await fsp.writeFile(file, JSON.stringify([task]), 'utf8');
   };
 
+  it('normalizes a legacy task (no name/enabled) on GET', async () => {
+    // Pre-fields format, as tool-created tasks were written before this PR.
+    await seedTask({
+      id: 'leg1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+    });
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    // Backward compatibility: absent name → null, absent enabled → true.
+    expect(res.body.tasks[0]).toMatchObject({
+      id: 'leg1',
+      name: null,
+      enabled: true,
+    });
+  });
+
   it('re-enabling a previously-fired task resumes from now (no catch-up)', async () => {
     const createdAt = 1_700_000_000_000;
     const firedAt = createdAt + 3 * 86_400_000; // a genuine past fire
