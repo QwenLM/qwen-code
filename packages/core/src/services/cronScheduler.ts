@@ -1262,7 +1262,13 @@ export class CronScheduler {
             // never accrue history — they're deleted the moment they fire.
             .map((t) => {
               const stamp = firedAt.get(t.id);
-              if (stamp === undefined) return t;
+              // Never regress lastFiredAt: a concurrent writer (a manual
+              // POST /run, or a catch-up persist) may have stamped a NEWER value
+              // between this tick's read and write; overwriting it with the older
+              // tick slot could re-open an already-covered slot. Mirrors the
+              // catch-up persist's equality guard.
+              if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
+                return t;
               return {
                 ...t,
                 lastFiredAt: stamp,

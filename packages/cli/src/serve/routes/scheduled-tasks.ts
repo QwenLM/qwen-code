@@ -514,22 +514,8 @@ export function registerScheduledTasksRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
-        // Re-seat a recurring task's schedule anchor to "now" whenever an edit
-        // would otherwise let the NEXT reload retroactively fire an already-past
-        // slot. Three cases, all only when the task ends up ENABLED + recurring:
-        //  - false→true re-enable: don't run fires the task "missed" while the
-        //    user had it paused (applies even to a task disabled before it ever
-        //    ran, so its paused slot isn't treated as overdue on next load).
-        //  - cron changed: a new expression whose last matching slot is in the
-        //    past must not fire immediately on save. This matters especially for
-        //    a session-bound task, whose catch-up runs on every file-watch
-        //    reload (not just initial load), so a bare cron edit would fire it.
-        //  - one-shot→recurring: the anchor source flips from createdAt to
-        //    lastFiredAt, so re-seat it rather than inherit a stale value.
-        // Skipped when the task ends up disabled (it won't fire) — the eventual
-        // re-enable re-seats it then. (Trade-off: a re-seated never-run task
-        // reads "last run: now" not "never run" — cosmetic, preferred over an
-        // unwanted real fire.)
+        // Re-seat the task's schedule anchor to "now" whenever an edit would
+        // otherwise let the scheduler retroactively fire an already-past slot.
         const justReEnabled =
           current.enabled === false && patch.enabled === true;
         // Compare the EFFECTIVE schedule, not the raw string: a cosmetic edit
@@ -540,13 +526,29 @@ export function registerScheduledTasksRoutes(
           canonicalCron(patch.cron) !== canonicalCron(current.cron);
         const becameRecurring =
           patch.recurring === true && current.recurring !== true;
-        if (
-          next.enabled !== false &&
-          next.recurring &&
-          (justReEnabled || cronChanged || becameRecurring)
-        ) {
+        const becameOneShot =
+          patch.recurring === false && current.recurring !== false;
+        if (next.enabled !== false) {
           const now = Date.now();
-          next.lastFiredAt = now - (now % 60_000);
+          const minute = now - (now % 60_000);
+          if (
+            next.recurring &&
+            (justReEnabled || cronChanged || becameRecurring)
+          ) {
+            // A recurring task's anchor is lastFiredAt: resume from now so a
+            // re-enable / cron edit / one-shot→recurring flip doesn't retroactively
+            // fire a past slot (matters most for a bound task, whose catch-up runs
+            // on every file-watch reload).
+            next.lastFiredAt = minute;
+          } else if (!next.recurring && (cronChanged || becameOneShot)) {
+            // A one-shot's anchor is createdAt. Re-seat it on a schedule change
+            // (cron edit, or recurring→one-shot) so the task fires at its NEXT
+            // occurrence — otherwise the scheduler reads its original long-past
+            // slot as a MISSED one-shot and fires + permanently deletes it. Not
+            // on a bare re-enable: a paused one-shot resumes on its own schedule.
+            next.createdAt = now;
+            next.lastFiredAt = minute;
+          }
         }
         updated = next;
         return tasks.map((t, i) => (i === idx ? next : t));
@@ -690,6 +692,13 @@ export function registerScheduledTasksRoutes(
           }),
         };
         updated = next;
+        // A one-shot's manual run IS its single fire — remove it from the store
+        // so the scheduler doesn't ALSO fire it at its original scheduled time
+        // (its slot is still in the future, so stamping lastFiredAt=now wouldn't
+        // stop that fire). The response still returns the recorded run.
+        if (!current.recurring) {
+          return tasks.filter((_, i) => i !== idx);
+        }
         return tasks.map((t, i) => (i === idx ? next : t));
       });
     } catch (err) {

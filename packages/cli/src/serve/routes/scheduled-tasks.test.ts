@@ -9,9 +9,13 @@ import type { Request } from 'express';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { Storage, getCronFilePath } from '@qwen-code/qwen-code-core';
+import {
+  SessionService,
+  Storage,
+  getCronFilePath,
+} from '@qwen-code/qwen-code-core';
 import { registerScheduledTasksRoutes } from './scheduled-tasks.js';
 
 function safeBody(req: Request): Record<string, unknown> {
@@ -214,6 +218,27 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks).toEqual([]);
   });
 
+  it('rolls back the minted session (close + remove) when the commit fails', async () => {
+    // Corrupt the tasks file so the spawn SUCCEEDS but the authoritative write
+    // throws → the rollback must both close the live child AND remove the
+    // persisted session, or a rejected create leaks an orphan session.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, 'CORRUPT {{{', 'utf8');
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    try {
+      const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+      expect(res.status).toBe(500);
+      expect(h.bridge.spawned).toHaveLength(1); // spawn happened
+      expect(h.bridge.closed).toEqual([h.bridge.spawned[0]]); // closed
+      expect(removeSpy).toHaveBeenCalledWith(h.bridge.spawned[0]); // and removed
+    } finally {
+      removeSpy.mockRestore();
+    }
+  });
+
   it('rejects an unparseable cron', async () => {
     const res = await create({ cron: 'not a cron', prompt: 'x' });
     expect(res.status).toBe(400);
@@ -358,6 +383,40 @@ describe('scheduled-tasks routes', () => {
     const res = await request(h.app).post('/scheduled-tasks/arch3/run');
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('task_disabled');
+  });
+
+  it('removes a ONE-SHOT task on manual run (so the scheduler cannot fire it again)', async () => {
+    await seedTask({
+      id: 'os-run',
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+    });
+    const res = await request(h.app).post('/scheduled-tasks/os-run/run');
+    expect(res.status).toBe(200);
+    expect(res.body.runs.at(-1).kind).toBe('manual'); // run recorded in response
+    // The one-shot is gone from the store — its single fire already happened.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toEqual([]);
+  });
+
+  it('keeps a RECURRING task on manual run (only stamps lastFiredAt)', async () => {
+    await seedTask({
+      id: 'rec-run',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+    });
+    const res = await request(h.app).post('/scheduled-tasks/rec-run/run');
+    expect(res.status).toBe(200);
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toHaveLength(1); // still scheduled
   });
 
   it('rejects a create past the max-tasks cap without spawning a session', async () => {
@@ -731,6 +790,31 @@ describe('scheduled-tasks routes', () => {
     expect(patch.status).toBe(200);
     expect(patch.body.recurring).toBe(true);
     expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
+  });
+
+  it('flipping recurring→one-shot re-seats createdAt so it fires next, not as missed', async () => {
+    // A long-ago createdAt would make the new one-shot read as a MISSED slot the
+    // scheduler fires + deletes immediately. Re-seating createdAt to now points
+    // its next fire at the upcoming occurrence instead.
+    const createdAt = 1_700_000_000_000;
+    const firedAt = createdAt + 3 * 86_400_000;
+    await seedTask({
+      id: 'r2o',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt,
+      lastFiredAt: firedAt,
+      enabled: true,
+    });
+    const now = Date.now();
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/r2o')
+      .send({ recurring: false });
+    expect(patch.status).toBe(200);
+    expect(patch.body.recurring).toBe(false);
+    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
   });
 
   it('rejects re-enabling an archive-disabled task via PATCH (409, no write)', async () => {
