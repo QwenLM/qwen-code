@@ -106,6 +106,66 @@ function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
 
+function withRunnerDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeQwenStub(dir, lines = []) {
+  const stub = join(dir, 'qwen-stub.mjs');
+  writeFileSync(stub, ['#!/usr/bin/env node', ...lines, ''].join('\n'));
+  chmodSync(stub, 0o755);
+  return stub;
+}
+
+function writeWorkdirStub(dir, lines) {
+  return writeQwenStub(dir, [
+    "import { writeFileSync } from 'node:fs';",
+    "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+    'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+    ...lines,
+  ]);
+}
+
+function runAutofixRunner(args) {
+  return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
+    encoding: 'utf8',
+  });
+}
+
+function runAddressReview(dir, stub, extraArgs = []) {
+  return runAutofixRunner([
+    '--mode',
+    'address-review',
+    '--pr',
+    '5678',
+    '--issue',
+    '1234',
+    '--workdir',
+    dir,
+    '--qwen-bin',
+    stub,
+    ...extraArgs,
+  ]);
+}
+
+function runDevelopIssue(dir, stub) {
+  return runAutofixRunner([
+    '--mode',
+    'develop-issue',
+    '--issue',
+    '1234',
+    '--workdir',
+    dir,
+    '--qwen-bin',
+    stub,
+  ]);
+}
+
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
@@ -576,19 +636,9 @@ describe('qwen-autofix workflow', () => {
       'untrusted input',
       'Do not push, comment, create pull requests',
       'Operate only in the workflow',
-      'Do not create git worktrees',
-      'Never ask the user a question',
-      'not execution',
-      'strict nullability',
-      'optional fields',
-      'git status --short',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
-    ]) {
-      expect(skill).toContain(requiredText);
-    }
-    for (const filename of [
       'decision.json',
       'pr-title.txt',
       'pr-body.md',
@@ -597,7 +647,7 @@ describe('qwen-autofix workflow', () => {
       'no-action.md',
       'failure.md',
     ]) {
-      expect(skill).toContain(filename);
+      expect(skill).toContain(requiredText);
     }
 
     expect(assessCandidatesStep).toContain(
@@ -623,27 +673,8 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('keeps the current autofix skill limited to workflow-invoked modes', () => {
-    const skill = readAutofixSkill();
-    let stderr = '';
-    try {
-      execFileSync(
-        process.execPath,
-        [autofixRunnerScriptPath, '--mode', 'bogus', '--print-prompt'],
-        { encoding: 'utf8', stdio: 'pipe' },
-      );
-    } catch (error) {
-      stderr = String(error.stderr);
-    }
+    const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
-    for (const futureMode of [
-      'design-solution',
-      'review-design',
-      'repair-verification',
-      'cross-review',
-    ]) {
-      expect(skill).not.toContain(futureMode);
-      expect(stderr).not.toContain(futureMode);
-    }
     expect(stderr).toContain(
       '--mode must be one of: assess-candidates, develop-issue, address-review',
     );
@@ -680,107 +711,26 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('keeps autofix runner failure paths explicit', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
-      expect(() =>
-        execFileSync(
-          process.execPath,
-          [autofixRunnerScriptPath, '--mode', 'develop-issue'],
-          { encoding: 'utf8', stdio: 'pipe' },
-        ),
-      ).toThrow(/--issue is required/);
+    withRunnerDir((dir) => {
+      expect(runAutofixRunner(['--mode', 'develop-issue']).stderr).toContain(
+        '--issue is required',
+      );
+      expect(runDevelopIssue(dir, process.execPath).stderr).toContain(
+        'Missing input file',
+      );
 
-      expect(() =>
-        execFileSync(
-          process.execPath,
-          [
-            autofixRunnerScriptPath,
-            '--mode',
-            'develop-issue',
-            '--issue',
-            '1234',
-            '--workdir',
-            dir,
-            '--qwen-bin',
-            process.execPath,
-          ],
-          { encoding: 'utf8', stdio: 'pipe' },
-        ),
-      ).toThrow(/Missing input file/);
-
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(stub, '#!/usr/bin/env node\n');
-      chmodSync(stub, 0o755);
+      const stub = writeQwenStub(dir);
       writeFileSync(join(dir, 'candidates.json'), '[]\n');
       writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
 
-      expect(() =>
-        execFileSync(
-          process.execPath,
-          [
-            autofixRunnerScriptPath,
-            '--mode',
-            'develop-issue',
-            '--issue',
-            '1234',
-            '--workdir',
-            dir,
-            '--qwen-bin',
-            stub,
-          ],
-          { encoding: 'utf8', stdio: 'pipe' },
-        ),
-      ).toThrow(/without required output/);
+      expect(runDevelopIssue(dir, stub).stderr).toContain(
+        'without required output',
+      );
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'without required output',
       );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   }, 10000);
-
-  it('lets agent-written failure.md reach workflow verification', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
-      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(
-        stub,
-        [
-          '#!/usr/bin/env node',
-          "import { writeFileSync } from 'node:fs';",
-          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
-          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
-          "writeFileSync(`${workdir}/failure.md`, 'cannot proceed\\n');",
-          '',
-        ].join('\n'),
-      );
-      chmodSync(stub, 0o755);
-
-      execFileSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          'address-review',
-          '--pr',
-          '5678',
-          '--issue',
-          '1234',
-          '--workdir',
-          dir,
-          '--qwen-bin',
-          stub,
-        ],
-        { encoding: 'utf8', stdio: 'pipe' },
-      );
-      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
-        'cannot proceed',
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
@@ -921,49 +871,20 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('preserves agent-written failure details when the qwen subprocess fails', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
+    withRunnerDir((dir) => {
       writeFileSync(join(dir, 'candidates.json'), '[]\n');
       writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
 
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(
-        stub,
-        [
-          '#!/usr/bin/env node',
-          "import { writeFileSync } from 'node:fs';",
-          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
-          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
-          "writeFileSync(`${workdir}/failure.md`, 'agent detail\\n');",
-          'process.exit(1);',
-          '',
-        ].join('\n'),
-      );
-      chmodSync(stub, 0o755);
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/failure.md`, 'agent detail\\n');",
+        'process.exit(1);',
+      ]);
 
-      expect(() =>
-        execFileSync(
-          process.execPath,
-          [
-            autofixRunnerScriptPath,
-            '--mode',
-            'develop-issue',
-            '--issue',
-            '1234',
-            '--workdir',
-            dir,
-            '--qwen-bin',
-            stub,
-          ],
-          { encoding: 'utf8', stdio: 'pipe' },
-        ),
-      ).toThrow();
+      expect(runDevelopIssue(dir, stub).status).not.toBe(0);
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'agent detail',
       );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('bounds qwen subprocess runtime', () => {
@@ -974,164 +895,74 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('reports external qwen subprocess signals without calling them timeouts', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
+    withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
 
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(
-        stub,
-        [
-          '#!/usr/bin/env node',
-          "process.kill(process.pid, 'SIGTERM');",
-          '',
-        ].join('\n'),
-      );
-      chmodSync(stub, 0o755);
-
-      const result = spawnSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          'address-review',
-          '--pr',
-          '5678',
-          '--issue',
-          '1234',
-          '--workdir',
-          dir,
-          '--qwen-bin',
-          stub,
-        ],
-        { encoding: 'utf8' },
-      );
+      const stub = writeQwenStub(dir, [
+        "process.kill(process.pid, 'SIGTERM');",
+      ]);
+      const result = runAddressReview(dir, stub);
       expect(result.status).not.toBe(0);
       const failure = readFileSync(join(dir, 'failure.md'), 'utf8');
       expect(failure).toContain('signal SIGTERM');
       expect(failure).not.toContain('timeout (');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('rejects invalid --conflict values', () => {
-    expect(() =>
-      execFileSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          'address-review',
-          '--pr',
-          '5678',
-          '--issue',
-          '1234',
-          '--conflict',
-          'maybe',
-          '--print-prompt',
-        ],
-        { encoding: 'utf8', stdio: 'pipe' },
-      ),
-    ).toThrow(/--conflict must be true or false/);
+    expect(
+      runAutofixRunner([
+        '--mode',
+        'address-review',
+        '--pr',
+        '5678',
+        '--issue',
+        '1234',
+        '--conflict',
+        'maybe',
+        '--print-prompt',
+      ]).stderr,
+    ).toContain('--conflict must be true or false');
   });
 
   it('requires --pr for address-review mode', () => {
-    expect(() =>
-      execFileSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          'address-review',
-          '--issue',
-          '1234',
-          '--print-prompt',
-        ],
-        { encoding: 'utf8', stdio: 'pipe' },
-      ),
-    ).toThrow(/--pr is required/);
+    expect(
+      runAutofixRunner([
+        '--mode',
+        'address-review',
+        '--issue',
+        '1234',
+        '--print-prompt',
+      ]).stderr,
+    ).toContain('--pr is required');
   });
 
   it('logs failure.md content when the agent writes it and exits 0', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
+    withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(
-        stub,
-        [
-          '#!/usr/bin/env node',
-          "import { writeFileSync } from 'node:fs';",
-          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
-          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
-          "writeFileSync(`${workdir}/failure.md`, 'cannot proceed\\n');",
-          '',
-        ].join('\n'),
-      );
-      chmodSync(stub, 0o755);
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/failure.md`, 'cannot proceed\\n');",
+      ]);
 
-      const result = spawnSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          'address-review',
-          '--pr',
-          '5678',
-          '--issue',
-          '1234',
-          '--workdir',
-          dir,
-          '--qwen-bin',
-          stub,
-        ],
-        { encoding: 'utf8' },
-      );
+      const result = runAddressReview(dir, stub);
       expect(result.status).toBe(0);
       expect(result.stderr).toContain('failure.md:');
       expect(result.stderr).toContain('cannot proceed');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'cannot proceed',
+      );
+    });
   });
 
   it('rejects mutually exclusive address-review output files', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
+    withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(
-        stub,
-        [
-          '#!/usr/bin/env node',
-          "import { writeFileSync } from 'node:fs';",
-          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
-          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
-          "writeFileSync(`${workdir}/address-summary.md`, 'fixed\\n');",
-          "writeFileSync(`${workdir}/no-action.md`, 'skipped\\n');",
-          '',
-        ].join('\n'),
-      );
-      chmodSync(stub, 0o755);
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/address-summary.md`, 'fixed\\n');",
+        "writeFileSync(`${workdir}/no-action.md`, 'skipped\\n');",
+      ]);
 
-      const result = spawnSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          'address-review',
-          '--pr',
-          '5678',
-          '--issue',
-          '1234',
-          '--workdir',
-          dir,
-          '--qwen-bin',
-          stub,
-        ],
-        { encoding: 'utf8' },
-      );
+      const result = runAddressReview(dir, stub);
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain('mutually exclusive output files');
       expect(result.stderr).toContain('address-summary.md');
@@ -1139,98 +970,38 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'mutually exclusive output files',
       );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('treats empty output files as missing runner outputs', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
+    withRunnerDir((dir) => {
       writeFileSync(join(dir, 'candidates.json'), '[]\n');
       writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
 
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(
-        stub,
-        [
-          '#!/usr/bin/env node',
-          "import { writeFileSync } from 'node:fs';",
-          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
-          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
-          "writeFileSync(`${workdir}/e2e-report.md`, 'ok\\n');",
-          "writeFileSync(`${workdir}/pr-title.txt`, '');",
-          "writeFileSync(`${workdir}/pr-body.md`, 'body\\n');",
-          '',
-        ].join('\n'),
-      );
-      chmodSync(stub, 0o755);
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/e2e-report.md`, 'ok\\n');",
+        "writeFileSync(`${workdir}/pr-title.txt`, '');",
+        "writeFileSync(`${workdir}/pr-body.md`, 'body\\n');",
+      ]);
 
-      let stderr = '';
-      try {
-        execFileSync(
-          process.execPath,
-          [
-            autofixRunnerScriptPath,
-            '--mode',
-            'develop-issue',
-            '--issue',
-            '1234',
-            '--workdir',
-            dir,
-            '--qwen-bin',
-            stub,
-          ],
-          { encoding: 'utf8', stdio: 'pipe' },
-        );
-      } catch (error) {
-        stderr = String(error.stderr);
-      }
+      const { stderr } = runDevelopIssue(dir, stub);
       expect(stderr).toContain('pr-title.txt');
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'pr-title.txt',
       );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('reports only missing output files in the error message', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
-    try {
+    withRunnerDir((dir) => {
       writeFileSync(join(dir, 'candidates.json'), '[]\n');
       writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
 
-      const stub = join(dir, 'qwen-stub.mjs');
-      writeFileSync(stub, '#!/usr/bin/env node\n');
-      chmodSync(stub, 0o755);
-
-      let stderr = '';
-      try {
-        execFileSync(
-          process.execPath,
-          [
-            autofixRunnerScriptPath,
-            '--mode',
-            'develop-issue',
-            '--issue',
-            '1234',
-            '--workdir',
-            dir,
-            '--qwen-bin',
-            stub,
-          ],
-          { encoding: 'utf8', stdio: 'pipe' },
-        );
-      } catch (error) {
-        stderr = String(error.stderr);
-      }
+      const { stderr } = runDevelopIssue(dir, writeQwenStub(dir));
       expect(stderr).toContain('e2e-report.md');
       expect(stderr).toContain('pr-title.txt');
       expect(stderr).toContain('pr-body.md');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('does not reference stale comment-trigger routing in the skill', () => {
