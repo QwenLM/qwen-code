@@ -579,7 +579,7 @@ export async function getInitialChatHistory(
  *    `getInitialChatHistory`.
  *  - The legacy ack-pair prelude (2 entries) — sessions saved before the
  *    startup context moved into system reminders.
- *  - The compressed-history prefix (2 or 3 entries) — summary, ack, and
+ *  - The compressed-history prefix (2-4 entries) — summary, ack, and
  *    optionally a post-compact attachments entry produced by
  *    `composePostCompactHistory`. These synthetic entries must not be
  *    counted as real user prompts for rewind indexing.
@@ -599,6 +599,10 @@ export function getStartupContextLength(
     firstText.startsWith(SYSTEM_REMINDER_OPEN) &&
     firstText.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
   ) {
+    if (options.includeCompressed) {
+      const compressedLength = detectCompressedPrefixLength(history, 1);
+      if (compressedLength > 0) return 1 + compressedLength;
+    }
     return 1;
   }
   // Legacy format (sessions saved before startup context moved into system
@@ -614,23 +618,33 @@ export function getStartupContextLength(
   }
   if (!options.includeCompressed) return 0;
 
+  return detectCompressedPrefixLength(history, 0);
+}
+
+function detectCompressedPrefixLength(
+  history: Content[],
+  offset: number,
+): number {
+  const firstEntry = history[offset];
+  if (firstEntry?.role !== 'user') return 0;
+  const firstText = firstEntry.parts?.[0]?.text;
   // Post-compression prefix for rewind indexing only. The startup-context
   // refresh/restore paths need compressed history to look like "no startup
   // prelude" so they don't strip or skip the compressed summary.
   if (
-    typeof firstText === 'string' &&
-    firstText.includes('Resume the prior task') &&
-    history[1]?.role === 'model' &&
-    history[1]?.parts?.[0]?.text ===
+    typeof firstText !== 'string' ||
+    !firstText.includes('Resume the prior task') ||
+    history[offset + 1]?.role !== 'model' ||
+    history[offset + 1]?.parts?.[0]?.text !==
       'Got it. Thanks for the additional context!'
   ) {
-    if (isPostCompactAttachmentEntry(history[2])) {
-      if (isModelFunctionCallEntry(history[3])) return 4;
-      return 3;
-    }
-    return 2;
+    return 0;
   }
-  return 0;
+  if (isPostCompactAttachmentEntry(history[offset + 2])) {
+    if (isModelFunctionCallEntry(history[offset + 3])) return 4;
+    return 3;
+  }
+  return 2;
 }
 
 function isPostCompactAttachmentEntry(content: Content | undefined): boolean {

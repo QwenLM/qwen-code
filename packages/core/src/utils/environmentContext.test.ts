@@ -635,6 +635,24 @@ describe('getStartupContextLength', () => {
     expect(getStartupContextLength(history)).toBe(0);
   });
 
+  it('is 0 for compressed prefixes with trailing prompts by default', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Now do something else' }],
+      },
+    ];
+    expect(getStartupContextLength(history)).toBe(0);
+  });
+
   it('is 2 for rewind when a real prompt follows a compressed prefix', () => {
     const history: Content[] = [
       {
@@ -652,6 +670,27 @@ describe('getStartupContextLength', () => {
     ];
     expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
       2,
+    );
+  });
+
+  it('includes compressed prefixes after startup reminders for rewind', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: wrap('env') }] },
+      {
+        role: 'user',
+        parts: [{ text: 'summary text\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Now do something else' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      3,
     );
   });
 
