@@ -167,6 +167,10 @@ export interface DaemonScheduledTaskRun {
   /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
    * "run now"); absent = scheduled. */
   kind?: 'scheduled' | 'catch-up' | 'manual';
+  /** The session the fire ran in, when the task is bound to one. Mirrors the
+   * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
+   * on the client (not surfaced in the UI yet). */
+  sessionId?: string;
 }
 
 export interface DaemonScheduledTask {

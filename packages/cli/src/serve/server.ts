@@ -842,6 +842,10 @@ export function createServeApp(
           Math.min(Math.floor(idleTimeoutMs / 3), KEEPALIVE_MAX_INTERVAL_MS),
         ),
       });
+      // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
+      // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+      // run-qwen-serve.ts can invoke it without threading it back through the
+      // createServeApp return type.
       (
         app.locals as { stopScheduledTaskKeepalive?: () => void }
       ).stopScheduledTaskKeepalive = keepalive.stop;
@@ -861,6 +865,10 @@ export function createServeApp(
           }\n`,
         );
       },
+      // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+      // catches readCronTasks failures and per-session load errors internally
+      // (returning { loaded, failed }), so this only guards an unexpected throw
+      // from the function entry itself — intentional, not a swallowed error.
     }).catch(() => {});
   }
 
