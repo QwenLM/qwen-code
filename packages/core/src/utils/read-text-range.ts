@@ -34,9 +34,14 @@ export interface ReadTextRangeResult {
 }
 
 export class LargeNonUtf8TextError extends Error {
-  constructor(readonly encoding: string) {
+  constructor(
+    readonly encoding: string,
+    reason?: 'invalid-utf8',
+  ) {
     super(
-      `Large non-UTF-8 text files are not supported for streaming reads (detected ${encoding}). Convert or extract a smaller UTF-8 slice and read that instead.`,
+      reason === 'invalid-utf8'
+        ? 'Large text file contains invalid UTF-8 byte sequence beyond the initial encoding sample. Convert or extract a smaller UTF-8 slice and read that instead.'
+        : `Large non-UTF-8 text files are not supported for streaming reads (detected ${encoding}). Convert or extract a smaller UTF-8 slice and read that instead.`,
     );
     this.name = 'LargeNonUtf8TextError';
   }
@@ -170,7 +175,7 @@ async function readLargeUtf8Range(
     try {
       return decoder.decode(chunk, options);
     } catch {
-      throw new LargeNonUtf8TextError(encoding);
+      throw new LargeNonUtf8TextError(encoding, 'invalid-utf8');
     }
   }
 

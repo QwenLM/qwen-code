@@ -204,7 +204,7 @@ describe('readTextRange', () => {
         limit: 500,
         maxOutputBytes: 20_000,
       }),
-    ).rejects.toThrow(LargeNonUtf8TextError);
+    ).rejects.toThrow(/invalid UTF-8 byte sequence/);
   });
 
   it('bounds selected output for a large single-line file', async () => {
