@@ -201,6 +201,29 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.content).toContain('Unsupported image file');
     });
 
+    it('references large PDFs instead of inlining extracted text for @ attachments', async () => {
+      const relativePath = 'paper.pdf';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.alloc(2 * 1024 * 1024));
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const content = contentToString(result.contentParts);
+
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toBeUndefined();
+      expect(result.files[0]!.content).toContain('PDF "paper.pdf"');
+      expect(content).toContain("Use the 'pages' parameter");
+      expect(content.length).toBeLessThan(1000);
+
+      const status = cache.check(nodeFs.statSync(absolutePath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
     it('should return message when no files found', async () => {
       const mockConfig = createMockConfig(tempRootDir);
 

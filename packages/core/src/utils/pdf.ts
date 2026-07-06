@@ -7,11 +7,59 @@
 import { execFile, type ExecFileOptions } from 'node:child_process';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
+export const PDF_FULL_TEXT_PAGE_LIMIT = 10;
+export const PDF_MAX_PAGES_PER_READ = 20;
+export const PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES = 100 * 1024;
+export const PDF_TEXT_RESULT_MAX_TOKENS = 12_000;
+const PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS = 64;
+const PDF_TEXT_RESULT_CHARS_PER_TOKEN = 4;
 // Upper bound on a page number we're willing to forward to pdftotext.
 // Sits well below Number.MAX_SAFE_INTEGER so arithmetic in validation
 // (e.g. lastPage - firstPage + 1) stays exact, and well above any real
 // PDF (the current world record is roughly 86,000 pages).
 const MAX_PDF_PAGE_NUMBER = 1_000_000;
+
+export interface PDFPageRangeRequirement {
+  required: boolean;
+  effectivePageCount: number;
+  hadPdfInfo: boolean;
+}
+
+export function shouldRequirePDFPageRange(
+  pageCount: number | null,
+  sizeBytes: number,
+): PDFPageRangeRequirement {
+  const hadPdfInfo = pageCount !== null;
+  const effectivePageCount =
+    pageCount ?? Math.ceil(sizeBytes / PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES);
+  return {
+    required: effectivePageCount > PDF_FULL_TEXT_PAGE_LIMIT,
+    effectivePageCount,
+    hadPdfInfo,
+  };
+}
+
+export function estimatePDFTextOutputTokens(text: string): number {
+  return Math.ceil(
+    (text.length + PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS) /
+      PDF_TEXT_RESULT_CHARS_PER_TOKEN,
+  );
+}
+
+export function buildLargePDFGuidance(
+  displayName: string,
+  requirement: PDFPageRangeRequirement,
+): string {
+  const source = requirement.hadPdfInfo ? 'has' : 'appears to have about';
+  return `PDF "${displayName}" ${source} ${requirement.effectivePageCount} pages, which is too many to read at once. Use the 'pages' parameter to read a specific page range such as '1-5'. Maximum ${PDF_MAX_PAGES_PER_READ} pages per request.`;
+}
+
+export function buildPDFTextTooLargeGuidance(
+  displayName: string,
+  estimatedTokens: number,
+): string {
+  return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.`;
+}
 
 /**
  * Lightweight wrapper around execFile that returns { stdout, stderr, code,
@@ -210,7 +258,7 @@ export async function getPDFPageCount(
 }
 
 export type PDFTextResult =
-  | { success: true; text: string }
+  | { success: true; text: string; truncated?: boolean }
   | { success: false; error: string };
 
 /**
@@ -273,6 +321,7 @@ export async function extractPDFText(
     if (maxBufferExceeded && stdout.length >= MAX_PDF_TEXT_OUTPUT_CHARS) {
       return {
         success: true,
+        truncated: true,
         text:
           stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
           `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
@@ -310,13 +359,14 @@ export async function extractPDFText(
     if (stdout.length > MAX_PDF_TEXT_OUTPUT_CHARS) {
       return {
         success: true,
+        truncated: true,
         text:
           stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
           `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
       };
     }
 
-    return { success: true, text: stdout };
+    return { success: true, text: stdout, truncated: false };
   } catch (e: unknown) {
     return {
       success: false,

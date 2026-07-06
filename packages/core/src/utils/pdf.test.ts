@@ -11,6 +11,8 @@ import {
   getPDFPageCount,
   extractPDFText,
   resetPdftotextCache,
+  shouldRequirePDFPageRange,
+  estimatePDFTextOutputTokens,
 } from './pdf.js';
 
 vi.mock('node:child_process', () => ({
@@ -92,6 +94,36 @@ describe('pdf utilities', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPdftotextCache();
+  });
+
+  describe('PDF budget policy helpers', () => {
+    it('requires pages when pdfinfo reports more than the full-text page limit', () => {
+      expect(shouldRequirePDFPageRange(11, 64 * 1024)).toEqual({
+        required: true,
+        effectivePageCount: 11,
+        hadPdfInfo: true,
+      });
+    });
+
+    it('does not require pages for small PDFs', () => {
+      expect(shouldRequirePDFPageRange(10, 2 * 1024 * 1024)).toEqual({
+        required: false,
+        effectivePageCount: 10,
+        hadPdfInfo: true,
+      });
+    });
+
+    it('falls back to a size heuristic when pdfinfo is unavailable', () => {
+      expect(shouldRequirePDFPageRange(null, 2 * 1024 * 1024)).toEqual({
+        required: true,
+        effectivePageCount: 21,
+        hadPdfInfo: false,
+      });
+    });
+
+    it('estimates dense PDF text output tokens using the same char ratio as prompt estimation', () => {
+      expect(estimatePDFTextOutputTokens('x'.repeat(64_000))).toBe(16_016);
+    });
   });
 
   describe('parsePDFPageRange', () => {
@@ -310,6 +342,7 @@ describe('pdf utilities', () => {
       expect(result).toEqual({
         success: true,
         text: 'Hello World\nThis is a PDF.',
+        truncated: false,
       });
     });
 
@@ -437,6 +470,7 @@ describe('pdf utilities', () => {
       const result = await extractPDFText('/test.pdf');
       expect(result.success).toBe(true);
       if (result.success) {
+        expect(result.truncated).toBe(true);
         expect(result.text.length).toBeLessThan(110000);
         expect(result.text).toContain('text truncated');
         expect(result.text).toContain("'pages' parameter");
@@ -461,6 +495,7 @@ describe('pdf utilities', () => {
       const result = await extractPDFText('/test.pdf');
       expect(result.success).toBe(true);
       if (result.success) {
+        expect(result.truncated).toBe(true);
         expect(result.text.length).toBeLessThan(110000);
         expect(result.text).toContain('text truncated');
         expect(result.text).toContain("'pages' parameter");

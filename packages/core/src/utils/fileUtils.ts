@@ -21,7 +21,16 @@ import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
-import { extractPDFText, parsePDFPageRange } from './pdf.js';
+import {
+  buildLargePDFGuidance,
+  buildPDFTextTooLargeGuidance,
+  estimatePDFTextOutputTokens,
+  extractPDFText,
+  getPDFPageCount,
+  parsePDFPageRange,
+  PDF_TEXT_RESULT_MAX_TOKENS,
+  shouldRequirePDFPageRange,
+} from './pdf.js';
 import { readNotebookWithMetadata } from './notebook.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
@@ -856,6 +865,11 @@ export interface ProcessSingleFileContentOptions {
    * sets this after deciding the vision bridge should handle the image.
    */
   preserveUnsupportedImage?: boolean;
+  /**
+   * Large full-PDF text fallback returns a tool error by default. `@`-attached
+   * PDFs use `reference` so the model gets guidance without a failed read.
+   */
+  largePdfBehavior?: 'error' | 'reference';
 }
 
 /**
@@ -924,7 +938,13 @@ export async function processSingleFileContent(
           limit: legacyLimit,
           pages: legacyPages,
         };
-  const { offset, limit, pages, preserveUnsupportedImage = false } = options;
+  const {
+    offset,
+    limit,
+    pages,
+    preserveUnsupportedImage = false,
+    largePdfBehavior = 'error',
+  } = options;
   const rootDirectory = config.getTargetDir();
   try {
     let stats: import('node:fs').Stats;
@@ -983,14 +1003,39 @@ export async function processSingleFileContent(
     const fileSizeInMB = stats.size / (1024 * 1024);
     // The 10MB cap exists for inline-data paths (base64 images / audio /
     // video / PDFs), where the encoded payload must fit in the model's
-    // data-URI budget. PDF text extraction streams through pdftotext and
-    // truncates to MAX_PDF_TEXT_OUTPUT_CHARS, so oversized PDFs should go
-    // through it instead of being rejected up front. Use 9.9MB to leave
-    // margin for base64 encoding overhead (#1880). A separate upper
-    // bound applies to the extraction path so a multi-GB file can't hang
+    // data-URI budget. PDF text extraction streams through pdftotext, so
+    // explicit page reads can bypass the inline-data cap. Full-document text
+    // fallback is separately gated by page count or size heuristic below. Use
+    // 9.9MB to leave margin for base64 encoding overhead (#1880). A separate
+    // upper bound applies to the extraction path so a multi-GB file can't hang
     // pdftotext until the 30s timeout.
     const willExtractPdfText =
       fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
+    if (willExtractPdfText && !pages) {
+      const pageCount =
+        fileSizeInMB > PDF_EXTRACTION_MAX_MB
+          ? null
+          : await getPDFPageCount(filePath);
+      const requirement = shouldRequirePDFPageRange(pageCount, stats.size);
+      if (requirement.required) {
+        const guidance = buildLargePDFGuidance(displayName, requirement);
+        const returnDisplay =
+          largePdfBehavior === 'reference'
+            ? `Referenced large PDF: ${relativePathForDisplay}`
+            : `PDF requires page range: ${relativePathForDisplay}`;
+        return {
+          llmContent: guidance,
+          returnDisplay,
+          ...(largePdfBehavior === 'error'
+            ? {
+                error: guidance,
+                errorType: ToolErrorType.FILE_TOO_LARGE,
+              }
+            : {}),
+          stats,
+        };
+      }
+    }
     if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
       return {
         llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document.`,
@@ -1212,10 +1257,27 @@ export async function processSingleFileContent(
           pageRange ?? undefined,
         );
         if (pdfResult.success) {
+          const estimatedTokens = estimatePDFTextOutputTokens(pdfResult.text);
+          if (estimatedTokens > PDF_TEXT_RESULT_MAX_TOKENS) {
+            const guidance = buildPDFTextTooLargeGuidance(
+              displayName,
+              estimatedTokens,
+            );
+            return {
+              llmContent: guidance,
+              returnDisplay: `PDF text too large: ${relativePathForDisplay}`,
+              error: guidance,
+              errorType: ToolErrorType.FILE_TOO_LARGE,
+              stats,
+            };
+          }
+
           const pagesLabel = pages ? ` (pages ${pages})` : '';
           return {
             llmContent: pdfResult.text,
             returnDisplay: `Read pdf as text${pagesLabel}: ${relativePathForDisplay}`,
+            isTruncated: pdfResult.truncated ?? false,
+            stats,
           };
         }
 

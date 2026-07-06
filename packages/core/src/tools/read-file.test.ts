@@ -715,6 +715,36 @@ describe('ReadFileTool', () => {
         return invocation.execute(abortSignal);
       }
 
+      it('returns a short error when a text-only model reads a large PDF without pages', async () => {
+        const pdfPath = path.join(tempRootDir, 'large.pdf');
+        await fsp.writeFile(pdfPath, Buffer.alloc(2 * 1024 * 1024));
+        const textOnlyConfig = {
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const textOnlyTool = new ReadFileTool(textOnlyConfig);
+
+        const result = await read({ file_path: pdfPath }, textOnlyTool);
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(String(result.llmContent).length).toBeLessThan(1000);
+        expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
+
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
         const filePath = path.join(tempRootDir, 'note.txt');
         await fsp.writeFile(filePath, 'hello world', 'utf-8');
