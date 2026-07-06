@@ -16,7 +16,7 @@ describe('shellPagerEnv', () => {
   it('does not default to Unix-only cat on Windows', () => {
     expect(getDefaultShellPager('win32')).toBeUndefined();
     expect(getShellPagerEnv(undefined, { platform: 'win32' })).toEqual({
-      PAGER: undefined,
+      PAGER: '',
     });
   });
 
@@ -27,8 +27,20 @@ describe('shellPagerEnv', () => {
         platform: 'win32',
       }),
     ).toEqual({
-      PAGER: undefined,
-      GIT_PAGER: undefined,
+      PAGER: '',
+      GIT_PAGER: '',
+    });
+  });
+
+  it('sets both PAGER and GIT_PAGER to cat on non-Windows when pager is unset', () => {
+    expect(
+      getShellPagerEnv(undefined, {
+        includeGitPager: true,
+        platform: 'linux',
+      }),
+    ).toEqual({
+      PAGER: 'cat',
+      GIT_PAGER: 'cat',
     });
   });
 

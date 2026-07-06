@@ -501,6 +501,18 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('shell execution config', () => {
+    it('allows explicitly clearing the configured pager', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ pager: undefined });
+      expect(config.getShellExecutionConfig().pager).toBeUndefined();
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);

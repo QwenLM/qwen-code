@@ -195,6 +195,7 @@ describe('MonitorTool', () => {
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getShellExecutionConfig: vi.fn().mockReturnValue({}),
       storage: {
         getUserSkillsDirs: vi
           .fn()
@@ -630,6 +631,21 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+    });
+
+    it('propagates explicit pager configuration to spawned processes', async () => {
+      vi.mocked(mockConfig.getShellExecutionConfig).mockReturnValue({
+        pager: 'more',
+      });
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('more');
+      expect(spawnOptions.env['GIT_PAGER']).toBe('more');
     });
 
     it('does not spawn when the turn signal is already aborted', async () => {

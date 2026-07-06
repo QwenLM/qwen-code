@@ -53,7 +53,6 @@ import {
 } from '../services/fileSystemService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
-import { getDefaultShellPager } from '../utils/shell-pager-env.js';
 import {
   CronScheduler,
   DEFAULT_RECURRING_MAX_AGE_DAYS,
@@ -1908,7 +1907,7 @@ export class Config {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
       terminalHeight: params.shellExecutionConfig?.terminalHeight ?? 24,
       showColor: params.shellExecutionConfig?.showColor ?? false,
-      pager: params.shellExecutionConfig?.pager ?? getDefaultShellPager(),
+      pager: params.shellExecutionConfig?.pager,
       maxBufferedOutputBytes:
         params.shellExecutionConfig?.maxBufferedOutputBytes,
     };
@@ -5675,7 +5674,9 @@ export class Config {
       terminalHeight:
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
-      pager: config.pager ?? this.shellExecutionConfig.pager,
+      pager: Object.prototype.hasOwnProperty.call(config, 'pager')
+        ? config.pager
+        : this.shellExecutionConfig.pager,
       maxBufferedOutputBytes:
         config.maxBufferedOutputBytes ??
         this.shellExecutionConfig.maxBufferedOutputBytes,

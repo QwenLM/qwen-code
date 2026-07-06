@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import stripAnsi from 'strip-ansi';
@@ -367,7 +368,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
           ...process.env,
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
-          ...getShellPagerEnv(undefined),
+          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });

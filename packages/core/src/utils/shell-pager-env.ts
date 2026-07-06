@@ -20,8 +20,8 @@ export function getShellPagerEnv(
   const effectivePager = pager ?? getDefaultShellPager(options.platform);
   if (!effectivePager) {
     return {
-      PAGER: undefined,
-      ...(options.includeGitPager ? { GIT_PAGER: undefined } : {}),
+      PAGER: '',
+      ...(options.includeGitPager ? { GIT_PAGER: '' } : {}),
     };
   }
 

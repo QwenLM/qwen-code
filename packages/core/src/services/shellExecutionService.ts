@@ -722,7 +722,10 @@ export class ShellExecutionService {
           ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          ...getShellPagerEnv(pager, { platform: os.platform() }),
+          ...getShellPagerEnv(pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });
