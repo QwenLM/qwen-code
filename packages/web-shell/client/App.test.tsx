@@ -27,6 +27,7 @@ type ChatEditorTestProps = {
     commitAccepted?: () => void,
   ) => boolean | void;
   isPreparing?: boolean;
+  dialogOpen?: boolean;
 };
 
 const {
@@ -40,6 +41,8 @@ const {
   rawEnqueuePrompt,
   editorClear,
   editorCommit,
+  editorFocus,
+  settingsReload,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -70,6 +73,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      loadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspaceActions: {
       loadSkillsStatus: vi.fn().mockResolvedValue({ skills: [] }),
@@ -100,6 +104,8 @@ const {
     rawEnqueuePrompt: vi.fn(() => true),
     editorClear: vi.fn(),
     editorCommit: vi.fn(),
+    editorFocus: vi.fn(),
+    settingsReload: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -117,7 +123,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useSettings: () => ({
     settings: [],
     setValue: vi.fn().mockResolvedValue(undefined),
-    reload: vi.fn().mockResolvedValue(undefined),
+    reload: settingsReload,
     loading: false,
   }),
   useStreamingState: () => testState.streamingState,
@@ -165,12 +171,16 @@ vi.mock('./components/ChatEditor', async () => {
       ref: React.ForwardedRef<{
         clear: () => void;
         insertText: (text: string) => void;
+        focus: () => void;
       }>,
     ) {
       testState.latestChatEditorProps = props;
       React.useImperativeHandle(ref, () => ({
         clear: editorClear,
         insertText: vi.fn(),
+        // The panel focus effect calls editorRef.current?.focus() when a panel
+        // closes with no pending approval (e.g. resuming a session).
+        focus: editorFocus,
       }));
       return React.createElement(
         'button',
@@ -214,12 +224,82 @@ vi.mock('./components/MessageList', async () => {
   };
 });
 
+// SettingsMessage / ModelDialog expose their callbacks as buttons so tests can
+// walk the fast-model path: open Settings -> onSubDialog('fastModel') opens the
+// model picker -> onSelect fires handleFastModelSelect.
+vi.mock('./components/messages/SettingsMessage', async () => {
+  const React = await import('react');
+  return {
+    SettingsMessage: (props: { onSubDialog?: (key: string) => void }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'settings-message' },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-fast-model',
+            type: 'button',
+            onClick: () => props.onSubDialog?.('fastModel'),
+          },
+          'fast model',
+        ),
+      ),
+  };
+});
+
+vi.mock('./components/dialogs/ModelDialog', async () => {
+  const React = await import('react');
+  return {
+    ModelDialog: (props: { onSelect?: (id: string) => void }) =>
+      React.createElement(
+        'button',
+        {
+          'data-testid': 'model-select',
+          type: 'button',
+          onClick: () => props.onSelect?.('fast-model-x'),
+        },
+        'select model',
+      ),
+  };
+});
+
+// Render DialogShell as an observable container so tests can detect an open
+// sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
+vi.mock('./components/dialogs/DialogShell', async () => {
+  const React = await import('react');
+  return {
+    DialogShell: (props: { children?: React.ReactNode }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'dialog-shell' },
+        props.children,
+      ),
+  };
+});
+
 vi.mock('./components/sidebar/WebShellSidebar', async () => {
   const React = await import('react');
   return {
-    WebShellSidebar: (props: { sessionListReloadToken?: number }) => {
+    WebShellSidebar: (props: {
+      sessionListReloadToken?: number;
+      onOpenDaemonStatus?: () => void;
+    }) => {
       sidebarTokens.push(props.sessionListReloadToken);
-      return React.createElement('div', { 'data-testid': 'sidebar' });
+      // Expose the Daemon Status opener so tests can exercise the
+      // activePanel === 'status' branch (there is no slash command for it).
+      return React.createElement(
+        'div',
+        { 'data-testid': 'sidebar' },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-daemon-status',
+            type: 'button',
+            onClick: props.onOpenDaemonStatus,
+          },
+          'daemon status',
+        ),
+      );
     },
   };
 });
@@ -240,10 +320,12 @@ mockComponent('./components/panels/TodoPanel', 'TodoPanel');
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
-mockComponent('./components/dialogs/DialogShell', 'DialogShell');
-mockComponent('./components/dialogs/ModelDialog', 'ModelDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
+mockComponent(
+  './components/dialogs/ScheduledTasksDialog',
+  'ScheduledTasksDialog',
+);
 mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
@@ -259,7 +341,6 @@ mockComponent('./components/dialogs/McpDialog', 'McpDialog');
 mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
-mockComponent('./components/messages/SettingsMessage', 'SettingsMessage');
 mockComponent('./components/messages/ToolApproval', 'ToolApproval');
 mockComponent('./components/messages/AskUserQuestion', 'AskUserQuestion');
 mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
@@ -306,6 +387,38 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
+// A transcript block shaped like extractPendingPermission() expects. Defaults to
+// a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
+// 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
+// isAskUserPermission() classifies by rawInput.questions being a non-empty
+// array, so the ask-user variant carries a toolCall.input.questions payload
+// (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
+function makePendingPermissionBlock(
+  overrides: { resolved?: boolean; toolName?: string } = {},
+): unknown {
+  const toolName = overrides.toolName ?? 'run_shell_command';
+  const isAskUser = toolName === 'ask_user_question';
+  return {
+    kind: 'permission',
+    resolved: overrides.resolved ?? false,
+    requestId: 'req-1',
+    sessionId: 'session-1',
+    title: 'Run ls',
+    toolCall: {
+      toolCallId: 'tc-1',
+      kind: isAskUser ? 'other' : 'execute',
+      _meta: { toolName },
+      ...(isAskUser
+        ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
+        : {}),
+    },
+    options: [
+      { optionId: 'proceed_once', label: 'Allow', raw: {} },
+      { optionId: 'cancel', label: 'Reject', raw: {} },
+    ],
+  };
+}
+
 beforeEach(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
@@ -327,6 +440,9 @@ beforeEach(() => {
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
   editorCommit.mockClear();
+  editorFocus.mockClear();
+  settingsReload.mockClear();
+  settingsReload.mockResolvedValue(undefined);
   mockFollowup.clear.mockClear();
   for (const value of Object.values(mockSessionActions)) {
     if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
@@ -345,6 +461,7 @@ beforeEach(() => {
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
@@ -573,6 +690,383 @@ describe('App session callbacks', () => {
     expect(onSessionChange).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'turn_complete' }),
     );
+  });
+
+  it('auto-closes an open Settings/Status panel when a tool approval becomes pending', async () => {
+    // Regression: the approval overlay lives in the chat footer, which is
+    // hidden (display:none) while a panel is shown. If a gated tool call
+    // arrives while Settings/Status is open, the panel must step aside so the
+    // approval is visible instead of the turn hanging behind it.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    // Open the Settings panel via the /settings command; the panel host carries
+    // data-testid="inline-panel", so its presence tracks the panel.
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    // A gated tool call arrives.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {
+    // The auto-close effect gates on pendingToolApproval || pendingAskUserApproval;
+    // this covers the second branch (ask_user_question resolves to
+    // pendingAskUserApproval), whose overlay is also hidden behind the panel.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('opens the Daemon Status panel and auto-closes it on a pending approval', async () => {
+    // Covers the activePanel === 'status' branch (DaemonStatusDialog); the other
+    // panel tests all open via /settings, so this guards the 'status' literal and
+    // confirms the auto-close is panel-type-agnostic.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-daemon-status"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('dismisses the Scheduled Tasks page when an approval becomes pending', async () => {
+    // The scheduled-tasks fullPage overlay covers the chat footer where the
+    // approval renders, so an approval must close it too (like the panel).
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).toBeNull();
+  });
+
+  it('opening Daemon Status closes the Scheduled Tasks page (mutually exclusive full-pane views)', async () => {
+    // Regression: both are full-pane views; the Scheduled Tasks fullPage is a
+    // position:absolute overlay, so opening Daemon Status while it was up left
+    // the panel rendered *behind* it — the button looked dead.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-daemon-status"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).toBeNull();
+  });
+
+  it('opening Scheduled Tasks closes an open Settings/Status panel', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('keeps the panel open when transcript blocks carry no actionable approval', async () => {
+    // Negative control: a resolved permission is not actionable, so the panel
+    // must stay put (guards against an unconditional "close on any block").
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock({ resolved: true })];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+  });
+
+  it('keeps the composer dormant (dialogOpen) while an approval overlay is up', async () => {
+    // Regression: after the panel auto-closes for an approval, interactionBlocked
+    // flips false. Unless dialogOpen also keys off the pending approval,
+    // useComposerCore refocuses the composer and ToolApproval — which ignores
+    // keys from editable targets — stops responding to its approval shortcuts.
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+  });
+
+  it('dismisses an open sub-dialog (model picker) when an approval becomes pending', async () => {
+    // A DialogShell sub-dialog left open would sit (backdrop) over the approval
+    // overlay in the chat footer, hiding it — and, for the approval-mode picker,
+    // let the user yolo-approve an unseen tool call. /model (no arg) opens the
+    // picker; an approval must dismiss it.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/model';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it('moves focus to the approval overlay when it appears', async () => {
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    const overlay = document.querySelector('[data-testid="approval-overlay"]');
+    expect(overlay).not.toBeNull();
+    expect(document.activeElement).toBe(overlay);
+  });
+
+  it('closes the panel on Escape from outside the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+
+    await act(async () => {
+      panel?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('keeps the panel open on Escape originating inside the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    await act(async () => {
+      sidebar?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+  });
+
+  it('marks the composer dormant (dialogOpen) while a panel replaces the chat', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+  });
+
+  it('restores composer focus after an approval resolves following a panel auto-close', async () => {
+    // Regression: on panel auto-close the editor focus is intentionally skipped
+    // (the approval owns the keyboard); when the approval later resolves with no
+    // panel to return to, focus must come back to the composer rather than being
+    // orphaned on <body>.
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    editorFocus.mockClear();
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('closes the panel and restores composer focus on Back button click', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('closes the panel, sends /model --fast, and reloads settings on fast-model pick', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    // Open the fast-model picker from Settings, then pick a model.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/model --fast fast-model-x',
+      ),
+    ).toBe(true);
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('marks the chat view aria-hidden while a panel is shown', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="submit"]')
+        ?.closest('[aria-hidden="true"]'),
+    ).toBeNull();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="submit"]')
+        ?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
+  });
+
+  it('closes an open panel when resuming a session via /resume', async () => {
+    // Resuming a session must surface that chat, not leave it hidden behind an
+    // open Settings/Status panel — mirrors createNewSession / loadSidebarSession.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    testState.prompt = '/resume session-2';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2');
   });
 
   it('dispatches rename only after the current session name changes', async () => {
