@@ -376,6 +376,12 @@ Flow:
 `hookRegistry.reloadConfiguredHooks()`. Runtime reload therefore does not need
 to recreate the whole hook system.
 
+This reload path does not re-read user or project settings files from disk.
+`processHooksFromConfig()` re-processes the current `Config` values for
+user/project hooks and the refreshed extension config values. Settings file
+reload remains owned by the settings reload path; `/reload-plugins` is scoped to
+extension runtime state.
+
 ### 9. Wire State Into Interactive UI
 
 Interactive startup creates one shared `ExtensionRefreshState`:

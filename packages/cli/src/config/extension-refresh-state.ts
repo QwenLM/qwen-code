@@ -11,6 +11,8 @@ const SUPPRESS_AFTER_MS = 1000;
 
 export class ExtensionRefreshState {
   private extensionRefreshNeeded = false;
+  private reloadInProgress = false;
+  private changedDuringReload = false;
   private suppressionDepth = 0;
   private suppressUntil = 0;
 
@@ -26,6 +28,10 @@ export class ExtensionRefreshState {
 
   markExtensionsChanged(reason?: string): boolean {
     if (this.isSuppressed()) {
+      return false;
+    }
+    if (this.reloadInProgress) {
+      this.changedDuringReload = true;
       return false;
     }
     if (this.extensionRefreshNeeded) {
@@ -45,12 +51,23 @@ export class ExtensionRefreshState {
   }
 
   clearExtensionsChanged(): void {
-    this.extensionRefreshNeeded = false;
+    const changedDuringReload = this.changedDuringReload;
+    this.extensionRefreshNeeded = changedDuringReload;
+    this.reloadInProgress = false;
+    this.changedDuringReload = false;
     this.suppressUntil = 0;
     this.events.emit(AppEvent.ExtensionsReloaded);
+    if (changedDuringReload) {
+      this.events.emit(
+        AppEvent.ExtensionRefreshNeeded,
+        'extension files changed during reload',
+      );
+    }
   }
 
   notifyExtensionsReloadStarted(): void {
+    this.reloadInProgress = true;
+    this.changedDuringReload = false;
     this.events.emit(AppEvent.ExtensionsReloadStarted);
   }
 
@@ -90,6 +107,8 @@ export class ExtensionRefreshState {
 
   resetForTesting(): void {
     this.extensionRefreshNeeded = false;
+    this.reloadInProgress = false;
+    this.changedDuringReload = false;
     this.suppressionDepth = 0;
     this.suppressUntil = 0;
   }

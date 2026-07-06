@@ -70,17 +70,27 @@ export class ExtensionFileWatcher {
       })
         .on('all', (event: string, changedPath: string) => {
           if (generation !== this.watchGeneration) return;
+          const resolvedPath = path.resolve(changedPath);
           const action = this.getRefreshAction(
             event as WatchEvent,
-            path.resolve(changedPath),
+            resolvedPath,
           );
+          let marked = false;
           if (action === 'auto') {
-            this.refreshState.markExtensionContentChanged(
+            marked = this.refreshState.markExtensionContentChanged(
               'extension content files changed',
             );
           } else if (action === 'stale') {
-            this.refreshState.markExtensionsChanged('extension files changed');
+            marked = this.refreshState.markExtensionsChanged(
+              'extension files changed',
+            );
           }
+          debugLogger.debug('Extension file event classified', {
+            event,
+            path: resolvedPath,
+            action,
+            marked,
+          });
         })
         .on('error', (error: unknown) => {
           debugLogger.warn('Extension file watcher error:', error);
@@ -152,6 +162,7 @@ export class ExtensionFileWatcher {
   }
 
   private watchExtensionsParent(): void {
+    this.closeBootstrapWatcher();
     const parentDir = path.dirname(this.extensionsDir);
     const dirBasename = path.basename(this.extensionsDir);
     const generation = this.watchGeneration;
@@ -300,5 +311,13 @@ export class ExtensionFileWatcher {
     if (this.watching) {
       this.restartWatching();
     }
+  }
+
+  private closeBootstrapWatcher(): void {
+    const bootstrapWatcher = this.bootstrapWatcher;
+    this.bootstrapWatcher = undefined;
+    bootstrapWatcher?.close().catch((error: unknown) => {
+      debugLogger.warn('Extension bootstrap watcher close error:', error);
+    });
   }
 }

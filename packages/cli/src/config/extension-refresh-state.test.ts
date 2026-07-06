@@ -87,6 +87,30 @@ describe('extension refresh state', () => {
     }
   });
 
+  it('preserves stale state for changes that arrive during reload', () => {
+    const listener = vi.fn();
+    refreshState.on(AppEvent.ExtensionRefreshNeeded, listener);
+
+    try {
+      expect(refreshState.markExtensionsChanged('before reload')).toBe(true);
+      refreshState.notifyExtensionsReloadStarted();
+
+      expect(refreshState.markExtensionsChanged('during reload')).toBe(false);
+      refreshState.clearExtensionsChanged();
+
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(listener).toHaveBeenLastCalledWith(
+        'extension files changed during reload',
+      );
+
+      refreshState.clearExtensionsChanged();
+      expect(refreshState.needsExtensionRefresh()).toBe(false);
+    } finally {
+      refreshState.off(AppEvent.ExtensionRefreshNeeded, listener);
+    }
+  });
+
   it('settles only after all overlapping suppressions end', () => {
     const onSettle = vi.fn();
     const endFirst = refreshState.beginSuppression(onSettle);
