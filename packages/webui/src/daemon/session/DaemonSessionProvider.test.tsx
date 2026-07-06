@@ -2624,6 +2624,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'missing session',
     });
+    expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
     const abortedPrompt = promptResult;
     if (!abortedPrompt) throw new Error('prompt was not started');
@@ -4050,6 +4051,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'missing session',
     });
+    expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
   });
 
@@ -5016,6 +5018,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'session gone',
       errorStatus: 410,
+      missingSession: false,
       capabilities: {
         workspaceCwd: '/mock-workspace',
         features: ['client_heartbeat'],
@@ -5065,8 +5068,9 @@ describe('DaemonSessionProvider', () => {
     expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(connection).toMatchObject({
       status: 'disconnected',
-      error: 'heartbeat lost',
+      error: 'session gone',
       errorStatus: 410,
+      missingSession: false,
     });
     expect(connection?.sessionId).toBeUndefined();
   });
@@ -5859,6 +5863,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'session gone',
     });
+    expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
@@ -5946,6 +5951,7 @@ describe('DaemonSessionProvider', () => {
         status: 'disconnected',
         error: 'session gone',
         errorStatus: status,
+        missingSession: true,
         capabilities: {
           workspaceCwd: '/mock-workspace',
           features: [],

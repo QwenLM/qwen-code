@@ -102,6 +102,7 @@ export function getConnectionAfterSessionClear(
     catchingUp: undefined,
     error: undefined,
     errorStatus: undefined,
+    missingSession: false,
   };
 }
 
@@ -231,6 +232,7 @@ export function createDaemonSessionActions({
       displayName: undefined,
       error: undefined,
       errorStatus: undefined,
+      missingSession: false,
       loadingTranscript: true,
       catchingUp: undefined,
     }));
@@ -620,6 +622,7 @@ export function createDaemonSessionActions({
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
           errorStatus: undefined,
+          missingSession: false,
         }));
         return nextSession;
       } catch (error) {
@@ -664,6 +667,12 @@ export function createDaemonSessionActions({
     async newSession() {
       manualSessionClearRef.current = false;
       clearActiveSessionState();
+      setConnection((current) => ({
+        ...current,
+        missingSession: false,
+        error: undefined,
+        errorStatus: undefined,
+      }));
       setNewSessionNonce((nonce) => nonce + 1);
     },
 

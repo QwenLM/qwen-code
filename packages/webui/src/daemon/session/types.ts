@@ -78,6 +78,7 @@ export interface DaemonConnectionState {
   catchingUp?: boolean;
   error?: string;
   errorStatus?: number;
+  missingSession?: boolean;
 }
 
 export interface DaemonTokenUsage {

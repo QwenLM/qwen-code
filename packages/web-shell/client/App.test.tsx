@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 type StreamingState = 'idle' | 'responding';
 
 type MockConnection = {
-  status: 'connected' | 'disconnected';
+  status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
   clientId: string;
   displayName: string | undefined;
@@ -20,6 +20,7 @@ type MockConnection = {
   catchingUp: boolean;
   error?: string;
   errorStatus?: number;
+  missingSession?: boolean;
 };
 
 type ChatEditorTestProps = {
@@ -116,8 +117,6 @@ const {
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  isMissingSessionHttpStatus: (status: number | undefined) =>
-    status === 404 || status === 410,
   useActions: () => mockSessionActions,
   useConnection: () => mockConnection,
   useDaemonFollowupSuggestion: () => ({
@@ -440,6 +439,7 @@ beforeEach(() => {
   mockConnection.displayName = 'Session One';
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
+  mockConnection.missingSession = false;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
@@ -503,6 +503,7 @@ describe('App session callbacks', () => {
       mockConnection.sessionId = undefined;
       mockConnection.error = 'Session load failed';
       mockConnection.errorStatus = status;
+      mockConnection.missingSession = true;
 
       const onSessionIdChange = vi.fn();
       const { container } = renderApp({
@@ -534,6 +535,22 @@ describe('App session callbacks', () => {
     mockConnection.sessionId = undefined;
     mockConnection.error = 'Server error';
     mockConnection.errorStatus = 500;
+    mockConnection.missingSession = false;
+
+    const { container } = renderApp({ onSessionIdChange: vi.fn() });
+    await flush();
+
+    expect(container.textContent).not.toContain(
+      'Current session does not exist',
+    );
+  });
+
+  it('does not show missing-session state while connecting', async () => {
+    mockConnection.status = 'connecting';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
 
     const { container } = renderApp({ onSessionIdChange: vi.fn() });
     await flush();
@@ -548,6 +565,7 @@ describe('App session callbacks', () => {
     mockConnection.sessionId = undefined;
     mockConnection.error = 'Session load failed';
     mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
     mockSessionActions.clearSession.mockRejectedValueOnce(new Error('network'));
 
     const onSessionIdChange = vi.fn();
@@ -563,6 +581,60 @@ describe('App session callbacks', () => {
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
     expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('preserves active goal for the same session and clears it after session changes', async () => {
+    const activeGoals: unknown[] = [];
+    const { rerender } = renderApp({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('web-shell-goal-status-active', {
+          detail: {
+            active: true,
+            condition: 'ship it',
+            setAt: 123,
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(activeGoals.at(-1)).toMatchObject({
+      condition: 'ship it',
+      setAt: 123,
+    });
+
+    mockConnection.errorStatus = 404;
+    rerender({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    expect(activeGoals.at(-1)).toMatchObject({
+      condition: 'ship it',
+      setAt: 123,
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    expect(activeGoals.at(-1)).toBeNull();
   });
 
   it('gates direct submissions and dispatches submit events with delayed sidebar reload', async () => {

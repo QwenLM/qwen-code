@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export const MISSING_SESSION_HTTP_STATUSES = [404, 410] as const;
+
+const MISSING_SESSION_HTTP_STATUS_SET = new Set<number>(
+  MISSING_SESSION_HTTP_STATUSES,
+);
+
 export function isMissingSessionHttpStatus(
   status: number | undefined,
 ): boolean {
-  return status === 404 || status === 410;
+  return status !== undefined && MISSING_SESSION_HTTP_STATUS_SET.has(status);
 }
 
 /**

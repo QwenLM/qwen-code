@@ -74,6 +74,7 @@ import {
   publishPendingPromptEvent,
 } from '../pendingPromptVersion.js';
 import {
+  MISSING_SESSION_HTTP_STATUSES,
   isMissingSessionHttpStatus,
   resolveConnectionErrorStatus,
 } from './status.js';
@@ -152,7 +153,11 @@ const DaemonSessionNoticesContext = createContext<
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
-const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
+const TERMINAL_SESSION_HTTP_STATUSES = new Set([
+  ...AUTH_FAILURE_HTTP_STATUSES,
+  ...MISSING_SESSION_HTTP_STATUSES,
+]);
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
 // normalization still rebuilds from retained blocks today, so this high default
@@ -182,7 +187,6 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
  * 404/410 (session-not-found) leave the requested session disconnected instead
  * of silently creating a replacement empty session.
  */
-const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const UNHANDLED_SESSION = Symbol('unhandled session');
 
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
@@ -351,6 +355,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
+        let loadingRequestedSession = false;
         try {
           // ── SSE Reconnection Strategy ────────────────────────────────
           //
@@ -492,12 +497,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const requestClientId = clientId
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
+            loadingRequestedSession = Boolean(restoreSessionId);
             if (targetSessionId) {
               setConnection((current) => ({
                 ...current,
                 sessionId: targetSessionId,
                 error: undefined,
                 errorStatus: undefined,
+                missingSession: false,
                 loadingTranscript: true,
               }));
             }
@@ -530,6 +537,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     },
                     requestClientId,
                   );
+            loadingRequestedSession = false;
             if (!clientId && nextSession.clientId) {
               clientIdRef.current = nextSession.clientId;
               persistStableClientId(
@@ -1200,6 +1208,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionId: undefined,
               error: undefined,
               errorStatus: undefined,
+              missingSession: false,
             }));
             return;
           }
@@ -1290,12 +1299,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   errorStatus,
                   current.errorStatus,
                 ),
+                missingSession: false,
                 capabilities: capabilities ?? current.capabilities,
                 loadingTranscript: undefined,
                 catchingUp: undefined,
               }));
               return;
             }
+            const missingLoadedSession =
+              loadingRequestedSession &&
+              isMissingSessionHttpStatus(errorStatus);
             console.warn(
               '[DaemonSessionProvider] terminal session error (sessionId=%s, status=%d, message=%s)',
               failedSessionId,
@@ -1311,6 +1324,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
                 current.errorStatus,
               ),
+              missingSession: missingLoadedSession,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -1340,6 +1354,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus,
                 current.errorStatus,
               ),
+              missingSession: false,
             }));
             return;
           }
@@ -1351,6 +1366,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               errorStatus,
               current.errorStatus,
             ),
+            missingSession: false,
             loadingTranscript: undefined,
           }));
         }
@@ -1450,7 +1466,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
     let disposed = false;
     let consecutiveFailures = 0;
-    let lastHttpErrorStatus: number | undefined;
+    let lastHttpError: { status: number; message: string } | undefined;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
@@ -1471,19 +1487,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
           }
           consecutiveFailures = 0;
-          lastHttpErrorStatus = undefined;
+          lastHttpError = undefined;
         })
         .catch((error: unknown) => {
           if (disposed) return;
           consecutiveFailures += 1;
-          const thisErrorStatus = extractHttpStatus(error);
-          if (thisErrorStatus !== undefined) {
-            lastHttpErrorStatus = thisErrorStatus;
-          }
-          if (consecutiveFailures < heartbeatFailureThreshold) return;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
-          const errorStatus = thisErrorStatus ?? lastHttpErrorStatus;
+          const thisErrorStatus = extractHttpStatus(error);
+          if (thisErrorStatus !== undefined) {
+            lastHttpError = { status: thisErrorStatus, message };
+          }
+          if (consecutiveFailures < heartbeatFailureThreshold) return;
+          const errorStatus = thisErrorStatus ?? lastHttpError?.status;
+          const effectiveMessage =
+            thisErrorStatus !== undefined
+              ? message
+              : (lastHttpError?.message ?? message);
           const authFailure =
             errorStatus !== undefined &&
             AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
@@ -1517,11 +1537,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? {
                   ...current,
                   status: authFailure ? 'error' : 'disconnected',
-                  error: message,
+                  error: effectiveMessage,
                   errorStatus: resolveConnectionErrorStatus(
                     errorStatus,
                     current.errorStatus,
                   ),
+                  missingSession: false,
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,

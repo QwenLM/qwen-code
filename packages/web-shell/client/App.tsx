@@ -21,7 +21,6 @@ import {
   useTranscriptStore,
   useWorkspaceActions,
   useWorkspaceEventSignals,
-  isMissingSessionHttpStatus,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -1136,6 +1135,7 @@ export function App({
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
   const [isCreatingMissingSession, setIsCreatingMissingSession] =
     useState(false);
+  const creatingMissingSessionRef = useRef(false);
   const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
   activeGoalRef.current = activeGoal;
   const {
@@ -2204,10 +2204,7 @@ export function App({
       setActiveGoal(null);
     }
     lastGoalSessionIdRef.current = connection.sessionId;
-    if (
-      !connection.sessionId &&
-      isMissingSessionHttpStatus(connection.errorStatus)
-    ) {
+    if (!connection.sessionId && connection.missingSession) {
       // Keep the missing-session route visible until the user chooses a new chat.
       lastNotifiedSessionIdRef.current = connection.sessionId;
       return;
@@ -2215,7 +2212,7 @@ export function App({
     if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
     lastNotifiedSessionIdRef.current = connection.sessionId;
     onSessionIdChange?.(connection.sessionId);
-  }, [connection.errorStatus, connection.sessionId, onSessionIdChange]);
+  }, [connection.missingSession, connection.sessionId, onSessionIdChange]);
 
   const lastRenameSessionRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
@@ -2420,7 +2417,8 @@ export function App({
     }
   }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
   const handleMissingSessionNewSession = useCallback(async () => {
-    if (isCreatingMissingSession) return;
+    if (creatingMissingSessionRef.current) return;
+    creatingMissingSessionRef.current = true;
     setIsCreatingMissingSession(true);
     setMainView('chat');
     try {
@@ -2429,9 +2427,10 @@ export function App({
         onSessionIdChange?.(undefined);
       }
     } finally {
+      creatingMissingSessionRef.current = false;
       setIsCreatingMissingSession(false);
     }
-  }, [createNewSession, isCreatingMissingSession, onSessionIdChange]);
+  }, [createNewSession, onSessionIdChange]);
 
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
@@ -3939,7 +3938,9 @@ export function App({
     !pendingApproval &&
     !btwMessage;
   const missingSession =
-    !connection.sessionId && isMissingSessionHttpStatus(connection.errorStatus);
+    connection.status !== 'connecting' &&
+    !connection.sessionId &&
+    connection.missingSession === true;
   const effectiveChatWidthMode: ChatWidthMode = isChatEmptyState
     ? getDefaultChatWidthMode()
     : chatWidthMode;
