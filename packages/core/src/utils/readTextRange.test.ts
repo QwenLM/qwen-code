@@ -9,7 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { iconvEncode } from './iconvHelper.js';
-import { readTextRange } from './readTextRange.js';
+import { LargeNonUtf8TextError, readTextRange } from './readTextRange.js';
 
 describe('readTextRange', () => {
   let tempDir: string;
@@ -165,7 +165,25 @@ describe('readTextRange', () => {
         limit: 10,
         maxOutputBytes: 10_000,
       }),
-    ).rejects.toThrow(/Large non-UTF-8 text files are not supported/);
+    ).rejects.toThrow(LargeNonUtf8TextError);
+  });
+
+  it('rejects large files with invalid UTF-8 beyond the encoding sample', async () => {
+    const mostlyAsciiThenGbk = Buffer.concat([
+      Buffer.alloc(9 * 1024, 'a'),
+      iconvEncode('你好', 'gbk'),
+      Buffer.alloc(11 * 1024 * 1024, 'b'),
+    ]);
+    const filePath = await writeFile('late-gbk.log', mostlyAsciiThenGbk);
+
+    await expect(
+      readTextRange({
+        path: filePath,
+        offset: 0,
+        limit: 500,
+        maxOutputBytes: 20_000,
+      }),
+    ).rejects.toThrow(LargeNonUtf8TextError);
   });
 
   it('bounds selected output for a large single-line file', async () => {

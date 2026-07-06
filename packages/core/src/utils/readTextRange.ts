@@ -6,6 +6,7 @@
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
+import { TextDecoder } from 'node:util';
 import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
 import { isUtf8CompatibleEncoding } from './iconvHelper.js';
 import {
@@ -71,6 +72,9 @@ export async function readTextRange(
 }
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
+  if (maxOutputBytes === Number.POSITIVE_INFINITY) {
+    return Number.POSITIVE_INFINITY;
+  }
   if (!Number.isFinite(maxOutputBytes)) {
     return DEFAULT_RANGE_READ_BYTES;
   }
@@ -124,9 +128,13 @@ async function readLargeUtf8Range(
   let lineEnding: 'crlf' | 'lf' = 'lf';
   let previousChunkEndedWithCR = false;
   let originalLineCountExact = true;
+  let stoppedEarly = false;
+  const decoder = new TextDecoder('utf-8', {
+    fatal: true,
+    ignoreBOM: true,
+  });
 
   const stream = createReadStream(request.path, {
-    encoding: 'utf8',
     highWaterMark: 512 * 1024,
     signal: request.signal,
   });
@@ -154,9 +162,20 @@ async function readLargeUtf8Range(
     return currentLine >= offset && currentLine < endLine;
   }
 
+  function decodeUtf8Chunk(
+    chunk?: Buffer,
+    options?: TextDecodeOptions,
+  ): string {
+    try {
+      return decoder.decode(chunk, options);
+    } catch {
+      throw new LargeNonUtf8TextError(encoding);
+    }
+  }
+
   for await (const rawChunk of stream) {
     request.signal?.throwIfAborted();
-    let chunk = rawChunk;
+    let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
     if (firstChunk) {
       firstChunk = false;
       if (chunk.charCodeAt(0) === 0xfeff) {
@@ -186,6 +205,7 @@ async function readLargeUtf8Range(
       start = newline + 1;
       if (currentLine >= endLine || truncatedByBytes) {
         originalLineCountExact = false;
+        stoppedEarly = true;
         break;
       }
       newline = chunk.indexOf('\n', start);
@@ -196,8 +216,13 @@ async function readLargeUtf8Range(
     }
     if (currentLine >= endLine || truncatedByBytes) {
       originalLineCountExact = false;
+      stoppedEarly = true;
       break;
     }
+  }
+
+  if (!stoppedEarly) {
+    decodeUtf8Chunk();
   }
 
   return {

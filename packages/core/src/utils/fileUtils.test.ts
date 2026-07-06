@@ -1614,11 +1614,41 @@ describe('fileUtils', () => {
       expect(result.linesShown?.[0]).toBe(1);
     });
 
-    it('should mark byte truncation without character truncation', async () => {
-      actualNodeFs.writeFileSync(
+    it('should mark byte truncation metadata without character truncation', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'visible');
+      const byteTruncatedConfig = {
+        ...mockConfig,
+        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+        getFileSystemService: () => ({
+          readTextFile: vi.fn().mockResolvedValue({
+            content: 'visible',
+            _meta: {
+              originalLineCount: 1,
+              originalLineCountExact: false,
+              truncatedByBytes: true,
+            },
+          }),
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
         testTextFilePath,
-        'x'.repeat(11 * 1024 * 1024),
+        byteTruncatedConfig,
       );
+
+      expect(typeof result.llmContent).toBe('string');
+      const llmContent = result.llmContent as string;
+      expect(llmContent).toBe('visible... [truncated]');
+      expect(llmContent.match(/\.\.\. \[truncated\]/g)).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from test.txt (truncated)',
+      );
+      expect(result.isTruncated).toBe(true);
+    });
+
+    it('should preserve disabled output truncation for large text files', async () => {
+      const byteLength = 11 * 1024 * 1024;
+      actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(byteLength));
       const noCharacterLimitConfig = {
         ...mockConfig,
         getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
@@ -1631,12 +1661,10 @@ describe('fileUtils', () => {
 
       expect(typeof result.llmContent).toBe('string');
       const llmContent = result.llmContent as string;
-      expect(llmContent).toBe('x'.repeat(25_000) + '... [truncated]');
-      expect(llmContent.match(/\.\.\. \[truncated\]/g)).toHaveLength(1);
-      expect(result.returnDisplay).toBe(
-        'Read lines 1-1 of at least 1 from test.txt (truncated)',
-      );
-      expect(result.isTruncated).toBe(true);
+      expect(llmContent).toHaveLength(byteLength);
+      expect(llmContent).not.toContain('... [truncated]');
+      expect(result.returnDisplay).toBe('');
+      expect(result.isTruncated).toBe(false);
     });
 
     it('should still return an error if an inline media file exceeds 10MB', async () => {

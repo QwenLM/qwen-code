@@ -310,15 +310,11 @@ export async function readFileWithLineAndLimit(params: {
 }> {
   const { path: filePath, limit, line, maxOutputBytes, signal } = params;
   if (Number.isFinite(limit)) {
-    const rangeMaxOutputBytes =
-      typeof maxOutputBytes === 'number' && Number.isFinite(maxOutputBytes)
-        ? maxOutputBytes
-        : DEFAULT_RANGE_READ_BYTES;
     return readTextRange({
       path: filePath,
       offset: line || 0,
       limit,
-      maxOutputBytes: rangeMaxOutputBytes,
+      maxOutputBytes: normalizeRangeReadByteLimit(maxOutputBytes),
       ...(signal !== undefined ? { signal } : {}),
     });
   }
@@ -1348,12 +1344,24 @@ export async function processSingleFileContent(
 
 function getRangeReadByteLimit(config: Config): number {
   const charLimit = config.getTruncateToolOutputThreshold();
+  if (charLimit === Number.POSITIVE_INFINITY) {
+    return Number.POSITIVE_INFINITY;
+  }
   if (!Number.isFinite(charLimit)) {
     return DEFAULT_RANGE_READ_BYTES;
   }
   // Leave enough byte headroom for UTF-8 text so the character budget remains
   // the primary truncation control for normal source/log content.
   return Math.max(DEFAULT_RANGE_READ_BYTES, Math.floor(charLimit) * 4);
+}
+
+function normalizeRangeReadByteLimit(maxOutputBytes: number | undefined) {
+  if (maxOutputBytes === Number.POSITIVE_INFINITY) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return typeof maxOutputBytes === 'number' && Number.isFinite(maxOutputBytes)
+    ? maxOutputBytes
+    : DEFAULT_RANGE_READ_BYTES;
 }
 
 export async function fileExists(filePath: string): Promise<boolean> {
