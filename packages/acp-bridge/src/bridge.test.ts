@@ -62,7 +62,10 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
-import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -458,6 +461,41 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('keeps added artifacts committed when expired pin pruning fails', async () => {
+    const pruneSpy = vi.spyOn(
+      SessionArtifactStore.prototype,
+      'pruneExpiredPins',
+    );
+    pruneSpy.mockRejectedValueOnce(new Error('prune failed'));
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const result = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'New link',
+          url: 'https://example.com/new-link',
+        },
+        { clientId: session.clientId },
+      );
+
+      expect(result).toMatchObject({
+        changes: [{ action: 'created' }],
+        warnings: ['expired_artifact_content_retained'],
+      });
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: [expect.objectContaining({ title: 'New link' })],
+      });
+    } finally {
+      pruneSpy.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
   it('applies metadata pin options to an already pinned artifact', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
@@ -745,6 +783,62 @@ describe('createAcpSessionBridge', () => {
       gcSpy.mockClear();
 
       await bridge.killSession(session.sessionId);
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+      expect(gcSpy.mock.calls[0]?.[0]).toBe(session.sessionId);
+      expect(gcSpy.mock.calls[0]?.[1]).toEqual(new Set([contentRef.contentId]));
+    } finally {
+      gcSpy.mockRestore();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('runs content GC when closing a session', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      const firstPin = await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+      const contentRef = firstPin.changes[0]?.artifact?.contentRef;
+      expect(contentRef).toBeDefined();
+      if (!contentRef) {
+        throw new Error('expected content ref');
+      }
+      gcSpy.mockClear();
+
+      await bridge.closeSession(session.sessionId);
 
       expect(gcSpy).toHaveBeenCalledTimes(1);
       expect(gcSpy.mock.calls[0]?.[0]).toBe(session.sessionId);
@@ -1976,6 +2070,72 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('runs content GC after restore drops invalid content refs', async () => {
+    const sessionId = 'persisted-artifact-content-missing';
+    const artifactUrl = 'https://example.com/restored-content';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 1,
+                artifacts: [
+                  {
+                    id: artifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restored link',
+                    url: artifactUrl,
+                    retention: 'pinned',
+                    clientRetained: true,
+                    contentRef: {
+                      kind: 'managed_copy',
+                      contentId: `${'0'.repeat(64)}-${'1'.repeat(16)}`,
+                      sha256: '0'.repeat(64),
+                      sizeBytes: 1,
+                    },
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    try {
+      const loaded = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+      expect(gcSpy.mock.calls[0]?.[0]).toBe(loaded.sessionId);
+      await expect(
+        bridge.getSessionArtifacts(loaded.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: [
+          {
+            id: artifactId,
+            retention: 'restorable',
+            persistenceWarning: 'content_missing',
+          },
+        ],
+      });
+    } finally {
+      gcSpy.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
   it('keeps live artifacts when rewind returns no artifact snapshot', async () => {
     const bridge = makeBridge({
       channelFactory: async () =>
@@ -2030,6 +2190,7 @@ describe('createAcpSessionBridge', () => {
       `url:${rewoundUrl}`,
     );
     const persistedSnapshots: unknown[] = [];
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
@@ -2136,7 +2297,10 @@ describe('createAcpSessionBridge', () => {
         ],
       }),
     ]);
+    expect(gcSpy).toHaveBeenCalledTimes(1);
+    expect(gcSpy.mock.calls[0]?.[0]).toBe(session.sessionId);
 
+    gcSpy.mockRestore();
     await bridge.shutdown();
   });
 

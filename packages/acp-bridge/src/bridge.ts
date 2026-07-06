@@ -2829,6 +2829,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return warnings;
   };
 
+  const hasDroppedContentRefs = (artifacts: readonly DaemonSessionArtifact[]) =>
+    artifacts.some((artifact) =>
+      [
+        'content_missing',
+        'content_expired',
+        'content_hash_mismatch',
+        'restore_validation_failed',
+        'sticky_override_active',
+      ].includes(artifact.persistenceWarning ?? ''),
+    );
+
   function createSessionArtifactPersistence(
     connection: ClientSideConnection,
     sessionId: string,
@@ -3263,6 +3274,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             warning,
           )}`,
         );
+      }
+      const restoredArtifacts = await entry.artifacts.list();
+      if (hasDroppedContentRefs(restoredArtifacts.artifacts)) {
+        await gcArtifactContent(entry).catch((error) => {
+          writeStderrLine(
+            `qwen serve: session artifact GC failed during restore for ${JSON.stringify(
+              req.sessionId,
+            )}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates);
@@ -4720,10 +4741,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           persistenceStrict: false,
         });
       publishArtifactChanges(entry, result.changes, clientId);
-      const warnings = [
-        ...(result.warnings ?? []),
-        ...(await pruneExpiredArtifactPins(entry, clientId)),
-      ];
+      const warnings = [...(result.warnings ?? [])];
+      try {
+        warnings.push(...(await pruneExpiredArtifactPins(entry, clientId)));
+      } catch (error) {
+        warnings.push('expired_artifact_content_retained');
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=add_prune_failed reason=${JSON.stringify(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+      }
       return warnings.length > 0 ? { ...result, warnings } : result;
     },
 

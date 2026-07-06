@@ -3513,7 +3513,7 @@ describe('SessionArtifactStore', () => {
     );
     const artifactId = created.changes[0]!.artifactId;
     await source.pin(artifactId, {
-      expiresAt: '2026-07-06T00:00:00.000Z',
+      expiresAt: '2999-07-06T00:00:00.000Z',
       contentRef: {
         kind: 'managed_copy',
         contentId: `${'e'.repeat(64)}-${'f'.repeat(16)}`,
@@ -3545,7 +3545,7 @@ describe('SessionArtifactStore', () => {
     );
 
     const pruned = await restored.pruneExpiredPins(
-      new Date('2026-07-07T00:00:00.000Z'),
+      new Date('2999-07-07T00:00:00.000Z'),
     );
 
     expect(pruned.changes[0]?.artifact).toMatchObject({
@@ -3831,7 +3831,9 @@ describe('SessionArtifactContentStore', () => {
 
     await expect(
       contentStore.pinWorkspaceFile('content-session', artifact, workspace),
-    ).rejects.toThrow(SessionArtifactValidationError);
+    ).rejects.toThrow(
+      /Artifact content quota exceeded .*usedBytes=.*requestedBytes=.*limitBytes=/,
+    );
     await expect(fs.readdir(path.join(contentRoot, '.tmp'))).resolves.toEqual(
       [],
     );
@@ -3901,6 +3903,35 @@ describe('SessionArtifactContentStore', () => {
     const contentDir = path.join(contentRoot, contentId);
     await fs.mkdir(contentDir, { recursive: true });
     await fs.writeFile(path.join(contentDir, 'manifest.json'), '{bad json');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(
+        contentStore.gc('content-session', new Set()),
+      ).resolves.toEqual({
+        removed: [],
+        retained: [contentId],
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('content_gc_manifest_read_failed');
+      expect(logged).toContain(contentId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs and retains content with oversized manifests during gc', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const contentId = fakeContentId('huge-manifest');
+    const contentDir = path.join(contentRoot, contentId);
+    await fs.mkdir(contentDir, { recursive: true });
+    await fs.writeFile(
+      path.join(contentDir, 'manifest.json'),
+      'x'.repeat(5000),
+    );
+    await fs.writeFile(path.join(contentDir, 'content'), 'data');
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockReturnValue(true as never);
@@ -4049,6 +4080,15 @@ describe('SessionArtifactContentStore', () => {
     });
 
     await fs.writeFile(path.join(contentRoot, ref.contentId, 'content'), 'bad');
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBe('content_hash_mismatch');
+
+    await fs.rm(path.join(contentRoot, ref.contentId, 'content'));
+    await fs.symlink(
+      path.join(workspace, 'reports', 'verify.txt'),
+      path.join(contentRoot, ref.contentId, 'content'),
+    );
     await expect(
       contentStore.verifyContentRef('content-session', artifact.id, ref),
     ).resolves.toBe('content_hash_mismatch');

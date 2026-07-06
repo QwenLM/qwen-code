@@ -19,6 +19,7 @@ import { SessionArtifactValidationError } from './sessionArtifacts.js';
 const CONTENT_FORMAT_VERSION = 1;
 const MAX_PINNED_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_CONTENT_STORE_BYTES = 256 * 1024 * 1024;
+const MAX_CONTENT_MANIFEST_BYTES = 4 * 1024;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 
 interface ContentManifest {
@@ -118,7 +119,7 @@ export class SessionArtifactContentStore {
           const usedBytes = await this.getUsedBytes();
           if (usedBytes + sizeBytes > MAX_CONTENT_STORE_BYTES) {
             throw new SessionArtifactValidationError(
-              'Artifact content quota exceeded',
+              `Artifact content quota exceeded (usedBytes=${usedBytes}, requestedBytes=${sizeBytes}, limitBytes=${MAX_CONTENT_STORE_BYTES})`,
               'artifactId',
             );
           }
@@ -250,7 +251,7 @@ export class SessionArtifactContentStore {
     }
     try {
       const contentPath = path.join(contentDir, 'content');
-      const stat = await fs.stat(contentPath);
+      const stat = await fs.lstat(contentPath);
       if (!stat.isFile()) {
         return 'content_hash_mismatch';
       }
@@ -617,23 +618,42 @@ function sameFile(before: fsSync.Stats, after: fsSync.Stats): boolean {
   return before.size === after.size && before.mtimeMs === after.mtimeMs;
 }
 
-function hashFile(
+async function hashFile(
   filePath: string,
 ): Promise<{ sha256: string; sizeBytes: number }> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256');
-    let sizeBytes = 0;
-    const stream = fsSync.createReadStream(filePath);
-    stream.on('data', (chunk: string | Buffer) => {
-      const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-      sizeBytes += buffer.length;
-      hash.update(buffer);
-    });
-    stream.on('error', reject);
-    stream.on('end', () => {
-      resolve({ sha256: hash.digest('hex'), sizeBytes });
-    });
-  });
+  const fileStat = await fs.lstat(filePath);
+  if (!fileStat.isFile()) {
+    throw new Error('Retained artifact content must be a regular file');
+  }
+  const handle = await fs.open(
+    filePath,
+    fsSync.constants.O_RDONLY | noFollowFlag(),
+  );
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let sizeBytes = 0;
+  let position = 0;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error('Retained artifact content must be a regular file');
+    }
+    while (true) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.length,
+        position,
+      );
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      sizeBytes += bytesRead;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    return { sha256: hash.digest('hex'), sizeBytes };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 async function contentFileMatches(
@@ -646,6 +666,10 @@ async function contentFileMatches(
 }
 
 async function readManifest(filePath: string): Promise<ContentManifest> {
+  const stat = await fs.lstat(filePath);
+  if (!stat.isFile() || stat.size > MAX_CONTENT_MANIFEST_BYTES) {
+    throw new Error('Invalid artifact content manifest');
+  }
   const body = await fs.readFile(filePath, 'utf8');
   const parsed = JSON.parse(body) as Partial<ContentManifest>;
   if (
