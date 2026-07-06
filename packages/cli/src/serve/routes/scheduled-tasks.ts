@@ -31,6 +31,7 @@ import {
   parseCron,
   nextFireTime,
   nextDurableFireMs,
+  SessionService,
   MAX_JOBS,
   type DurableCronTask,
   type CronTaskRun,
@@ -355,10 +356,17 @@ export function registerScheduledTasksRoutes(
     };
 
     // Best-effort teardown of the just-minted session when the create can't be
-    // committed, so a rejected create doesn't leak a resident session.
+    // committed. closeSession only tears down the live child; removeSession also
+    // deletes the persisted transcript/title record — both are needed, or a
+    // rejected create (the loser of a concurrent create at the cap boundary,
+    // which passes the pre-check but loses the authoritative write) would leave
+    // a named "⏰ …" session in the list with no owning task.
     const rollbackSession = async () => {
       if (boundSessionId !== undefined && bridge) {
         await bridge.closeSession(boundSessionId).catch(() => {});
+        await new SessionService(boundWorkspace)
+          .removeSession(boundSessionId)
+          .catch(() => {});
       }
     };
 

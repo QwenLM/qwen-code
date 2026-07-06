@@ -1305,6 +1305,52 @@ describe('CronScheduler', () => {
       await settle(scheduler);
     });
 
+    it('guards an on-time tick fire from re-detection until its persist lands', async () => {
+      // Symmetric to the catch-up guard: an on-time tick fire also advances
+      // lastFiredAt asynchronously, so its id must be in firePersistPending while
+      // the write is in flight — otherwise a reload racing the persist (bound
+      // detection runs every reload) re-detects the just-fired slot as overdue.
+      const nowMs = Date.now();
+      const minute = nowMs - (nowMs % 60_000);
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'boundTick',
+          cron: '* * * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt: minute,
+          lastFiredAt: minute, // current slot already fired → not overdue at enable
+          sessionId: 'sess-B',
+        },
+      ]);
+      const fired: CronJob[] = [];
+      scheduler.start((j) => fired.push(j));
+      await scheduler.enableDurable('sess-B'); // no catch-up (not overdue)
+
+      let release!: () => void;
+      updateGate.block = new Promise((resolve) => {
+        release = resolve;
+      });
+      const hit = new Promise<void>((resolve) => {
+        updateGate.onHit = resolve;
+      });
+
+      // Fire the NEXT minute's slot on time (well past any jitter), parking the
+      // lastFiredAt persist on the gate.
+      scheduler.tick(new Date(minute + 90_000));
+      await hit;
+      expect(fired.map((j) => j.id)).toEqual(['boundTick']);
+      const internals = scheduler as unknown as {
+        firePersistPending: Set<string>;
+      };
+      expect(internals.firePersistPending.has('boundTick')).toBe(true); // guarded
+
+      updateGate.block = null;
+      release();
+      await settle(scheduler);
+      expect(internals.firePersistPending.has('boundTick')).toBe(false); // cleared
+    });
+
     it('skips a durable job the consumer cannot run: no fire, lastFiredAt left untouched', async () => {
       // A headless run can't expand a `<<loop.md>>` sentinel. Firing it would
       // stamp + persist lastFiredAt while the work is skipped downstream,

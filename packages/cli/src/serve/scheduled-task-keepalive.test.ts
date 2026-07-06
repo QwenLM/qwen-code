@@ -202,4 +202,29 @@ describe('scheduled-task keepalive', () => {
     });
     expect(res).toEqual({ loaded: [], failed: [] });
   });
+
+  it('rehydrates in bounded batches, not all sessions at once', async () => {
+    // Each loadSession forks a child; loading all (up to 50) at once would spike
+    // the host. Seed more sessions than the concurrency cap and assert the
+    // in-flight count never exceeds it.
+    const many = Array.from({ length: 12 }, (_, i) =>
+      task({ id: `t${i}`, sessionId: `s${i}` }),
+    );
+    await updateCronTasks(workspace, () => many);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const res = await rehydrateScheduledTaskSessions({
+      bridge: {
+        loadSession: async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 5));
+          inFlight--;
+        },
+      },
+      boundWorkspace: workspace,
+    });
+    expect(res.loaded).toHaveLength(12); // all still loaded
+    expect(maxInFlight).toBeLessThanOrEqual(4); // but batched, never all at once
+  });
 });

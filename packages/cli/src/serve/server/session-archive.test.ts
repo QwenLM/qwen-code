@@ -362,6 +362,41 @@ describe('unarchiveDaemonSessions', () => {
     expect(bound!.enabled).toBe(true); // resumed with its session
     expect(bound!.disabledByArchive).toBeUndefined(); // flag cleared
   });
+
+  it('recovers a stranded task on an ALREADY-active session', async () => {
+    // A task left `{enabled:false, disabledByArchive:true}` by a prior FAILED
+    // enable, whose session is already active, is otherwise unrecoverable
+    // (PATCH-enable 409s, keepalive skips it). Re-unarchiving the active session
+    // must reconcile it, since enableTasksForSessions also runs for alreadyActive.
+    const sessionId = '550e8400-e29b-41d4-a716-446655440062';
+    writeSessionFile(workspaceDir, sessionId, 'active'); // NOT archived
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'stranded',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1000,
+        sessionId,
+        enabled: false,
+        disabledByArchive: true,
+      },
+    ]);
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+    expect(result.alreadyActive).toEqual([sessionId]); // was already active
+
+    const stranded = (await readCronTasks(workspaceDir)).find(
+      (t) => t.id === 'stranded',
+    );
+    expect(stranded!.enabled).toBe(true); // recovered
+    expect(stranded!.disabledByArchive).toBeUndefined();
+  });
 });
 
 describe('deleteDaemonSessions', () => {

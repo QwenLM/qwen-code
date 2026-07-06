@@ -394,9 +394,19 @@ export async function archiveDaemonSessions(params: {
   });
 
   // Archiving a session pauses any scheduled task bound to it (kept on disk,
-  // recoverable on unarchive). Best-effort — never fail the archive over it.
+  // recoverable on unarchive). Best-effort — never fail the archive over it, but
+  // LOG a write failure: if the task's `enabled` flag isn't flipped, the
+  // keepalive still sees it enabled + bound and will revive the just-archived
+  // session so the task keeps firing. Logging makes that broken coupling
+  // diagnosable rather than silent.
   await disableTasksForSessions(service.getProjectRoot(), archived).catch(
-    () => {},
+    (err: unknown) => {
+      logSessionArchiveWarning(
+        `disableTasksForSessions failed for [${archived.join(', ')}]: ${
+          err instanceof Error ? err.message : String(err)
+        } — bound tasks may keep firing until reconciled`,
+      );
+    },
   );
 
   return { archived, alreadyArchived, notFound, errors };
@@ -457,10 +467,26 @@ export async function unarchiveDaemonSessions(params: {
   });
 
   // Unarchiving a session resumes any scheduled task bound to it (re-enabled,
-  // anchor reset to now). Best-effort — never fail the unarchive over it.
-  await enableTasksForSessions(service.getProjectRoot(), unarchived).catch(
-    () => {},
-  );
+  // anchor reset to now). Also run it for sessions that were ALREADY active:
+  // enableTasksForSessions is idempotent (it only re-enables archive-disabled
+  // tasks), so re-unarchiving a session whose task was stranded
+  // (`disabledByArchive: true`) by a PRIOR failed enable recovers it — otherwise
+  // that task is unrecoverable (PATCH-enable 409s on the stale flag, keepalive
+  // skips it). Surface a write failure in `errors` (and log it) instead of
+  // swallowing, so a stranded task isn't left silent.
+  try {
+    await enableTasksForSessions(service.getProjectRoot(), [
+      ...unarchived,
+      ...alreadyActive,
+    ]);
+  } catch (err) {
+    logSessionArchiveWarning(
+      `enableTasksForSessions failed for [${unarchived.join(', ')}]: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    for (const sessionId of unarchived) errors.push({ sessionId, error: err });
+  }
 
   return { unarchived, alreadyActive, notFound, errors };
 }

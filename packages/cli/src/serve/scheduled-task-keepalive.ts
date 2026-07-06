@@ -161,6 +161,11 @@ export interface RehydrateResult {
 /** Per-session load timeout: one hung `loadSession` (cold start, blocked child
  * spawn, huge replay) must not stall the whole boot sweep. */
 const REHYDRATE_LOAD_TIMEOUT_MS = 30_000;
+/** Max sessions rehydrated at once. Each `loadSession` forks a real agent
+ * child, so loading all of them (up to MAX_JOBS = 50) in one shot would spike
+ * CPU/memory on boot and, on constrained hosts, hit spawn failures
+ * (EAGAIN/ENOMEM) that strand healthy tasks. Load in small batches instead. */
+const REHYDRATE_MAX_CONCURRENCY = 4;
 
 export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
@@ -197,27 +202,31 @@ export async function rehydrateScheduledTaskSessions(deps: {
 
   const loaded: string[] = [];
   const failed: string[] = [];
-  // Load concurrently so one slow/hung session can't block the rest, each
-  // bounded by a timeout so a permanently-hung load still resolves as failed.
-  await Promise.all(
-    sessionIds.map(async (sessionId) => {
-      try {
-        await withTimeout(
-          bridge.loadSession({
-            sessionId,
-            workspaceCwd: boundWorkspace,
-            historyReplay: 'response',
-          }),
-          timeoutMs,
+  const loadOne = async (sessionId: string) => {
+    try {
+      await withTimeout(
+        bridge.loadSession({
           sessionId,
-        );
-        loaded.push(sessionId);
-      } catch (err) {
-        failed.push(sessionId);
-        deps.onError?.(sessionId, err);
-      }
-    }),
-  );
+          workspaceCwd: boundWorkspace,
+          historyReplay: 'response',
+        }),
+        timeoutMs,
+        sessionId,
+      );
+      loaded.push(sessionId);
+    } catch (err) {
+      failed.push(sessionId);
+      deps.onError?.(sessionId, err);
+    }
+  };
+  // Load in bounded batches: concurrent within a batch (one slow/hung session
+  // can't block its batch, each capped by a timeout), but never more than
+  // REHYDRATE_MAX_CONCURRENCY child spawns in flight at once.
+  for (let i = 0; i < sessionIds.length; i += REHYDRATE_MAX_CONCURRENCY) {
+    await Promise.all(
+      sessionIds.slice(i, i + REHYDRATE_MAX_CONCURRENCY).map(loadOne),
+    );
+  }
   return { loaded, failed };
 }
 
