@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 type StreamingState = 'idle' | 'responding';
 
 type MockConnection = {
-  status: 'connected';
+  status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
   clientId: string;
   displayName: string | undefined;
@@ -18,6 +18,9 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  error?: string;
+  errorStatus?: number;
+  missingSession?: boolean;
 };
 
 type ChatEditorTestProps = {
@@ -63,6 +66,9 @@ const {
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      attachSession: vi.fn().mockResolvedValue(undefined),
+      closeSession: vi.fn().mockResolvedValue(undefined),
+      clearSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -429,7 +435,11 @@ beforeEach(() => {
     }),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
+  mockConnection.error = undefined;
+  mockConnection.errorStatus = undefined;
+  mockConnection.missingSession = false;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
@@ -451,6 +461,10 @@ beforeEach(() => {
   mockSessionActions.createSession.mockResolvedValue({
     sessionId: 'session-1',
   });
+  mockSessionActions.attachSession.mockResolvedValue(undefined);
+  mockSessionActions.closeSession.mockResolvedValue(undefined);
+  mockSessionActions.clearSession.mockResolvedValue(undefined);
+  mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
@@ -482,6 +496,148 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it.each([404, 410])(
+    'shows a missing-session empty state with a new-session action for %d',
+    async (status) => {
+      mockConnection.status = 'disconnected';
+      mockConnection.sessionId = undefined;
+      mockConnection.error = 'Session load failed';
+      mockConnection.errorStatus = status;
+      mockConnection.missingSession = true;
+
+      const onSessionIdChange = vi.fn();
+      const { container } = renderApp({
+        onSessionIdChange,
+      });
+      await flush();
+
+      expect(container.textContent).toContain('Current session does not exist');
+      const submit = container.querySelector('[data-testid="submit"]');
+      expect(submit?.closest('[class*="chatSubtreeHidden"]')).not.toBeNull();
+      expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
+
+      await act(async () => {
+        Array.from(container.querySelectorAll('button'))
+          .find((button) => button.textContent === 'New session')
+          ?.click();
+        await Promise.resolve();
+      });
+
+      expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+      expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+      expect(onSessionIdChange).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not show missing-session state for non-404/410 errors', async () => {
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Server error';
+    mockConnection.errorStatus = 500;
+    mockConnection.missingSession = false;
+
+    const { container } = renderApp({ onSessionIdChange: vi.fn() });
+    await flush();
+
+    expect(container.textContent).not.toContain(
+      'Current session does not exist',
+    );
+  });
+
+  it('does not show missing-session state while connecting', async () => {
+    mockConnection.status = 'connecting';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
+
+    const { container } = renderApp({ onSessionIdChange: vi.fn() });
+    await flush();
+
+    expect(container.textContent).not.toContain(
+      'Current session does not exist',
+    );
+  });
+
+  it('does not notify session change when missing-session new chat fails', async () => {
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('network'));
+
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'New session')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('preserves active goal for the same session and clears it after session changes', async () => {
+    const activeGoals: unknown[] = [];
+    const { rerender } = renderApp({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('web-shell-goal-status-active', {
+          detail: {
+            active: true,
+            condition: 'ship it',
+            setAt: 123,
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(activeGoals.at(-1)).toMatchObject({
+      condition: 'ship it',
+      setAt: 123,
+    });
+
+    mockConnection.errorStatus = 404;
+    rerender({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    expect(activeGoals.at(-1)).toMatchObject({
+      condition: 'ship it',
+      setAt: 123,
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    expect(activeGoals.at(-1)).toBeNull();
+  });
+
   it('gates direct submissions and dispatches submit events with delayed sidebar reload', async () => {
     vi.useFakeTimers();
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
@@ -705,7 +861,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     // A gated tool call arrives.
     await act(async () => {
@@ -727,7 +885,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [
@@ -753,7 +913,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -821,7 +983,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     testState.prompt = '/schedule';
     await clickSubmit(container);
@@ -841,7 +1005,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock({ resolved: true })];
@@ -849,7 +1015,9 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('keeps the composer dormant (dialogOpen) while an approval overlay is up', async () => {
@@ -881,7 +1049,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/model';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -930,7 +1100,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     const sidebar = container.querySelector('[data-testid="sidebar"]');
     await act(async () => {
@@ -939,7 +1111,9 @@ describe('App session callbacks', () => {
       );
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('marks the composer dormant (dialogOpen) while a panel replaces the chat', async () => {
@@ -985,7 +1159,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
     editorFocus.mockClear();
 
     await act(async () => {
@@ -1012,7 +1188,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       container
@@ -1059,7 +1237,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     testState.prompt = '/resume session-2';
     await clickSubmit(container);

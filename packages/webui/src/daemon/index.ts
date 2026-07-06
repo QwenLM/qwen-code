@@ -30,6 +30,7 @@ export {
   selectDaemonStreamingState,
   selectDaemonTodoLists,
   selectDaemonTranscriptStreamingState,
+  isMissingSessionHttpStatus,
   toDaemonPromptContent,
 } from './session/index.js';
 export type {
