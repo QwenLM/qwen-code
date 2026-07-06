@@ -1230,6 +1230,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
 
   const mockArgv = {} as CliArgs;
+  const acpLocalReadRootsEnv = 'QWEN_ACP_LOCAL_READ_ROOTS';
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1327,75 +1328,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('configures ACP file system fallback roots for read_file allowed local roots', async () => {
-    const fsCapabilities = { readTextFile: true, writeTextFile: true };
-    const fallbackFileSystem = {};
-    const innerConfig = {
-      ...makeInnerConfig(),
-      getTargetDir: vi.fn().mockReturnValue('/project'),
-      getSessionId: vi.fn().mockReturnValue('session-with-fs'),
-      getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
-      setFileSystemService: vi.fn(),
-      storage: {
-        getProjectTempDir: vi.fn().mockReturnValue('/project/.qwen/tmp'),
-        getProjectDir: vi.fn().mockReturnValue('/project'),
-        getUserSkillsDirs: vi.fn().mockReturnValue(['/home/test/.qwen/skills']),
-      },
-    };
-    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      innerConfig as unknown as Config,
-    );
-    vi.mocked(Session).mockImplementation(
-      () =>
-        ({
-          getId: vi.fn().mockReturnValue('session-with-fs'),
-          getConfig: vi.fn().mockReturnValue(innerConfig),
-          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
-          startCronScheduler: vi.fn(),
-          dispose: vi.fn(),
-        }) as unknown as InstanceType<typeof Session>,
-    );
+    const previousRoots = process.env[acpLocalReadRootsEnv];
+    delete process.env[acpLocalReadRootsEnv];
 
-    const agentPromise = runAcpAgent(
-      mockConfig,
-      makeSessionSettings(),
-      mockArgv,
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    try {
+      await expectAcpLocalReadRoots(
+        'session-with-fs',
+        expectedDefaultAcpLocalReadRoots(),
+      );
+    } finally {
+      restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
+    }
+  });
 
-    const fakeConn = {
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    } as AgentSideConnectionLike;
-    const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+  it('appends QWEN_ACP_LOCAL_READ_ROOTS absolute entries to ACP file system fallback roots', async () => {
+    const previousRoots = process.env[acpLocalReadRootsEnv];
+    const envRootA = path.resolve('/custom/acp-a');
+    const envRootB = path.resolve('/custom/acp-b');
+    process.env[acpLocalReadRootsEnv] = [
+      '',
+      ` ${envRootA} `,
+      'relative-acp-root',
+      envRootB,
+      '   ',
+    ].join(path.delimiter);
 
-    await agent.initialize({ clientCapabilities: { fs: fsCapabilities } });
-    await agent.newSession({ cwd: '/project', mcpServers: [] });
-
-    expect(AcpFileSystemService).toHaveBeenCalledWith(
-      fakeConn,
-      'session-with-fs',
-      fsCapabilities,
-      fallbackFileSystem,
-      {
-        localReadRoots: [
-          '/project/.qwen/tmp',
-          path.join('/project', 'subagents'),
-          '/tmp/qwen-global-temp',
-          '/project/.qwen/memory',
-          '/tmp/user-memory',
-          '/home/test/.qwen/skills',
-          '/tmp/qwen-extensions',
-        ],
-      },
-    );
-    expect(innerConfig.setFileSystemService).toHaveBeenCalled();
-
-    mockConnectionState.resolve();
-    await agentPromise;
+    try {
+      await expectAcpLocalReadRoots(
+        'session-with-fs-env',
+        [...expectedDefaultAcpLocalReadRoots(), envRootA, envRootB],
+      );
+    } finally {
+      restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
+    }
   });
 
   it('passes each concurrent newSession its own workspace settings instance', async () => {
@@ -1606,6 +1571,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
     };
+  }
+
+  function expectedDefaultAcpLocalReadRoots(): string[] {
+    return [
+      '/project/.qwen/tmp',
+      path.join('/project', 'subagents'),
+      '/tmp/qwen-global-temp',
+      '/project/.qwen/memory',
+      '/tmp/user-memory',
+      '/home/test/.qwen/skills',
+      '/tmp/qwen-extensions',
+      ...(process.platform === 'win32' ? [] : ['/tmp']),
+    ];
+  }
+
+  function restoreOptionalEnv(key: string, value: string | undefined): void {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  async function expectAcpLocalReadRoots(
+    sessionId: string,
+    expectedLocalReadRoots: string[],
+  ): Promise<void> {
+    const fsCapabilities = { readTextFile: true, writeTextFile: true };
+    const fallbackFileSystem: Record<string, never> = {};
+    const innerConfig = {
+      ...makeInnerConfig(),
+      getTargetDir: vi.fn().mockReturnValue('/project'),
+      getSessionId: vi.fn().mockReturnValue(sessionId),
+      getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
+      setFileSystemService: vi.fn(),
+      storage: {
+        getProjectTempDir: vi.fn().mockReturnValue('/project/.qwen/tmp'),
+        getProjectDir: vi.fn().mockReturnValue('/project'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/home/test/.qwen/skills']),
+      },
+    };
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    try {
+      const fakeConn = {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as AgentSideConnectionLike;
+      const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+
+      await agent.initialize({ clientCapabilities: { fs: fsCapabilities } });
+      await agent.newSession({ cwd: '/project', mcpServers: [] });
+
+      expect(AcpFileSystemService).toHaveBeenCalledWith(
+        fakeConn,
+        sessionId,
+        fsCapabilities,
+        fallbackFileSystem,
+        {
+          localReadRoots: expectedLocalReadRoots,
+        },
+      );
+      expect(innerConfig.setFileSystemService).toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   }
 
   function makeSessionSettings() {
