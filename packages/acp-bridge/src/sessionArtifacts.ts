@@ -655,8 +655,12 @@ export class SessionArtifactStore {
     }
     return this.enqueue(async () => {
       const recordedAt = new Date().toISOString();
+      const sequence = this.persistenceSeq + 1;
       try {
-        await persistence.recordSnapshot(this.buildSnapshotPayload(recordedAt));
+        await persistence.recordSnapshot(
+          this.buildSnapshotPayload(recordedAt, sequence),
+        );
+        this.persistenceSeq = sequence;
         this.durableEventsSinceSnapshot = 0;
         this.consecutiveSnapshotFailures = 0;
         return [];
@@ -768,10 +772,11 @@ export class SessionArtifactStore {
       change.artifact = artifact;
     }
 
+    const sequence = this.persistenceSeq + 1;
     const payload: SessionArtifactEventRecordPayload = {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
-      sequence: ++this.persistenceSeq,
+      sequence,
       recordedAt,
       changes: durableChanges.map((change) =>
         toPersistedChange(change, recordedAt),
@@ -780,6 +785,7 @@ export class SessionArtifactStore {
 
     try {
       await this.persistence.recordEvent(payload);
+      this.persistenceSeq = sequence;
       for (const change of durableChanges) {
         if (change.action === 'removed') continue;
         const stored = this.artifacts.get(change.artifactId);
@@ -818,10 +824,12 @@ export class SessionArtifactStore {
     if (this.durableEventsSinceSnapshot < snapshotThreshold) {
       return;
     }
+    const sequence = this.persistenceSeq + 1;
     try {
       await this.persistence.recordSnapshot(
-        this.buildSnapshotPayload(recordedAt),
+        this.buildSnapshotPayload(recordedAt, sequence),
       );
+      this.persistenceSeq = sequence;
       this.durableEventsSinceSnapshot = 0;
       this.consecutiveSnapshotFailures = 0;
     } catch (error) {
@@ -839,6 +847,7 @@ export class SessionArtifactStore {
 
   private buildSnapshotPayload(
     recordedAt: string,
+    sequence: number,
   ): SessionArtifactSnapshotRecordPayload {
     const artifacts = Array.from(this.artifacts.values())
       .filter((artifact) => artifact.retention !== 'ephemeral')
@@ -852,7 +861,7 @@ export class SessionArtifactStore {
     return {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
-      sequence: ++this.persistenceSeq,
+      sequence,
       recordedAt,
       artifacts,
       tombstonedIds: Array.from(this.tombstonedIds),
@@ -1090,9 +1099,10 @@ export class SessionArtifactStore {
         ? { persistenceWarning: 'persistence_unavailable' as const }
         : {}),
       clientRetained:
-        input.clientRetained !== undefined
+        source === 'client' &&
+        (input.clientRetained !== undefined
           ? input.clientRetained === true
-          : source === 'client',
+          : true),
       createdAt: now,
       updatedAt: now,
       toolCallId: normalizeString(input.toolCallId, 'toolCallId', 200, false),
@@ -1114,8 +1124,10 @@ export class SessionArtifactStore {
       return false;
     }
     const tombstonedClientId = this.tombstonedClientIds.get(artifact.id);
+    if (artifact.source !== 'client') {
+      return false;
+    }
     return !(
-      artifact.source === 'client' &&
       artifact.retentionExplicit &&
       artifact.clientId !== undefined &&
       artifact.clientId === tombstonedClientId

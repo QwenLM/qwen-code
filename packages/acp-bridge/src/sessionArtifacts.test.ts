@@ -270,6 +270,27 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('ignores explicit client retention flags from non-client sources', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-retained-source',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Tool retained',
+        source: 'tool',
+        clientRetained: true,
+        url: 'https://example.com/tool-retained',
+      },
+    ]);
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      source: 'tool',
+      clientRetained: false,
+    });
+  });
+
   it('skips cross-client upsert conflicts without dropping the batch', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-client-upsert-owner-batch',
@@ -443,6 +464,39 @@ describe('SessionArtifactStore', () => {
       { strict: true },
     );
     expect(sequenceState.receivedSeq).toBe(2);
+  });
+
+  it('does not consume persistence sequence when strict event writes fail', async () => {
+    let fail = false;
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-persistence-sequence-rollback',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (fail) throw new Error('persist failed');
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    fail = true;
+    await expect(
+      store.upsertMany(
+        [{ title: 'First', url: 'https://example.com/sequence-first' }],
+        { strict: true },
+      ),
+    ).rejects.toThrow('persist failed');
+
+    fail = false;
+    await store.upsertMany(
+      [{ title: 'Second', url: 'https://example.com/sequence-second' }],
+      { strict: true },
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ sequence: 1 });
   });
 
   it('serializes concurrent store operations', async () => {
@@ -2441,6 +2495,7 @@ describe('SessionArtifactStore', () => {
       }
       expect(snapshotAttempts).toBe(2);
       expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]).toMatchObject({ sequence: 101 });
 
       for (let index = 100; index < 149; index++) {
         await store.upsertMany(
@@ -2466,6 +2521,7 @@ describe('SessionArtifactStore', () => {
       );
       expect(snapshotAttempts).toBe(3);
       expect(snapshots).toHaveLength(2);
+      expect(snapshots[1]).toMatchObject({ sequence: 152 });
 
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('snapshot_failed');
@@ -2513,13 +2569,19 @@ describe('SessionArtifactStore', () => {
       snapshots[0]?.artifacts.some((artifact) => artifact.id === deletedId),
     ).toBe(false);
 
-    const suppressed = await store.upsertMany([
+    const rerun = await store.upsertMany([
       { title: 'Deleted', url: 'https://example.com/deleted' },
     ]);
-    expect(suppressed.changes).toEqual([]);
+    expect(rerun.changes).toMatchObject([
+      {
+        action: 'created',
+        artifactId: deletedId,
+        artifact: { source: 'tool' },
+      },
+    ]);
   });
 
-  it('suppresses implicit upserts for restored tombstones', async () => {
+  it('allows tool reruns to supersede restored delete tombstones', async () => {
     const sessionId = 's11-restored-tombstone';
     const input = {
       title: 'Old tool result',
@@ -2544,18 +2606,45 @@ describe('SessionArtifactStore', () => {
       stickyEphemeralIds: [],
       warnings: [],
     });
-    const suppressed = await store.upsertMany([input]);
-    expect(suppressed.changes).toEqual([]);
-
-    const explicitClient = await store.upsertMany([
+    const rerun = await store.upsertMany([input]);
+    expect(rerun.changes).toMatchObject([
       {
-        ...input,
-        source: 'client',
-        clientId: 'client-a',
-        retention: 'restorable',
+        action: 'created',
+        artifactId,
+        artifact: { source: 'tool' },
       },
     ]);
-    expect(explicitClient.changes).toEqual([]);
+  });
+
+  it('keeps stale client upserts suppressed by restored tombstones', async () => {
+    const sessionId = 's11-restored-client-tombstone';
+    const input = {
+      title: 'Old client result',
+      source: 'client' as const,
+      clientId: 'client-a',
+      url: 'https://example.com/tombstoned-client',
+    };
+    const seed = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const artifactId = (await seed.upsertMany([input])).changes[0]!.artifactId;
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [artifactId],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const suppressed = await store.upsertMany([input]);
+    expect(suppressed.changes).toEqual([]);
   });
 
   it('keeps restore warnings visible on the artifact list', async () => {
