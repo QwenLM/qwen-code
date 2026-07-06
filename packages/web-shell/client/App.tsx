@@ -73,7 +73,7 @@ import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog'
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
-import { isAskUserQuestionToolName } from './components/messages/toolFormatting';
+import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
@@ -653,16 +653,6 @@ function isEditToolPermission(request: PermissionRequest): boolean {
   return request.toolKind === 'edit';
 }
 
-function isAskUserPermission(request: PermissionRequest | null): boolean {
-  if (
-    !request?.rawInput?.questions ||
-    !Array.isArray(request.rawInput.questions)
-  ) {
-    return false;
-  }
-  if (!request.toolName) return true;
-  return isAskUserQuestionToolName(request.toolName);
-}
 
 function parseRenameArgument(
   raw: string,

@@ -144,4 +144,15 @@ describe('SplitView', () => {
     act(() => back.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onExit).toHaveBeenCalledTimes(1);
   });
+
+  it('caps the number of panes at MAX_PANES (6)', () => {
+    sessionsState = Array.from({ length: 8 }, (_, i) => ({
+      sessionId: `x${i}`,
+      workspaceCwd: '/w',
+      displayName: `Pane ${i}`,
+    }));
+    render({ initialSessionIds: sessionsState.map((s) => s.sessionId) });
+    // Eight requested, but only six live panes mount.
+    expect(panes()).toHaveLength(6);
+  });
 });

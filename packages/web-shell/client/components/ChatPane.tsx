@@ -16,13 +16,12 @@ import { useMessages } from '../hooks/useMessages';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type { ComposerSubmitCommit } from '../hooks/useComposerCore';
-import { isAskUserQuestionToolName } from './messages/toolFormatting';
+import { isAskUserPermission } from '../utils/askUserPermission';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor } from './ChatEditor';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
-import type { PermissionRequest } from '../adapters/types';
 import styles from './ChatPane.module.css';
 
 // Matches the daemon default (ui.shellOutputMaxLines). A split pane does not
@@ -31,20 +30,6 @@ import styles from './ChatPane.module.css';
 const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 const EMPTY_COMMANDS: never[] = [];
 const EMPTY_TOOLBAR: never[] = [];
-
-// Mirror of App's local helper: an AskUserQuestion approval carries a
-// `questions` array (and either no toolName or the AskUserQuestion tool name);
-// everything else is a normal tool-call approval.
-function isAskUserPermission(request: PermissionRequest | null): boolean {
-  if (
-    !request?.rawInput?.questions ||
-    !Array.isArray(request.rawInput.questions)
-  ) {
-    return false;
-  }
-  if (!request.toolName) return true;
-  return isAskUserQuestionToolName(request.toolName);
-}
 
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */

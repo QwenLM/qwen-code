@@ -117,10 +117,29 @@ function render(props: { onOpenSplit?: (ids: string[]) => void } = {}): void {
   );
 }
 
+function rerender(props: { onOpenSplit?: (ids: string[]) => void } = {}): void {
+  act(() =>
+    root!.render(
+      <I18nProvider language="en">
+        <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+      </I18nProvider>,
+    ),
+  );
+}
+
 function cardLabels(): string[] {
   return Array.from(container!.querySelectorAll('ul li')).map(
     (li) => li.querySelectorAll('button')[0]?.textContent?.trim() ?? '',
   );
+}
+
+function selectAllCheckbox(): HTMLInputElement {
+  return container!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+}
+function tabButton(): HTMLButtonElement {
+  return Array.from(container!.querySelectorAll('button')).find((b) =>
+    b.textContent?.includes('Open in new tab'),
+  ) as HTMLButtonElement;
 }
 
 describe('deriveSessionCards', () => {
@@ -267,5 +286,55 @@ describe('SessionOverviewPanel', () => {
     );
     // needs-approval (Charlie) is ranked ahead of idle (Bravo).
     expect(onOpenSplit).toHaveBeenCalledWith(['s-appr', 's-idle']);
+  });
+
+  it('toggling a card checkbox selects it without switching sessions', () => {
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    render();
+    const cardCheckbox = container!.querySelector(
+      'ul li input[type="checkbox"]',
+    ) as HTMLInputElement;
+    act(() => cardCheckbox.click());
+    expect(cardCheckbox.checked).toBe(true);
+    // Selecting must not navigate — that's what the label button is for.
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the popup-blocked notice when window.open is blocked', () => {
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    openSpy.mockReturnValue(null); // browser blocked the pop-up
+    render();
+    act(() => selectAllCheckbox().click());
+    act(() =>
+      tabButton().dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(container!.textContent).toContain('Pop-up blocked');
+  });
+
+  it('does not re-select a session that left the list and came back', () => {
+    sessionsState.sessions = [
+      session('a', { displayName: 'A' }),
+      session('b', { displayName: 'B' }),
+    ];
+    render();
+    act(() => selectAllCheckbox().click()); // a + b selected
+    expect(selectAllCheckbox().checked).toBe(true);
+
+    // 'a' leaves the list → its selection is pruned.
+    sessionsState.sessions = [session('b', { displayName: 'B' })];
+    rerender();
+    // 'a' comes back → it must NOT be pre-selected (only b remains selected).
+    sessionsState.sessions = [
+      session('a', { displayName: 'A' }),
+      session('b', { displayName: 'B' }),
+    ];
+    rerender();
+    expect(selectAllCheckbox().checked).toBe(false);
+    act(() =>
+      tabButton().dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    // Only 'b' is opened — the returned 'a' was pruned, not silently reselected.
+    const url = new URL(String(openSpy.mock.calls[0][0]));
+    expect(url.searchParams.get('split')).toBe('b');
   });
 });

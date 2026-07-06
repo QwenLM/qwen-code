@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -63,6 +63,26 @@ export function SplitView({
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  const addWrapRef = useRef<HTMLDivElement | null>(null);
+
+  // Dismiss the "add session" picker on Escape or a click outside it.
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!addWrapRef.current?.contains(event.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPickerOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [pickerOpen]);
 
   const titleById = useMemo(() => {
     const map = new Map<string, string>();
@@ -119,7 +139,7 @@ export function SplitView({
         <span className={styles.count}>
           {t('splitView.count', { count: paneIds.length })}
         </span>
-        <div className={styles.addWrap}>
+        <div className={styles.addWrap} ref={addWrapRef}>
           <button
             type="button"
             className={styles.addButton}

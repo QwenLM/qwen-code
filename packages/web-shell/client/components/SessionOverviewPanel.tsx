@@ -214,11 +214,29 @@ function SessionOverviewPanelInner({
   const selectedCount = selectedIds.length;
   const allSelected = cards.length > 0 && selectedCount === cards.length;
   const toggleSelectAll = useCallback(() => {
-    setSelected((prev) =>
-      prev.size >= cards.length && cards.length > 0
-        ? new Set()
-        : new Set(cards.map((card) => card.sessionId)),
-    );
+    setSelected((prev) => {
+      const ids = cards.map((card) => card.sessionId);
+      // Toggle off only when every currently-listed card is selected — using
+      // the intersection, not prev.size, so stale ids can't skew it.
+      const everySelected = ids.length > 0 && ids.every((id) => prev.has(id));
+      return everySelected ? new Set() : new Set(ids);
+    });
+  }, [cards]);
+
+  // Drop selections for sessions that have left the list, so a reappearing
+  // session isn't silently pre-selected and select-all/counts stay accurate.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(cards.map((card) => card.sessionId));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (present.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
   }, [cards]);
 
   // Open the selected sessions as a split view in a NEW browser tab: one tab
