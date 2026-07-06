@@ -328,58 +328,52 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
-  if (
-    injectedWorkspaceRegistry &&
-    deps.boundWorkspace !== undefined &&
-    deps.boundWorkspace !== injectedWorkspaceRegistry.primary.workspaceCwd
-  ) {
-    throw new Error(
-      'createServeApp: workspaceRegistry conflicts with ' +
-        `deps.boundWorkspace: ${describeRegistryPrimaryForConflict(
-          injectedWorkspaceRegistry,
-        )}; deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}.`,
-    );
-  }
-  if (injectedWorkspaceRegistry && deps.bridge) {
-    if (deps.bridge !== injectedWorkspaceRegistry.primary.bridge) {
-      throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.bridge: ' +
-          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
-          'deps.bridge is a different object.',
-      );
-    }
-  }
-  if (injectedWorkspaceRegistry && deps.workspace) {
-    if (deps.workspace !== injectedWorkspaceRegistry.primary.workspaceService) {
-      throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.workspace: ' +
-          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
-          'deps.workspace is a different object.',
-      );
-    }
-  }
-  if (injectedWorkspaceRegistry && deps.fsFactory) {
-    if (
-      deps.fsFactory !==
-      injectedWorkspaceRegistry.primary.routeFileSystemFactory
-    ) {
-      throw new Error(
-        'createServeApp: workspaceRegistry conflicts with deps.fsFactory: ' +
-          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
-          'deps.fsFactory is a different object.',
-      );
-    }
-  }
-  if (injectedWorkspaceRegistry && deps.clientMcpSenderRegistry) {
-    if (
-      deps.clientMcpSenderRegistry !==
-      injectedWorkspaceRegistry.primary.clientMcpSenderRegistry
-    ) {
+  if (injectedWorkspaceRegistry) {
+    const primary = injectedWorkspaceRegistry.primary;
+    const registryConflictCandidates = [
+      {
+        depName: 'deps.boundWorkspace',
+        depValue: deps.boundWorkspace,
+        registryValue: primary.workspaceCwd,
+        detail: `deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}`,
+      },
+      {
+        depName: 'deps.bridge',
+        depValue: deps.bridge,
+        registryValue: primary.bridge,
+        detail: 'deps.bridge is a different object',
+      },
+      {
+        depName: 'deps.workspace',
+        depValue: deps.workspace,
+        registryValue: primary.workspaceService,
+        detail: 'deps.workspace is a different object',
+      },
+      {
+        depName: 'deps.fsFactory',
+        depValue: deps.fsFactory,
+        registryValue: primary.routeFileSystemFactory,
+        detail: 'deps.fsFactory is a different object',
+      },
+      {
+        depName: 'deps.clientMcpSenderRegistry',
+        depValue: deps.clientMcpSenderRegistry,
+        registryValue: primary.clientMcpSenderRegistry,
+        detail: 'deps.clientMcpSenderRegistry is a different object',
+      },
+    ];
+    for (const candidate of registryConflictCandidates) {
+      if (
+        candidate.depValue === undefined ||
+        candidate.depValue === candidate.registryValue
+      ) {
+        continue;
+      }
       throw new Error(
         'createServeApp: workspaceRegistry conflicts with ' +
-          'deps.clientMcpSenderRegistry: ' +
-          `${describeRegistryPrimaryForConflict(injectedWorkspaceRegistry)}; ` +
-          'deps.clientMcpSenderRegistry is a different object.',
+          `${candidate.depName}: ${describeRegistryPrimaryForConflict(
+            injectedWorkspaceRegistry,
+          )}; ${candidate.detail}.`,
       );
     }
   }

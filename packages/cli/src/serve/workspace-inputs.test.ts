@@ -61,7 +61,9 @@ describe('resolveSingleWorkspaceInput', () => {
     const root = makeScratch();
     const parent = path.join(root, 'parent');
     const child = path.join(parent, 'child');
+    const dotPrefixedChild = path.join(parent, '..foo');
     fs.mkdirSync(child, { recursive: true });
+    fs.mkdirSync(dotPrefixedChild);
 
     expect(() => resolveSingleWorkspaceInput([parent, child])).toThrow(
       NestedWorkspaceInputError,
@@ -69,6 +71,9 @@ describe('resolveSingleWorkspaceInput', () => {
     expect(() => resolveSingleWorkspaceInput([child, parent])).toThrow(
       NestedWorkspaceInputError,
     );
+    expect(() =>
+      resolveSingleWorkspaceInput([parent, dotPrefixedChild]),
+    ).toThrow(NestedWorkspaceInputError);
   });
 
   it('rejects distinct non-nested explicit workspaces while Phase 2a is gated', () => {
@@ -83,7 +88,7 @@ describe('resolveSingleWorkspaceInput', () => {
     );
   });
 
-  it('propagates canonicalization failures for explicit multi-workspace inputs', async () => {
+  it('keeps canonicalization failures on the gated multi-workspace error path', async () => {
     const canonicalizationError = Object.assign(
       new Error('permission denied'),
       { code: 'EACCES' },
@@ -98,13 +103,12 @@ describe('resolveSingleWorkspaceInput', () => {
       },
     }));
     try {
-      const { resolveSingleWorkspaceInput } = await import(
-        './workspace-inputs.js'
-      );
+      const { MultipleWorkspaceInputError, resolveSingleWorkspaceInput } =
+        await import('./workspace-inputs.js');
 
       expect(() =>
         resolveSingleWorkspaceInput(['/inaccessible', '/other']),
-      ).toThrow(canonicalizationError);
+      ).toThrow(MultipleWorkspaceInputError);
     } finally {
       vi.doUnmock('@qwen-code/acp-bridge/workspacePaths');
       vi.resetModules();

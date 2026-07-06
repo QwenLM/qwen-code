@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { isWithinRoot } from '../config/path-comparison.js';
 
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {
@@ -57,10 +57,7 @@ function normalizeWorkspaceInputs(workspace: unknown): string[] {
 }
 
 function isNestedWorkspace(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return (
-    relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
-  );
+  return parent !== child && isWithinRoot(child, parent);
 }
 
 function rejectUnsupportedMultiWorkspaceInputs(
@@ -68,9 +65,14 @@ function rejectUnsupportedMultiWorkspaceInputs(
 ): void {
   if (workspaces.length <= 1) return;
 
-  const canonicalWorkspaces = workspaces.map((workspace) =>
-    canonicalizeWorkspace(workspace),
-  );
+  let canonicalWorkspaces: string[];
+  try {
+    canonicalWorkspaces = workspaces.map((workspace) =>
+      canonicalizeWorkspace(workspace),
+    );
+  } catch {
+    throw new MultipleWorkspaceInputError();
+  }
   const seen = new Set<string>();
   for (const workspace of canonicalWorkspaces) {
     if (seen.has(workspace)) {
