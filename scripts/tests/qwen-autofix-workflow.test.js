@@ -40,10 +40,16 @@ const pushAndReportStep =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
-const issueAutofixReportStep =
+const reportDryRunFailureSteps =
   workflow.match(
-    /- name: 'Report dry-run \/ failure'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
-  )?.[0] ?? '';
+    /- name: 'Report dry-run \/ failure'[\s\S]*?(?=\n[ ]{6}- name: '|$)/g,
+  ) ?? [];
+const issueAutofixReportStep =
+  reportDryRunFailureSteps.find((step) => step.includes('pr-title.txt')) ?? '';
+const reviewAddressReportStep =
+  reportDryRunFailureSteps.find((step) =>
+    step.includes('address-summary.md'),
+  ) ?? '';
 const withdrawClaimStep =
   workflow.match(
     /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
@@ -221,6 +227,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'workflow_dispatch is a maintainer-initiated escape hatch',
     );
+    expect(routeStep).toContain('sanitize_number()');
+    expect(routeStep).toContain('ROUTE_ISSUE="$(sanitize_number');
+    expect(routeStep).toContain('ROUTE_PR="$(sanitize_number');
+    expect(routeStep).toContain('routing values single-line numeric');
     expect(workflow).toContain(
       'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
     );
@@ -516,7 +526,11 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('for attempt in 1 2; do');
       expect(step).not.toContain('Qwen Code failed on attempt');
     }
-    expect(assessCandidatesStep).toContain('rm -f "${WORKDIR}/decision.json"');
+    expect(assessCandidatesStep).toContain(
+      'rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md"',
+    );
+    expect(developFixStep).toContain('rm -f "${WORKDIR}/failure.md"');
+    expect(triageAndAddressStep).toContain('rm -f "${WORKDIR}/failure.md"');
   });
 
   it('keeps agent decision logic in the project autofix skill', () => {
@@ -855,6 +869,15 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewVerificationGateStep).toContain('failure.md');
     expect(reviewVerificationGateStep).toContain('outcome=failed');
+    expect(reviewAddressReportStep.length).toBeGreaterThan(0);
+    expect(reviewAddressReportStep).toContain('GITHUB_STEP_SUMMARY');
+    expect(reviewAddressReportStep).toContain(
+      "needs.route.outputs.dry_run == 'true'",
+    );
+    expect(reviewAddressReportStep).toContain('failure() || cancelled()');
+    expect(reviewAddressReportStep).not.toContain(
+      "steps.verify.outputs.outcome == 'failed'",
+    );
   });
 
   it('preserves agent-written failure details when the qwen subprocess fails', () => {

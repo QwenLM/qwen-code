@@ -114,8 +114,15 @@ jobs:
           DO_ISSUE=false
           DO_REVIEW=false
           DRY_RUN="${DRY_RUN_INPUT:-false}"
-          ROUTE_ISSUE="${FORCED_ISSUE}"
-          ROUTE_PR="${FORCED_PR}"
+          sanitize_number() {
+            local value="${1//$'\r'/}"
+            value="${value//$'\n'/}"
+            [[ "${value}" =~ ^[0-9]*$ ]] && printf '%s' "${value}"
+          }
+          # workflow_dispatch inputs are user-controlled; keep GITHUB_OUTPUT
+          # routing values single-line numeric before later jobs consume them.
+          ROUTE_ISSUE="$(sanitize_number "${FORCED_ISSUE}")"
+          ROUTE_PR="$(sanitize_number "${FORCED_PR}")"
           case "${PHASE}" in
             issue) DO_ISSUE=true ;;
             review) DO_REVIEW=true ;;
@@ -466,7 +473,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          rm -f "${WORKDIR}/decision.json"
+          rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md"
           node .qwen/skills/autofix/scripts/run-agent.mjs \
             --mode assess-candidates \
             --workdir "${WORKDIR}"
@@ -633,6 +640,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/failure.md"
           node .qwen/skills/autofix/scripts/run-agent.mjs \
             --mode develop-issue \
             --issue "${ISSUE}" \
@@ -1174,6 +1182,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/failure.md"
           node .qwen/skills/autofix/scripts/run-agent.mjs \
             --mode address-review \
             --pr "${PR}" \
@@ -1351,7 +1360,7 @@ jobs:
 
       - name: 'Report dry-run / failure'
         if: |-
-          ${{ always() && (needs.route.outputs.dry_run == 'true' || steps.verify.outputs.outcome == 'failed') }}
+          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
