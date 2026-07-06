@@ -9,7 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { iconvEncode } from './iconvHelper.js';
-import { LargeNonUtf8TextError, readTextRange } from './readTextRange.js';
+import { LargeNonUtf8TextError, readTextRange } from './read-text-range.js';
 
 describe('readTextRange', () => {
   let tempDir: string;

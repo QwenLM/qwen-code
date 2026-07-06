@@ -23,7 +23,7 @@ import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import { extractPDFText, parsePDFPageRange } from './pdf.js';
 import { readNotebookWithMetadata } from './notebook.js';
-import { readTextRange } from './readTextRange.js';
+import { readTextRange } from './read-text-range.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
   TEXT_RANGE_FAST_PATH_MAX_SIZE,
