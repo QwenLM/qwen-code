@@ -362,6 +362,38 @@ describe('session-start-profiler', () => {
     }
   });
 
+  it('appends to an existing JSONL file', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
+    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
+
+    try {
+      const perfDir = join(runtimeDir, 'session-start-perf');
+      const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
+      await mkdir(perfDir);
+      await writeFile(profilePath, '{"existing":true}\n', 'utf8');
+
+      const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+        now: clockFrom([10, 15, 20]),
+        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
+      });
+      profiler.timeSync('system_instruction', () => undefined);
+      profiler.finish({ ok: true });
+
+      const lines = (await readFile(profilePath, 'utf8')).trim().split('\n');
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[0]!)).toEqual({ existing: true });
+      expect(JSON.parse(lines[1]!)).toMatchObject({
+        timestamp: '2026-07-06T12:34:56.789Z',
+        source: 'clear',
+        ok: true,
+        stages: { system_instruction: 5 },
+      });
+    } finally {
+      await rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
   itNoSymlink('does not write through a symlinked JSONL file', async () => {
     const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
     vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);

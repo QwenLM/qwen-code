@@ -1127,6 +1127,48 @@ describe('Gemini Client (client.ts)', () => {
         }),
       );
     });
+
+    it('finalizes failed startChat profiles with partial counts', async () => {
+      const toolRegistry = vi.mocked(
+        mockConfig.getToolRegistry,
+      )() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      toolRegistry.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      toolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [
+          {
+            role: 'user',
+            parts: [{ text: '<system-reminder>context</system-reminder>' }],
+          },
+        ],
+        [{ name: 'skill-one', description: 'first skill' }],
+      ]);
+      vi.spyOn(client, 'setTools').mockRejectedValueOnce(
+        new Error('set tools failed'),
+      );
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: set tools failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 1,
+          snapshotEntryCount: 1,
+          deferredReminderCount: 1,
+        }),
+      );
+    });
   });
 
   describe('startChat — deferred tools', () => {

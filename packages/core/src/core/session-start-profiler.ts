@@ -10,6 +10,7 @@ import { performance } from 'node:perf_hooks';
 import { Storage } from '../config/storage.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
 
 export const SESSION_START_PROFILE_ENV = 'QWEN_CODE_PROFILE_SESSION_START';
 
@@ -19,6 +20,10 @@ export interface SessionStartProfileRecord {
   timestamp: string;
   source: SessionStartSource;
   ok: boolean;
+  /**
+   * Wall-clock session start duration. The sum of `stages` can be lower because
+   * only profiled callbacks are included in stage timings.
+   */
   totalMs: number;
   stages: Record<string, number>;
   extraHistoryLength?: number;
@@ -78,12 +83,7 @@ function assertSafeExistingProfileFile(filePath: string): void {
       throw new Error('session-start profiler path must be a real file');
     }
   } catch (error) {
-    if (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
       return;
     }
     throw error;
@@ -209,13 +209,7 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
 
       this.writeRecord(record);
     } catch (error) {
-      const code =
-        typeof error === 'object' &&
-        error !== null &&
-        'code' in error &&
-        typeof error.code === 'string'
-          ? error.code
-          : undefined;
+      const code = isNodeError(error) ? error.code : undefined;
       debugLogger.debug('session-start-profiler write failed', {
         name: error instanceof Error ? error.name : typeof error,
         ...(code ? { code } : {}),
