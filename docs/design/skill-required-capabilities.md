@@ -281,6 +281,11 @@ import {
 />;
 ```
 
+In this renderer configuration, `loadEcharts` lets the host provide the
+approved ECharts runtime, either as a static import or a lazy-loaded module.
+`resolveDataRef` is only used for `data.kind="ref"` chart blocks; it is the
+host-owned bridge from a model-visible data reference to a trusted dataset.
+
 The skill file should be installed or injected only by hosts that perform this
 registration. A simple file-based integration can copy:
 
@@ -304,6 +309,62 @@ For `data.kind="ref"` envelopes, the renderer must use a host-controlled
 arbitrary URLs or evaluate model-provided JavaScript; it should parse the block
 as JSON, resolve only trusted `artifact://` or `session-file://` references, and
 inject the resolved dataset into the ECharts option before rendering.
+
+A daemon-backed host can treat the workspace file API as one artifact backend.
+For example, the host can persist chart artifacts under a controlled workspace
+directory such as `.qwen/artifacts/`, expose model-facing references like
+`artifact://chart-data/orders.csv`, and resolve them through daemon
+`GET /file?path=.qwen/artifacts/chart-data/orders.csv`. This keeps
+`artifact://` as the public chart contract while allowing the first
+implementation to reuse daemon workspace files.
+
+The resolver must still enforce the artifact root before calling the daemon:
+
+```tsx
+const ARTIFACT_ROOT = '.qwen/artifacts/';
+const MAX_CHART_DATA_BYTES = 256 * 1024;
+
+async function resolveDataRef(
+  ref: string,
+  meta: { format?: string; dimensions?: string[] },
+) {
+  const artifactPrefix = 'artifact://';
+  if (!ref.startsWith(artifactPrefix)) {
+    throw new Error(`Unsupported chart data ref: ${ref}`);
+  }
+
+  const artifactPath = ref.slice(artifactPrefix.length);
+  if (
+    artifactPath.length === 0 ||
+    artifactPath.startsWith('/') ||
+    artifactPath.includes('\\') ||
+    artifactPath.split('/').includes('..')
+  ) {
+    throw new Error(`Invalid chart data ref: ${ref}`);
+  }
+
+  const url = new URL('/file', daemonBaseUrl);
+  url.searchParams.set('path', `${ARTIFACT_ROOT}${artifactPath}`);
+  url.searchParams.set('maxBytes', String(MAX_CHART_DATA_BYTES));
+
+  const response = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to read chart data: ${response.status}`);
+  }
+
+  const file = (await response.json()) as { content: string };
+  return meta.format === 'csv'
+    ? parseCsvAsArrayRows(file.content, meta.dimensions)
+    : JSON.parse(file.content);
+}
+```
+
+This example intentionally maps only normalized `artifact://` paths under
+`.qwen/artifacts/`. If a host later moves artifacts to object storage or a
+session-scoped artifact service, only `resolveDataRef` needs to change; the
+model-facing `echarts-fulldata` block can keep using the same ref shape.
 
 ### Pros
 
