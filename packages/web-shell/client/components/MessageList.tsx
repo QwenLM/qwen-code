@@ -773,7 +773,7 @@ export function getSessionTimelineEntries(
       detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
       timestamp: turnStart.timestamp,
       nodeKinds,
-      isScheduledTask: isScheduledTaskMessage(turnStart),
+      ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
     });
   };
 
