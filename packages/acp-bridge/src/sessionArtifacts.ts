@@ -806,6 +806,10 @@ export class SessionArtifactStore {
     for (const change of changes) {
       if (change.action === 'removed') {
         removalNotPersisted = true;
+        if (change.reason === 'explicit') {
+          this.rememberTombstone(change);
+          this.stickyEphemeralIds.delete(change.artifactId);
+        }
         continue;
       }
       const stored = this.artifacts.get(change.artifactId);
@@ -2221,12 +2225,6 @@ function withWorkspaceContentHashMetadata(
       ? { [WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY]: workspaceStatus.mtimeMs }
       : {}),
   };
-  if (Buffer.byteLength(JSON.stringify(next), 'utf8') > 4096) {
-    throw new SessionArtifactValidationError(
-      'metadata must be 4096 bytes or fewer',
-      'metadata',
-    );
-  }
   return next;
 }
 

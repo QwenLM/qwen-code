@@ -945,7 +945,7 @@ export class SessionService {
     }
 
     let currentUuid: string | null =
-      leafUuid ?? records[records.length - 1].uuid;
+      leafUuid ?? this.lastConversationRecordUuid(records);
     const uuidChain: string[] = [];
     const visited = new Set<string>();
 
@@ -967,6 +967,16 @@ export class SessionService {
     }
 
     return messages;
+  }
+
+  private lastConversationRecordUuid(records: ChatRecord[]): string | null {
+    for (let index = records.length - 1; index >= 0; index--) {
+      const record = records[index];
+      if (record && !isSessionArtifactRecord(record)) {
+        return record.uuid;
+      }
+    }
+    return null;
   }
 
   /**

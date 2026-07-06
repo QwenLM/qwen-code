@@ -66,6 +66,7 @@ import {
   matchesAnyServerPattern,
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
   startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
@@ -7381,6 +7382,7 @@ class QwenAgent implements Agent {
           }
         }
         let artifactSnapshot: unknown;
+        let artifactSnapshotUnavailable: string | undefined;
         try {
           await session.getConfig().getChatRecordingService()?.flush();
           const cwd = session.getConfig().getProjectRoot();
@@ -7392,11 +7394,21 @@ class QwenAgent implements Agent {
               return sessionService.loadSession(sessionId);
             },
           );
-          artifactSnapshot = sessionData?.artifactSnapshot;
+          artifactSnapshot = sessionData?.artifactSnapshot ?? {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId,
+            sequence: 0,
+            artifacts: [],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          };
         } catch (err) {
+          artifactSnapshotUnavailable =
+            err instanceof Error ? err.message : String(err);
           debugLogger.warn(
             `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
+              artifactSnapshotUnavailable
             }`,
           );
         }
@@ -7408,6 +7420,9 @@ class QwenAgent implements Agent {
           filesChanged,
           filesFailed,
           ...(artifactSnapshot ? { artifactSnapshot } : {}),
+          ...(artifactSnapshotUnavailable
+            ? { artifactSnapshotUnavailable }
+            : {}),
         };
       }
       case 'qwen/session/loadUpdates': {

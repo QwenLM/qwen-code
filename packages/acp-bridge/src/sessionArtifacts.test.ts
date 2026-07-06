@@ -125,6 +125,33 @@ describe('SessionArtifactStore', () => {
     expect(missing).not.toHaveProperty('sizeBytes');
   });
 
+  it('does not count injected workspace hash metadata against the user metadata limit', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-workspace-metadata-budget',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'budget.txt'), 'budget');
+    const metadata = { payload: 'x'.repeat(4096) };
+    while (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 4096) {
+      metadata.payload = metadata.payload.slice(0, -1);
+    }
+
+    const created = await store.upsertMany(
+      [{ title: 'Budget', workspacePath: 'budget.txt', metadata }],
+      { strict: true },
+    );
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      metadata: {
+        payload: metadata.payload,
+        'qwen.workspace.sha256': createHash('sha256')
+          .update('budget')
+          .digest('hex'),
+        'qwen.workspace.mtimeMs': expect.any(Number),
+      },
+    });
+  });
+
   it('prevents one client from removing another client retained artifact', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-client-owner',
@@ -2559,6 +2586,13 @@ describe('SessionArtifactStore', () => {
         warnings: ['artifact removal not persisted; live removal kept'],
       }),
     );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [],
+    });
+    const replay = await store.upsertMany([
+      { title: 'Sensitive', url: 'https://example.com/sensitive' },
+    ]);
+    expect(replay.changes).toEqual([]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [],
     });

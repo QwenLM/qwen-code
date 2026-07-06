@@ -2857,6 +2857,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   };
 
+  const artifactSnapshotUnavailableReason = (
+    state: BridgeSessionState,
+  ): string | undefined => {
+    const reason = (state as { artifactSnapshotUnavailable?: unknown })
+      .artifactSnapshotUnavailable;
+    return typeof reason === 'string' && reason ? reason : undefined;
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -4567,9 +4575,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
-      if (!(await entry.artifacts.get(artifactId))) {
-        return { v: 1, sessionId, changes: [] };
-      }
       const result = await entry.artifacts.remove(artifactId, { clientId });
       publishArtifactChanges(entry, result.changes, clientId);
       const warnings = [...(result.warnings ?? [])];
@@ -5927,14 +5932,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const artifactSnapshot = restoredArtifactSnapshotFromState(
         response as BridgeSessionState,
       );
+      const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
+        response as BridgeSessionState,
+      );
       const beforeArtifacts = (await entry.artifacts.list()).artifacts;
       const shouldRecordArtifactSnapshot =
-        artifactSnapshot !== undefined ||
-        beforeArtifacts.some((artifact) => artifact.retention !== 'ephemeral');
-      const artifactRestoreWarnings = await entry.artifacts.restore(
-        artifactSnapshot,
-        { preserveLiveEphemeral: true },
-      );
+        artifactSnapshot !== undefined &&
+        artifactSnapshotUnavailable === undefined;
+      const artifactRestoreWarnings =
+        artifactSnapshotUnavailable !== undefined
+          ? [
+              `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+            ]
+          : await entry.artifacts.restore(artifactSnapshot, {
+              preserveLiveEphemeral: true,
+            });
       const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
         ? await entry.artifacts.recordSnapshot()
         : [];
