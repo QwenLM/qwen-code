@@ -25,7 +25,12 @@ import {
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 
-/** Disables every task bound to one of `sessionIds` (archived sessions). */
+/**
+ * Disables every ENABLED task bound to one of `sessionIds` (archived sessions),
+ * marking it `disabledByArchive` so unarchive only re-enables tasks the archive
+ * itself paused — a task the user deliberately disabled (already `enabled:false`,
+ * no flag) is left untouched and stays disabled across the cycle.
+ */
 export async function disableTasksForSessions(
   projectRoot: string,
   sessionIds: string[],
@@ -41,7 +46,7 @@ export async function disableTasksForSessions(
         task.enabled !== false
       ) {
         changed = true;
-        return { ...task, enabled: false };
+        return { ...task, enabled: false, disabledByArchive: true };
       }
       return task;
     });
@@ -50,11 +55,12 @@ export async function disableTasksForSessions(
 }
 
 /**
- * Re-enables every task bound to one of `sessionIds` (unarchived sessions),
- * resetting a recurring task's anchor to `now` so it resumes from now rather
- * than catching up fires it "missed" while archived — mirroring the management
- * route's re-enable. (The bound session becomes live again on the next session
- * load / daemon rehydration; until then the re-enabled task simply won't fire.)
+ * Re-enables tasks bound to one of `sessionIds` (unarchived sessions) that were
+ * disabled BY the archive (`disabledByArchive`) — NOT tasks the user disabled
+ * themselves. Clears the flag and resets a recurring task's anchor to `now` so
+ * it resumes from now rather than catching up fires it "missed" while archived.
+ * (The bound session becomes live again on the next session load / daemon
+ * rehydration; until then the re-enabled task simply won't fire.)
  */
 export async function enableTasksForSessions(
   projectRoot: string,
@@ -69,10 +75,12 @@ export async function enableTasksForSessions(
       if (
         task.sessionId !== undefined &&
         targets.has(task.sessionId) &&
-        task.enabled === false
+        task.enabled === false &&
+        task.disabledByArchive === true
       ) {
         changed = true;
         const resumed: DurableCronTask = { ...task, enabled: true };
+        delete resumed.disabledByArchive;
         if (resumed.recurring) resumed.lastFiredAt = now - (now % 60_000);
         return resumed;
       }

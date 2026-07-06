@@ -72,6 +72,13 @@ export interface DurableCronTask {
    */
   enabled?: boolean;
   /**
+   * Set when a task was disabled BY archiving its bound session (not by the
+   * user's own off-switch). Only such tasks are re-enabled when the session is
+   * unarchived, so a task the user deliberately disabled stays disabled across
+   * an archive/unarchive cycle. Cleared on re-enable.
+   */
+  disabledByArchive?: boolean;
+  /**
    * Id of the dedicated session this task is bound to. A task created through
    * the Web Shell management page mints its own session and stores its id here;
    * the task then fires ONLY inside that session (not via the shared per-project
@@ -380,7 +387,13 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // than being silently coerced or dropped.
     (obj['name'] === undefined || typeof obj['name'] === 'string') &&
     (obj['enabled'] === undefined || typeof obj['enabled'] === 'boolean') &&
-    (obj['sessionId'] === undefined || typeof obj['sessionId'] === 'string') &&
+    (obj['disabledByArchive'] === undefined ||
+      typeof obj['disabledByArchive'] === 'boolean') &&
+    // A bound sessionId must be a NON-EMPTY string: an empty string would pass
+    // a bare `typeof` check but the scheduler's truthy `task.sessionId` guard
+    // would treat it as unbound, so a "bound" task would silently run unbound.
+    (obj['sessionId'] === undefined ||
+      (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

@@ -156,10 +156,12 @@ export function describeCron(cron: string, t: TranslateFn): string {
   return cron;
 }
 
-/** Sensible defaults for the fields a given frequency doesn't drive, so a
- * reversed cron always yields a complete BuilderState. Kept in sync with the
- * dialog's DEFAULT_BUILDER. */
-const REVERSE_DEFAULTS: Omit<BuilderState, 'frequency'> = {
+/** The default builder state for a new task, and the fallback for fields a
+ * reversed cron doesn't drive. Single source of truth — the dialog imports this
+ * rather than keeping its own copy, so the create form and the cron-reversal
+ * can't drift apart. */
+export const DEFAULT_BUILDER: BuilderState = {
+  frequency: 'daily',
   time: '09:00',
   weekday: 1,
   minuteInterval: 30,
@@ -177,9 +179,9 @@ const REVERSE_DEFAULTS: Omit<BuilderState, 'frequency'> = {
 export function parseCronToBuilder(cron: string): BuilderState {
   const raw = cron.trim();
   const custom: BuilderState = {
-    ...REVERSE_DEFAULTS,
+    ...DEFAULT_BUILDER,
     frequency: 'custom',
-    customCron: raw.length > 0 ? raw : REVERSE_DEFAULTS.customCron,
+    customCron: raw.length > 0 ? raw : DEFAULT_BUILDER.customCron,
   };
 
   const parts = raw.split(/\s+/);
@@ -193,7 +195,7 @@ export function parseCronToBuilder(cron: string): BuilderState {
   if (/^\*\/\d+$/.test(min!) && hour === '*' && anyDate && dow === '*') {
     const n = Number(min!.slice(2));
     if (Number.isInteger(n) && n >= 1 && n <= 30 && 60 % n === 0) {
-      return { ...REVERSE_DEFAULTS, frequency: 'minutes', minuteInterval: n };
+      return { ...DEFAULT_BUILDER, frequency: 'minutes', minuteInterval: n };
     }
     return custom;
   }
@@ -206,7 +208,7 @@ export function parseCronToBuilder(cron: string): BuilderState {
   // M * * * * → hourly at minute M. The minute rides in `time` (HH ignored by
   // buildCron's hourly branch), so the round-trip is lossless.
   if (hour === '*' && anyDate && dow === '*') {
-    return { ...REVERSE_DEFAULTS, frequency: 'hourly', time: `00:${pad(mm)}` };
+    return { ...DEFAULT_BUILDER, frequency: 'hourly', time: `00:${pad(mm)}` };
   }
 
   // The remaining shapes all need a numeric hour in range.
@@ -217,18 +219,18 @@ export function parseCronToBuilder(cron: string): BuilderState {
 
   // M H * * * → daily
   if (anyDate && dow === '*') {
-    return { ...REVERSE_DEFAULTS, frequency: 'daily', time };
+    return { ...DEFAULT_BUILDER, frequency: 'daily', time };
   }
   // M H * * 1-5 → weekdays
   if (anyDate && dow === '1-5') {
-    return { ...REVERSE_DEFAULTS, frequency: 'weekdays', time };
+    return { ...DEFAULT_BUILDER, frequency: 'weekdays', time };
   }
   // M H * * D → weekly on a single weekday (cron allows 0 and 7 for Sunday).
   if (anyDate && isNum(dow!)) {
     const d = Number(dow);
     if (d >= 0 && d <= 7) {
       return {
-        ...REVERSE_DEFAULTS,
+        ...DEFAULT_BUILDER,
         frequency: 'weekly',
         time,
         weekday: d === 7 ? 0 : d,

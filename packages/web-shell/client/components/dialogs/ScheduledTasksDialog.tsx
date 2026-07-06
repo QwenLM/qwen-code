@@ -18,6 +18,7 @@ import {
   describeLastRun,
   formatCountdown,
   parseCronToBuilder,
+  DEFAULT_BUILDER,
   type BuilderState,
   type Frequency,
   type TranslateFn,
@@ -66,14 +67,6 @@ const FREQUENCIES: Frequency[] = [
   'minutes',
   'custom',
 ];
-
-const DEFAULT_BUILDER: BuilderState = {
-  frequency: 'daily',
-  time: '09:00',
-  weekday: 1,
-  minuteInterval: 30,
-  customCron: '0 9 * * *',
-};
 
 // Divisors of 60 only: a non-divisor `*/N` is anchored to the hour and fires
 // more often than "every N minutes" implies, so the picker offers only values
@@ -260,19 +253,21 @@ export function ScheduledTasksDialog({
   );
 
   const handleRunNow = useCallback(
-    (task: DaemonScheduledTask) => {
-      // Record the run so "last run" reflects the manual trigger (best-effort;
-      // the run still happens even if recording fails). The prompt then executes
-      // in the task's bound session — the App wiring switches to it — so manual
-      // and scheduled runs share one transcript.
-      void actions
-        .runScheduledTask(task.id)
-        .catch((err: unknown) =>
-          onError(err, t('scheduledTasks.error.runFailed')),
-        );
+    async (task: DaemonScheduledTask) => {
+      // Record the trigger first (updates lastFiredAt + run history) and reload
+      // so the card reflects it, THEN execute the prompt in the task's bound
+      // session (the App wiring switches to it). A record failure is surfaced
+      // but doesn't block the run — same as a scheduled fire, which records the
+      // trigger regardless of the turn's outcome.
+      try {
+        await actions.runScheduledTask(task.id);
+        await reload();
+      } catch (err) {
+        onError(err, t('scheduledTasks.error.runFailed'));
+      }
       onRunPrompt(task.prompt, task.sessionId);
     },
-    [actions, onError, onRunPrompt, t],
+    [actions, onError, onRunPrompt, reload, t],
   );
 
   const handleDelete = useCallback(
@@ -570,7 +565,7 @@ export function ScheduledTasksDialog({
                   <button
                     type="button"
                     className={styles.iconAction}
-                    onClick={() => handleRunNow(task)}
+                    onClick={() => void handleRunNow(task)}
                     title={t('scheduledTasks.runNow')}
                     aria-label={t('scheduledTasks.runNow')}
                   >

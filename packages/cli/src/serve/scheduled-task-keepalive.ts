@@ -22,7 +22,9 @@
  * restart) is a separate concern.
  */
 
-import { readCronTasks } from '@qwen-code/qwen-code-core';
+import { readCronTasks, createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const log = createDebugLogger('SCHED_KEEPALIVE');
 
 /** The slice of the bridge the keepalive needs — narrowed for testability. */
 export interface KeepaliveBridge {
@@ -52,10 +54,12 @@ export function startScheduledTaskKeepalive(
     let tasks;
     try {
       tasks = await readCronTasks(boundWorkspace);
-    } catch {
+    } catch (err) {
       // A read failure (missing file already maps to [], so this is a real
       // EACCES/corruption) just skips this pass; the next one retries. The
-      // interval must never throw.
+      // interval must never throw. Logged so a persistently-failing keepalive
+      // is diagnosable rather than silent.
+      log.debug('keepalive: readCronTasks failed, skipping this pass', err);
       return;
     }
     const beaten = new Set<string>();
@@ -72,10 +76,12 @@ export function startScheduledTaskKeepalive(
       beaten.add(sessionId);
       try {
         bridge.recordHeartbeat(sessionId);
-      } catch {
+      } catch (err) {
         // The bound session is already gone (task deleted, or session closed
         // out from under us) — its heartbeat is moot. Reloading a dead
-        // session is not this component's job.
+        // session is not this component's job. Debug-only: an expected,
+        // frequent case, so it must not spam stderr.
+        log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
       }
     }
   };
@@ -121,21 +127,29 @@ export interface RehydrateResult {
  * its `loadSession` and is skipped rather than aborting the sweep. Distinct
  * session ids only; unbound tasks are ignored (they fire via the lock owner).
  */
+/** Per-session load timeout: one hung `loadSession` (cold start, blocked child
+ * spawn, huge replay) must not stall the whole boot sweep. */
+const REHYDRATE_LOAD_TIMEOUT_MS = 30_000;
+
 export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
+  loadTimeoutMs?: number;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
+  const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
   let tasks;
   try {
     tasks = await readCronTasks(boundWorkspace);
-  } catch {
+  } catch (err) {
+    log.debug('rehydrate: readCronTasks failed', err);
     return { loaded: [], failed: [] };
   }
+
+  // Distinct sessions of enabled bound tasks.
   const seen = new Set<string>();
-  const loaded: string[] = [];
-  const failed: string[] = [];
+  const sessionIds: string[] = [];
   for (const task of tasks) {
     const sessionId = task.sessionId;
     if (
@@ -147,17 +161,51 @@ export async function rehydrateScheduledTaskSessions(deps: {
       continue;
     }
     seen.add(sessionId);
-    try {
-      await bridge.loadSession({
-        sessionId,
-        workspaceCwd: boundWorkspace,
-        historyReplay: 'response',
-      });
-      loaded.push(sessionId);
-    } catch (err) {
-      failed.push(sessionId);
-      deps.onError?.(sessionId, err);
-    }
+    sessionIds.push(sessionId);
   }
+
+  const loaded: string[] = [];
+  const failed: string[] = [];
+  // Load concurrently so one slow/hung session can't block the rest, each
+  // bounded by a timeout so a permanently-hung load still resolves as failed.
+  await Promise.all(
+    sessionIds.map(async (sessionId) => {
+      try {
+        await withTimeout(
+          bridge.loadSession({
+            sessionId,
+            workspaceCwd: boundWorkspace,
+            historyReplay: 'response',
+          }),
+          timeoutMs,
+          sessionId,
+        );
+        loaded.push(sessionId);
+      } catch (err) {
+        failed.push(sessionId);
+        deps.onError?.(sessionId, err);
+      }
+    }),
+  );
   return { loaded, failed };
+}
+
+/** Rejects with a clear error if `p` doesn't settle within `ms`. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`loadSession(${label}) timed out after ${ms}ms`));
+    }, ms);
+    if (typeof timer.unref === 'function') timer.unref();
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
 }

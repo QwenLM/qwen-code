@@ -26,7 +26,6 @@ import type { Application, Request, RequestHandler } from 'express';
 import {
   readCronTasks,
   updateCronTasks,
-  removeCronTasks,
   generateCronTaskId,
   appendCronRun,
   parseCron,
@@ -483,21 +482,23 @@ export function registerScheduledTasksRoutes(
         .json({ error: 'Task id is required', code: 'invalid_id' });
       return;
     }
-    // Capture the task's bound session before removal so it can be torn down —
-    // the dedicated session exists only to run this task. Best-effort: a read
-    // failure here just skips teardown; removeCronTasks below surfaces it.
+    // Single atomic read-modify-write: capture the task's bound session AND
+    // remove it in one cycle, closing the TOCTOU window a separate
+    // read-then-remove would open (and cutting three file reads to one). The
+    // dedicated session exists only to run this task, so it's torn down after.
     let boundSessionId: string | undefined;
+    let removed = false;
     try {
-      const existing = await readCronTasks(boundWorkspace);
-      const match = existing.find((t) => t.id === id)?.sessionId;
-      if (typeof match === 'string' && match.length > 0) boundSessionId = match;
-    } catch {
-      // ignore — the remove below re-reads and reports any corruption
-    }
-
-    let removed: number;
-    try {
-      removed = await removeCronTasks(boundWorkspace, [id]);
+      await updateCronTasks(boundWorkspace, (tasks) => {
+        const idx = tasks.findIndex((t) => t.id === id);
+        if (idx === -1) return tasks; // not found → no write
+        const match = tasks[idx]!.sessionId;
+        if (typeof match === 'string' && match.length > 0) {
+          boundSessionId = match;
+        }
+        removed = true;
+        return tasks.filter((_, i) => i !== idx);
+      });
     } catch (err) {
       writeStderrLine(
         `qwen serve: DELETE /scheduled-tasks/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -508,7 +509,7 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
-    if (removed === 0) {
+    if (!removed) {
       res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
       return;
     }
@@ -533,6 +534,11 @@ export function registerScheduledTasksRoutes(
         .json({ error: 'Task id is required', code: 'invalid_id' });
       return;
     }
+    // A manual run is stamped at its exact instant (not minute-rounded like a
+    // scheduler fire): the scheduler compares slots as `slot > lastFiredAt`, so
+    // a precise timestamp behaves correctly, and — unlike rounding — it can't
+    // collide with the creation-minute anchor that describeLastRun reads as
+    // "never run" when a task is run manually within its creation minute.
     const now = Date.now();
     let found = false;
     let updated: DurableCronTask | undefined;

@@ -22,6 +22,7 @@ import {
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  deleteDaemonSessions,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from './session-archive.js';
@@ -329,6 +330,90 @@ describe('unarchiveDaemonSessions', () => {
       notFound: [],
       errors: [{ sessionId: archivedId, error: failure }],
     });
+  });
+
+  it('re-enables an archive-disabled task bound to the unarchived session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440060';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1000,
+        sessionId,
+        enabled: false,
+        disabledByArchive: true, // paused when the session was archived
+      },
+    ]);
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+    expect(result.unarchived).toEqual([sessionId]);
+
+    const bound = (await readCronTasks(workspaceDir)).find(
+      (t) => t.id === 'bound',
+    );
+    expect(bound!.enabled).toBe(true); // resumed with its session
+    expect(bound!.disabledByArchive).toBeUndefined(); // flag cleared
+  });
+});
+
+describe('deleteDaemonSessions', () => {
+  let runtimeDir: string;
+  let workspaceDir: string;
+
+  beforeEach(() => {
+    runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-archive-test-'));
+    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('removes a scheduled task bound to the deleted session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440070';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+      {
+        id: 'other',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+      },
+    ]);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+    expect(result.removed).toEqual([sessionId]);
+
+    const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
+    expect(ids).toEqual(['other']); // bound task deleted, unbound survives
   });
 });
 

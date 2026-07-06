@@ -62,16 +62,18 @@ describe('scheduled-task session lifecycle', () => {
     await disableTasksForSessions(workspace, ['sess-1']);
     const tasks = await byId();
     expect(tasks['a']!.enabled).toBe(false);
+    expect(tasks['a']!.disabledByArchive).toBe(true); // marked for unarchive
     expect(tasks['b']!.enabled).toBeUndefined(); // other session — untouched
     expect(tasks['c']!.enabled).toBeUndefined(); // unbound — untouched
   });
 
-  it('re-enables and resets a recurring task anchor, leaving one-shots anchored', async () => {
+  it('re-enables archive-disabled tasks (clears flag, resets recurring anchor)', async () => {
     await seed([
       task({
         id: 'a',
         sessionId: 'sess-1',
         enabled: false,
+        disabledByArchive: true,
         recurring: true,
         lastFiredAt: 1000,
       }),
@@ -79,6 +81,7 @@ describe('scheduled-task session lifecycle', () => {
         id: 'b',
         sessionId: 'sess-1',
         enabled: false,
+        disabledByArchive: true,
         recurring: false,
         lastFiredAt: 1000,
       }),
@@ -87,9 +90,19 @@ describe('scheduled-task session lifecycle', () => {
     await enableTasksForSessions(workspace, ['sess-1'], now);
     const tasks = await byId();
     expect(tasks['a']!.enabled).toBe(true);
+    expect(tasks['a']!.disabledByArchive).toBeUndefined(); // flag cleared
     expect(tasks['a']!.lastFiredAt).toBe(now - (now % 60_000)); // resumed from now
     expect(tasks['b']!.enabled).toBe(true);
     expect(tasks['b']!.lastFiredAt).toBe(1000); // one-shot anchor untouched
+  });
+
+  it('leaves a user-disabled task disabled across an unarchive (no flag)', async () => {
+    // Task the user disabled themselves — enabled:false but NOT disabledByArchive.
+    await seed([
+      task({ id: 'a', sessionId: 'sess-1', enabled: false, recurring: true }),
+    ]);
+    await enableTasksForSessions(workspace, ['sess-1'], 1_700_000_123_456);
+    expect((await byId())['a']!.enabled).toBe(false); // stays disabled
   });
 
   it('removes only tasks bound to the given sessions', async () => {
