@@ -34,6 +34,7 @@ import {
   detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
+import { DEFAULT_RANGE_READ_BYTES } from './text-range-constants.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 
@@ -1468,18 +1469,19 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([1, 2]);
     });
 
-    it('should reject unbounded full reads for large text files', async () => {
+    it('should stream default file-system reads for large text files', async () => {
       actualNodeFs.writeFileSync(
         testTextFilePath,
         'x'.repeat(11 * 1024 * 1024),
       );
 
-      await expect(
-        readFileWithLineAndLimit({
-          path: testTextFilePath,
-          limit: Number.POSITIVE_INFINITY,
-        }),
-      ).rejects.toThrow(/File too large for full read/);
+      const result = await fsService.readTextFile({ path: testTextFilePath });
+
+      expect(result.content).toHaveLength(DEFAULT_RANGE_READ_BYTES);
+      expect(result.content).toBe('x'.repeat(DEFAULT_RANGE_READ_BYTES));
+      expect(result._meta?.originalLineCount).toBe(1);
+      expect(result._meta?.originalLineCountExact).toBe(false);
+      expect(result._meta?.truncatedByBytes).toBe(true);
     });
 
     it('should propagate aborts from unbounded full reads', async () => {

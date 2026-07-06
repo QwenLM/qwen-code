@@ -312,9 +312,7 @@ export async function readFileWithLineAndLimit(params: {
   const stats = await fs.promises.stat(filePath);
   if (
     Number.isFinite(limit) ||
-    (stats.isFile() &&
-      stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE &&
-      maxOutputBytes !== undefined)
+    (stats.isFile() && stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE)
   ) {
     return readTextRange({
       path: filePath,
@@ -324,12 +322,6 @@ export async function readFileWithLineAndLimit(params: {
       stats,
       ...(signal !== undefined ? { signal } : {}),
     });
-  }
-
-  if (stats.isFile() && stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE) {
-    throw new Error(
-      `File too large for full read (${stats.size} bytes). Use offset/limit to read a range.`,
-    );
   }
 
   signal?.throwIfAborted();
