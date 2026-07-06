@@ -38,6 +38,7 @@ const mockChannelConnect = vi.hoisted(() => vi.fn());
 const mockChannelDisconnect = vi.hoisted(() => vi.fn());
 const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
+const mockChannelDispatchToolCall = vi.hoisted(() => vi.fn());
 const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -176,6 +177,7 @@ const mockChannel = {
   disconnect: mockChannelDisconnect,
   onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
+  dispatchToolCall: mockChannelDispatchToolCall,
   setBridge: mockChannelSetBridge,
 };
 
@@ -208,6 +210,7 @@ beforeEach(() => {
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
   delete process.env['http_proxy'];
+  delete process.env['QWEN_CODE_DISABLE_CRON'];
 });
 
 describe('resolveProxy', () => {
@@ -367,6 +370,83 @@ describe('startCommand.handler', () => {
       | ChannelBaseOptions
       | undefined;
     expect(() => options?.loopController?.validateCron('0 0 31 2 *')).toThrow();
+  });
+
+  it('does not expose channel loops when cron is disabled', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    process.env['QWEN_CODE_DISABLE_CRON'] = '1';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env['QWEN_CODE_DISABLE_CRON'];
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(options?.loopController).toBeUndefined();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+  });
+
+  it('does not expose channel loops when starting all channels with cron disabled', async () => {
+    const channels = {
+      telegram: { type: 'telegram' },
+      feishu: { type: 'feishu' },
+    };
+    process.env['QWEN_CODE_DISABLE_CRON'] = '1';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env['QWEN_CODE_DISABLE_CRON'];
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+    for (const call of mockCreateChannel.mock.calls) {
+      const options = call[3] as ChannelBaseOptions;
+      expect(options.loopController).toBeUndefined();
+    }
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+  });
+
+  it('does not expose channel loops when cron is disabled in settings', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({
+      merged: { channels, experimental: { cron: false } },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(options?.loopController).toBeUndefined();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
   });
 
   it('cleans up a single channel when pidfile creation races', async () => {
@@ -584,7 +664,8 @@ describe('startCommand.handler', () => {
     toolCallListener!(event);
 
     expect(mockRouterGetTarget).toHaveBeenCalledWith('s-1');
-    expect(mockChannelOnToolCall).toHaveBeenCalledWith('chat1', event);
+    expect(mockChannelDispatchToolCall).toHaveBeenCalledWith(event);
+    expect(mockChannelOnToolCall).not.toHaveBeenCalled();
   });
 
   it('dispatches session death to the owning channel when the route is known', async () => {

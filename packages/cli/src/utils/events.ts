@@ -18,6 +18,7 @@ export enum AppEvent {
    * re-evaluate mid-session instead of only at startup. See issue #4615.
    */
   McpPendingApprovalChanged = 'mcp-pending-approval-changed',
+  LspStatusChanged = 'lsp-status-changed',
 }
 
 export const appEvents = new EventEmitter();

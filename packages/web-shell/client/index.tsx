@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { type ReactNode } from 'react';
 import {
   DaemonSessionProvider,
   DaemonWorkspaceProvider,
@@ -13,8 +13,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   baseUrl?: string;
   /** Bearer token passed to daemon requests. */
   token?: string;
-  /** Initial daemon session id to load. Omit to create/attach automatically. */
-  initialSessionId?: string;
+  /** Session id to load. Undefined starts on an empty page. */
+  sessionId?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
 }
@@ -71,13 +71,8 @@ export function WebShell(props: WebShellProps) {
  * with both daemon providers, so MCP/tools/skills/memory/agents/session APIs
  * are available without extra setup.
  */
-export function WebShellWithProviders({
-  baseUrl,
-  token,
-  initialSessionId,
-  clientId,
-  ...webShellProps
-}: WebShellWithProvidersProps) {
+export function WebShellWithProviders(props: WebShellWithProvidersProps) {
+  const { baseUrl, token, sessionId, clientId, ...webShellProps } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
 
   return (
@@ -90,7 +85,7 @@ export function WebShellWithProviders({
     >
       <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
         <DaemonSessionProvider
-          initialSessionId={initialSessionId}
+          sessionId={sessionId}
           clientId={clientId}
           suppressOwnUserEcho
         >
@@ -113,6 +108,7 @@ export type {
 } from './utils/commandDisplay';
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
+  CodeBlockRenderer,
   MarkdownContentSource,
   MarkdownTableMode,
   MarkdownRenderContext,
@@ -126,6 +122,24 @@ export type {
   WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export {
+  ECHARTS_FULLDATA_LANGUAGE,
+  EchartsFullDataBlock,
+  createEchartsFullDataRenderer,
+} from './components/messages/EchartsFullDataBlock';
+export type {
+  DatasetCell,
+  EchartsFullDataBlockProps,
+  EchartsFullDataOption,
+  EchartsFullDataRefMeta,
+  EchartsFullDataRefResolver,
+  EchartsFullDataResolvedDataset,
+  EchartsFullDataRendererOptions,
+  EchartsInstance,
+  EchartsRuntime,
+  EchartsRuntimeLoader,
+} from './components/messages/EchartsFullDataBlock';

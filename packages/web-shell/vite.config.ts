@@ -66,6 +66,11 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      // Daemon status report; scoped to the exact route the dashboard uses (a
+      // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without
+      // it the SPA fallback answers with index.html and the dialog fails JSON
+      // parsing in dev.
+      '/daemon/status': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '/workspace': daemonProxy,
@@ -73,6 +78,11 @@ export default defineConfig(({ command }) => ({
       '/stat': daemonProxy,
       '/list': daemonProxy,
       '/glob': daemonProxy,
+      // Scheduled-tasks CRUD (the Scheduled Tasks dialog). Prefix-matches
+      // `/scheduled-tasks` and `/scheduled-tasks/:id`. Like the routes above,
+      // without it the SPA fallback returns index.html in dev and the dialog
+      // fails JSON parsing / reports an HTTP error on open.
+      '/scheduled-tasks': daemonProxy,
       // Voice dictation is a WebSocket (`/voice/stream`); `ws: true` makes the
       // dev proxy forward the HTTP upgrade to the daemon. Scope it to the exact
       // path — a bare `/voice` prefix would shadow the client's own

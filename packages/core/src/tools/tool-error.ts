@@ -14,6 +14,8 @@ export enum ToolErrorType {
   UNHANDLED_EXCEPTION = 'unhandled_exception',
   TOOL_NOT_REGISTERED = 'tool_not_registered',
   EXECUTION_FAILED = 'execution_failed',
+  // A tool call exceeded the per-tool execution timeout and was aborted.
+  EXECUTION_TIMEOUT = 'execution_timeout',
   // Try to execute a tool that is excluded due to the approval mode
   EXECUTION_DENIED = 'execution_denied',
 

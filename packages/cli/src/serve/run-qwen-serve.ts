@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
+import * as https from 'node:https';
 import * as path from 'node:path';
-import { performance } from 'node:perf_hooks';
+import * as os from 'node:os';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import express, {
   type Application,
   type NextFunction,
@@ -17,6 +20,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   loadServeFastPathSettings,
@@ -32,6 +36,7 @@ import type {
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -75,9 +80,12 @@ import {
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
   type DaemonStatusIssue,
+  type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -99,6 +107,39 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function daemonPipeDirection(
+  direction: NdJsonMessageObservation['direction'],
+): 'inbound' | 'outbound' {
+  switch (direction) {
+    case 'sent':
+      return 'outbound';
+    case 'received':
+      return 'inbound';
+    default: {
+      const exhaustive: never = direction;
+      return exhaustive;
+    }
+  }
+}
+
+// Daemon Status metrics ring: seal one bucket every SAMPLE_MS and retain
+// CAPACITY of them (5s × 180 ≈ 15 min of history), matching the dashboard's
+// own 5s poll so each poll surfaces roughly one fresh bucket.
+const DAEMON_METRICS_SAMPLE_MS = 5_000;
+const DAEMON_METRICS_CAPACITY = 180;
+
+// `process.cpuUsage()` can throw in restricted containers that lack the
+// syscall; return null so the sampler can skip the delta (and leave its
+// baseline untouched) rather than treating a failed read as zero usage —
+// which would turn the next successful read's since-start total into a spike.
+function safeCpuUsage(): NodeJS.CpuUsage | null {
+  try {
+    return process.cpuUsage();
+  } catch {
+    return null;
+  }
+}
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 // Let the first /health response flush before evaluating the runtime graph.
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
@@ -690,6 +731,7 @@ async function loadServeRuntimeModules() {
     workspaceTypesModule,
     daemonStatusProviderModule,
     workspaceProvidersStatusModule,
+    workspaceSkillsStatusModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -698,10 +740,13 @@ async function loadServeRuntimeModules() {
     import('./workspace-service/types.js'),
     import('./daemon-status-provider.js'),
     import('./workspace-providers-status.js'),
+    import('./workspace-skills-status.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
     getActiveSseCount: serverModule.getActiveSseCount,
+    resolveBoundWorkspacesFromIdeEnv:
+      serverModule.resolveBoundWorkspacesFromIdeEnv,
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
@@ -712,6 +757,8 @@ async function loadServeRuntimeModules() {
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
+    createWorkspaceSkillsStatusProvider:
+      workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
   };
 }
 
@@ -837,12 +884,35 @@ function installSameOriginOriginStrip(
       const port = getPort();
       if (port !== cachedStripPort) {
         cachedStripPort = port;
+        // Both schemes: under `--tls-cert/--tls-key` the loopback web
+        // shell is served over https, so its same-origin requests carry
+        // an `https://` Origin. Loopback hosts are trusted as same-origin
+        // regardless of scheme, so listing both is safe even on plain HTTP
+        // (the https entries simply never match without TLS).
         cachedSelfOrigins = new Set([
           `http://127.0.0.1:${port}`,
           `http://localhost:${port}`,
           `http://[::1]:${port}`,
           `http://host.docker.internal:${port}`,
+          `https://127.0.0.1:${port}`,
+          `https://localhost:${port}`,
+          `https://[::1]:${port}`,
+          `https://host.docker.internal:${port}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port in the Origin header when
+        // it matches the scheme default (http→80, https→443). Accept the
+        // port-less forms so the origin check doesn't fail on port 443.
+        if (port === 80 || port === 443) {
+          for (const host of [
+            '127.0.0.1',
+            'localhost',
+            '[::1]',
+            'host.docker.internal',
+          ]) {
+            cachedSelfOrigins.add(`http://${host}`);
+            cachedSelfOrigins.add(`https://${host}`);
+          }
+        }
       }
       if (cachedSelfOrigins.has(origin)) {
         delete req.headers.origin;
@@ -1109,6 +1179,13 @@ function createBootstrapServeApp(input: {
             mutation: 0,
             read: 0,
           },
+        },
+        activity: {
+          activePrompts: 0,
+          pendingPrompts: 0,
+          queuedPrompts: 0,
+          lastActivityAt: null,
+          idleSinceMs: null,
         },
         process: process.memoryUsage(),
       },
@@ -1405,6 +1482,72 @@ export async function runQwenServe(
         `combination. Use --port for the port, e.g. ` +
         `"--hostname ${host} --port ${port}".`,
     );
+  }
+
+  // TLS is both-or-nothing: a cert without a key (or vice versa) can't
+  // start an HTTPS listener, so fail loud at boot instead of silently
+  // falling back to plain HTTP — the operator asked for TLS and a silent
+  // downgrade would serve the web shell over an insecure transport they
+  // believe is encrypted.
+  let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
+    throw new Error(
+      `--tls-cert and --tls-key must be provided together (got only ` +
+        `--tls-${opts.tlsCert ? 'cert' : 'key'}).`,
+    );
+  }
+  if (opts.tlsCert && opts.tlsKey) {
+    let cert: Buffer;
+    let key: Buffer;
+    try {
+      cert = fs.readFileSync(opts.tlsCert);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-cert "${opts.tlsCert}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      key = fs.readFileSync(opts.tlsKey);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-key "${opts.tlsKey}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // Fail loud at boot on an expired (or unparseable) certificate. Node's
+    // https.createServer happily starts with an expired cert, then every TLS
+    // handshake is rejected client-side (NET::ERR_CERT_DATE_INVALID) while
+    // /health stays green — a silent outage that's hard to diagnose. Surface
+    // it here with an actionable message instead.
+    let x509: X509Certificate;
+    try {
+      x509 = new X509Certificate(cert);
+    } catch (err) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not a valid certificate: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const now = Date.now();
+    if (new Date(x509.validTo).getTime() < now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" expired on ${x509.validTo}. ` +
+          `Renew the certificate and restart.`,
+      );
+    }
+    // Symmetric to the expiry guard: a cert whose validity window hasn't
+    // started yet (notBefore > now, e.g. clock skew or a freshly minted
+    // cert) also boots cleanly but fails every handshake client-side with
+    // NET::ERR_CERT_DATE_INVALID. Fail loud here too.
+    if (new Date(x509.validFrom).getTime() > now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not yet valid (validFrom: ` +
+          `${x509.validFrom}). Check the certificate's notBefore date or ` +
+          `the system clock.`,
+      );
+    }
+    tlsOptions = { cert, key };
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -1763,6 +1906,13 @@ export async function runQwenServe(
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
+  let daemonEventLoopMonitor:
+    | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
+    | undefined;
+  // Daemon Status metrics-ring sampler: a fixed-cadence timer that seals a
+  // bucket plus the window-scoped event-loop histogram it resets each seal.
+  // Torn down together with the event-loop monitor on runtime restart/stop.
+  let daemonMetricsSampler: { dispose(): void } | undefined;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -1777,17 +1927,27 @@ export async function runQwenServe(
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
+  const disposeDaemonEventLoopMonitor = (): void => {
+    daemonEventLoopMonitor?.dispose();
+    daemonEventLoopMonitor = undefined;
+    daemonMetricsSampler?.dispose();
+    daemonMetricsSampler = undefined;
+  };
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
-  const writeChannelWorkerPidfile = (): void => {
+  const writeChannelWorkerPidfile = (
+    snapshot = channelWorker.snapshot(),
+    options: { clearWorkerPid?: boolean } = {},
+  ): void => {
     if (!opts.channelSelection || !channelServicePidfile) return;
-    const snapshot = channelWorker.snapshot();
     try {
       channelServicePidfile.writeServeServiceInfo({
         channels: snapshot.channels,
         servePid: process.pid,
-        workerPid: snapshot.pid,
+        ...(!options.clearWorkerPid && snapshot.pid !== undefined
+          ? { workerPid: snapshot.pid }
+          : {}),
       });
     } catch (err) {
       daemonLog.warn(
@@ -1874,6 +2034,62 @@ export async function runQwenServe(
       ),
     );
     core.initializeDaemonMetrics();
+    daemonEventLoopMonitor?.dispose();
+    daemonEventLoopMonitor = core.startEventLoopLagMonitor({
+      onNewMaxStall: (maxMs) => {
+        daemonLog.warn('daemon event loop stall detected', { maxMs });
+      },
+    });
+    const currentDaemonEventLoopMonitor = daemonEventLoopMonitor;
+    core.registerDaemonEventLoopLagGauge(() =>
+      currentDaemonEventLoopMonitor.snapshot(),
+    );
+    // Daemon Status metrics ring (time-series charts). Bounded so ~15 min of
+    // per-interval history survives dialog close / page reload — the point of
+    // doing this in the daemon rather than accumulating in the browser. Fed from
+    // the telemetry middleware (request rate/latency), the bridge telemetry
+    // hooks (queue-wait/duration, token burn, LLM round-trip), the pipe recorder
+    // (IPC bytes), and the sampler's gauge reads (CPU / memory / connections /
+    // pending prompts / event-loop lag). Declared before `recordPipeMessage` so
+    // that recorder can fold pipe bytes straight in.
+    const metricsRing = new DaemonMetricsRing({
+      capacity: DAEMON_METRICS_CAPACITY,
+    });
+    const pipeStats: DaemonPerfSnapshot['pipe'] = {
+      inbound: { count: 0, totalBytes: 0, maxBytes: 0 },
+      outbound: { count: 0, totalBytes: 0, maxBytes: 0 },
+    };
+    const promptQueueWaitStats = {
+      count: 0,
+      totalMs: 0,
+      maxMs: 0,
+      lastMs: null as number | null,
+    };
+    const recordPipeMessage = (
+      direction: keyof DaemonPerfSnapshot['pipe'],
+      bytes: number,
+    ): void => {
+      const stats = pipeStats[direction];
+      stats.count += 1;
+      stats.totalBytes += bytes;
+      stats.maxBytes = Math.max(stats.maxBytes, bytes);
+      core.recordDaemonPipeMessage(direction, bytes);
+      metricsRing.recordPipe(direction, bytes);
+    };
+    const observeLargePipeFrame = createLargePipeFrameObserver({
+      daemonLog,
+      emitTelemetryLog: core.emitDaemonLog,
+    });
+    const recordPromptQueueWait = (durationMs: number): void => {
+      promptQueueWaitStats.count += 1;
+      promptQueueWaitStats.totalMs += durationMs;
+      promptQueueWaitStats.maxMs = Math.max(
+        promptQueueWaitStats.maxMs,
+        durationMs,
+      );
+      promptQueueWaitStats.lastMs = durationMs;
+      core.recordDaemonPromptQueueWait(durationMs);
+    };
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
       sessionLifecycle(action) {
@@ -1907,9 +2123,26 @@ export async function runQwenServe(
           },
         );
       },
-      promptQueueWait: core.recordDaemonPromptQueueWait,
-      promptDuration: core.recordDaemonPromptDuration,
+      promptQueueWait(durationMs) {
+        recordPromptQueueWait(durationMs);
+        metricsRing.recordPromptQueueWait(durationMs);
+      },
+      promptDuration(durationMs) {
+        core.recordDaemonPromptDuration(durationMs);
+        metricsRing.recordPromptDuration(durationMs);
+      },
       cancelled: core.recordDaemonCancel,
+      // Per-round model token usage + LLM round-trip time sniffed off
+      // `agent_message_chunk._meta` (`usage` + `durationMs`) at the bridge's
+      // single session/update fan-in. Increments (not cumulative), so the ring
+      // sums tokens per window (token-burn chart) and pools the round-trip times
+      // for the LLM-latency percentiles.
+      tokenUsage(inputTokens, outputTokens, durationMs) {
+        metricsRing.recordTokens(inputTokens, outputTokens);
+        if (typeof durationMs === 'number') {
+          metricsRing.recordLlmDuration(durationMs);
+        }
+      },
     };
     // Allocate the audit ring + publisher in the daemon host (here)
     // rather than inside the bridge factory, because the ring is the
@@ -1920,15 +2153,60 @@ export async function runQwenServe(
     });
     const customIgnoreFiles =
       runtimeBootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
-    const fsFactory = runtime.resolveBridgeFsFactory({
+    const boundWorkspaces = runtime.resolveBoundWorkspacesFromIdeEnv(
       boundWorkspace,
+      undefined,
+      (workspace: string, index: number) => {
+        if (index === 0) return true;
+        if (!runtimeBootSettings) {
+          daemonLog.warn(
+            'excluding secondary workspace root because trust settings are unavailable',
+            { workspace },
+          );
+          return false;
+        }
+        const trustedSecondary =
+          settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            runtimeBootSettings.merged,
+            workspace,
+          ).effective.state === 'trusted';
+        if (!trustedSecondary) {
+          daemonLog.warn(
+            'excluding untrusted secondary workspace root from file-system access',
+            { workspace },
+          );
+        }
+        return trustedSecondary;
+      },
+    );
+    daemonLog.info('daemon workspace roots initialized', {
+      primary: boundWorkspaces[0],
+      secondary: boundWorkspaces.slice(1),
+      ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
+    });
+    const sharedPathLocks = new PathMutexRegistry();
+    const fsFactory = runtime.resolveBridgeFsFactory({
+      // Secondary roots share a write-capable factory only after their own
+      // folder trust check passes; untrusted secondary roots stay outside.
+      boundWorkspaces,
       injected: deps.fsFactory,
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,
+      pathLocks: sharedPathLocks,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
       onDiagnosticLine: diagnosticSink,
+      pipeHooks: {
+        onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+        onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+        onMessageObserved: ({ direction, bytes, message }) =>
+          observeLargePipeFrame({
+            direction: daemonPipeDirection(direction),
+            bytes,
+            message,
+          }),
+      },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }
         : {}),
@@ -1936,6 +2214,8 @@ export async function runQwenServe(
     const statusProvider = runtime.createDaemonStatusProvider();
     const workspaceProvidersStatusProvider =
       runtime.createWorkspaceProvidersStatusProvider();
+    const workspaceSkillsStatusProvider =
+      runtime.createWorkspaceSkillsStatusProvider();
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
     // between the bridge (which answers the ACP child's `client_mcp/message`
     // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
@@ -2066,6 +2346,7 @@ export async function runQwenServe(
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
       statusProvider,
       workspaceProvidersStatusProvider,
+      workspaceSkillsStatusProvider,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
@@ -2095,15 +2376,176 @@ export async function runQwenServe(
       heapUsed: () => process.memoryUsage().heapUsed,
     });
 
+    // Start the metrics-ring sampler now that `bridge` exists: seal a bucket
+    // every DAEMON_METRICS_SAMPLE_MS, reading memory / active sessions+prompts
+    // and a window-scoped event-loop lag p99 (its own histogram, reset each
+    // seal so the charted lag is per-interval, not the since-start average the
+    // shared monitor reports). `unref()` so sampling never keeps the process
+    // alive; torn down by `disposeDaemonEventLoopMonitor`.
+    // Retire any prior sampler before building a new one so a runtime rebuild
+    // (buildRuntime re-entry) can't leak the old interval + histogram —
+    // symmetric with the `daemonEventLoopMonitor?.dispose()` above.
+    daemonMetricsSampler?.dispose();
+    const metricsLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+    metricsLoopDelay.enable();
+    // Delta state for the cumulative counters. CPU% = delta CPU-µs over delta
+    // wall-ms, normalized by core count (same formula as memoryPressureMonitor);
+    // clamped to [0,100] to absorb non-monotonic cpuUsage on some VMs and
+    // CPU-bursting. Rate-limit rejects are diffed against the prior total.
+    const cpuCoreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
+    let prevCpu = safeCpuUsage();
+    let prevCpuAt = Date.now();
+    // undefined until the first tick sets the baseline, so the first sealed
+    // window reports 0 rejects instead of the entire since-start backlog as a
+    // y-axis-flattening spike.
+    let prevRateRejected: number | undefined;
+    const metricsSamplerTimer = setInterval(() => {
+      const nowMs = Date.now();
+      // Read the window lag BEFORE the try: a tick that throws is exactly when
+      // the daemon is overloaded and lag is most diagnostic, so the catch path
+      // must chart the real accumulated lag, not a misleading 0.
+      const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
+      try {
+        const mem = process.memoryUsage();
+        // CPU%: computeCpuPercent returns 0 (and we leave the baseline
+        // untouched) when cpuUsage() throws, so a transient failure can't turn
+        // the next successful read's since-start total into one giant spike.
+        const cpu = safeCpuUsage();
+        const cpuPercent = computeCpuPercent(
+          prevCpu,
+          cpu,
+          nowMs - prevCpuAt,
+          cpuCoreCount,
+        );
+        if (cpu) {
+          prevCpu = cpu;
+          prevCpuAt = nowMs;
+        }
+        // Connections + rate limiter live on `app` (the createServeApp const
+        // just below); read lazily — the first tick is ≥5s out, so the forward
+        // reference is assigned by call time. Guard with `?.` (ACP HTTP and the
+        // limiter are both toggleable).
+        const acp = (
+          app.locals?.['acpHandle'] as AcpHttpHandle | undefined
+        )?.registry.getSnapshot();
+        const hits = getRateLimiter(app)?.getHitCounts();
+        const rejectedTotal = hits
+          ? hits.prompt + hits.mutation + hits.read
+          : 0;
+        const rateLimitRejected =
+          prevRateRejected === undefined
+            ? 0
+            : Math.max(0, rejectedTotal - prevRateRejected);
+        prevRateRejected = rejectedTotal;
+        // ACP child resource: read this tick's cached snapshot synchronously
+        // and kick an async refresh for the next tick, keeping the sampler
+        // sync. Optional-chained: an injected bridge (RunQwenServeDeps.bridge)
+        // built against the older contract may not implement these hooks.
+        const child = bridge.getChildResourceSnapshot?.();
+        // Only poll the child's resources when someone is watching: the
+        // staleness guard already drops the reading to 0 when idle, so gating
+        // avoids a 5s RPC round-trip (pipe + child CPU) for a chart nobody has
+        // open.
+        if (runtime.getActiveSseCount() > 0 || (acp?.wsStreams ?? 0) > 0) {
+          void bridge.refreshChildResource?.();
+        }
+        metricsRing.sample(nowMs, {
+          cpuPercent,
+          rssBytes: mem.rss,
+          heapUsedBytes: mem.heapUsed,
+          activeSessions: bridge.sessionCount,
+          activePrompts: bridge.activePromptCount,
+          queuedPrompts: bridge.pendingPromptTotal ?? 0,
+          eventLoopLagP99Ms,
+          sseConnections: runtime.getActiveSseCount(),
+          wsConnections: acp?.wsStreams ?? 0,
+          acpConnections: acp?.connectionCount ?? 0,
+          rateLimitRejected,
+          childCpuPercent: child?.cpuPercent ?? 0,
+          childRssBytes: child?.rssBytes ?? 0,
+        });
+      } catch (err) {
+        // A gauge getter threw (e.g. process.memoryUsage() in a restricted
+        // container, or a bridge getter mid-teardown). Never let it surface as
+        // an uncaughtException that takes down the daemon; seal a zeroed bucket
+        // so the timeline stays contiguous rather than silently gapping.
+        daemonLog.warn(
+          `metrics sampler tick failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        try {
+          metricsRing.sample(nowMs, {
+            cpuPercent: 0,
+            rssBytes: 0,
+            heapUsedBytes: 0,
+            activeSessions: 0,
+            activePrompts: 0,
+            queuedPrompts: 0,
+            eventLoopLagP99Ms,
+            sseConnections: 0,
+            wsConnections: 0,
+            acpConnections: 0,
+            rateLimitRejected: 0,
+            childCpuPercent: 0,
+            childRssBytes: 0,
+          });
+        } catch {
+          // The ring is pure data; a throw here is unexpected, but never let
+          // the fallback path crash the timer either.
+        }
+      } finally {
+        // Reset the window histogram AFTER sampling (or after a failed tick) so
+        // a thrown tick can't permanently discard event-loop lag — which would
+        // otherwise leave the chart reading a healthy 0ms while the daemon was
+        // actually stalling.
+        metricsLoopDelay.reset();
+      }
+    }, DAEMON_METRICS_SAMPLE_MS);
+    metricsSamplerTimer.unref();
+    daemonMetricsSampler = {
+      dispose(): void {
+        clearInterval(metricsSamplerTimer);
+        metricsLoopDelay.disable();
+      },
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       bridge,
       webShellDir,
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
-      fsFactory,
+      fsFactory: runtime.resolveBridgeFsFactory({
+        // REST routes still return primary-relative paths, so keep their
+        // filesystem boundary primary-only until responses carry root IDs.
+        boundWorkspaces: [boundWorkspace],
+        trusted: trustedWorkspace,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      }),
       daemonLog,
       getChannelWorkerSnapshot,
+      getPerfSnapshot: () => ({
+        eventLoop: currentDaemonEventLoopMonitor.snapshot(),
+        promptQueueWait: {
+          count: promptQueueWaitStats.count,
+          meanMs:
+            promptQueueWaitStats.count === 0
+              ? 0
+              : promptQueueWaitStats.totalMs / promptQueueWaitStats.count,
+          maxMs: promptQueueWaitStats.maxMs,
+          lastMs: promptQueueWaitStats.lastMs,
+        },
+        pipe: {
+          inbound: { ...pipeStats.inbound },
+          outbound: { ...pipeStats.outbound },
+        },
+      }),
+      getMetricsSeries: () => metricsRing.snapshot(),
+      recordDaemonRequest: (durationMs, statusCode) =>
+        metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
@@ -2247,7 +2689,12 @@ export async function runQwenServe(
   reserveChannelServicePidfile();
 
   return await new Promise<RunHandle>((resolve, reject) => {
-    const server = app.listen(opts.port, listenHostname, () => {
+    // When TLS is configured, wrap the Express app in an HTTPS listener
+    // (`https.Server extends http.Server`, so everything downstream —
+    // `server.maxConnections`, `server.address()`, `attachServer(server)`,
+    // graceful close — is unchanged). Otherwise `app.listen()` keeps the
+    // existing plain-HTTP path bit-for-bit.
+    const onListening = () => {
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(
@@ -2283,7 +2730,8 @@ export async function runQwenServe(
       // else: leave unset (Node's default = unlimited at this layer).
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
-      const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const scheme = tlsOptions ? 'https' : 'http';
+      const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
       try {
         if (opts.channelSelection) {
           const createSupervisor =
@@ -2300,13 +2748,26 @@ export async function runQwenServe(
             ...(token ? { daemonToken: token } : {}),
             workspace: boundWorkspace,
             selection: opts.channelSelection,
+            onReady: (snapshot) => {
+              writeChannelWorkerPidfile(snapshot);
+            },
+            onLog: ({ stream, line }) => {
+              const message = `channel worker ${stream}: ${line}`;
+              if (stream === 'stderr') {
+                daemonLog.warn(message);
+              } else {
+                daemonLog.info(message);
+              }
+            },
             onExit: (snapshot) => {
               daemonLog.warn(
                 `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
                   `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
-                  `error=${snapshot.error ?? 'none'})`,
+                  `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
+                  `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +
+                  `staleHeartbeatAt=${snapshot.staleHeartbeatAt ?? 'none'})`,
               );
-              removeCurrentServePidfile();
+              writeChannelWorkerPidfile(snapshot, { clearWorkerPid: true });
             },
           });
         }
@@ -2455,6 +2916,7 @@ export async function runQwenServe(
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
         await stopChannelWorkerAfterFailedStartup();
+        disposeDaemonEventLoopMonitor();
         removeCurrentServePidfile();
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
         markRuntimeFailed(error);
@@ -2475,7 +2937,6 @@ export async function runQwenServe(
         if (opts.channelSelection) {
           await channelWorker.start();
           if (runtimeStartupSettled) return;
-          writeChannelWorkerPidfile();
         }
         if (runtimeStartupSettled) return;
         runtimeStartupSettled = true;
@@ -2764,6 +3225,7 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                disposeDaemonEventLoopMonitor();
                 // The worker owns daemon-backed sessions; disconnect it before
                 // tearing down the ACP bridge it is attached to.
                 await channelWorker.stop().catch((err) => {
@@ -2888,7 +3350,30 @@ export async function runQwenServe(
           },
         );
       }
-    });
+    };
+    let server: Server;
+    if (tlsOptions) {
+      let httpsServer: https.Server;
+      try {
+        httpsServer = https.createServer(tlsOptions, app);
+      } catch (err) {
+        // createSecureContext throws a raw OpenSSL string (e.g.
+        // "error:0B080074:...key values mismatch") when cert/key don't pair.
+        // Wrap it so the operator gets the same actionable framing as the
+        // --tls-cert/--tls-key read errors above.
+        reject(
+          new Error(
+            `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
+              `could not be loaded (do they match?): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return;
+      }
+      server = httpsServer.listen(opts.port, listenHostname, onListening);
+    } else {
+      server = app.listen(opts.port, listenHostname, onListening);
+    }
     server.once('error', (err) => {
       removeCurrentServePidfile();
       reject(err);

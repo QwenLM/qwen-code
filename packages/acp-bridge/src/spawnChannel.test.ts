@@ -121,6 +121,42 @@ describe('createSpawnChannelFactory env policy', () => {
     const args = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
     expect(args?.slice(-2)).toEqual(['--acp', '--experimental-lsp']);
   });
+
+  it('threads NDJSON pipe hooks through daemon-side spawned channels', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const onMessageSent = vi.fn();
+    const onMessageReceived = vi.fn();
+    const factory = createSpawnChannelFactory({
+      pipeHooks: { onMessageSent, onMessageReceived },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const reader = channel.stream.readable.getReader();
+
+    await writer.write({ jsonrpc: '2.0', method: 'daemon-to-child' });
+    (child.stdout as PassThrough).write(
+      `${JSON.stringify({ jsonrpc: '2.0', method: 'child-to-daemon' })}\n`,
+    );
+    await expect(reader.read()).resolves.toMatchObject({
+      value: { jsonrpc: '2.0', method: 'child-to-daemon' },
+      done: false,
+    });
+
+    expect(onMessageSent).toHaveBeenCalledWith(
+      Buffer.byteLength(
+        JSON.stringify({ jsonrpc: '2.0', method: 'daemon-to-child' }),
+      ),
+    );
+    expect(onMessageReceived).toHaveBeenCalledWith(
+      Buffer.byteLength(
+        JSON.stringify({ jsonrpc: '2.0', method: 'child-to-daemon' }),
+      ),
+    );
+
+    reader.releaseLock();
+    writer.releaseLock();
+  });
 });
 
 describe('createStderrForwarder', () => {
@@ -198,6 +234,57 @@ describe('createStderrForwarder', () => {
     expect(captured[0]!.level).toBe('warn');
     // The flushed line should have the prefix
     expect(captured[0]!.line).toMatch(/^\[x\] /);
+    stderrSpy.mockRestore();
+  });
+
+  it('redacts credentials from forwarded lines', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('Authorization: Bearer eyJsecret123\n');
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.line).not.toContain('eyJsecret123');
+    expect(captured[0]!.line).toContain('<redacted>');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('<redacted>'),
+    );
+    expect(stderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('eyJsecret123'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('redacts credentials in force-truncated lines', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[x] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    const bigChunk = 'Bearer secrettoken123 ' + 'A'.repeat(65 * 1024);
+    forwarder.onData(bigChunk);
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    expect(captured[0]!.line).toContain('<redacted>');
+    expect(captured[0]!.line).not.toContain('secrettoken123');
+    stderrSpy.mockRestore();
+  });
+
+  it('redacts credentials flushed via onEnd (partial line)', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('Bearer secrettoken123');
+    expect(captured).toHaveLength(0);
+    forwarder.onEnd();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.line).not.toContain('secrettoken123');
+    expect(captured[0]!.line).toContain('<redacted>');
     stderrSpy.mockRestore();
   });
 

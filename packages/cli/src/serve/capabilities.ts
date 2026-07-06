@@ -44,6 +44,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
+  session_artifacts: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -71,6 +72,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['workspace', 'clean'],
   },
+  workspace_memory_forget: { since: 'v1' },
+  workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
@@ -90,6 +93,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
+  session_organization: { since: 'v1' },
+  session_export: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -264,7 +269,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // only when explicitly requested by option or env.
   client_mcp_over_ws: { since: 'v1' },
   // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
-  // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
+  // where a loopback CDP client drives ONE real tab
   // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
   // frames. Advertised when explicitly enabled or when the daemon is serving a
   // Chrome extension origin.

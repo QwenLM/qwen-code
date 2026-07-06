@@ -6,7 +6,10 @@
 
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
-import { classifyRetryError } from './retryErrorClassification.js';
+import {
+  classifyRetryError,
+  isFallbackEligible,
+} from './retryErrorClassification.js';
 
 describe('classifyRetryError', () => {
   it('classifies HTTP 429 as retryable rate limiting', () => {
@@ -433,5 +436,50 @@ describe('classifyRetryError', () => {
       diagnosis: 'fail-fast',
       reason: 'aborted',
     });
+  });
+});
+
+describe('isFallbackEligible', () => {
+  it.each([
+    [429, 'Too Many Requests', true],
+    [503, 'Service Unavailable', true],
+    [529, 'Overloaded', true],
+    [400, 'Bad Request', false],
+    [401, 'Unauthorized', false],
+    [403, 'Forbidden', false],
+    [500, 'Internal Server Error', false],
+    [502, 'Bad Gateway', false],
+  ])('classifies HTTP %s fallback eligibility', (status, message, expected) => {
+    expect(isFallbackEligible(classifyRetryError({ status, message }))).toBe(
+      expected,
+    );
+  });
+
+  it('returns true for SSE-embedded 429/529 capacity errors', () => {
+    for (const status of [429, 529]) {
+      const error = new Error(
+        `id:1\nevent:error\n:HTTP_STATUS/${status}\ndata:{"request_id":"req-1","code":"Overloaded","message":"Provider overloaded"}`,
+      );
+      expect(isFallbackEligible(classifyRetryError(error))).toBe(true);
+    }
+  });
+
+  it('returns false for fail-fast and transport errors', () => {
+    const quotaError = {
+      status: 429,
+      code: 'Throttling.AllocationQuota',
+      message: 'Quota exceeded',
+    };
+    expect(isFallbackEligible(classifyRetryError(quotaError))).toBe(false);
+
+    expect(
+      isFallbackEligible({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+        statusCode: 503,
+        transportCode: 'ECONNRESET',
+      }),
+    ).toBe(false);
   });
 });

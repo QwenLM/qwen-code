@@ -119,6 +119,24 @@ describe('CronListTool', () => {
     expect(result.returnDisplay).toContain('[durable]');
   });
 
+  it('surfaces a durable task name and its disabled status', async () => {
+    await writeCronTasks(tmpDir, [
+      makeDurableTask({ id: 'off01', name: 'Weekly digest', enabled: false }),
+    ]);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    // The disabled marker + name let the agent tell a disabled task apart from
+    // an active one and reference it by name.
+    expect(result.llmContent).toContain(
+      'off01 — 0 */2 * * * (recurring) [durable, disabled]: Weekly digest: check deploy',
+    );
+    expect(result.returnDisplay).toContain(
+      '[durable, disabled]: Weekly digest',
+    );
+  });
+
   it('merges file-backed durable jobs with session-only jobs', async () => {
     await writeCronTasks(tmpDir, [makeDurableTask()]);
     config._scheduler.create('*/10 * * * *', 'session task', true);

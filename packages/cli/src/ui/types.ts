@@ -330,6 +330,8 @@ export interface ToolDefinition {
 
 export interface SkillDefinition {
   name: string;
+  description?: string;
+  level?: string;
 }
 
 export type HistoryItemToolsList = HistoryItemBase & {
@@ -564,12 +566,7 @@ export type HistoryItemDoctor = HistoryItemBase & {
 };
 
 export type GoalStatusKind =
-  | 'set'
-  | 'achieved'
-  | 'cleared'
-  | 'failed'
-  | 'aborted'
-  | 'checking';
+  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',
