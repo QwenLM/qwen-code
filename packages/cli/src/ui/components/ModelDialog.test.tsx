@@ -265,7 +265,10 @@ describe('<ModelDialog />', () => {
 
     const propsAfterError =
       mockedSelect.mock.calls[mockedSelect.mock.calls.length - 1][0];
-    expect(propsAfterError.maxItemsToShow).toBeLessThan(6);
+    // errorMessage = "Failed to switch model to 'model-1'.\n\nnetwork down"
+    // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
+    // floor((20 - 14 - 5) / 1) = 1.
+    expect(propsAfterError.maxItemsToShow).toBe(1);
   });
 
   it('hides discontinued qwen-oauth models for other auth types', () => {
