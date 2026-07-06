@@ -1010,6 +1010,123 @@ describe('handleSlashCommand', () => {
       await expect(executor?.('custom')).resolves.toBeNull();
     });
   });
+
+  describe('stacked skill invocations', () => {
+    const createSkillCommand = (name: string, body: string) => ({
+      name,
+      description: `Skill ${name}`,
+      kind: CommandKind.SKILL,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: `SKILL_BODY:${name}:${body}` }],
+      }),
+    });
+
+    it('combines two stacked skills into a single submit_prompt', async () => {
+      const skillA = createSkillCommand('feat-dev', 'feature workflow');
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /e2e-testing implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:feature workflow');
+        expect(texts).toContain('SKILL_BODY:e2e-testing:e2e workflow');
+        expect(texts).toContain('implement X');
+      }
+    });
+
+    it('calls each skill action once', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(skillA.action).toHaveBeenCalledTimes(1);
+      expect(skillB.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles stacked skills with no remaining text', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const skillB = createSkillCommand('bugfix', 'b');
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /bugfix',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:bugfix:b');
+        expect(texts).toHaveLength(2);
+      }
+    });
+
+    it('falls through to normal dispatch for a single skill', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      mockGetCommands.mockReturnValue([skillA]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev build something',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      // Single skill goes through normal dispatch, not stacked path
+      expect(result.type).toBe('submit_prompt');
+      expect(skillA.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips skills whose action is undefined', async () => {
+      const skillA = createSkillCommand('feat-dev', 'a');
+      const noActionSkill = {
+        name: 'no-action',
+        description: 'No action',
+        kind: CommandKind.SKILL,
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        action: undefined,
+      };
+      const skillB = createSkillCommand('review', 'b');
+      mockGetCommands.mockReturnValue([skillA, noActionSkill, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /no-action /review do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const content = result.content as Array<{ text: string }>;
+        const texts = content.map((c) => c.text);
+        expect(texts).toContain('SKILL_BODY:feat-dev:a');
+        expect(texts).toContain('SKILL_BODY:review:b');
+      }
+    });
+  });
 });
 
 describe('getAvailableCommands', () => {

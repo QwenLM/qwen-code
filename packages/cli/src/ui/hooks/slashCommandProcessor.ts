@@ -55,7 +55,11 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
-import { parseSlashCommand } from '../../utils/commands.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+  MAX_STACKED_SKILLS,
+} from '../../utils/commands.js';
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
@@ -675,6 +679,59 @@ export const useSlashCommandProcessor = (
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
 
+      // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+      const stackedResult = parseStackedSlashCommands(trimmed, commands);
+      if (stackedResult.skills.length >= 2) {
+        const combinedContent: PartListUnion[] = [];
+
+        for (const skill of stackedResult.skills) {
+          if (!skill.action) continue;
+          const skillContext: CommandContext = {
+            invocation: {
+              raw: `/${skill.name}`,
+              name: skill.name,
+              args: '',
+            },
+            services: { config, settings, logger: null },
+          } as unknown as CommandContext;
+
+          const skillResult = await skill.action(skillContext, '');
+          if (skillResult?.type === 'submit_prompt') {
+            combinedContent.push(skillResult.content);
+          }
+        }
+
+        // Append user's remaining text after skill tokens
+        if (stackedResult.remainingText) {
+          combinedContent.push([{ text: stackedResult.remainingText }]);
+        }
+
+        if (stackedResult.exceededMax) {
+          addMessage({
+            type: MessageType.WARNING,
+            content: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
+            timestamp: new Date(),
+          });
+        }
+
+        // Record skill invocations for telemetry
+        if (config) {
+          for (const skill of stackedResult.skills) {
+            recordSkillInvocation(config, {
+              skillName: getSkillCommandName(skill),
+              success: true,
+            });
+          }
+        }
+
+        // Combine all content into a single submit_prompt
+        const mergedContent: PartListUnion = combinedContent.flat();
+        return {
+          type: 'submit_prompt',
+          content: mergedContent,
+        };
+      }
+
       const subcommand =
         resolvedCommandPath.length > 1
           ? resolvedCommandPath.slice(1).join(' ')
@@ -1156,6 +1213,7 @@ export const useSlashCommandProcessor = (
     },
     [
       config,
+      settings,
       addItem,
       actions,
       commands,
