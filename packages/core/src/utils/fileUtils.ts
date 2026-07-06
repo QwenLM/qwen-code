@@ -1294,7 +1294,6 @@ export async function processSingleFileContent(
           return {
             llmContent: pdfResult.text,
             returnDisplay: `Read pdf as text${pagesLabel}: ${relativePathForDisplay}`,
-            isTruncated: pdfResult.truncated ?? false,
             stats,
           };
         }

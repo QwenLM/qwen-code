@@ -265,7 +265,7 @@ export async function getPDFPageCount(
 }
 
 export type PDFTextResult =
-  | { success: true; text: string; truncated?: boolean }
+  | { success: true; text: string; truncated: boolean }
   | { success: false; error: string };
 
 /**
