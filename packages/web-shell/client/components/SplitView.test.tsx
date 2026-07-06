@@ -94,8 +94,14 @@ describe('SplitView', () => {
     expect(titles()).toEqual(['One', 'Two']);
     const providers = container!.querySelectorAll('[data-session]');
     expect(providers[0].getAttribute('data-session')).toBe('s1');
-    // Panes use a distinct client id so they don't collide with the main view.
-    expect(providers[0].getAttribute('data-clientid')).toBe('split-pane:s1');
+    // Panes use a distinct client id (with a per-mount nonce) so they don't
+    // collide with the main view — or with another tab's panes for the session.
+    const clientId = providers[0].getAttribute('data-clientid') ?? '';
+    expect(clientId).toMatch(/^split-pane:.+:s1$/);
+    // Both panes share this instance's nonce.
+    const s2ClientId = providers[1].getAttribute('data-clientid') ?? '';
+    const nonce = clientId.slice('split-pane:'.length, -':s1'.length);
+    expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
   });
 
   it('seeds with the current session when no initial sessions are given', () => {

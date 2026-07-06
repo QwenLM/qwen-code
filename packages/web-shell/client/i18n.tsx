@@ -1550,6 +1550,8 @@ const EN: Messages = {
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
   'sessionsOverview.selectAll': 'Select all',
+  'sessionsOverview.splitCap': (v) =>
+    `Only the first ${v?.max ?? 6} selected sessions will open in the split.`,
   'sessionsOverview.selectSession': (v) => `Select ${v?.name ?? ''}`,
   'sessionsOverview.status.idle': 'Idle',
   'sessionsOverview.status.needsApproval': 'Needs approval',
@@ -3085,6 +3087,8 @@ const ZH: Messages = {
   'sessionsOverview.popupBlocked': '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
   'sessionsOverview.selectAll': '全选',
+  'sessionsOverview.splitCap': (v) =>
+    `只有前 ${v?.max ?? 6} 个选中的会话会进入分屏。`,
   'sessionsOverview.selectSession': (v) => `选择 ${v?.name ?? ''}`,
   'sessionsOverview.status.idle': '空闲',
   'sessionsOverview.status.needsApproval': '待审批',

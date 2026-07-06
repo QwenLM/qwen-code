@@ -4606,7 +4606,12 @@ export function App({
                         <TodoPanel todos={floatingTodos} />
                       </div>
                     )}
-                    {pendingToolApproval && (
+                    {/* Only render the outer session's approval on the chat
+                        view. Under the split view (a full-pane overlay) it would
+                        sit hidden behind the panes yet still own global keyboard
+                        shortcuts — a keypress could confirm an unseen approval.
+                        Each split pane surfaces its own session's approval. */}
+                    {pendingToolApproval && mainView === 'chat' && (
                       <div
                         ref={approvalOverlayRef}
                         tabIndex={-1}
@@ -4620,7 +4625,7 @@ export function App({
                         />
                       </div>
                     )}
-                    {pendingAskUserApproval && (
+                    {pendingAskUserApproval && mainView === 'chat' && (
                       <div
                         ref={approvalOverlayRef}
                         tabIndex={-1}

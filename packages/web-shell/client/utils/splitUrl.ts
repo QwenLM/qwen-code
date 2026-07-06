@@ -14,6 +14,14 @@
 const SPLIT_PARAM = 'split';
 
 /**
+ * Max sessions shown side by side in the split view. Each pane is a full
+ * session (its own SSE + transcript), so this bounds live connections and keeps
+ * panes readable. Shared so the overview caps a selection to the same limit
+ * before it ever builds a `?split=` URL or opens the in-window split.
+ */
+export const MAX_SPLIT_PANES = 6;
+
+/**
  * Build an absolute URL that opens the app straight into the split view for the
  * given sessions. Derived from the current location so it inherits the origin
  * and any `?daemon=`/`?token=` query a dev deployment relies on; the path is

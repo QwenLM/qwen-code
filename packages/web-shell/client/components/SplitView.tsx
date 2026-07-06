@@ -12,12 +12,10 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
+import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 import styles from './SplitView.module.css';
 
-// Cap the number of live panes: each is a full session (its own SSE stream +
-// transcript), so an unbounded split would open unbounded daemon connections.
-// Beyond a handful they also stop being readable side by side.
-const MAX_PANES = 6;
+const MAX_PANES = MAX_SPLIT_PANES;
 const SESSION_PAGE_SIZE = 1000;
 const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 
@@ -64,6 +62,14 @@ export function SplitView({
   });
   const [pickerOpen, setPickerOpen] = useState(false);
   const addWrapRef = useRef<HTMLDivElement | null>(null);
+  // A per-tab/per-mount nonce: two browser tabs opening the same split must not
+  // register the same daemon client id, or suppressOwnUserEcho would treat one
+  // tab's prompt as the other's own echo and drop it from the transcript.
+  const [instanceId] = useState(() =>
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2),
+  );
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -177,9 +183,10 @@ export function SplitView({
             <div className={styles.paneSlot} key={sessionId}>
               <DaemonSessionProvider
                 sessionId={sessionId}
-                // Distinct from the main view's client for the same session so
-                // the two attachments don't collide on one client identity.
-                clientId={`split-pane:${sessionId}`}
+                // Distinct from the main view's client (and from any other tab's
+                // panes) for the same session, so the attachments don't collide
+                // on one client identity.
+                clientId={`split-pane:${instanceId}:${sessionId}`}
                 suppressOwnUserEcho
               >
                 <ChatPane

@@ -16,6 +16,11 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
+let latestOnSubmit:
+  | ((text: string, images?: unknown, commit?: () => void) => boolean)
+  | undefined;
+let sendPromptResolve: (() => void) | undefined;
+let sendPromptReject: ((e: unknown) => void) | undefined;
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
@@ -47,26 +52,30 @@ vi.mock('./MessageList', () => ({
 }));
 vi.mock('./StreamingStatus', () => ({ StreamingStatus: () => <div /> }));
 vi.mock('./ChatEditor', () => ({
-  ChatEditor: (props: any) => (
-    <div>
-      <button
-        data-testid="pane-submit"
-        onClick={() => props.onSubmit('hello there')}
-      >
-        send
-      </button>
-      <button data-testid="pane-cancel" onClick={props.onCancel}>
-        cancel
-      </button>
-      <span data-testid="pane-running">{String(props.isRunning)}</span>
-      <span data-testid="pane-dialogopen">{String(props.dialogOpen)}</span>
-    </div>
-  ),
+  ChatEditor: (props: any) => {
+    latestOnSubmit = props.onSubmit;
+    return (
+      <div>
+        <button
+          data-testid="pane-submit"
+          onClick={() => props.onSubmit('hello there')}
+        >
+          send
+        </button>
+        <button data-testid="pane-cancel" onClick={props.onCancel}>
+          cancel
+        </button>
+        <span data-testid="pane-running">{String(props.isRunning)}</span>
+        <span data-testid="pane-dialogopen">{String(props.dialogOpen)}</span>
+      </div>
+    );
+  },
 }));
 vi.mock('./messages/ToolApproval', () => ({
   ToolApproval: (props: any) => (
     <button
       data-testid="tool-approval"
+      data-keyboard-active={String(props.keyboardActive)}
       onClick={() => props.onConfirm(props.request.id, 'proceed')}
     >
       approve
@@ -99,7 +108,17 @@ beforeEach(() => {
   };
   streamingStateValue = 'idle';
   pendingPermission = null;
-  sendPrompt.mockClear();
+  latestOnSubmit = undefined;
+  sendPrompt.mockReset();
+  // Each sendPrompt returns a promise the test controls, so we can assert the
+  // draft is committed only after the prompt is accepted.
+  sendPrompt.mockImplementation(
+    () =>
+      new Promise<unknown>((resolve, reject) => {
+        sendPromptResolve = () => resolve({});
+        sendPromptReject = (e) => reject(e);
+      }),
+  );
   submitPermission.mockClear();
   cancel.mockClear();
 });
@@ -144,6 +163,44 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect((sendPrompt.mock.calls[0] as unknown[])[0]).toBe('hello there');
+  });
+
+  it('commits the draft only after the prompt is accepted', async () => {
+    render();
+    const commit = vi.fn();
+    let returned: boolean | undefined;
+    act(() => {
+      returned = latestOnSubmit!('hi', undefined, commit);
+    });
+    // Returns false (keep the draft) and does NOT commit before acceptance.
+    expect(returned).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    await act(async () => {
+      sendPromptResolve!();
+      await Promise.resolve();
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not commit (preserves the draft) when the prompt is rejected', async () => {
+    render();
+    const commit = vi.fn();
+    act(() => {
+      latestOnSubmit!('hi', undefined, commit);
+    });
+    await act(async () => {
+      sendPromptReject!(new Error('session busy'));
+      await Promise.resolve();
+    });
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('keeps pane approvals click-only (no global keyboard shortcuts)', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(testid('tool-approval')?.getAttribute('data-keyboard-active')).toBe(
+      'false',
+    );
   });
 
   it('reflects streaming state on the composer', () => {

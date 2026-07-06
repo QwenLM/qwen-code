@@ -337,4 +337,31 @@ describe('SessionOverviewPanel', () => {
     const url = new URL(String(openSpy.mock.calls[0][0]));
     expect(url.searchParams.get('split')).toBe('b');
   });
+
+  it('caps the split to 6 sessions and warns when more are selected', () => {
+    sessionsState.sessions = Array.from({ length: 8 }, (_, i) =>
+      session(`s${i}`, { displayName: `S${i}` }),
+    );
+    const onOpenSplit = vi.fn();
+    render({ onOpenSplit });
+    act(() => selectAllCheckbox().click()); // all 8 selected
+    // A hint tells the user only the first 6 will open.
+    expect(container!.textContent).toContain('Only the first 6');
+    // New-tab URL carries at most 6 ids.
+    act(() =>
+      tabButton().dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    const split = new URL(String(openSpy.mock.calls[0][0])).searchParams.get(
+      'split',
+    );
+    expect(split!.split(',')).toHaveLength(6);
+    // In-window split is likewise capped.
+    const splitButton = Array.from(container!.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('Open in split'),
+    ) as HTMLButtonElement;
+    act(() =>
+      splitButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onOpenSplit.mock.calls[0][0]).toHaveLength(6);
+  });
 });

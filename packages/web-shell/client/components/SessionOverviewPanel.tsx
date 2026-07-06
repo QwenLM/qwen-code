@@ -17,7 +17,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
-import { buildSplitUrl } from '../utils/splitUrl';
+import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
 import { ErrorBoundary } from './ErrorBoundary';
 import styles from './SessionOverviewPanel.module.css';
 
@@ -213,6 +213,11 @@ function SessionOverviewPanelInner({
     .filter((id) => selected.has(id));
   const selectedCount = selectedIds.length;
   const allSelected = cards.length > 0 && selectedCount === cards.length;
+  // The split shows at most MAX_SPLIT_PANES; cap what we hand off so the new-tab
+  // URL doesn't bloat with ids that get discarded and the in-window path doesn't
+  // silently open fewer than were checked. The top-ranked selections win.
+  const splitIds = selectedIds.slice(0, MAX_SPLIT_PANES);
+  const overCap = selectedCount > MAX_SPLIT_PANES;
   const toggleSelectAll = useCallback(() => {
     setSelected((prev) => {
       const ids = cards.map((card) => card.sessionId);
@@ -243,12 +248,12 @@ function SessionOverviewPanelInner({
   // showing all of them side by side (not one tab per session). Passing no
   // window features makes browsers open a tab rather than a popup window.
   const openSelectedInNewTab = useCallback(() => {
-    if (selectedIds.length === 0) return;
-    const url = buildSplitUrl(selectedIds, window.location.href);
+    if (splitIds.length === 0) return;
+    const url = buildSplitUrl(splitIds, window.location.href);
     const win = window.open(url, '_blank');
     win?.focus();
     setPopupBlocked(!win);
-  }, [selectedIds]);
+  }, [splitIds]);
 
   const refresh = useCallback(() => {
     void reload();
@@ -297,7 +302,7 @@ function SessionOverviewPanelInner({
             type="button"
             className={styles.actionButton}
             disabled={selectedCount === 0}
-            onClick={() => onOpenSplit(selectedIds)}
+            onClick={() => onOpenSplit(splitIds)}
             title={t('sessionsOverview.openInSplitHint')}
           >
             {t('sessionsOverview.openInSplit')}
@@ -312,6 +317,11 @@ function SessionOverviewPanelInner({
         </button>
       </div>
 
+      {overCap && (
+        <div className={styles.notice} role="status">
+          {t('sessionsOverview.splitCap', { max: MAX_SPLIT_PANES })}
+        </div>
+      )}
       {popupBlocked && (
         <div className={styles.notice} role="alert">
           {t('sessionsOverview.popupBlocked')}

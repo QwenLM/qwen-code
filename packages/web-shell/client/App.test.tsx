@@ -902,6 +902,11 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-view-page"]'),
     ).not.toBeNull();
+    // The outer session's approval overlay must NOT render behind the split —
+    // otherwise its global keyboard shortcuts could confirm an unseen approval.
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
   });
 
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {

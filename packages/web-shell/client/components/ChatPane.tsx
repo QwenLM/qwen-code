@@ -80,14 +80,15 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
+      // Keep the draft (return false) until the prompt is actually accepted:
+      // sendPrompt can reject (transcript still loading, session disconnected,
+      // or a turn already active), and committing first would silently drop the
+      // user's text. Commit only once it resolves.
       actions
-        .sendPrompt(
-          trimmed,
-          images && images.length ? { images } : undefined,
-        )
+        .sendPrompt(trimmed, images && images.length ? { images } : undefined)
+        .then(() => commitAccepted?.())
         .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
-      commitAccepted?.();
-      return true;
+      return false;
     },
     [actions, reportError],
   );
@@ -169,6 +170,10 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
               request={pendingToolApproval}
               onConfirm={handleConfirm}
               variant="floating"
+              // Several panes can show approvals at once; global Enter/Escape
+              // shortcuts aren't focus-scoped, so keep pane approvals
+              // click-only to avoid confirming the wrong session's request.
+              keyboardActive={false}
             />
           </div>
         )}
