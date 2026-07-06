@@ -2810,13 +2810,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const pruneExpiredArtifactPins = async (
     entry: SessionEntry,
     originatorClientId?: string,
-  ): Promise<string[]> => {
+  ): Promise<{ warnings: string[]; gcRan: boolean }> => {
     const pruned = await entry.artifacts.pruneExpiredPins();
     const warnings = [...(pruned.warnings ?? [])];
+    let gcRan = false;
     if (pruned.changes.length > 0) {
       publishArtifactChanges(entry, pruned.changes, originatorClientId);
       try {
         await gcArtifactContent(entry);
+        gcRan = true;
       } catch (error) {
         warnings.push('artifact content GC failed; stale content retained');
         writeStderrLine(
@@ -2826,7 +2828,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       }
     }
-    return warnings;
+    return { warnings, gcRan };
+  };
+
+  const pruneExpiredArtifactPinsBestEffort = async (
+    entry: SessionEntry,
+    originatorClientId: string | undefined,
+    action: string,
+  ): Promise<{ warnings: string[]; gcRan: boolean }> => {
+    try {
+      return await pruneExpiredArtifactPins(entry, originatorClientId);
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=${action} reason=${JSON.stringify(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
+      return {
+        warnings: ['expired_artifact_content_retained'],
+        gcRan: false,
+      };
+    }
   };
 
   const hasDroppedContentRefs = (artifacts: readonly DaemonSessionArtifact[]) =>
@@ -4742,16 +4764,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       publishArtifactChanges(entry, result.changes, clientId);
       const warnings = [...(result.warnings ?? [])];
-      try {
-        warnings.push(...(await pruneExpiredArtifactPins(entry, clientId)));
-      } catch (error) {
-        warnings.push('expired_artifact_content_retained');
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=add_prune_failed reason=${JSON.stringify(
-            error instanceof Error ? error.message : String(error),
-          )}`,
-        );
-      }
+      const pruneResult = await pruneExpiredArtifactPinsBestEffort(
+        entry,
+        clientId,
+        'add_prune_failed',
+      );
+      warnings.push(...pruneResult.warnings);
       return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
@@ -4768,27 +4786,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       publishArtifactChanges(entry, result.changes, clientId);
       const warnings = [...(result.warnings ?? [])];
       if (result.changes.length > 0 && removeOptions.deleteContent !== false) {
-        try {
-          warnings.push(...(await pruneExpiredArtifactPins(entry, clientId)));
-        } catch (error) {
-          warnings.push('expired_artifact_content_retained');
-          writeStderrLine(
-            `[artifacts] session=${entry.sessionId} action=remove_prune_failed reason=${JSON.stringify(
-              error instanceof Error ? error.message : String(error),
-            )}`,
-          );
-        }
-        try {
-          await gcArtifactContent(entry);
-        } catch (error) {
-          if (removeOptions.deleteContent === true || artifact.contentRef) {
-            warnings.push('content_delete_preserved');
+        const pruneResult = await pruneExpiredArtifactPinsBestEffort(
+          entry,
+          clientId,
+          'remove_prune_failed',
+        );
+        warnings.push(...pruneResult.warnings);
+        if (!pruneResult.gcRan) {
+          try {
+            await gcArtifactContent(entry);
+          } catch (error) {
+            if (removeOptions.deleteContent === true || artifact.contentRef) {
+              warnings.push('content_delete_preserved');
+            }
+            writeStderrLine(
+              `[artifacts] session=${entry.sessionId} action=remove_gc_failed reason=${JSON.stringify(
+                error instanceof Error ? error.message : String(error),
+              )}`,
+            );
           }
-          writeStderrLine(
-            `[artifacts] session=${entry.sessionId} action=remove_gc_failed reason=${JSON.stringify(
-              error instanceof Error ? error.message : String(error),
-            )}`,
-          );
         }
       }
       return warnings.length > 0 ? { ...result, warnings } : result;
@@ -4811,7 +4827,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!currentArtifact) {
         return { v: 1, sessionId, changes: [] };
       }
-      const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
+      const pruneResult = await pruneExpiredArtifactPinsBestEffort(
+        entry,
+        clientId,
+        'pin_prune_failed',
+      );
+      const pruneWarnings = pruneResult.warnings;
       const prunedArtifact = await entry.artifacts.getForPin(artifactId, {
         clientId,
       });
@@ -4893,6 +4914,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(clientRetained !== undefined ? { clientRetained } : {}),
             clientId,
           });
+          const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
+          if (mode === 'metadata' && result.changes.length > 0) {
+            try {
+              await gcArtifactContent(entry);
+            } catch (error) {
+              warnings.push('content_delete_preserved');
+              writeStderrLine(
+                `[artifacts] session=${entry.sessionId} action=pin_metadata_gc_failed reason=${JSON.stringify(
+                  error instanceof Error ? error.message : String(error),
+                )}`,
+              );
+            }
+          }
           if (copiedContentRef && contentRef) {
             artifactContentStore.releaseContentRef(contentRef);
             await gcArtifactContent(entry).catch((error: unknown) => {
@@ -4912,7 +4946,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }
           }
           publishArtifactChanges(entry, result.changes, clientId);
-          const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
           return warnings.length > 0 ? { ...result, warnings } : result;
         } catch (error) {
           if (copiedContentRef && contentRef) {
@@ -4940,7 +4973,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!(await entry.artifacts.get(artifactId))) {
         return { v: 1, sessionId, changes: [] };
       }
-      const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
+      const pruneResult = await pruneExpiredArtifactPinsBestEffort(
+        entry,
+        clientId,
+        'unpin_prune_failed',
+      );
+      const pruneWarnings = pruneResult.warnings;
       const result = await entry.artifacts.unpin(artifactId, {
         ...unpinOptions,
         clientId,

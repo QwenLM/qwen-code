@@ -475,19 +475,19 @@ async function openRegularWorkspaceFile(
   if (!sourceStat.isFile()) {
     throw new SessionArtifactValidationError(
       'Only regular workspace files can be pinned with content retention',
-      'artifactId',
+      'workspacePath',
     );
   }
   if (sourceStat.nlink > 1) {
     throw new SessionArtifactValidationError(
       'Hardlinked workspace files cannot be pinned with content retention',
-      'artifactId',
+      'workspacePath',
     );
   }
   if (sourceStat.size > MAX_PINNED_FILE_BYTES) {
     throw new SessionArtifactValidationError(
       `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
-      'artifactId',
+      'workspacePath',
     );
   }
   let handle: FileHandle;

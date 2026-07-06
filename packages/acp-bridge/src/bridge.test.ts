@@ -496,6 +496,88 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('keeps pin successful when expired pin pruning fails', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const pruneSpy = vi.spyOn(
+      SessionArtifactStore.prototype,
+      'pruneExpiredPins',
+    );
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'New link',
+          url: 'https://example.com/new-link',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      pruneSpy.mockRejectedValueOnce(new Error('prune failed'));
+
+      await expect(
+        bridge.pinSessionArtifact(
+          session.sessionId,
+          artifactId,
+          { clientId: session.clientId },
+          { mode: 'metadata' },
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'updated', artifactId }],
+        warnings: ['expired_artifact_content_retained'],
+      });
+    } finally {
+      pruneSpy.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('keeps unpin successful when expired pin pruning fails', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const pruneSpy = vi.spyOn(
+      SessionArtifactStore.prototype,
+      'pruneExpiredPins',
+    );
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'New link',
+          url: 'https://example.com/new-link',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'metadata' },
+      );
+      pruneSpy.mockRejectedValueOnce(new Error('prune failed'));
+
+      await expect(
+        bridge.unpinSessionArtifact(
+          session.sessionId,
+          artifactId,
+          { clientId: session.clientId },
+          undefined,
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'updated', artifactId }],
+        warnings: ['expired_artifact_content_retained'],
+      });
+    } finally {
+      pruneSpy.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
   it('applies metadata pin options to an already pinned artifact', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
@@ -2131,6 +2213,86 @@ describe('createAcpSessionBridge', () => {
         ],
       });
     } finally {
+      gcSpy.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('runs content GC when metadata pin drops restored retained content', async () => {
+    const sessionId = 'persisted-artifact-content-metadata-pin';
+    const artifactUrl = 'https://example.com/restored-content-metadata';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
+    const contentRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'2'.repeat(64)}-${'3'.repeat(16)}`,
+      sha256: '2'.repeat(64),
+      sizeBytes: 1,
+    };
+    const verifySpy = vi
+      .spyOn(SessionArtifactContentStore.prototype, 'verifyContentRef')
+      .mockResolvedValue(undefined);
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 1,
+                artifacts: [
+                  {
+                    id: artifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restored link',
+                    url: artifactUrl,
+                    retention: 'pinned',
+                    clientRetained: true,
+                    contentRef,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    try {
+      const loaded = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      gcSpy.mockClear();
+
+      await expect(
+        bridge.pinSessionArtifact(
+          loaded.sessionId,
+          artifactId,
+          { clientId: loaded.clientId },
+          { mode: 'metadata' },
+        ),
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            artifactId,
+            artifact: {
+              retention: 'restorable',
+              persistenceWarning: 'metadata_only_restore',
+            },
+          },
+        ],
+      });
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+      expect(gcSpy.mock.calls[0]?.[0]).toBe(loaded.sessionId);
+      expect(gcSpy.mock.calls[0]?.[1]).toEqual(new Set());
+    } finally {
+      verifySpy.mockRestore();
       gcSpy.mockRestore();
       await bridge.shutdown();
     }
