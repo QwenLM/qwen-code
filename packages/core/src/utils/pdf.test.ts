@@ -153,11 +153,16 @@ describe('pdf utilities', () => {
     });
 
     it('builds exact dense-text guidance for range and single-page reads', () => {
+      const rangeGuidance =
+        "PDF text extracted from \"paper.pdf\" is too large to return safely (12345 estimated tokens; limit 12000). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.";
       const singlePageGuidance =
         'PDF text extracted from "paper.pdf" is too large to return safely (12345 estimated tokens; limit 12000). The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.';
 
       expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345)).toBe(
-        "PDF text extracted from \"paper.pdf\" is too large to return safely (12345 estimated tokens; limit 12000). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.",
+        rangeGuidance,
+      );
+      expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1-2')).toBe(
+        rangeGuidance,
       );
       expect(buildPDFTextTooLargeGuidance('paper.pdf', 12_345, '1')).toBe(
         singlePageGuidance,
