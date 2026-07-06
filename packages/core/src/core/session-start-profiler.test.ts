@@ -91,6 +91,28 @@ describe('session-start-profiler', () => {
     expect(writeRecord).not.toHaveBeenCalled();
   });
 
+  it.each(['true', '0', ''])(
+    'stays disabled when env var is set to %j',
+    (envValue) => {
+      vi.stubEnv(SESSION_START_PROFILE_ENV, envValue);
+      const now = vi.fn(() => {
+        throw new Error('disabled profiler should not read time');
+      });
+      const writeRecord = vi.fn();
+
+      const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
+        now,
+        writeRecord,
+      });
+      profiler.finish({ ok: true });
+
+      expect(profiler.enabled).toBe(false);
+      expect(now).not.toHaveBeenCalled();
+      expect(writeRecord).not.toHaveBeenCalled();
+      expect(debugLoggerMock.debug).not.toHaveBeenCalled();
+    },
+  );
+
   it('records sync and async stages when enabled', async () => {
     const records: SessionStartProfileRecord[] = [];
     const profiler = createSessionStartProfiler(SessionStartSource.Resume, {
