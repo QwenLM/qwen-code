@@ -537,6 +537,37 @@ Done.`.replace(/\n/g, eol);
       expect((lastFrame() ?? '').includes('Alpha')).toBe(false);
     });
 
+    it('releases a complete separator whose column count differs from the header', () => {
+      // Header has 3 columns, the separator is complete (ends with `|`) but has
+      // only 2 — it can never become a matching separator, and the main parser
+      // treats it as plain text. So it must render, not be held for the stream.
+      const text = `| A | B | C |
+| --- | --- |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      expect(lastFrame() ?? '').toContain('A');
+    });
+
+    it('does not hold a pipe line inside a nested (longer) code fence', () => {
+      // A ```` fence is still open; an inner ``` (shorter) does NOT close it, so a
+      // `| … |` line after it is code content and must render. A naive fence
+      // toggle would treat the inner ``` as a close and hold the pipe line back.
+      const text = `\`\`\`\`
+| code example |
+\`\`\`
+| ZZZ | YYY |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={20}
+        />,
+      );
+      expect(stripAnsi(lastFrame() ?? '')).toContain('ZZZ');
+    });
+
     it('renders the table once the separator matches the header columns', () => {
       const text = `| Alpha | Beta |
 |---|---|

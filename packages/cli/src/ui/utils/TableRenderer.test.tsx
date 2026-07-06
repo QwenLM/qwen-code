@@ -865,7 +865,7 @@ describe('<TableRenderer />', () => {
     });
   });
 
-  describe('streaming table rendering (isStreaming)', () => {
+  describe('streaming table rendering (format stability)', () => {
     it('renders a header-only box (no divider) when there are no data rows', () => {
       // The live empty box shown while the first row streams: header + borders
       // only. The header/body divider must be skipped so it does not stack on
@@ -931,9 +931,16 @@ describe('<TableRenderer />', () => {
           .find((l) => l.includes('┌')) ?? '';
       return stringWidth(line.trim());
     };
-    const render = (rows: string[][]) =>
+    // Defaults to isPending (this block covers streaming behavior); pass false
+    // to exercise a committed table's all-rows format decision.
+    const render = (rows: string[][], isPending = true) =>
       renderWithProviders(
-        <TableRenderer headers={headers} rows={rows} contentWidth={80} />,
+        <TableRenderer
+          headers={headers}
+          rows={rows}
+          contentWidth={80}
+          isPending={isPending}
+        />,
       ).lastFrame() ?? '';
 
     it('widens the table when a wider row is appended (redraw on wider)', () => {
@@ -944,14 +951,14 @@ describe('<TableRenderer />', () => {
       );
     });
 
-    it('picks the vertical format for a tall-wrapping table (no format flip)', () => {
-      // The horizontal-vs-vertical decision must not depend on a streaming flag,
-      // so a table never flips format mid-stream. A cell tall enough to trip the
-      // vertical fallback renders vertical, identically at every point.
+    it('picks the vertical format for a tall-wrapping first row', () => {
+      // A single row tall enough to trip the vertical fallback renders vertical
+      // — the same whether streaming or committed (its one row IS the first row).
       const tall = [
         [Array.from({ length: 80 }, (_, i) => `w${i}`).join(' '), 'y'],
       ];
       expect(stripAnsi(render(tall))).not.toContain('┌'); // vertical list
+      expect(stripAnsi(render(tall, false))).not.toContain('┌');
     });
 
     it('does not flip to vertical when a tall row is appended after a short first row', () => {
@@ -969,6 +976,25 @@ describe('<TableRenderer />', () => {
         ]),
       );
       expect(output).toContain('┌'); // still horizontal (box drawn)
+    });
+
+    it('DOES use the vertical format for the same table once committed', () => {
+      // A committed (non-pending) table has all rows and no flip concern, so it
+      // measures every row: a short first row + a tall later row goes vertical,
+      // which is more readable than a tall horizontal grid.
+      const tallLaterRow = Array.from({ length: 80 }, (_, i) => `w${i}`).join(
+        ' ',
+      );
+      const output = stripAnsi(
+        render(
+          [
+            ['x', 'y'],
+            [tallLaterRow, 'y'],
+          ],
+          false,
+        ),
+      );
+      expect(output).not.toContain('┌'); // vertical list
     });
   });
 });

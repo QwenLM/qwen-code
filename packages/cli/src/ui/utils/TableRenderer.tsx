@@ -64,6 +64,13 @@ interface TableRendererProps {
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
   /**
+   * True while the table is still streaming. The horizontal-vs-vertical decision
+   * is then anchored to the first row so the format cannot flip as later rows
+   * arrive; a committed table (false/undefined) measures every row for the most
+   * readable layout.
+   */
+  isPending?: boolean;
+  /**
    * Maximum rendered text lines the table may occupy. When set (streaming
    * preview) and the fully rendered table exceeds it, output is clipped to
    * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
@@ -435,6 +442,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
+  isPending = false,
   maxHeight,
 }) => {
   const colCount = headers.length;
@@ -551,16 +559,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
-  // Measure only the header + the FIRST data row, not every row. Using every row
-  // lets a later, taller row push maxRowLines over the threshold and flip an
-  // already-horizontal table to vertical mid-stream — a visible format change.
-  // The first row is representative for the common case (rows are similar in
-  // size), so freezing the decision to it keeps the format stable as rows stream
-  // in. Column WIDTHS still track all rows (redraw-on-wider is unchanged); only
-  // the horizontal-vs-vertical CHOICE is anchored to the first row.
+  // While STREAMING (isPending), measure only the header + the FIRST data row.
+  // Using every row lets a later, taller row push maxRowLines over the threshold
+  // and flip an already-horizontal table to vertical mid-stream — a visible
+  // format change. The first row is representative for the common case, so
+  // anchoring to it keeps the format stable as rows stream in. A COMMITTED table
+  // has all its rows and no flip concern, so it measures EVERY row for the most
+  // readable layout (a short first row followed by tall rows still goes vertical).
+  // Column WIDTHS always track all rows (redraw-on-wider is unchanged); only the
+  // horizontal-vs-vertical CHOICE is anchored to the first row while streaming.
   function calculateMaxRowLines(): number {
     let maxLines = 1;
-    const firstRow = rowMetrics[0];
+    const rowsToMeasure = isPending ? rowMetrics.slice(0, 1) : rowMetrics;
     for (let i = 0; i < colCount; i++) {
       const headerWrapped = wrapText(
         headerMetrics[i]!.rendered,
@@ -570,8 +580,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
         },
       );
       maxLines = Math.max(maxLines, headerWrapped.length);
-      if (firstRow) {
-        const cellWrapped = wrapText(firstRow[i]!.rendered, columnWidths[i]!, {
+    }
+    for (const row of rowsToMeasure) {
+      for (let i = 0; i < colCount; i++) {
+        const cellWrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
           hard: needsHardWrap,
         });
         maxLines = Math.max(maxLines, cellWrapped.length);

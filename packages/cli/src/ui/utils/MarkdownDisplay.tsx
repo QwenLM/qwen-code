@@ -204,10 +204,26 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     while (start > 0 && /^\s*\|/.test(lines[start - 1]!)) start--;
     if (start < lines.length) {
       // Don't touch pipe-lines that are actually fenced code-block content.
-      let insideCodeFence = false;
+      // Track the OPEN fence's delimiter, not a naive toggle: a closing fence
+      // must use the same char and be at least as long (mirrors the main parser),
+      // or a nested fence (```` inside ```` ) mis-toggles and a real code line
+      // like `| A | B |` gets held back as a forming table.
+      let activeCodeFence = '';
       for (let i = 0; i < start; i++) {
-        if (codeFenceRegex.test(lines[i]!)) insideCodeFence = !insideCodeFence;
+        const fenceMatch = lines[i]!.match(codeFenceRegex);
+        if (!fenceMatch) continue;
+        if (activeCodeFence) {
+          if (
+            fenceMatch[1]!.startsWith(activeCodeFence[0]!) &&
+            fenceMatch[1]!.length >= activeCodeFence.length
+          ) {
+            activeCodeFence = '';
+          }
+        } else {
+          activeCodeFence = fenceMatch[1]!;
+        }
       }
+      const insideCodeFence = activeCodeFence !== '';
       // Only hold back a plausible forming TABLE, not arbitrary pipe text. A
       // table header has ≥2 columns; a single-pipe line (an un-fenced shell
       // pipeline `| grep foo`, a pipe-prefixed log line) has one cell and must
@@ -252,9 +268,24 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         // yet) keep holding so a multi-column header does not flash in cell by
         // cell before its separator arrives.
         const lineAfterHeader = rest[0];
-        const couldStillBeTable =
+        let couldStillBeTable =
           lineAfterHeader === undefined ||
           tableSeparatorRegex.test(lineAfterHeader);
+        // A COMPLETE separator (ends with `|`) whose column count already differs
+        // from the header will never become a valid table — the main parser
+        // treats it as plain text — so release it instead of holding the run for
+        // the rest of the stream. A still-forming separator (no closing `|`) can
+        // still gain columns, so keep holding it.
+        if (
+          couldStillBeTable &&
+          lineAfterHeader !== undefined &&
+          /\|\s*$/.test(lineAfterHeader)
+        ) {
+          const sepCols = splitMarkdownTableRow(lineAfterHeader).filter(
+            (c) => c.length > 0,
+          ).length;
+          if (sepCols !== headerCells) couldStillBeTable = false;
+        }
         if (!hasMatchingSeparator && couldStillBeTable) {
           lines = lines.slice(0, start);
         }
@@ -660,13 +691,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // complete row means the table first appears ALREADY in its final format, with
   // no flip. Cost: the table area stays blank while the header + first row stream
   // (the pre-loop trim already hid the header text, so this just extends that
-  // blank until the first row terminates). Committed (isPending=false) tables
-  // always have rows, so `!isPending` keeps their behavior unchanged.
-  if (
-    inTable &&
-    tableHeaders.length > 0 &&
-    (tableRows.length > 0 || !isPending)
-  ) {
+  // blank until the first row terminates). The `tableRows.length > 0` guard also
+  // matches the mid-content end-of-table handler above, so a degenerate zero-row
+  // table renders (or not) the same whether it ends the message or is followed by
+  // more text — pending or committed.
+  if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
     addContentBlock(
       <RenderTable
         key={`table-${contentBlocks.length}`}
@@ -1013,6 +1042,7 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
       contentWidth={contentWidth}
       aligns={aligns}
       enableInlineMath={enableInlineMath}
+      isPending={isPending}
       maxHeight={maxHeight}
     />
   );
