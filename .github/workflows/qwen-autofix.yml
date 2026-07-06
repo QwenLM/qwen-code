@@ -117,7 +117,9 @@ jobs:
           sanitize_number() {
             local value="${1//$'\r'/}"
             value="${value//$'\n'/}"
-            [[ "${value}" =~ ^[0-9]*$ ]] && printf '%s' "${value}"
+            if [[ "${value}" =~ ^[0-9]+$ ]]; then
+              printf '%s' "${value}"
+            fi
           }
           # workflow_dispatch inputs are user-controlled; keep GITHUB_OUTPUT
           # routing values single-line numeric before later jobs consume them.
@@ -312,7 +314,7 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number || github.event.issue.number }}'
+          FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
 
@@ -791,16 +793,19 @@ jobs:
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+          OUTCOME: '${{ steps.verify.outputs.outcome }}'
         run: |-
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
-            echo "### Issue autofix${ISSUE:+ #${ISSUE}} — outcome=${{ job.status }}${SUFFIX}"
+            echo "### Issue autofix${ISSUE:+ #${ISSUE}} — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo
             for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
               if [[ -s "${WORKDIR}/${f}" ]]; then
                 echo "**${f}:**"
+                echo '```'
                 cat "${WORKDIR}/${f}"
+                echo '```'
                 echo
               fi
             done
@@ -859,7 +864,7 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'
+          FORCED_PR: '${{ needs.route.outputs.pr_number }}'
         run: |-
           WORKDIR="$(mktemp -d)"
 

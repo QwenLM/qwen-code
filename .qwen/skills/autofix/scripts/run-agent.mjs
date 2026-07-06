@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -45,7 +51,10 @@ function file(workdir, name) {
 }
 
 function missing(workdir, names) {
-  return names.filter((name) => !existsSync(file(workdir, name)));
+  return names.filter((name) => {
+    const path = file(workdir, name);
+    return !existsSync(path) || statSync(path).size === 0;
+  });
 }
 
 function writeFailure(workdir, message) {

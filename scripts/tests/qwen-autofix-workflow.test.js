@@ -234,9 +234,22 @@ describe('qwen-autofix workflow', () => {
       'workflow_dispatch is a maintainer-initiated escape hatch',
     );
     expect(routeStep).toContain('sanitize_number()');
+    expect(routeStep).toContain('[[ "${value}" =~ ^[0-9]+$ ]]');
     expect(routeStep).toContain('ROUTE_ISSUE="$(sanitize_number');
     expect(routeStep).toContain('ROUTE_PR="$(sanitize_number');
     expect(routeStep).toContain('routing values single-line numeric');
+    expect(workflow).toContain(
+      "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'",
+    );
+    expect(workflow).toContain(
+      "FORCED_PR: '${{ needs.route.outputs.pr_number }}'",
+    );
+    expect(workflow).not.toContain(
+      "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number",
+    );
+    expect(workflow).not.toContain(
+      "FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'",
+    );
     expect(workflow).toContain(
       'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
     );
@@ -852,9 +865,17 @@ describe('qwen-autofix workflow', () => {
     expect(issueAutofixReportStep.length).toBeGreaterThan(0);
     expect(issueAutofixReportStep).toContain('GITHUB_STEP_SUMMARY');
     expect(issueAutofixReportStep).toContain(
+      "OUTCOME: '${{ steps.verify.outputs.outcome }}'",
+    );
+    expect(issueAutofixReportStep).toContain(
+      'outcome=${OUTCOME:-unknown}${SUFFIX}',
+    );
+    expect(issueAutofixReportStep).not.toContain('outcome=${{ job.status }}');
+    expect(issueAutofixReportStep).toContain(
       "needs.route.outputs.dry_run == 'true'",
     );
     expect(issueAutofixReportStep).toContain('failure()');
+    expect(issueAutofixReportStep).toContain("echo '```'");
     for (const filename of [
       'decision.json',
       'pr-title.txt',
@@ -1015,6 +1036,57 @@ describe('qwen-autofix workflow', () => {
       expect(result.status).toBe(0);
       expect(result.stderr).toContain('failure.md:');
       expect(result.stderr).toContain('cannot proceed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats empty output files as missing runner outputs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(
+        stub,
+        [
+          '#!/usr/bin/env node',
+          "import { writeFileSync } from 'node:fs';",
+          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+          "writeFileSync(`${workdir}/e2e-report.md`, 'ok\\n');",
+          "writeFileSync(`${workdir}/pr-title.txt`, '');",
+          "writeFileSync(`${workdir}/pr-body.md`, 'body\\n');",
+          '',
+        ].join('\n'),
+      );
+      chmodSync(stub, 0o755);
+
+      let stderr = '';
+      try {
+        execFileSync(
+          process.execPath,
+          [
+            autofixRunnerScriptPath,
+            '--mode',
+            'develop-issue',
+            '--issue',
+            '1234',
+            '--workdir',
+            dir,
+            '--qwen-bin',
+            stub,
+          ],
+          { encoding: 'utf8', stdio: 'pipe' },
+        );
+      } catch (error) {
+        stderr = String(error.stderr);
+      }
+      expect(stderr).toContain('pr-title.txt');
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'pr-title.txt',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
