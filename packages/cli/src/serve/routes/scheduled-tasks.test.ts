@@ -259,4 +259,54 @@ describe('scheduled-tasks routes', () => {
     expect(badEnabled.status).toBe(400);
     expect(badEnabled.body.code).toBe('invalid_enabled');
   });
+
+  // Seeds the on-disk file directly so a task can carry a real prior fire.
+  const seedTask = async (task: Record<string, unknown>) => {
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, JSON.stringify([task]), 'utf8');
+  };
+
+  it('re-enabling a previously-fired task resumes from now (no catch-up)', async () => {
+    const createdAt = 1_700_000_000_000;
+    const firedAt = createdAt + 3 * 86_400_000; // a genuine past fire
+    await seedTask({
+      id: 'r1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt,
+      lastFiredAt: firedAt,
+      enabled: false,
+    });
+    const now = Date.now();
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/r1')
+      .send({ enabled: true });
+    expect(patch.status).toBe(200);
+    expect(patch.body.enabled).toBe(true);
+    // lastFiredAt advanced to ~now so the scheduler won't catch up the fires
+    // it "missed" while paused.
+    expect(patch.body.lastFiredAt).toBeGreaterThan(firedAt);
+    expect(patch.body.lastFiredAt).toBeGreaterThanOrEqual(now - (now % 60_000));
+  });
+
+  it('re-enabling a never-run task keeps its never-run stamp', async () => {
+    const createdAt = 1_700_000_000_000;
+    const createdMinute = createdAt - (createdAt % 60_000);
+    await seedTask({
+      id: 'n1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt,
+      lastFiredAt: createdMinute, // never actually fired
+      enabled: false,
+    });
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/n1')
+      .send({ enabled: true });
+    expect(patch.status).toBe(200);
+    expect(patch.body.lastFiredAt).toBe(createdMinute); // unchanged
+  });
 });

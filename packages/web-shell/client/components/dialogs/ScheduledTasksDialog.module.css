@@ -332,7 +332,13 @@
   color: var(--muted-foreground);
 }
 
+.recurringTag {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
 .lastFired {
   font-size: 11px;
   color: var(--muted-foreground);
+  margin-left: auto;
 }

@@ -82,6 +82,10 @@ describe('buildCron', () => {
     expect(
       buildCron(builder({ frequency: 'minutes', minuteInterval: 60 })),
     ).toBeNull();
+    // Non-divisors of 60 are rejected — */45 would not mean "every 45 minutes".
+    expect(
+      buildCron(builder({ frequency: 'minutes', minuteInterval: 45 })),
+    ).toBeNull();
     expect(
       buildCron(builder({ frequency: 'daily', time: '25:00' })),
     ).toBeNull();

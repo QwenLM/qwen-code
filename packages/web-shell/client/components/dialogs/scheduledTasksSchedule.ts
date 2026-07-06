@@ -51,7 +51,10 @@ export function buildCron(state: BuilderState): string | null {
   }
   if (state.frequency === 'minutes') {
     const n = Math.floor(state.minuteInterval);
-    if (!Number.isFinite(n) || n < 1 || n > 59) return null;
+    // Only divisors of 60: `*/N` with a non-divisor (e.g. */45) is anchored to
+    // the hour, so it fires at :00 and :45 then :00 again — far more often than
+    // "every 45 minutes" claims. Reject non-divisors so the label stays honest.
+    if (!Number.isFinite(n) || n < 1 || n > 30 || 60 % n !== 0) return null;
     return `*/${n} * * * *`;
   }
   const t = parseHhmm(state.time);

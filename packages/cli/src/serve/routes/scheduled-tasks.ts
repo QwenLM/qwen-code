@@ -110,7 +110,7 @@ export function registerScheduledTasksRoutes(
         `qwen serve: GET /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
-        error: err instanceof Error ? err.message : 'Failed to read tasks',
+        error: 'Failed to read scheduled tasks (the tasks file may be corrupt)',
         code: 'scheduled_tasks_read_failed',
       });
     }
@@ -215,7 +215,7 @@ export function registerScheduledTasksRoutes(
         `qwen serve: POST /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
-        error: err instanceof Error ? err.message : 'Failed to create task',
+        error: 'Failed to create scheduled task',
         code: 'scheduled_tasks_write_failed',
       });
       return;
@@ -328,6 +328,20 @@ export function registerScheduledTasksRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
+        // Re-enabling a task that had genuinely fired before: resume from now
+        // rather than catching up the fires it "missed" while paused. Guarded
+        // to a real prior fire (lastFiredAt past the creation minute) so a
+        // never-run task keeps reading as "never run".
+        const createdMinute = current.createdAt - (current.createdAt % 60_000);
+        if (
+          current.enabled === false &&
+          patch.enabled === true &&
+          current.lastFiredAt !== null &&
+          current.lastFiredAt > createdMinute
+        ) {
+          const now = Date.now();
+          next.lastFiredAt = now - (now % 60_000);
+        }
         updated = next;
         return tasks.map((t, i) => (i === idx ? next : t));
       });
@@ -336,7 +350,7 @@ export function registerScheduledTasksRoutes(
         `qwen serve: PATCH /scheduled-tasks/:id failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
-        error: err instanceof Error ? err.message : 'Failed to update task',
+        error: 'Failed to update scheduled task',
         code: 'scheduled_tasks_write_failed',
       });
       return;
@@ -365,7 +379,7 @@ export function registerScheduledTasksRoutes(
         `qwen serve: DELETE /scheduled-tasks/:id failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
-        error: err instanceof Error ? err.message : 'Failed to delete task',
+        error: 'Failed to delete scheduled task',
         code: 'scheduled_tasks_write_failed',
       });
       return;

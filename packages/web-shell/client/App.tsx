@@ -1491,7 +1491,10 @@ export function App({
     showSettingsDialog ||
     showMemoryDialog ||
     showAuthDialog;
-  const interactionBlocked = dialogOpen;
+  // Block chat interaction (composer, chat keyboard shortcuts) both when a
+  // modal is open and while a full-pane view (e.g. Scheduled Tasks) covers the
+  // chat, so keystrokes/Escape can't reach the hidden composer underneath.
+  const interactionBlocked = dialogOpen || mainView !== 'chat';
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -4179,7 +4182,9 @@ export function App({
                         // to the chat view and send the task's prompt into the
                         // current session so the run streams in the chat.
                         setMainView('chat');
-                        void sendPrompt(taskPrompt);
+                        sendPrompt(taskPrompt).catch((error: unknown) => {
+                          reportError(error, 'Failed to run scheduled task');
+                        });
                       }}
                       onCreateViaChat={() => {
                         // Return to chat and prime the composer so the user can

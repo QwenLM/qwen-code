@@ -47,6 +47,11 @@ const DEFAULT_BUILDER: BuilderState = {
   customCron: '0 9 * * *',
 };
 
+// Divisors of 60 only: a non-divisor `*/N` is anchored to the hour and fires
+// more often than "every N minutes" implies, so the picker offers only values
+// that actually mean "every N minutes".
+const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+
 export function ScheduledTasksDialog({
   onRunPrompt,
   onCreateViaChat,
@@ -69,6 +74,10 @@ export function ScheduledTasksDialog({
 
   // Guard against setState after unmount (loads are async).
   const mountedRef = useRef(true);
+  // Monotonic reload id: a slow mount/Refresh load that resolves after a
+  // create/toggle/delete's reload must not overwrite the newer list with
+  // stale data. Only the latest reload is allowed to apply its result.
+  const reloadSeqRef = useRef(0);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -77,15 +86,16 @@ export function ScheduledTasksDialog({
   }, []);
 
   const reload = useCallback(async () => {
+    const seq = ++reloadSeqRef.current;
     try {
       const list = await actions.listScheduledTasks();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       // Newest first — matches the reference "sort by created, descending".
       const sorted = [...list].sort((a, b) => b.createdAt - a.createdAt);
       setTasks(sorted);
       setLoadError(null);
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
       setTasks((prev) => prev ?? []);
     }
@@ -321,11 +331,8 @@ export function ScheduledTasksDialog({
                   <span className={styles.fieldLabel}>
                     {t('scheduledTasks.interval')}
                   </span>
-                  <input
-                    className={styles.input}
-                    type="number"
-                    min={1}
-                    max={59}
+                  <select
+                    className={styles.select}
                     value={builder.minuteInterval}
                     onChange={(e) =>
                       setBuilder((b) => ({
@@ -333,7 +340,13 @@ export function ScheduledTasksDialog({
                         minuteInterval: Number(e.target.value),
                       }))
                     }
-                  />
+                  >
+                    {MINUTE_INTERVALS.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               )}
 
@@ -464,6 +477,13 @@ export function ScheduledTasksDialog({
                     ◷
                   </span>
                   {describeCron(task.cron, t)}
+                </span>
+                <span className={styles.recurringTag}>
+                  {t(
+                    task.recurring
+                      ? 'scheduledTasks.repeats'
+                      : 'scheduledTasks.runsOnce',
+                  )}
                 </span>
                 <span className={styles.lastFired}>
                   {describeLastRun(task, t)}
