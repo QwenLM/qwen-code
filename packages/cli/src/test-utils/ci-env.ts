@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-function isCiEnvKey(key: string): boolean {
-  return (
-    key === 'CI' || key === 'CONTINUOUS_INTEGRATION' || key.startsWith('CI_')
-  );
-}
+import { isCiEnvKey } from '../ui/utils/terminal-buffer.js';
 
 export function clearCiEnv(): () => void {
   const saved = new Map<string, string | undefined>();

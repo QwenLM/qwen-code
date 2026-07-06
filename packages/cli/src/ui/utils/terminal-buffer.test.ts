@@ -51,6 +51,7 @@ describe('isInteractiveTerminal', () => {
     expect(isInteractiveTerminal(true, { CI: '' })).toBe(true);
     expect(isInteractiveTerminal(true, { CI: '0' })).toBe(true);
     expect(isInteractiveTerminal(true, { CI: 'false' })).toBe(true);
+    expect(isInteractiveTerminal(true, { CI: 'False' })).toBe(true);
     expect(isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: '' })).toBe(
       true,
     );
@@ -60,8 +61,12 @@ describe('isInteractiveTerminal', () => {
     expect(
       isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: 'false' }),
     ).toBe(true);
+    expect(
+      isInteractiveTerminal(true, { CONTINUOUS_INTEGRATION: 'FALSE' }),
+    ).toBe(true);
     expect(isInteractiveTerminal(true, { CI_NAME: '' })).toBe(true);
     expect(isInteractiveTerminal(true, { CI_NAME: '0' })).toBe(true);
     expect(isInteractiveTerminal(true, { CI_NAME: 'false' })).toBe(true);
+    expect(isInteractiveTerminal(true, { CI_NAME: 'False' })).toBe(true);
   });
 });
