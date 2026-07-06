@@ -49,6 +49,13 @@ export interface UsageSummaryRecord {
     linesAdded: number;
     linesRemoved: number;
   };
+  /** Optional — older records (written before skills were tracked) omit it. */
+  skills?: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, { count: number; success: number; fail: number }>;
+  };
 }
 
 export type TimeRange = 'today' | 'week' | 'month' | 'all';
@@ -88,6 +95,15 @@ export interface AggregatedReport {
   files: {
     linesAdded: number;
     linesRemoved: number;
+  };
+  skills: {
+    totalCalls: number;
+    topSkills: Array<{
+      name: string;
+      count: number;
+      success: number;
+      fail: number;
+    }>;
   };
   projects: Array<{
     path: string;
@@ -170,6 +186,21 @@ export function metricsToUsageRecord(
       linesAdded: metrics.files.totalLinesAdded,
       linesRemoved: metrics.files.totalLinesRemoved,
     },
+    ...(metrics.skills
+      ? {
+          skills: {
+            totalCalls: metrics.skills.totalCalls,
+            totalSuccess: metrics.skills.totalSuccess,
+            totalFail: metrics.skills.totalFail,
+            byName: Object.fromEntries(
+              Object.entries(metrics.skills.byName).map(([name, s]) => [
+                name,
+                { count: s.count, success: s.success, fail: s.fail },
+              ]),
+            ),
+          },
+        }
+      : {}),
   };
 }
 
@@ -356,6 +387,11 @@ export function aggregateUsage(
     string,
     { count: number; success: number; fail: number; totalDurationMs: number }
   >();
+  const skillCounts = new Map<
+    string,
+    { count: number; success: number; fail: number }
+  >();
+  let totalSkillCalls = 0;
   const projectMap = new Map<
     string,
     {
@@ -408,6 +444,24 @@ export function aggregateUsage(
       }
     }
 
+    if (r.skills) {
+      totalSkillCalls += r.skills.totalCalls;
+      for (const [name, s] of Object.entries(r.skills.byName)) {
+        const existing = skillCounts.get(name);
+        if (existing) {
+          existing.count += s.count;
+          existing.success += s.success;
+          existing.fail += s.fail;
+        } else {
+          skillCounts.set(name, {
+            count: s.count,
+            success: s.success,
+            fail: s.fail,
+          });
+        }
+      }
+    }
+
     let sessionTokens = 0;
     for (const m of Object.values(r.models)) {
       sessionTokens += m.totalTokens;
@@ -431,6 +485,10 @@ export function aggregateUsage(
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
+  const topSkills = [...skillCounts.entries()]
+    .map(([name, s]) => ({ name, ...s }))
+    .sort((a, b) => b.count - a.count);
+
   const projects = [...projectMap.entries()]
     .map(([p, stats]) => ({ path: p, ...stats }))
     .sort((a, b) => b.totalTokens - a.totalTokens);
@@ -446,6 +504,7 @@ export function aggregateUsage(
     models,
     tools: { totalCalls, totalSuccess, totalFail, topTools },
     files: { linesAdded, linesRemoved },
+    skills: { totalCalls: totalSkillCalls, topSkills },
     projects,
   };
 }
