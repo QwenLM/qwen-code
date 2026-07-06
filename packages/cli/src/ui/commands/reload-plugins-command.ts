@@ -90,7 +90,7 @@ export const reloadPluginsCommand: SlashCommand = {
         }),
       };
     } catch (error) {
-      extensionRefreshState.clearExtensionsChanged();
+      extensionRefreshState.markExtensionsReloadFailed();
       return {
         type: 'message',
         messageType: 'error',

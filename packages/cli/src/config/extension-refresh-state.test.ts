@@ -111,6 +111,95 @@ describe('extension refresh state', () => {
     }
   });
 
+  it('defers content changes that arrive during reload', () => {
+    const contentListener = vi.fn();
+    refreshState.on(AppEvent.ExtensionContentChanged, contentListener);
+
+    try {
+      refreshState.notifyExtensionsReloadStarted();
+
+      expect(
+        refreshState.markExtensionContentChanged(
+          'content changed during reload',
+        ),
+      ).toBe(false);
+      expect(contentListener).not.toHaveBeenCalled();
+
+      refreshState.clearExtensionsChanged();
+
+      expect(refreshState.needsExtensionRefresh()).toBe(false);
+      expect(contentListener).toHaveBeenCalledOnce();
+      expect(contentListener).toHaveBeenCalledWith(
+        'extension content files changed during reload',
+      );
+    } finally {
+      refreshState.off(AppEvent.ExtensionContentChanged, contentListener);
+    }
+  });
+
+  it('lets stale changes during reload take priority over content changes', () => {
+    const staleListener = vi.fn();
+    const contentListener = vi.fn();
+    refreshState.on(AppEvent.ExtensionRefreshNeeded, staleListener);
+    refreshState.on(AppEvent.ExtensionContentChanged, contentListener);
+
+    try {
+      refreshState.notifyExtensionsReloadStarted();
+
+      expect(refreshState.markExtensionContentChanged('content changed')).toBe(
+        false,
+      );
+      expect(refreshState.markExtensionsChanged('manifest changed')).toBe(
+        false,
+      );
+      refreshState.clearExtensionsChanged();
+
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+      expect(staleListener).toHaveBeenCalledOnce();
+      expect(staleListener).toHaveBeenCalledWith(
+        'extension files changed during reload',
+      );
+      expect(contentListener).not.toHaveBeenCalled();
+    } finally {
+      refreshState.off(AppEvent.ExtensionRefreshNeeded, staleListener);
+      refreshState.off(AppEvent.ExtensionContentChanged, contentListener);
+    }
+  });
+
+  it('does not emit content changes while stale refresh is needed', () => {
+    const contentListener = vi.fn();
+    refreshState.on(AppEvent.ExtensionContentChanged, contentListener);
+
+    try {
+      expect(refreshState.markExtensionsChanged('manifest changed')).toBe(true);
+      expect(refreshState.markExtensionContentChanged('content changed')).toBe(
+        false,
+      );
+      expect(contentListener).not.toHaveBeenCalled();
+    } finally {
+      refreshState.off(AppEvent.ExtensionContentChanged, contentListener);
+    }
+  });
+
+  it('keeps refresh needed when reload fails', () => {
+    const staleListener = vi.fn();
+    const reloadedListener = vi.fn();
+    refreshState.on(AppEvent.ExtensionRefreshNeeded, staleListener);
+    refreshState.on(AppEvent.ExtensionsReloaded, reloadedListener);
+
+    try {
+      refreshState.notifyExtensionsReloadStarted();
+      refreshState.markExtensionsReloadFailed('reload failed');
+
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+      expect(reloadedListener).toHaveBeenCalledOnce();
+      expect(staleListener).toHaveBeenCalledWith('reload failed');
+    } finally {
+      refreshState.off(AppEvent.ExtensionRefreshNeeded, staleListener);
+      refreshState.off(AppEvent.ExtensionsReloaded, reloadedListener);
+    }
+  });
+
   it('settles only after all overlapping suppressions end', () => {
     const onSettle = vi.fn();
     const endFirst = refreshState.beginSuppression(onSettle);

@@ -87,6 +87,12 @@ export class HookRegistry {
 
   async reloadConfiguredHooks(): Promise<void> {
     const previousEntries = this.entries;
+    const enabledSnapshot = new Map(
+      previousEntries.map((entry) => [
+        this.getHookStateKey(entry),
+        entry.enabled,
+      ]),
+    );
     const agentEntries = this.entries.filter(
       (entry) => entry.agentScope !== undefined,
     );
@@ -94,6 +100,12 @@ export class HookRegistry {
     try {
       this.entries = [...agentEntries];
       this.processHooksFromConfig();
+      for (const entry of this.entries) {
+        const enabled = enabledSnapshot.get(this.getHookStateKey(entry));
+        if (enabled !== undefined) {
+          entry.enabled = enabled;
+        }
+      }
     } catch (err) {
       this.entries = previousEntries;
       throw err;
@@ -223,6 +235,17 @@ export class HookRegistry {
       return identity.length > 30 ? identity.slice(0, 30) + '...' : identity;
     }
     return identity;
+  }
+
+  private getHookStateKey(entry: HookRegistryEntry): string {
+    return JSON.stringify([
+      entry.eventName,
+      entry.source,
+      entry.agentScope ?? null,
+      this.getHookIdentity(entry),
+      entry.matcher ?? null,
+      entry.sequential ?? null,
+    ]);
   }
 
   /**

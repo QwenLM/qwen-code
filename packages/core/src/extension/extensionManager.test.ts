@@ -19,6 +19,7 @@ import {
   ExtensionUpdateState,
   SettingScope,
   type ExtensionManagerOptions,
+  type Extension,
   validateName,
   getExtensionId,
   hashValue,
@@ -575,6 +576,32 @@ describe('extension tests', () => {
 
       expect(extensions).toHaveLength(1);
       expect(extensions[0].name).toBe('ext2');
+    });
+
+    it('keeps the previous cache when refreshCache fails before replacement', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'stable-ext',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions().map((ext) => ext.name)).toEqual([
+        'stable-ext',
+      ]);
+
+      const internals = manager as unknown as {
+        loadExtensionsFromExtensionsDir: () => Promise<Extension[]>;
+      };
+      internals.loadExtensionsFromExtensionsDir = vi
+        .fn()
+        .mockRejectedValue(new Error('refresh failed'));
+
+      await expect(manager.refreshCache()).rejects.toThrow('refresh failed');
+      expect(manager.getLoadedExtensions().map((ext) => ext.name)).toEqual([
+        'stable-ext',
+      ]);
     });
 
     describe('command discovery', () => {

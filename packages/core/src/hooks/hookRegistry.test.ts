@@ -1020,6 +1020,41 @@ describe('HookRegistry', () => {
       expect(after[0].agentScope).toBe('agent:test:reload');
     });
 
+    it('preserves configured hook enabled state when hooks reload', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo user',
+                name: 'user-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('user-hook', false);
+
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect(after[0].enabled).toBe(false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+    });
+
     it('restores all previous hooks when configured hooks reload fails', async () => {
       const userHooks = {
         [HookEventName.PreToolUse]: [

@@ -781,7 +781,6 @@ export class ExtensionManager {
    * Refreshes the extension cache from disk.
    */
   async refreshCache(options?: { names?: string[] }): Promise<void> {
-    this.extensionCache = new Map<string, Extension>();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     let extensions: Extension[];
     if (requestedNames.length > 0) {
@@ -797,9 +796,11 @@ export class ExtensionManager {
         this.workspaceDir,
       );
     }
+    const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
-      this.extensionCache!.set(extension.name, extension);
+      nextCache.set(extension.name, extension);
     });
+    this.extensionCache = nextCache;
   }
 
   getLoadedExtensions(): Extension[] {

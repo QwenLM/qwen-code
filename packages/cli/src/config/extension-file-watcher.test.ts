@@ -61,6 +61,7 @@ vi.mock('node:fs', async (importOriginal) => {
 function configWithExtensions(extensions: unknown[]): Config {
   return {
     getExtensions: () => extensions,
+    getActiveExtensions: () => extensions,
     getExtensionManager: () => ({
       addMutationListener: vi.fn(() => vi.fn()),
     }),
@@ -221,6 +222,52 @@ describe('ExtensionFileWatcher', () => {
     expect(refreshState.markExtensionContentChanged).toHaveBeenCalledOnce();
   });
 
+  it('does not watch inactive linked extension sources or context files', () => {
+    const activeSource = '/tmp/active-linked-extension';
+    const inactiveSource = '/tmp/inactive-linked-extension';
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      {
+        getExtensions: () => [
+          {
+            path: activeSource,
+            config: {},
+            installMetadata: { type: 'link', source: activeSource },
+            contextFiles: [`${activeSource}/QWEN.md`],
+          },
+          {
+            path: inactiveSource,
+            config: {},
+            installMetadata: { type: 'link', source: inactiveSource },
+            contextFiles: [`${inactiveSource}/QWEN.md`],
+          },
+        ],
+        getActiveExtensions: () => [
+          {
+            path: activeSource,
+            config: {},
+            installMetadata: { type: 'link', source: activeSource },
+            contextFiles: [`${activeSource}/QWEN.md`],
+          },
+        ],
+        getExtensionManager: () => ({
+          addMutationListener: vi.fn(() => vi.fn()),
+        }),
+      } as unknown as Config,
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+
+    expect(mockWatchers[0].target).toEqual([extensionsDir, activeSource]);
+
+    fireAllEvent(0, 'change', `${inactiveSource}/QWEN.md`);
+    fireAllEvent(0, 'change', `${inactiveSource}/commands/run.toml`);
+
+    expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
+    expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
+  });
+
   it('ignores unrelated files', () => {
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
@@ -295,6 +342,7 @@ describe('ExtensionFileWatcher', () => {
     const watcher = new ExtensionFileWatcher(
       {
         getExtensions: () => [],
+        getActiveExtensions: () => [],
         getExtensionManager: () => manager,
       } as unknown as Config,
       extensionsDir,
@@ -365,6 +413,7 @@ describe('ExtensionFileWatcher', () => {
     const watcher = new ExtensionFileWatcher(
       {
         getExtensions: () => [],
+        getActiveExtensions: () => [],
         getExtensionManager: () => manager,
       } as unknown as Config,
       extensionsDir,
@@ -413,6 +462,7 @@ describe('ExtensionFileWatcher', () => {
     const watcher = new ExtensionFileWatcher(
       {
         getExtensions: () => [],
+        getActiveExtensions: () => [],
         getExtensionManager: () => manager,
       } as unknown as Config,
       extensionsDir,

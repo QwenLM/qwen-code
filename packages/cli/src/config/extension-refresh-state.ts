@@ -13,6 +13,7 @@ export class ExtensionRefreshState {
   private extensionRefreshNeeded = false;
   private reloadInProgress = false;
   private changedDuringReload = false;
+  private contentChangedDuringReload = false;
   private suppressionDepth = 0;
   private suppressUntil = 0;
 
@@ -46,15 +47,24 @@ export class ExtensionRefreshState {
     if (this.isSuppressed()) {
       return false;
     }
+    if (this.reloadInProgress) {
+      this.contentChangedDuringReload = true;
+      return false;
+    }
+    if (this.extensionRefreshNeeded) {
+      return false;
+    }
     this.events.emit(AppEvent.ExtensionContentChanged, reason);
     return true;
   }
 
   clearExtensionsChanged(): void {
     const changedDuringReload = this.changedDuringReload;
+    const contentChangedDuringReload = this.contentChangedDuringReload;
     this.extensionRefreshNeeded = changedDuringReload;
     this.reloadInProgress = false;
     this.changedDuringReload = false;
+    this.contentChangedDuringReload = false;
     this.suppressUntil = 0;
     this.events.emit(AppEvent.ExtensionsReloaded);
     if (changedDuringReload) {
@@ -62,13 +72,29 @@ export class ExtensionRefreshState {
         AppEvent.ExtensionRefreshNeeded,
         'extension files changed during reload',
       );
+    } else if (contentChangedDuringReload) {
+      this.events.emit(
+        AppEvent.ExtensionContentChanged,
+        'extension content files changed during reload',
+      );
     }
   }
 
   notifyExtensionsReloadStarted(): void {
     this.reloadInProgress = true;
     this.changedDuringReload = false;
+    this.contentChangedDuringReload = false;
     this.events.emit(AppEvent.ExtensionsReloadStarted);
+  }
+
+  markExtensionsReloadFailed(reason = 'extension reload failed'): void {
+    this.extensionRefreshNeeded = true;
+    this.reloadInProgress = false;
+    this.changedDuringReload = false;
+    this.contentChangedDuringReload = false;
+    this.suppressUntil = 0;
+    this.events.emit(AppEvent.ExtensionsReloaded);
+    this.events.emit(AppEvent.ExtensionRefreshNeeded, reason);
   }
 
   needsExtensionRefresh(): boolean {
@@ -109,6 +135,7 @@ export class ExtensionRefreshState {
     this.extensionRefreshNeeded = false;
     this.reloadInProgress = false;
     this.changedDuringReload = false;
+    this.contentChangedDuringReload = false;
     this.suppressionDepth = 0;
     this.suppressUntil = 0;
   }

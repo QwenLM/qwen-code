@@ -29,6 +29,9 @@ const EXTENSION_FILES = new Set([
   '.qwen-extension-install.json',
 ]);
 
+// Keep these sets in sync with extension directory conventions. New runtime
+// directories must be classified here as either content-auto-refreshable or
+// package-stale.
 const AUTO_REFRESH_DIRS = new Set(['commands', 'skills', 'agents']);
 const STALE_DIRS = new Set(['hooks']);
 
@@ -129,7 +132,7 @@ export class ExtensionFileWatcher {
     if (fs.existsSync(this.extensionsDir)) {
       roots.add(this.extensionsDir);
     }
-    for (const extension of this.config.getExtensions()) {
+    for (const extension of this.config.getActiveExtensions()) {
       if (extension.installMetadata?.type === 'link') {
         const rawSource = extension.installMetadata.source;
         const source = rawSource ? path.resolve(rawSource) : undefined;
@@ -143,7 +146,7 @@ export class ExtensionFileWatcher {
 
   private getContextFiles(): Set<string> {
     const files = new Set<string>();
-    for (const extension of this.config.getExtensions()) {
+    for (const extension of this.config.getActiveExtensions()) {
       for (const filePath of extension.contextFiles) {
         files.add(path.resolve(filePath));
       }
@@ -234,7 +237,7 @@ export class ExtensionFileWatcher {
   private getLinkedExtensionRefreshAction(
     changedPath: string,
   ): RefreshAction | false {
-    for (const extension of this.config.getExtensions()) {
+    for (const extension of this.config.getActiveExtensions()) {
       if (extension.installMetadata?.type !== 'link') continue;
       const rawSource = extension.installMetadata.source;
       const source = rawSource ? path.resolve(rawSource) : undefined;

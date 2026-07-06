@@ -38,6 +38,16 @@ const lspConfigWatcherMock = vi.hoisted(() => ({
   }>,
 }));
 
+function withExtensionWatcherConfig<T extends object>(config: T): T {
+  return {
+    getActiveExtensions: () => [],
+    getExtensionManager: () => ({
+      addMutationListener: vi.fn(() => vi.fn()),
+    }),
+    ...config,
+  } as T;
+}
+
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {
     const source = readFileSync('src/gemini.tsx', 'utf8');
@@ -91,6 +101,10 @@ vi.mock('./config/config.js', () => ({
     getWarnings: vi.fn(() => []),
     isSafeMode: vi.fn(() => false),
     getModelsConfig: vi.fn(() => ({ getCurrentAuthType: () => null })),
+    getActiveExtensions: () => [],
+    getExtensionManager: () => ({
+      addMutationListener: vi.fn(() => vi.fn()),
+    }),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
@@ -268,7 +282,7 @@ describe('gemini.tsx main function', () => {
     });
     vi.mocked(loadCliConfig).mockImplementation(async () => {
       callOrder.push('loadCliConfig');
-      return {
+      return withExtensionWatcherConfig({
         isInteractive: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
@@ -289,7 +303,7 @@ describe('gemini.tsx main function', () => {
         isSafeMode: () => false,
         getModelsConfig: () => ({ getCurrentAuthType: () => null }),
         getSessionId: () => 'test-session-id',
-      } as unknown as Config;
+      }) as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -396,7 +410,7 @@ describe('gemini.tsx main function', () => {
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     };
-    const configStub = {
+    const configStub = withExtensionWatcherConfig({
       isInteractive: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
@@ -417,7 +431,7 @@ describe('gemini.tsx main function', () => {
       isSafeMode: () => false,
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getSessionId: () => 'test-session-id',
-    } as unknown as Config;
+    }) as unknown as Config;
 
     vi.mocked(parseArguments).mockResolvedValue({
       bare: true,
@@ -684,7 +698,7 @@ describe('gemini.tsx main function', () => {
     vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
 
     let initialized = false;
-    const configStub = {
+    const configStub = withExtensionWatcherConfig({
       isInteractive: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
@@ -711,7 +725,7 @@ describe('gemini.tsx main function', () => {
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getProxy: () => undefined,
-    } as unknown as Config;
+    }) as unknown as Config;
 
     vi.mocked(parseArguments).mockResolvedValue({
       extensions: [],
@@ -805,10 +819,12 @@ describe('gemini.tsx main function', () => {
       command: 'sandbox-exec',
       image: '',
     });
-    vi.mocked(loadCliConfig).mockResolvedValue({
-      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
-      getSessionId: () => sessionId,
-    } as unknown as Config);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      withExtensionWatcherConfig({
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getSessionId: () => sessionId,
+      }) as unknown as Config,
+    );
 
     try {
       await main();
@@ -1012,7 +1028,7 @@ describe('gemini.tsx main function', () => {
       extensions: [],
     } as never);
 
-    const configStub = {
+    const configStub = withExtensionWatcherConfig({
       isInteractive: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
@@ -1036,7 +1052,7 @@ describe('gemini.tsx main function', () => {
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
-    } as unknown as Config;
+    }) as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
 
@@ -1148,26 +1164,28 @@ describe('gemini.tsx main function kitty protocol', () => {
       './config/config.js'
     );
     const { loadSettings } = await import('./config/settings.js');
-    vi.mocked(loadCliConfig).mockResolvedValue({
-      isInteractive: () => true,
-      getQuestion: () => '',
-      getSandbox: () => false,
-      getDebugMode: () => false,
-      getListExtensions: () => false,
-      getMcpServers: () => ({}),
-      getTopTierMcpServers: () => undefined,
-      initialize: vi.fn(),
-      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
-      getWarnings: () => [],
-      isSafeMode: () => false,
-      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
-      getUsageStatisticsEnabled: () => true,
-      getSessionId: () => 'test-session-id',
-    } as unknown as Config);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      withExtensionWatcherConfig({
+        isInteractive: () => true,
+        getQuestion: () => '',
+        getSandbox: () => false,
+        getDebugMode: () => false,
+        getListExtensions: () => false,
+        getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
+        initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getScreenReader: () => false,
+        getGeminiMdFileCount: () => 0,
+        getWarnings: () => [],
+        isSafeMode: () => false,
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getUsageStatisticsEnabled: () => true,
+        getSessionId: () => 'test-session-id',
+      }) as unknown as Config,
+    );
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1262,30 +1280,32 @@ describe('gemini.tsx main function kitty protocol', () => {
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
 
-    vi.mocked(loadCliConfig).mockResolvedValue({
-      isInteractive: () => true,
-      getQuestion: () => '',
-      getSandbox: () => false,
-      getDebugMode: () => false,
-      getListExtensions: () => false,
-      getMcpServers: () => ({}),
-      getTopTierMcpServers: () => undefined,
-      initialize: vi.fn(),
-      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
-      getWarnings: () => [],
-      isSafeMode: () => false,
-      getModelsConfig: () => ({
-        getCurrentAuthType: () => null,
-        getGenerationConfig: () => ({}),
-      }),
-      getProxy: () => undefined,
-      getUsageStatisticsEnabled: () => true,
-      getSessionId: () => 'test-session-id',
-    } as unknown as Config);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      withExtensionWatcherConfig({
+        isInteractive: () => true,
+        getQuestion: () => '',
+        getSandbox: () => false,
+        getDebugMode: () => false,
+        getListExtensions: () => false,
+        getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
+        initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getScreenReader: () => false,
+        getGeminiMdFileCount: () => 0,
+        getWarnings: () => [],
+        isSafeMode: () => false,
+        getModelsConfig: () => ({
+          getCurrentAuthType: () => null,
+          getGenerationConfig: () => ({}),
+        }),
+        getProxy: () => undefined,
+        getUsageStatisticsEnabled: () => true,
+        getSessionId: () => 'test-session-id',
+      }) as unknown as Config,
+    );
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1349,28 +1369,30 @@ describe('gemini.tsx main function kitty protocol', () => {
       throw new MockProcessExitError(code);
     }) as unknown as typeof process.exit);
 
-    vi.mocked(loadCliConfig).mockResolvedValue({
-      isInteractive: () => true,
-      getJsonSchema: () => ({ type: 'object' }),
-      getQuestion: () => '',
-      getSandbox: () => false,
-      getDebugMode: () => false,
-      getListExtensions: () => false,
-      getMcpServers: () => ({}),
-      getTopTierMcpServers: () => undefined,
-      initialize: vi.fn(),
-      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
-      getWarnings: () => [],
-      isSafeMode: () => false,
-      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
-      getUsageStatisticsEnabled: () => true,
-      getSessionId: () => 'test-session-id',
-      shutdown: vi.fn(),
-    } as unknown as Config);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      withExtensionWatcherConfig({
+        isInteractive: () => true,
+        getJsonSchema: () => ({ type: 'object' }),
+        getQuestion: () => '',
+        getSandbox: () => false,
+        getDebugMode: () => false,
+        getListExtensions: () => false,
+        getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
+        initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getScreenReader: () => false,
+        getGeminiMdFileCount: () => 0,
+        getWarnings: () => [],
+        isSafeMode: () => false,
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getUsageStatisticsEnabled: () => true,
+        getSessionId: () => 'test-session-id',
+        shutdown: vi.fn(),
+      }) as unknown as Config,
+    );
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
