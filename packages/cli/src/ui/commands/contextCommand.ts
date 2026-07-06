@@ -146,7 +146,8 @@ export async function collectContextData(
     if (
       tool.shouldDefer &&
       !tool.alwaysLoad &&
-      !toolRegistry?.isDeferredToolRevealed(tool.name)
+      !toolRegistry?.isDeferredToolRevealed(tool.name) &&
+      !config.getVisibleTools().has(tool.name)
     ) {
       continue;
     }

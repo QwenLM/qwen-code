@@ -44,6 +44,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
       getAllTools: vi.fn().mockReturnValue([]),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
     }),
+    getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
@@ -70,6 +71,7 @@ describe('collectContextData (contextCommand)', () => {
         getAllTools: vi.fn().mockReturnValue([]),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
       }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -162,6 +164,7 @@ describe('collectContextData (contextCommand)', () => {
         getFunctionDeclarations: vi.fn().mockReturnValue([]),
         isDeferredToolRevealed,
       }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -176,6 +179,44 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.mcpTools).toHaveLength(0);
     expect(isDeferredToolRevealed).toHaveBeenCalledWith('web_fetch');
     expect(isDeferredToolRevealed).toHaveBeenCalledWith('mcp__server__tool');
+  });
+
+  it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {
+    const visibleTool = {
+      name: 'web_fetch',
+      schema: { name: 'web_fetch', description: 'visible tool schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const hiddenDeferred = {
+      name: 'monitor',
+      schema: { name: 'monitor', description: 'hidden tool schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const config = {
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        contextWindowSize: 32_000,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([visibleTool, hiddenDeferred]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([visibleTool.schema]),
+        isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+      }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0].name).toBe('web_fetch');
   });
 });
 
