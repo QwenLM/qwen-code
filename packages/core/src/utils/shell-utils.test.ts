@@ -697,6 +697,47 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('pgrep vite | xargs kill')).toBe(false);
   });
 
+  it('detects path-prefixed pgrep/pidof command substitution', () => {
+    expect(detectSelfKillCommand('kill -9 $(/usr/bin/pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(/usr/bin/pidof node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(/usr/local/bin/pgrep qwen)')).toBe(
+      true,
+    );
+  });
+
+  it('detects ANSI-C quoted arguments in pgrep command substitution', () => {
+    expect(detectSelfKillCommand("kill -9 $(pgrep $'node')")).toBe(true);
+    expect(detectSelfKillCommand("kill -9 $(pgrep $'qwen')")).toBe(true);
+  });
+
+  it('detects ERE-obfuscated patterns in pgrep -f', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f "[n]ode")')).toBe(true);
+    expect(detectSelfKillCommand("kill -9 $(pgrep -f '[n]ode')")).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f "n.de")')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f "n(o)de")')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f "[q]wen")')).toBe(true);
+  });
+
+  it('detects pidof with single-shot flag targeting self processes', () => {
+    expect(detectSelfKillCommand('pidof -s node | xargs kill')).toBe(true);
+    expect(detectSelfKillCommand('pidof -s qwen | xargs kill')).toBe(true);
+  });
+
+  it('detects pgrep piped through intermediate stages to xargs kill', () => {
+    expect(detectSelfKillCommand('pgrep node | head -1 | xargs kill')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | sort | xargs kill')).toBe(true);
+    expect(
+      detectSelfKillCommand('pgrep node | grep -v grep | xargs kill'),
+    ).toBe(true);
+  });
+
+  it('does not false-positive when kill is an argument to another command', () => {
+    expect(detectSelfKillCommand('pgrep node | xargs echo kill')).toBe(false);
+    expect(detectSelfKillCommand('pgrep node | xargs printf kill')).toBe(false);
+  });
+
   it('allows targeted process kills and unrelated process patterns', () => {
     expect(detectSelfKillCommand('taskkill /PID 1234 /F')).toBe(false);
     expect(detectSelfKillCommand('kill 1234')).toBe(false);

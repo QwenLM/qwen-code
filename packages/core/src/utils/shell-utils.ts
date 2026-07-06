@@ -464,6 +464,8 @@ const PKILL_OPTIONS_WITH_VALUES = new Set([
   '--euid',
 ]);
 
+const PIDOF_OPTIONS_WITH_VALUES = new Set(['-o', '-d', '--delimiter']);
+
 export const SHELL_SELF_KILL_REJECTION =
   'Blocked: this command may terminate the running qwen-code process because it targets all node/qwen-code processes. Use task_stop for managed background shells, or kill a specific PID instead.';
 
@@ -741,7 +743,7 @@ function pkillTargetsSelf(tokens: string[]): boolean {
 }
 
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*(?:pgrep|pidof)\b([^)]*)\)|`\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*(?:pgrep|pidof)\b([^`]*)`/gi;
+  /\$\(\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*(?:[\w./-]+\/)?(?:pgrep|pidof)\b((?:[^)"']*|"[^"]*"|'[^']*')*)\)|`\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+)*(?:[\w./-]+\/)?(?:pgrep|pidof)\b((?:[^`"']*|"[^"]*"|'[^']*')*)`/gi;
 
 const BARE_SELF_PROCESS_PATTERN = new RegExp(`^(${SELF_PROCESS_NAMES})$`, 'i');
 
@@ -749,7 +751,27 @@ function isBareSelfProcessName(value: string): boolean {
   return BARE_SELF_PROCESS_PATTERN.test(value);
 }
 
-function pgrepTargetsSelf(tokens: string[]): boolean {
+function argMatchesSelfAsRegex(arg: string): boolean {
+  if (!/[[\]\\()|.^$*+?{}]/.test(arg)) return false;
+  const selfNames = [
+    'node',
+    'node.exe',
+    'qwen',
+    'qwen-code',
+    'qwen.exe',
+    'qwen-code.exe',
+  ];
+  try {
+    const re = new RegExp(arg, 'i');
+    return selfNames.some((name) => re.test(name));
+  } catch {
+    return false;
+  }
+}
+
+function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
+  const optionsWithValues =
+    command === 'pidof' ? PIDOF_OPTIONS_WITH_VALUES : PKILL_OPTIONS_WITH_VALUES;
   let usesFullCommandLine = false;
   const args: string[] = [];
   for (let index = 1; index < tokens.length; index++) {
@@ -770,10 +792,7 @@ function pgrepTargetsSelf(tokens: string[]): boolean {
     }
 
     if (isOptionToken(token)) {
-      if (
-        PKILL_OPTIONS_WITH_VALUES.has(normalized) &&
-        !optionHasInlineValue(token)
-      ) {
+      if (optionsWithValues.has(normalized) && !optionHasInlineValue(token)) {
         index++;
       }
       continue;
@@ -784,7 +803,10 @@ function pgrepTargetsSelf(tokens: string[]): boolean {
 
   if (usesFullCommandLine) {
     return args.some(
-      (arg) => matchesQwenProcessPattern(arg) || isBroadNodeFullPattern(arg),
+      (arg) =>
+        matchesQwenProcessPattern(arg) ||
+        isBroadNodeFullPattern(arg) ||
+        argMatchesSelfAsRegex(arg),
     );
   }
 
@@ -797,15 +819,34 @@ function xargsInvokesKill(segment: string | undefined): boolean {
   if (!parsed) return /\bxargs\b.*\bkill\b/i.test(segment);
   const tokens = unwrapExecutionPrefixes(parsed);
   if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') return false;
-  return tokens
-    .slice(1)
-    .some((token) => normalizeExecutableName(token) === 'kill');
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token === '--') {
+      return normalizeExecutableName(tokens[i + 1] ?? '') === 'kill';
+    }
+    if (isOptionToken(token)) {
+      if (
+        (token === '-I' ||
+          token === '-n' ||
+          token === '-P' ||
+          token === '-s' ||
+          token === '-E') &&
+        i + 1 < tokens.length
+      ) {
+        i++;
+      }
+      continue;
+    }
+    return normalizeExecutableName(token) === 'kill';
+  }
+  return false;
 }
 
 function killCommandTargetsSelf(segment: string): boolean {
   for (const match of segment.matchAll(KILL_COMMAND_SUBSTITUTION_PGREP)) {
     const rawArgs = match[1] ?? match[2] ?? '';
-    const parsed = parseShellSegment(`pgrep ${rawArgs}`);
+    const normalizedArgs = rawArgs.replace(/\$'([^']*)'/g, "'$1'");
+    const parsed = parseShellSegment(`pgrep ${normalizedArgs}`);
     if (parsed) {
       if (pgrepTargetsSelf(parsed)) {
         return true;
@@ -813,12 +854,12 @@ function killCommandTargetsSelf(segment: string): boolean {
       continue;
     }
     const unquotedArgs = rawArgs.replace(
-      /"([^"]*)"|'([^']*)'/g,
+      /\$?'([^']*)'|"([^"]*)"/g,
       (
         _match,
-        doubleQuoted: string | undefined,
         singleQuoted: string | undefined,
-      ) => doubleQuoted ?? singleQuoted ?? '',
+        doubleQuoted: string | undefined,
+      ) => singleQuoted ?? doubleQuoted ?? '',
     );
     const fallbackTokens = ['pgrep', ...unquotedArgs.trim().split(/\s+/)];
     if (pgrepTargetsSelf(fallbackTokens)) {
@@ -861,10 +902,11 @@ export function detectSelfKillCommand(command: string): boolean {
     }
     if (
       (root === 'pgrep' || root === 'pidof') &&
-      pgrepTargetsSelf(tokens) &&
-      xargsInvokesKill(segments[index + 1])
+      pgrepTargetsSelf(tokens, root)
     ) {
-      return true;
+      for (let j = index + 1; j < segments.length; j++) {
+        if (xargsInvokesKill(segments[j])) return true;
+      }
     }
     if (root === 'kill' && killCommandTargetsSelf(segment)) {
       return true;
