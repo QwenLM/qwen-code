@@ -1348,6 +1348,8 @@ export class GeminiClient {
         });
       }
 
+      // setTools() intentionally keeps its own warmAll() guard, so this stage
+      // overlaps with tool_registry_warm while preserving the startup path.
       await profiler.time('set_tools', () => this.setTools());
 
       finishProfile(true);
