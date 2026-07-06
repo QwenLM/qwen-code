@@ -28,7 +28,8 @@ The `/review` command runs a multi-stage pipeline:
 ```
 Step 1:  Determine scope (local diff / PR worktree / file)
 Step 2:  Load project review rules
-Step 3:  9 parallel review agents                          [9 LLM calls]
+Step 3:  10 parallel review agents                         [10 LLM calls]
+           |-- Agent 0: Issue Fidelity & Root-Cause Ownership
            |-- Agent 1: Correctness
            |-- Agent 2: Security
            |-- Agent 3: Code Quality
@@ -48,6 +49,7 @@ Step 9:  Clean up (remove worktree + temp files)
 
 | Agent                             | Focus                                                                                       |
 | --------------------------------- | ------------------------------------------------------------------------------------------- |
+| Agent 0: Issue Fidelity           | Linked issue evidence, root-cause ownership, and whether the PR solves the reported problem |
 | Agent 1: Correctness              | Logic errors, edge cases, null handling, race conditions, type safety                       |
 | Agent 2: Security                 | Injection, XSS, SSRF, auth bypass, sensitive data exposure                                  |
 | Agent 3: Code Quality             | Style consistency, naming, duplication, dead code                                           |
@@ -56,7 +58,7 @@ Step 9:  Clean up (remove worktree + temp files)
 | Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues |
 | Agent 7: Build & Test             | Runs build and test commands, reports failures                                              |
 
-All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 9 parallel tasks for same-repo reviews). Findings from Agents 1-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
+All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 10 parallel tasks for same-repo reviews). Findings from Agents 0-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
 
 ## Severity Levels
 
@@ -92,7 +94,7 @@ This runs in **lightweight mode** — no worktree, no build/test. The review is 
 
 | Capability                                                 | Same-repo | Cross-repo                    |
 | ---------------------------------------------------------- | --------- | ----------------------------- |
-| LLM review (Agents 1-6 + verify + iterative reverse audit) | ✅        | ✅                            |
+| LLM review (Agents 0-6 + verify + iterative reverse audit) | ✅        | ✅                            |
 | Agent 7: Build & test                                      | ✅        | ❌ (no local codebase)        |
 | Cross-file impact analysis                                 | ✅        | ❌                            |
 | PR inline comments                                         | ✅        | ✅ (if you have write access) |
@@ -148,7 +150,19 @@ You can customize review criteria per project. `/review` reads rules from these 
 3. `AGENTS.md` — `## Code Review` section
 4. `QWEN.md` — `## Code Review` section
 
-Rules are injected into the LLM review agents (1-6) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
+Rules are injected into the LLM review agents (0-6) as additional criteria. For PR reviews, rules are read from the **base branch** to prevent a malicious PR from injecting bypass rules.
+
+## Linked Issue Fit
+
+For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It uses `gh pr view <pr> --repo <owner/repo> --json closingIssuesReferences` for GitHub's strong closing-issue metadata, then `gh issue view <number> --repo <owner/repo> --comments` for the original report and discussion.
+
+If the PR context mentions other possibly relevant issues, the agent may fetch them after judging relevance. For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
+
+If the issue evidence shows an upstream service or provider returned malformed data outside the client contract, client-side parser or sanitizer changes are not treated as a valid root-cause fix unless a maintainer explicitly requested a defensive workaround. A test that replays malformed upstream output proves only that the workaround handles that shape; it does not prove the workaround is architecturally appropriate.
+
+## Core Infrastructure Gate
+
+For external PRs touching core infrastructure, `/review` applies the repository gate before normal review. Large core changes (500+ additions plus deletions in core infrastructure) are reported as a hard block unless maintainer-authored. Smaller core changes require 100% confidence and downstream-consumer awareness; otherwise `/review` escalates to a maintainer.
 
 Example `.qwen/review-rules.md`:
 
@@ -219,10 +233,10 @@ The review pipeline uses a bounded number of LLM calls regardless of how many fi
 
 | Stage                            | LLM calls         | Notes                                               |
 | -------------------------------- | ----------------- | --------------------------------------------------- |
-| Review agents (Step 3)           | 9 (or 8)          | Run in parallel; Agent 7 skipped in cross-repo mode |
+| Review agents (Step 3)           | 10 (or 9)         | Run in parallel; Agent 7 skipped in cross-repo mode |
 | Batch verification (Step 4)      | 1                 | Single agent verifies all findings at once          |
 | Iterative reverse audit (Step 5) | 1-3               | Loops until "No issues found" or 3-round cap        |
-| **Total**                        | **11-13 (10-12)** | Same-repo: 11-13; cross-repo: 10-12 (no Agent 7)    |
+| **Total**                        | **12-14 (11-13)** | Same-repo: 12-14; cross-repo: 11-13 (no Agent 7)    |
 
 Most PRs converge to the lower end of the range (1 reverse audit round); the cap prevents runaway cost on pathological cases.
 
