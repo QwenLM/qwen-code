@@ -333,7 +333,7 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
     </Card>
   );
   return (
-    <div className={styles.grid}>
+    <div className={`${styles.grid} ${styles.chartsGrid}`}>
       {chart('daemon.charts.concurrency', formatCount, [
         {
           label: t('daemon.charts.activePrompts'),

@@ -443,6 +443,93 @@
   outline: none;
 }
 
+/* In-place panel that replaces the chat view (message list + composer) when
+   Settings or Daemon Status is opened. Fills the chat pane and owns its own
+   scroll container, mirroring what the DialogShell body used to provide. */
+.panelHost {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.panelBack {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.panelBack:hover,
+.panelBack:focus-visible {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.panelBack svg {
+  width: 18px;
+  height: 18px;
+}
+
+.panelTitle {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.panelBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+/* The chat view (message list + composer) stays mounted while a panel is shown,
+   just hidden — so the composer keeps its unsent draft and attachments instead
+   of losing them on unmount. */
+.chatViewWrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatViewHidden {
+  display: none;
+}
+
+/* Empty (new-chat) state centers the welcome header + composer vertically via
+   `.appChatEmpty .chatPane { justify-content: center }`. For that to take effect
+   the wrapper must shrink to its content instead of filling the pane — the same
+   thing `.content` already does in this state. */
+.appChatEmpty .chatViewWrap {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .footer {
   position: relative;
   width: min(100%, var(--chat-shell-width));
