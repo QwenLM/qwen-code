@@ -2516,6 +2516,10 @@ export async function runQwenServe(
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
+      // The real long-running daemon keeps scheduled-task sessions resident
+      // (keepalive) and reloads them on boot (rehydration). Off by default so
+      // direct createServeApp embeds/tests don't spawn sessions.
+      manageScheduledTaskSessions: true,
       fsFactory: runtime.resolveBridgeFsFactory({
         // REST routes still return primary-relative paths, so keep their
         // filesystem boundary primary-only until responses carry root IDs.

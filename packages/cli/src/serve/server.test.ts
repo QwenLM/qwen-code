@@ -12055,11 +12055,27 @@ describe('createServeApp', () => {
 
 describe('runQwenServe', () => {
   let handle: RunHandle | undefined;
+  let runtimeDir: string | undefined;
+
+  beforeEach(async () => {
+    // These tests spawn a real daemon bound to the repo cwd. Redirect the
+    // per-project runtime dir (where scheduled_tasks.json lives) into a temp
+    // dir so the daemon's scheduled-task rehydration reads an empty schedule
+    // instead of the developer's real ~/.qwen — otherwise it would try to
+    // reload a real bound session and hang these startup/shutdown tests.
+    runtimeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'run-qwen-serve-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
 
   afterEach(async () => {
     if (handle) {
       await handle.close();
       handle = undefined;
+    }
+    Storage.setRuntimeBaseDir(null);
+    if (runtimeDir) {
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+      runtimeDir = undefined;
     }
     // Scrub any env vars individual tests may have set so leftover
     // state can't leak into the next test in this worker.

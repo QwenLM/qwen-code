@@ -2440,6 +2440,52 @@ export function App({
     sidebarSwitchingSessionId,
   ]);
 
+  // Manual "run now" from the scheduled-tasks page. A bound task runs in its
+  // own session (so manual and scheduled runs share one transcript); an unbound
+  // task runs in the current session. Switching sessions is async, so a latch
+  // holds the prompt until the target session is fully active before sending.
+  const pendingBoundRunRef = useRef<{
+    sessionId: string;
+    prompt: string;
+  } | null>(null);
+  const runTaskManually = useCallback(
+    (prompt: string, sessionId: string | null) => {
+      setMainView('chat');
+      if (!sessionId) {
+        sendPrompt(prompt).catch((error: unknown) =>
+          reportError(error, 'Failed to run scheduled task'),
+        );
+        return;
+      }
+      pendingBoundRunRef.current = { sessionId, prompt };
+      loadSidebarSession(sessionId).catch((error: unknown) => {
+        pendingBoundRunRef.current = null;
+        reportError(error, 'Failed to open session');
+      });
+    },
+    [sendPrompt, loadSidebarSession, reportError],
+  );
+  useEffect(() => {
+    const pending = pendingBoundRunRef.current;
+    if (
+      pending &&
+      connection.sessionId === pending.sessionId &&
+      !connection.loadingTranscript &&
+      !connection.catchingUp
+    ) {
+      pendingBoundRunRef.current = null;
+      sendPrompt(pending.prompt).catch((error: unknown) =>
+        reportError(error, 'Failed to run scheduled task'),
+      );
+    }
+  }, [
+    connection.sessionId,
+    connection.loadingTranscript,
+    connection.catchingUp,
+    sendPrompt,
+    reportError,
+  ]);
+
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     sessionActions
@@ -4364,7 +4410,10 @@ export function App({
                 </section>
               )}
               {mainView === 'scheduledTasks' && (
-                <div className={styles.fullPage} data-testid="scheduled-tasks-page">
+                <div
+                  className={styles.fullPage}
+                  data-testid="scheduled-tasks-page"
+                >
                   <div className={styles.fullPageHeader}>
                     <button
                       type="button"
@@ -4393,15 +4442,7 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
-                      onRunPrompt={(taskPrompt) => {
-                        // Manual trigger reuses the normal prompt path: return
-                        // to the chat view and send the task's prompt into the
-                        // current session so the run streams in the chat.
-                        setMainView('chat');
-                        sendPrompt(taskPrompt).catch((error: unknown) => {
-                          reportError(error, 'Failed to run scheduled task');
-                        });
-                      }}
+                      onRunPrompt={runTaskManually}
                       onCreateViaChat={() => {
                         // Return to chat and prime the composer so the user can
                         // describe the task in natural language; the agent
@@ -4415,6 +4456,16 @@ export function App({
                           );
                           editorRef.current?.focus();
                         }, 0);
+                      }}
+                      onOpenSession={(sessionId) => {
+                        // The task's bound session IS its run history — switch
+                        // to the chat view and load that session's transcript.
+                        setMainView('chat');
+                        loadSidebarSession(sessionId).catch(
+                          (error: unknown) => {
+                            reportError(error, 'Failed to open session');
+                          },
+                        );
                       }}
                       onError={reportError}
                     />

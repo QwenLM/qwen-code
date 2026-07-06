@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   useWorkspaceActions,
   type DaemonScheduledTask,
+  type DaemonScheduledTaskRun,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
@@ -15,18 +16,45 @@ import {
   buildCron,
   describeCron,
   describeLastRun,
+  formatCountdown,
+  parseCronToBuilder,
   type BuilderState,
   type Frequency,
+  type TranslateFn,
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
 
+/** Localized absolute timestamp, resilient to a bad epoch value. */
+function safeLocaleString(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(ms);
+  }
+}
+
+/** Formats one run-history entry: localized timestamp + a kind tag. */
+function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
+  const kind =
+    run.kind === 'catch-up'
+      ? ` · ${t('scheduledTasks.runKind.catchUp')}`
+      : run.kind === 'manual'
+        ? ` · ${t('scheduledTasks.runKind.manual')}`
+        : '';
+  return `${safeLocaleString(run.at)}${kind}`;
+}
+
 interface ScheduledTasksDialogProps {
-  /** Manual "run now": inject the task's prompt into the current session and
-   * (in the App wiring) close this dialog so the run is visible in the chat. */
-  onRunPrompt: (prompt: string) => void;
+  /** Manual "run now": execute the task's prompt in its bound session (so it
+   * lands in the same transcript as its scheduled runs), or in the current
+   * session for an unbound task. The App wiring switches to that session. */
+  onRunPrompt: (prompt: string, sessionId: string | null) => void;
   /** Switch to the chat view with the composer primed to describe a task, so
    * the agent can create it conversationally via its cron_create tool. */
   onCreateViaChat: () => void;
+  /** Open a task's bound session — its transcript IS the task's run history.
+   * When absent, tasks fall back to the inline fire-timestamp list. */
+  onOpenSession?: (sessionId: string) => void;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -55,6 +83,7 @@ const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
 export function ScheduledTasksDialog({
   onRunPrompt,
   onCreateViaChat,
+  onOpenSession,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -64,13 +93,22 @@ export function ScheduledTasksDialog({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  // Create form
+  // Create / edit form. `editingId` null = create, otherwise the id of the
+  // task being edited (the form is dual-mode — same fields, different verb).
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Which task's run history is expanded inline (only one at a time).
+  const [expandedRunsId, setExpandedRunsId] = useState<string | null>(null);
+
+  // Wall-clock, ticked every second, that the per-task next-run countdowns are
+  // measured against. Only runs while at least one task has a next run.
+  const [now, setNow] = useState(() => Date.now());
 
   // Guard against setState after unmount (loads are async).
   const mountedRef = useRef(true);
@@ -105,6 +143,33 @@ export function ScheduledTasksDialog({
     void reload();
   }, [reload]);
 
+  // Tick the countdown clock once a second, but only while something is
+  // actually counting down — an all-disabled (or empty) list needs no timer.
+  const hasCountdown = !!tasks?.some((task) => task.nextRunAt != null);
+  useEffect(() => {
+    if (!hasCountdown) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [hasCountdown]);
+
+  // Refresh the list shortly after the soonest task is due, so its countdown
+  // rolls to the next occurrence and lastFiredAt / run history refresh too.
+  // A single timer for the whole list; the +2s buffer and 1s floor keep a
+  // just-passed snapshot from spinning a tight reload loop.
+  useEffect(() => {
+    if (!tasks) return;
+    let soonest = Infinity;
+    for (const task of tasks) {
+      if (task.nextRunAt != null && task.nextRunAt < soonest) {
+        soonest = task.nextRunAt;
+      }
+    }
+    if (!Number.isFinite(soonest)) return;
+    const delay = Math.max(1000, soonest - Date.now() + 2000);
+    const id = window.setTimeout(() => void reload(), delay);
+    return () => window.clearTimeout(id);
+  }, [tasks, reload]);
+
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
 
@@ -114,9 +179,30 @@ export function ScheduledTasksDialog({
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     setShowForm(false);
+    setEditingId(null);
   }, []);
 
-  const handleCreate = useCallback(async () => {
+  const openCreate = useCallback(() => {
+    setEditingId(null);
+    setName('');
+    setPrompt('');
+    setBuilder(DEFAULT_BUILDER);
+    setFormError(null);
+    setShowForm(true);
+  }, []);
+
+  const openEdit = useCallback((task: DaemonScheduledTask) => {
+    setEditingId(task.id);
+    setName(task.name ?? '');
+    setPrompt(task.prompt);
+    // Reverse the cron back onto the pickers; an expression the pickers can't
+    // represent lands in the `custom` field, never silently rewritten.
+    setBuilder(parseCronToBuilder(task.cron));
+    setFormError(null);
+    setShowForm(true);
+  }, []);
+
+  const handleSubmit = useCallback(async () => {
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -129,13 +215,24 @@ export function ScheduledTasksDialog({
     setSubmitting(true);
     setFormError(null);
     try {
-      await actions.createScheduledTask({
-        cron,
-        prompt: prompt.trim(),
-        name: name.trim() || null,
-        recurring: true,
-        enabled: true,
-      });
+      if (editingId) {
+        // Update only the editable fields; `recurring`/`enabled` are omitted so
+        // the PATCH leaves them unchanged (recurring isn't in this form, and
+        // enabled is driven by the card toggle). Empty name clears it.
+        await actions.updateScheduledTask(editingId, {
+          cron,
+          prompt: prompt.trim(),
+          name: name.trim() || null,
+        });
+      } else {
+        await actions.createScheduledTask({
+          cron,
+          prompt: prompt.trim(),
+          name: name.trim() || null,
+          recurring: true,
+          enabled: true,
+        });
+      }
       if (!mountedRef.current) return;
       resetForm();
       await reload();
@@ -145,7 +242,7 @@ export function ScheduledTasksDialog({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [actions, builder, name, prompt, reload, resetForm, t]);
+  }, [actions, builder, editingId, name, prompt, reload, resetForm, t]);
 
   const handleToggle = useCallback(
     async (task: DaemonScheduledTask) => {
@@ -160,6 +257,22 @@ export function ScheduledTasksDialog({
       }
     },
     [actions, onError, reload, t],
+  );
+
+  const handleRunNow = useCallback(
+    (task: DaemonScheduledTask) => {
+      // Record the run so "last run" reflects the manual trigger (best-effort;
+      // the run still happens even if recording fails). The prompt then executes
+      // in the task's bound session — the App wiring switches to it — so manual
+      // and scheduled runs share one transcript.
+      void actions
+        .runScheduledTask(task.id)
+        .catch((err: unknown) =>
+          onError(err, t('scheduledTasks.error.runFailed')),
+        );
+      onRunPrompt(task.prompt, task.sessionId);
+    },
+    [actions, onError, onRunPrompt, t],
   );
 
   const handleDelete = useCallback(
@@ -212,7 +325,7 @@ export function ScheduledTasksDialog({
           <button
             type="button"
             className={styles.primaryButton}
-            onClick={() => setShowForm(true)}
+            onClick={openCreate}
           >
             {t('scheduledTasks.new')}
           </button>
@@ -221,7 +334,9 @@ export function ScheduledTasksDialog({
 
       {showForm && (
         <DialogShell
-          title={t('scheduledTasks.new')}
+          title={t(
+            editingId ? 'scheduledTasks.editTitle' : 'scheduledTasks.new',
+          )}
           size="md"
           onClose={resetForm}
         >
@@ -397,12 +512,20 @@ export function ScheduledTasksDialog({
               <button
                 type="button"
                 className={styles.primaryButton}
-                onClick={() => void handleCreate()}
+                onClick={() => void handleSubmit()}
                 disabled={submitting}
               >
                 {submitting
-                  ? t('scheduledTasks.creating')
-                  : t('scheduledTasks.create')}
+                  ? t(
+                      editingId
+                        ? 'scheduledTasks.saving'
+                        : 'scheduledTasks.creating',
+                    )
+                  : t(
+                      editingId
+                        ? 'scheduledTasks.save'
+                        : 'scheduledTasks.create',
+                    )}
               </button>
             </div>
           </div>
@@ -447,11 +570,21 @@ export function ScheduledTasksDialog({
                   <button
                     type="button"
                     className={styles.iconAction}
-                    onClick={() => onRunPrompt(task.prompt)}
+                    onClick={() => handleRunNow(task)}
                     title={t('scheduledTasks.runNow')}
                     aria-label={t('scheduledTasks.runNow')}
                   >
                     ▶
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.iconAction}
+                    onClick={() => openEdit(task)}
+                    disabled={busy}
+                    title={t('scheduledTasks.edit')}
+                    aria-label={t('scheduledTasks.edit')}
+                  >
+                    ✎
                   </button>
                   <button
                     type="button"
@@ -486,10 +619,71 @@ export function ScheduledTasksDialog({
                       : 'scheduledTasks.runsOnce',
                   )}
                 </span>
+                {task.nextRunAt != null && (
+                  <span
+                    className={styles.countdown}
+                    data-testid="scheduled-task-next-run"
+                    title={t('scheduledTasks.nextRunTooltip', {
+                      when: safeLocaleString(task.nextRunAt),
+                    })}
+                  >
+                    <span className={styles.hourglassIcon} aria-hidden="true">
+                      ⏳
+                    </span>
+                    {formatCountdown(task.nextRunAt - now, t)}
+                  </span>
+                )}
                 <span className={styles.lastFired}>
                   {describeLastRun(task, t)}
                 </span>
+                {task.sessionId && onOpenSession ? (
+                  // The task's bound session IS its run history — open its
+                  // transcript. Always shown (empty state included) so the
+                  // history is discoverable even before the first run.
+                  <button
+                    type="button"
+                    className={styles.runsToggle}
+                    onClick={() => onOpenSession(task.sessionId!)}
+                    title={t('scheduledTasks.viewHistoryHint')}
+                  >
+                    {task.runs.length > 0
+                      ? t('scheduledTasks.viewHistory', {
+                          count: task.runs.length,
+                        })
+                      : t('scheduledTasks.viewHistoryEmpty')}
+                  </button>
+                ) : (
+                  // Unbound (tool-created / legacy) task: no session to open, so
+                  // fall back to the inline fire-timestamp list.
+                  task.runs.length > 0 && (
+                    <button
+                      type="button"
+                      className={styles.runsToggle}
+                      aria-expanded={expandedRunsId === task.id}
+                      onClick={() =>
+                        setExpandedRunsId((cur) =>
+                          cur === task.id ? null : task.id,
+                        )
+                      }
+                    >
+                      {t('scheduledTasks.runHistory', {
+                        count: task.runs.length,
+                      })}
+                    </button>
+                  )
+                )}
               </div>
+
+              {expandedRunsId === task.id && task.runs.length > 0 && (
+                <ul className={styles.runsList}>
+                  {/* Newest first — the ring is stored oldest-first. */}
+                  {[...task.runs].reverse().map((run, idx) => (
+                    <li key={`${run.at}-${idx}`} className={styles.runsItem}>
+                      {describeRun(run, t)}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           );
         })}

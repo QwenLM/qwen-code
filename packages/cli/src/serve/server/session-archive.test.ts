@@ -8,7 +8,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  SessionService,
+  Storage,
+  readCronTasks,
+  updateCronTasks,
+} from '@qwen-code/qwen-code-core';
 import {
   SessionArchivedError,
   SessionArchivingError,
@@ -190,6 +195,44 @@ describe('archiveDaemonSessions', () => {
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
+  });
+
+  it('disables a scheduled task bound to the archived session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440050';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+      {
+        id: 'other',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+      },
+    ]);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+    expect(result.archived).toEqual([sessionId]);
+
+    const byId = Object.fromEntries(
+      (await readCronTasks(workspaceDir)).map((t) => [t.id, t]),
+    );
+    expect(byId['bound']!.enabled).toBe(false); // paused with its session
+    expect(byId['other']!.enabled).toBeUndefined(); // unrelated — untouched
   });
 
   it('does not lock ids that are already archived or missing', async () => {

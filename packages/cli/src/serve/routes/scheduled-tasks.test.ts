@@ -20,10 +20,54 @@ function safeBody(req: Request): Record<string, unknown> {
     : {};
 }
 
+/** Stub session bridge: mints sequential fake session ids and records spawns /
+ * closes so tests can assert binding and rollback without a real child. */
+interface StubBridge {
+  spawnOrAttach(req: { workspaceCwd: string }): Promise<{ sessionId: string }>;
+  closeSession(sessionId: string): Promise<unknown>;
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+  ): unknown;
+  spawned: string[];
+  closed: string[];
+  named: Array<{ sessionId: string; displayName?: string }>;
+  failNext: boolean;
+}
+
+function makeStubBridge(): StubBridge {
+  let seq = 0;
+  const bridge: StubBridge = {
+    spawned: [],
+    closed: [],
+    named: [],
+    failNext: false,
+    async spawnOrAttach() {
+      if (bridge.failNext) {
+        bridge.failNext = false;
+        throw new Error('spawn failed');
+      }
+      const sessionId = `sess-${++seq}`;
+      bridge.spawned.push(sessionId);
+      return { sessionId };
+    },
+    async closeSession(sessionId: string) {
+      bridge.closed.push(sessionId);
+      return undefined;
+    },
+    updateSessionMetadata(sessionId, metadata) {
+      bridge.named.push({ sessionId, ...metadata });
+      return metadata;
+    },
+  };
+  return bridge;
+}
+
 interface Harness {
   app: express.Application;
   scratch: string;
   workspace: string;
+  bridge: StubBridge;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -34,6 +78,7 @@ async function makeHarness(): Promise<Harness> {
   // ~/.qwen — redirect it into the scratch dir for the duration of the test.
   Storage.setRuntimeBaseDir(scratch);
 
+  const bridge = makeStubBridge();
   const app = express();
   app.use(express.json());
   registerScheduledTasksRoutes(app, {
@@ -41,8 +86,9 @@ async function makeHarness(): Promise<Harness> {
     // Non-strict mutate is a passthrough (matches the loopback web-shell).
     mutate: () => (_req, _res, next) => next(),
     safeBody,
+    bridge,
   });
-  return { app, scratch, workspace };
+  return { app, scratch, workspace, bridge };
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -89,6 +135,46 @@ describe('scheduled-tasks routes', () => {
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toHaveLength(1);
     expect(list.body.tasks[0].id).toBe(res.body.id);
+  });
+
+  it('binds a created task to a freshly minted session', async () => {
+    const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(201);
+    // The task carries the id of the session the bridge minted for it.
+    expect(h.bridge.spawned).toHaveLength(1);
+    expect(res.body.sessionId).toBe(h.bridge.spawned[0]);
+    // And it's persisted on disk, not just in the response.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].sessionId).toBe(h.bridge.spawned[0]);
+    // No teardown on the happy path.
+    expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('names the bound session after the task (name preferred over prompt)', async () => {
+    const named = await create({
+      name: 'Digest',
+      cron: '0 9 * * *',
+      prompt: 'summarize the day',
+    });
+    expect(h.bridge.named).toEqual([
+      { sessionId: named.body.sessionId, displayName: '⏰ Digest' },
+    ]);
+
+    const unnamed = await create({ cron: '0 9 * * *', prompt: 'do the thing' });
+    expect(h.bridge.named[1]).toEqual({
+      sessionId: unnamed.body.sessionId,
+      displayName: '⏰ do the thing',
+    });
+  });
+
+  it('returns 500 and writes nothing when the session cannot be minted', async () => {
+    h.bridge.failNext = true;
+    const res = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_session_failed');
+    // The task must not land on disk without its session.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks).toEqual([]);
   });
 
   it('rejects an unparseable cron', async () => {
@@ -170,9 +256,35 @@ describe('scheduled-tasks routes', () => {
     const del = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(del.status).toBe(200);
     expect(del.body).toEqual({ deleted: true, id });
+    // The task's dedicated session is torn down with it (no resident leak).
+    expect(h.bridge.closed).toEqual([created.body.sessionId]);
 
     const again = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(again.status).toBe(404);
+    // A no-op delete (already gone) closes nothing further.
+    expect(h.bridge.closed).toEqual([created.body.sessionId]);
+  });
+
+  it('records a manual run: advances lastFiredAt and appends a manual run', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'p' });
+    const id = created.body.id as string;
+    const before = created.body.lastFiredAt as number;
+
+    const res = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+    expect(res.status).toBe(200);
+    expect(res.body.lastFiredAt).toBeGreaterThan(before);
+    expect(res.body.runs).toHaveLength(1);
+    expect(res.body.runs[0].kind).toBe('manual');
+    // The manual run is tagged with the task's bound session.
+    expect(res.body.runs[0].sessionId).toBe(created.body.sessionId);
+  });
+
+  it('404s a manual run for an unknown task', async () => {
+    const res = await request(h.app).post(
+      '/scheduled-tasks/does-not-exist/run',
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
   });
 
   it('rejects a create past the max-tasks cap', async () => {
@@ -183,6 +295,10 @@ describe('scheduled-tasks routes', () => {
     const over = await create({ cron: '0 9 * * *', prompt: 'overflow' });
     expect(over.status).toBe(409);
     expect(over.body.code).toBe('max_tasks_reached');
+    // The over-cap create still minted a session before the write was rejected;
+    // it must be rolled back so a bounced create doesn't leak a resident one.
+    expect(h.bridge.spawned).toHaveLength(51);
+    expect(h.bridge.closed).toEqual([h.bridge.spawned[50]]);
   });
 
   it('updates cron / prompt / recurring via PATCH', async () => {
@@ -290,6 +406,67 @@ describe('scheduled-tasks routes', () => {
       name: null,
       enabled: true,
     });
+    // Absent runs normalizes to an empty array (never undefined on the wire).
+    expect(res.body.tasks[0].runs).toEqual([]);
+  });
+
+  it('surfaces on-disk run history on GET', async () => {
+    await seedTask({
+      id: 'h1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_540_000,
+      runs: [
+        { at: 1_700_000_480_000, kind: 'scheduled' },
+        { at: 1_700_000_540_000, kind: 'catch-up' },
+      ],
+    });
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    expect(res.body.tasks[0].runs).toEqual([
+      { at: 1_700_000_480_000, kind: 'scheduled' },
+      { at: 1_700_000_540_000, kind: 'catch-up' },
+    ]);
+  });
+
+  it('computes nextRunAt for an enabled task and nulls it when disabled', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(created.status).toBe(201);
+    // Enabled → a concrete future fire time.
+    expect(typeof created.body.nextRunAt).toBe('number');
+    expect(created.body.nextRunAt).toBeGreaterThan(Date.now());
+
+    // Disabling drops it — a paused task has no next run.
+    const patched = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ enabled: false });
+    expect(patched.status).toBe(200);
+    expect(patched.body.nextRunAt).toBeNull();
+
+    // Re-enabling brings it back.
+    const reenabled = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ enabled: true });
+    expect(typeof reenabled.body.nextRunAt).toBe('number');
+  });
+
+  it('rejects a task whose run history is malformed (fix-or-delete)', async () => {
+    // A present-but-corrupt `runs` routes through the same read failure as any
+    // other corrupt field rather than being silently dropped.
+    await seedTask({
+      id: 'bad1',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      runs: [{ at: 'not-a-number' }],
+    });
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_read_failed');
   });
 
   it('re-enabling a previously-fired task resumes from now (no catch-up)', async () => {

@@ -28,10 +28,12 @@ import {
   updateCronTasks,
   removeCronTasks,
   generateCronTaskId,
+  appendCronRun,
   parseCron,
   nextFireTime,
   MAX_JOBS,
   type DurableCronTask,
+  type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -44,14 +46,51 @@ const MAX_PROMPT_LENGTH = 100_000;
 const MAX_NAME_LENGTH = 200;
 const MAX_CRON_LENGTH = 200;
 
+/**
+ * The slice of the session bridge this route needs: mint a task's dedicated
+ * session, and tear it back down if the create fails after minting. Narrowed
+ * to a structural type so tests can stub it without the full bridge.
+ */
+export interface ScheduledTasksSessionBridge {
+  spawnOrAttach(req: { workspaceCwd: string }): Promise<{ sessionId: string }>;
+  closeSession(sessionId: string): Promise<unknown>;
+  /** Give the task's session a readable name so it's recognizable in the
+   * session list (rather than a bare id). Best-effort. */
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+  ): unknown;
+}
+
+// Cap for the derived session display name — a session label, not the full
+// prompt (which can be up to MAX_PROMPT_LENGTH).
+const MAX_SESSION_NAME_LENGTH = 60;
+
+/** Builds a readable session name for a task from its name (or prompt), marked
+ * with a clock so scheduled-task sessions are recognizable in the list. */
+export function scheduledTaskSessionName(label: string): string {
+  const trimmed = label.trim().replace(/\s+/g, ' ');
+  const short =
+    trimmed.length > MAX_SESSION_NAME_LENGTH
+      ? `${trimmed.slice(0, MAX_SESSION_NAME_LENGTH - 1)}…`
+      : trimmed;
+  return `⏰ ${short}`;
+}
+
 interface RegisterScheduledTasksRoutesDeps {
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  /**
+   * Session bridge used to mint a dedicated session per task. When absent
+   * (e.g. a minimal embedding), tasks are created without a bound session and
+   * fall back to the shared per-project durable-owner firing model.
+   */
+  bridge?: ScheduledTasksSessionBridge;
 }
 
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
- * client never has to special-case `undefined` name/enabled. */
+ * client never has to special-case `undefined` name/enabled/runs. */
 interface ScheduledTaskView {
   id: string;
   name: string | null;
@@ -61,6 +100,23 @@ interface ScheduledTaskView {
   enabled: boolean;
   createdAt: number;
   lastFiredAt: number | null;
+  nextRunAt: number | null;
+  sessionId: string | null;
+  runs: CronTaskRun[];
+}
+
+/** Next scheduled fire (epoch ms) for an enabled task, or null when the task
+ * is disabled (it won't fire) or its cron can't be projected. A GET-time
+ * snapshot the client counts down against — kept server-side so every cron
+ * shape (including hand-written ones) uses core's single next-fire authority,
+ * with no cron parser shipped to the browser. */
+function computeNextRunAt(task: DurableCronTask): number | null {
+  if (task.enabled === false) return null;
+  try {
+    return nextFireTime(task.cron, new Date()).getTime();
+  } catch {
+    return null;
+  }
 }
 
 function toView(task: DurableCronTask): ScheduledTaskView {
@@ -75,6 +131,16 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     enabled: task.enabled !== false,
     createdAt: task.createdAt,
     lastFiredAt: task.lastFiredAt,
+    nextRunAt: computeNextRunAt(task),
+    // The task's bound session (its run-history transcript), or null for an
+    // unbound tool-created/legacy task.
+    sessionId:
+      typeof task.sessionId === 'string' && task.sessionId.length > 0
+        ? task.sessionId
+        : null,
+    // Absent runs (tool-created / never-fired) normalizes to [] so the client
+    // never special-cases undefined.
+    runs: Array.isArray(task.runs) ? task.runs : [],
   };
 }
 
@@ -96,7 +162,7 @@ export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody } = deps;
+  const { boundWorkspace, mutate, safeBody, bridge } = deps;
 
   // ── List ──────────────────────────────────────────────────────────
   app.get('/scheduled-tasks', async (_req, res) => {
@@ -185,6 +251,39 @@ export function registerScheduledTasksRoutes(
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
 
+    // Mint the task's dedicated session up front. The task is BOUND to it and
+    // fires only inside it — its transcript becomes the task's run history, and
+    // archiving/deleting the session stops the task. Done before the write so a
+    // task never lands on disk without its session; if the bridge is absent
+    // (minimal embedding) the task is created unbound (shared-owner firing).
+    let boundSessionId: string | undefined;
+    if (bridge) {
+      try {
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: boundWorkspace,
+        });
+        boundSessionId = session.sessionId;
+        // Name the session after the task so it's recognizable in the session
+        // list. Best-effort — a nameless session still fires correctly.
+        try {
+          bridge.updateSessionMetadata(boundSessionId, {
+            displayName: scheduledTaskSessionName(nameResult.value ?? prompt),
+          });
+        } catch {
+          // metadata update is non-critical
+        }
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /scheduled-tasks failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        res.status(500).json({
+          error: "Failed to create the task's session",
+          code: 'scheduled_tasks_session_failed',
+        });
+        return;
+      }
+    }
+
     const now = Date.now();
     const task: DurableCronTask = {
       id: generateCronTaskId(),
@@ -196,7 +295,16 @@ export function registerScheduledTasksRoutes(
       // minute the task was created — same guard cronScheduler.create uses.
       lastFiredAt: now - (now % 60_000),
       enabled,
+      ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
+    };
+
+    // Best-effort teardown of the just-minted session when the create can't be
+    // committed, so a rejected create doesn't leak a resident session.
+    const rollbackSession = async () => {
+      if (boundSessionId !== undefined && bridge) {
+        await bridge.closeSession(boundSessionId).catch(() => {});
+      }
     };
 
     let overCap = false;
@@ -212,6 +320,7 @@ export function registerScheduledTasksRoutes(
         return [...tasks, task];
       });
     } catch (err) {
+      await rollbackSession();
       writeStderrLine(
         `qwen serve: POST /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -222,6 +331,7 @@ export function registerScheduledTasksRoutes(
       return;
     }
     if (overCap) {
+      await rollbackSession();
       res.status(409).json({
         error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
         code: 'max_tasks_reached',
@@ -373,6 +483,18 @@ export function registerScheduledTasksRoutes(
         .json({ error: 'Task id is required', code: 'invalid_id' });
       return;
     }
+    // Capture the task's bound session before removal so it can be torn down —
+    // the dedicated session exists only to run this task. Best-effort: a read
+    // failure here just skips teardown; removeCronTasks below surfaces it.
+    let boundSessionId: string | undefined;
+    try {
+      const existing = await readCronTasks(boundWorkspace);
+      const match = existing.find((t) => t.id === id)?.sessionId;
+      if (typeof match === 'string' && match.length > 0) boundSessionId = match;
+    } catch {
+      // ignore — the remove below re-reads and reports any corruption
+    }
+
     let removed: number;
     try {
       removed = await removeCronTasks(boundWorkspace, [id]);
@@ -390,7 +512,63 @@ export function registerScheduledTasksRoutes(
       res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
       return;
     }
+    // Stop the now-orphaned session (keeps its transcript on disk as history).
+    if (boundSessionId && bridge) {
+      await bridge.closeSession(boundSessionId).catch(() => {});
+    }
     res.status(200).json({ deleted: true, id });
+  });
+
+  // ── Record a manual run ───────────────────────────────────────────
+  // Marks the task as run *now* (updates lastFiredAt + appends a 'manual' run
+  // record) so the management UI's "last run" reflects a manual trigger. The
+  // prompt itself is executed by the client in the task's bound session; this
+  // route only records that a run happened, keeping manual and scheduled runs
+  // consistent in the history.
+  app.post('/scheduled-tasks/:id/run', mutate(), async (req, res) => {
+    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+    if (id.length === 0) {
+      res
+        .status(400)
+        .json({ error: 'Task id is required', code: 'invalid_id' });
+      return;
+    }
+    const now = Date.now();
+    let found = false;
+    let updated: DurableCronTask | undefined;
+    try {
+      await updateCronTasks(boundWorkspace, (tasks) => {
+        const idx = tasks.findIndex((t) => t.id === id);
+        if (idx === -1) return tasks; // not found → no write
+        found = true;
+        const current = tasks[idx]!;
+        const next: DurableCronTask = {
+          ...current,
+          lastFiredAt: now,
+          runs: appendCronRun(current.runs, {
+            at: now,
+            kind: 'manual',
+            ...(current.sessionId ? { sessionId: current.sessionId } : {}),
+          }),
+        };
+        updated = next;
+        return tasks.map((t, i) => (i === idx ? next : t));
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: POST /scheduled-tasks/${id}/run failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({
+        error: 'Failed to record scheduled task run',
+        code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (!found || !updated) {
+      res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
+      return;
+    }
+    res.status(200).json(toView(updated));
   });
 }
 

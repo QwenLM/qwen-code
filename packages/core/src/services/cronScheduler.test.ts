@@ -1144,6 +1144,120 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('appends a scheduled run record on each recurring fire (newest last)', async () => {
+      await writeCronTasks(tmpDir, [diskTask('rec1')]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start(() => {});
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      const firstMinute = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      // The run records the session that fired it (here the durable owner).
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.runs).toEqual([
+          { at: firstMinute, kind: 'scheduled', sessionId: 'session-1' },
+        ]);
+      });
+
+      // A second fire a minute later appends — it does not replace.
+      scheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
+      const secondMinute = new Date(2025, 0, 15, 10, 31, 0).getTime();
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.runs).toEqual([
+          { at: firstMinute, kind: 'scheduled', sessionId: 'session-1' },
+          { at: secondMinute, kind: 'scheduled', sessionId: 'session-1' },
+        ]);
+      });
+    });
+
+    it('does not accrue run history for a one-shot (deleted on fire)', async () => {
+      // A recurring:false durable task is removed from disk the moment it
+      // fires, so there is no surviving entry to attach a run record to.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('once1'), recurring: false },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      expect(fired).toHaveLength(1);
+      // Gone from disk (no lingering task carrying a runs ring).
+      await vi.waitFor(async () => {
+        expect(await readCronTasks(tmpDir)).toHaveLength(0);
+      });
+    });
+
+    // Settle + tear down a second scheduler sharing this tmpDir, so its
+    // fire-and-forget writes don't race the afterEach rm.
+    async function settle(s: CronScheduler): Promise<void> {
+      s.destroy();
+      const internals = s as unknown as {
+        pendingPersist: Promise<void>;
+        pendingRelease: Promise<void> | null;
+      };
+      await internals.pendingPersist;
+      await internals.pendingRelease;
+    }
+
+    it('a session-bound task fires only in its bound session (tick path)', async () => {
+      // Two tasks, each bound to a different session.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('taskA'), sessionId: 'sess-A' },
+        { ...diskTask('taskB'), sessionId: 'sess-B' },
+      ]);
+      // Scheduler A wins the per-project lock (owner); B does not (non-owner).
+      const firedA: CronJob[] = [];
+      await scheduler.enableDurable('sess-A');
+      scheduler.start((j) => firedA.push(j));
+      const schedB = new CronScheduler(tmpDir);
+      const firedB: CronJob[] = [];
+      await schedB.enableDurable('sess-B');
+      schedB.start((j) => firedB.push(j));
+
+      const when = new Date(2025, 0, 15, 10, 30, 59);
+      scheduler.tick(when);
+      schedB.tick(when);
+
+      // Each session fires ONLY its own bound task — the owner does not fire
+      // B's task, and B fires its own despite not holding the lock.
+      expect(firedA.map((j) => j.id)).toEqual(['taskA']);
+      expect(firedB.map((j) => j.id)).toEqual(['taskB']);
+
+      await settle(schedB);
+    });
+
+    it('a non-owner session catches up its own overdue bound task', async () => {
+      const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'boundOverdue',
+          cron: '0 * * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+          sessionId: 'sess-B',
+        },
+      ]);
+      // A holds the lock but the task is bound to B, not A.
+      const firedA: CronJob[] = [];
+      scheduler.start((j) => firedA.push(j));
+      await scheduler.enableDurable('sess-A');
+      // B is a non-owner, but the task IS bound to B.
+      const schedB = new CronScheduler(tmpDir);
+      const firedB: CronJob[] = [];
+      schedB.start((j) => firedB.push(j));
+      await schedB.enableDurable('sess-B');
+
+      // Only B catches it up (its own bound task), even though A owns the lock.
+      expect(firedA).toHaveLength(0);
+      expect(firedB.map((j) => j.id)).toEqual(['boundOverdue']);
+
+      await settle(schedB);
+    });
+
     it('skips a durable job the consumer cannot run: no fire, lastFiredAt left untouched', async () => {
       // A headless run can't expand a `<<loop.md>>` sentinel. Firing it would
       // stamp + persist lastFiredAt while the work is skipped downstream,
@@ -1640,6 +1754,31 @@ describe('CronScheduler', () => {
       // The stamped minute also blocks the tick loop from double-firing.
       scheduler.tick(new Date());
       expect(fired).toHaveLength(1);
+    });
+
+    it('records a late fire as a catch-up run', async () => {
+      const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'cu1',
+          cron: '0 * * * *',
+          prompt: 'overdue recurring',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+      ]);
+
+      scheduler.start(() => {});
+      await scheduler.enableDurable('session-1');
+
+      // The catch-up stamp + its 'catch-up' run land together.
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.runs).toHaveLength(1);
+        expect(task.runs![0]!.kind).toBe('catch-up');
+        expect(task.runs![0]!.at).toBe(task.lastFiredAt);
+      });
     });
 
     it('does not catch-up overdue recurring tasks as a non-owner', async () => {

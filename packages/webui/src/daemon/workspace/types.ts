@@ -157,6 +157,16 @@ export interface DaemonGlobResult {
 /** A durable scheduled task as returned by the daemon. `name`/`enabled` are
  * normalized (never undefined): `name: null` = unnamed, `enabled` defaults to
  * true for tasks created before the field existed. */
+/** One recorded fire of a recurring scheduled task, newest last in
+ * {@link DaemonScheduledTask.runs}. Mirrors the daemon's wire shape. */
+export interface DaemonScheduledTaskRun {
+  /** Fire time (epoch ms). */
+  at: number;
+  /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
+   * "run now"); absent = scheduled. */
+  kind?: 'scheduled' | 'catch-up' | 'manual';
+}
+
 export interface DaemonScheduledTask {
   id: string;
   name: string | null;
@@ -166,6 +176,15 @@ export interface DaemonScheduledTask {
   enabled: boolean;
   createdAt: number;
   lastFiredAt: number | null;
+  /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
+   * snapshot the UI counts down against; it advances on the next reload. */
+  nextRunAt: number | null;
+  /** Id of the dedicated session this task is bound to — its transcript is the
+   * task's run history. Null for unbound tool-created/legacy tasks. */
+  sessionId: string | null;
+  /** Bounded, newest-last history of recent fires. Empty for tasks that have
+   * not fired (and, by nature, for one-shots — they are deleted on fire). */
+  runs: DaemonScheduledTaskRun[];
 }
 
 export interface DaemonCreateScheduledTaskRequest {
@@ -305,6 +324,9 @@ export interface DaemonWorkspaceActions {
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
   ): Promise<DaemonScheduledTask>;
+  /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
+   * prompt itself is executed by the caller in the task's bound session. */
+  runScheduledTask(id: string): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string): Promise<void>;
 
   // Providers / env (read-only diagnostics)

@@ -70,6 +70,10 @@ import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
 import {
+  startScheduledTaskKeepalive,
+  rehydrateScheduledTaskSessions,
+} from './scheduled-task-keepalive.js';
+import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceStatusRoutes,
 } from './routes/workspace-status.js';
@@ -147,6 +151,15 @@ let warnedDefaultTrust = false;
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Enables resident management of scheduled-task-owned sessions: a periodic
+   * keepalive (so their schedulers aren't idle-reaped) and a boot-time
+   * rehydration (so they re-arm after a restart). Opt-in — only the real
+   * long-running daemon (`runQwenServe`) sets it. Tests and direct embeds
+   * leave it off so `createServeApp` neither spawns sessions on boot nor holds
+   * a heartbeat timer.
+   */
+  manageScheduledTaskSessions?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -289,6 +302,14 @@ export interface ServeAppDeps {
  * a "healthy"-looking daemon whose every spawn fails with cryptic
  * child-process ENOENT.
  */
+// Mirrors the bridge's session-idle reaper default (30 min). Used only to
+// size the scheduled-task keepalive interval when no explicit timeout is set.
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+// Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
+// timeout) and ≤10min (stay well inside the 30-min default reaper window).
+const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
+const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
@@ -794,7 +815,49 @@ export function createServeApp(
     boundWorkspace,
     mutate,
     safeBody,
+    bridge,
   });
+
+  // Resident management of scheduled-task-owned sessions — opt-in, so tests and
+  // embeds that call createServeApp neither spawn sessions on boot nor hold a
+  // heartbeat timer (both would read the bound workspace's real tasks file).
+  if (deps.manageScheduledTaskSessions) {
+    // Keepalive: keep task sessions resident so their in-child schedulers keep
+    // ticking rather than being idle-reaped. A disabled reaper (timeout ≤ 0)
+    // never closes idle sessions, so none is needed. Interval is a third of the
+    // reaper window, clamped — the same window the bridge is configured with.
+    const idleTimeoutMs =
+      opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+    if (idleTimeoutMs > 0) {
+      const keepalive = startScheduledTaskKeepalive({
+        bridge,
+        boundWorkspace,
+        intervalMs: Math.max(
+          KEEPALIVE_MIN_INTERVAL_MS,
+          Math.min(Math.floor(idleTimeoutMs / 3), KEEPALIVE_MAX_INTERVAL_MS),
+        ),
+      });
+      (
+        app.locals as { stopScheduledTaskKeepalive?: () => void }
+      ).stopScheduledTaskKeepalive = keepalive.stop;
+    }
+
+    // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
+    // restart (a bound task fires only in its own session, which nothing else
+    // reloads). Fire-and-forget so it never delays the server coming up; a
+    // no-op when there are no bound tasks. Deliberately not awaited.
+    void rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace,
+      onError: (sessionId, err) => {
+        process.stderr.write(
+          `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      },
+    }).catch(() => {});
+  }
 
   registerPermissionRoutes(app, {
     bridge,

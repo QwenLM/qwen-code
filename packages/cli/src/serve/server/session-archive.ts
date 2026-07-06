@@ -14,6 +14,11 @@ import {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
+import {
+  disableTasksForSessions,
+  enableTasksForSessions,
+  removeTasksForSessions,
+} from '../scheduled-task-session-lifecycle.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -173,6 +178,13 @@ export async function deleteDaemonSessions(params: {
         closeErrors.push({ sessionId, error: message });
       }
     }),
+  );
+
+  // Deleting a session permanently removes any scheduled task bound to it —
+  // the task existed only to run in that session. Best-effort: a failure here
+  // must not turn a successful session delete into an error.
+  await removeTasksForSessions(service.getProjectRoot(), removed).catch(
+    () => {},
   );
 
   return { removed, notFound, errors: [...closeErrors, ...removeErrors] };
@@ -381,6 +393,12 @@ export async function archiveDaemonSessions(params: {
     errors,
   });
 
+  // Archiving a session pauses any scheduled task bound to it (kept on disk,
+  // recoverable on unarchive). Best-effort — never fail the archive over it.
+  await disableTasksForSessions(service.getProjectRoot(), archived).catch(
+    () => {},
+  );
+
   return { archived, alreadyArchived, notFound, errors };
 }
 
@@ -437,6 +455,12 @@ export async function unarchiveDaemonSessions(params: {
     notFound,
     errors,
   });
+
+  // Unarchiving a session resumes any scheduled task bound to it (re-enabled,
+  // anchor reset to now). Best-effort — never fail the unarchive over it.
+  await enableTasksForSessions(service.getProjectRoot(), unarchived).catch(
+    () => {},
+  );
 
   return { unarchived, alreadyActive, notFound, errors };
 }
