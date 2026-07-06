@@ -16,7 +16,10 @@ import {
   Storage,
   getCronFilePath,
 } from '@qwen-code/qwen-code-core';
-import { registerScheduledTasksRoutes } from './scheduled-tasks.js';
+import {
+  registerScheduledTasksRoutes,
+  scheduledTaskSessionName,
+} from './scheduled-tasks.js';
 
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
@@ -398,6 +401,7 @@ describe('scheduled-tasks routes', () => {
     const res = await request(h.app).post('/scheduled-tasks/os-run/run');
     expect(res.status).toBe(200);
     expect(res.body.runs.at(-1).kind).toBe('manual'); // run recorded in response
+    expect(res.body.nextRunAt).toBeNull(); // consumed — no future fire advertised
     // The one-shot is gone from the store — its single fire already happened.
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toEqual([]);
@@ -841,6 +845,26 @@ describe('scheduled-tasks routes', () => {
     expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated now
   });
 
+  it('editing an ENABLED one-shot cron re-seats createdAt (fires next, not as missed)', async () => {
+    const createdAt = 1_700_000_000_000; // long past
+    await seedTask({
+      id: 'eo1',
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      createdAt,
+      lastFiredAt: createdAt,
+      enabled: true,
+    });
+    const now = Date.now();
+    const patch = await request(h.app)
+      .patch('/scheduled-tasks/eo1')
+      .send({ cron: '30 8 1 1 *' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
+    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+  });
+
   it('rejects re-enabling an archive-disabled task via PATCH (409, no write)', async () => {
     // Disabled BY archiving its session — re-enabling here would show it enabled
     // while the session stays archived and can't fire. Must unarchive instead.
@@ -902,5 +926,36 @@ describe('scheduled-tasks routes', () => {
     expect(patch.status).toBe(200);
     expect(patch.body.cron).toBe('30 8 * * *');
     expect(patch.body.enabled).toBe(false); // still disabled
+  });
+});
+
+describe('scheduledTaskSessionName', () => {
+  it('prefixes the clock and collapses whitespace', () => {
+    expect(scheduledTaskSessionName('  Daily   digest ')).toBe(
+      '⏰ Daily digest',
+    );
+  });
+
+  it('strips terminal control sequences (else the bridge guard drops the rename)', () => {
+    // The CSI sequence is flattened to a space (and collapsed), leaving no
+    // control char to trip the bridge's title guard.
+    const name = scheduledTaskSessionName('ab\x1b[31mc');
+    expect(name).toBe('⏰ ab c');
+    // eslint-disable-next-line no-control-regex
+    expect(/[\x00-\x1f\x7f-\x9f]/.test(name)).toBe(false);
+  });
+
+  it('truncates on a code-point boundary (no lone surrogate)', () => {
+    // 59 ASCII then an emoji straddling the 60-char cap — a naive slice would
+    // split its surrogate pair, leaving an orphaned high surrogate.
+    const name = scheduledTaskSessionName('x'.repeat(59) + '\u{1F600}tail');
+    for (let i = 0; i < name.length; i++) {
+      const c = name.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const next = name.charCodeAt(i + 1);
+        expect(next >= 0xdc00 && next <= 0xdfff).toBe(true); // always paired
+      }
+    }
+    expect(name.endsWith('…')).toBe(true);
   });
 });

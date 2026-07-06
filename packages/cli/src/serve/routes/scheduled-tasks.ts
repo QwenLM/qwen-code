@@ -32,6 +32,7 @@ import {
   nextFireTime,
   nextDurableFireMs,
   SessionService,
+  stripTerminalControlSequences,
   MAX_JOBS,
   type DurableCronTask,
   type CronTaskRun,
@@ -71,13 +72,24 @@ export interface ScheduledTasksSessionBridge {
 const MAX_SESSION_NAME_LENGTH = 60;
 
 /** Builds a readable session name for a task from its name (or prompt), marked
- * with a clock so scheduled-task sessions are recognizable in the list. */
+ * with a clock so scheduled-task sessions are recognizable in the list. Strips
+ * terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
+ * them, so an unsanitized control char would silently drop the whole rename and
+ * leave a bare-id session — and truncates on a code-point boundary so slicing
+ * can't leave a lone surrogate that broadcasts as `�`. */
 export function scheduledTaskSessionName(label: string): string {
-  const trimmed = label.trim().replace(/\s+/g, ' ');
-  const short =
-    trimmed.length > MAX_SESSION_NAME_LENGTH
-      ? `${trimmed.slice(0, MAX_SESSION_NAME_LENGTH - 1)}…`
-      : trimmed;
+  const cleaned = stripTerminalControlSequences(label)
+    .trim()
+    .replace(/\s+/g, ' ');
+  let short = cleaned;
+  if (cleaned.length > MAX_SESSION_NAME_LENGTH) {
+    let cut = MAX_SESSION_NAME_LENGTH - 1;
+    // Don't slice between a surrogate pair — back off one unit if the boundary
+    // lands right after a high surrogate.
+    const boundary = cleaned.charCodeAt(cut - 1);
+    if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+    short = `${cleaned.slice(0, cut)}…`;
+  }
   return `⏰ ${short}`;
 }
 
@@ -728,7 +740,13 @@ export function registerScheduledTasksRoutes(
       res.status(404).json({ error: 'Task not found', code: 'task_not_found' });
       return;
     }
-    res.status(200).json(toView(updated));
+    const view = toView(updated);
+    // A consumed one-shot was removed from the store — its manual run WAS its
+    // single fire, so the returned view must not advertise a future nextRunAt on
+    // an entity the next GET omits (the shipped dialog reloads, but an embedder
+    // gets this object from the SDK).
+    if (!updated.recurring) view.nextRunAt = null;
+    res.status(200).json(view);
   });
 }
 

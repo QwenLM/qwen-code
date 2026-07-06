@@ -81,7 +81,20 @@ export async function enableTasksForSessions(
         changed = true;
         const resumed: DurableCronTask = { ...task, enabled: true };
         delete resumed.disabledByArchive;
-        if (resumed.recurring) resumed.lastFiredAt = now - (now % 60_000);
+        const minute = now - (now % 60_000);
+        if (resumed.recurring) {
+          // Recurring anchor is lastFiredAt: resume from now, not catching up
+          // fires missed while archived.
+          resumed.lastFiredAt = minute;
+        } else {
+          // A one-shot anchors on createdAt: without re-seating it, the
+          // scheduler reads the original long-past slot as a MISSED one-shot on
+          // reload and fires + permanently deletes the task. (Reachable: archive
+          // a task, PATCH it to recurring:false while disabled — the route
+          // re-seat only touches recurring anchors — then unarchive.)
+          resumed.createdAt = now;
+          resumed.lastFiredAt = minute;
+        }
         return resumed;
       }
       return task;

@@ -268,6 +268,15 @@ export class CronScheduler {
   // the FIRST settle would drop the guard while the second write is still
   // pending; the count keeps it until the LAST in-flight persist for that id
   // settles.
+  //
+  // LIMITATION: this guard is INSTANCE-scoped in-memory state. It protects
+  // against a reload racing a persist WITHIN one scheduler. It does NOT survive
+  // a new scheduler instance (daemon restart, keepalive revive, session reload):
+  // a fresh instance starts with an empty map, so if the previous instance died
+  // with a persist still in flight, the new one reads the stale on-disk stamp
+  // and can re-fire that slot once. Fully closing that narrow cross-instance
+  // window would need a durable stamp (in the tasks file or a lock file); it's
+  // accepted here as a sub-second restart-timing edge.
   private firePersistPending = new Map<string, number>();
 
   private markFirePersistPending(ids: Iterable<string>): void {
@@ -1538,15 +1547,34 @@ function computeNextFireMs(
  * jitter isn't skipped to the following period. Returns null when the cron
  * can't be projected. Callers should treat a disabled task as "no next fire".
  */
+// Memoize the (expensive, up to three minute-stepping cron scans) computation:
+// deterministic per (id, cron, recurring, anchor), and the route recomputes it
+// per task on every GET/POST/PATCH/run response. A sparse cron (yearly, leap-day)
+// costs hundreds of ms per scan, so an un-memoized 50-task list could stall the
+// event loop for seconds. A task re-keys only when its anchor advances (a fire)
+// or its schedule is edited, so steady-state GETs are all cache hits.
+const nextDurableFireCache = new Map<string, number | null>();
+const NEXT_DURABLE_FIRE_CACHE_MAX = 512;
+
 export function nextDurableFireMs(
   task: Pick<
     DurableCronTask,
     'id' | 'cron' | 'recurring' | 'lastFiredAt' | 'createdAt'
   >,
 ): number | null {
-  const jitter = computeJitter(task.id, task.cron, task.recurring);
   const anchor = task.recurring
     ? (task.lastFiredAt ?? task.createdAt)
     : task.createdAt;
-  return computeNextFireMs(task.cron, anchor, jitter);
+  const key = `${task.id} ${task.cron} ${task.recurring ? 1 : 0} ${anchor}`;
+  const cached = nextDurableFireCache.get(key);
+  if (cached !== undefined) return cached;
+  const jitter = computeJitter(task.id, task.cron, task.recurring);
+  const result = computeNextFireMs(task.cron, anchor, jitter);
+  // Clear wholesale on overflow (re-warms on the next request) rather than track
+  // LRU — the working set is the current task list, well under the cap.
+  if (nextDurableFireCache.size >= NEXT_DURABLE_FIRE_CACHE_MAX) {
+    nextDurableFireCache.clear();
+  }
+  nextDurableFireCache.set(key, result);
+  return result;
 }

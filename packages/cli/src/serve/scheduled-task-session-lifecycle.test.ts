@@ -93,7 +93,10 @@ describe('scheduled-task session lifecycle', () => {
     expect(tasks['a']!.disabledByArchive).toBeUndefined(); // flag cleared
     expect(tasks['a']!.lastFiredAt).toBe(now - (now % 60_000)); // resumed from now
     expect(tasks['b']!.enabled).toBe(true);
-    expect(tasks['b']!.lastFiredAt).toBe(1000); // one-shot anchor untouched
+    // A one-shot's anchor is createdAt — re-seat it too, or unarchive fires it as
+    // a missed slot and deletes it.
+    expect(tasks['b']!.createdAt).toBe(now);
+    expect(tasks['b']!.lastFiredAt).toBe(now - (now % 60_000));
   });
 
   it('leaves a user-disabled task disabled across an unarchive (no flag)', async () => {

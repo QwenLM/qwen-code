@@ -182,9 +182,18 @@ export async function deleteDaemonSessions(params: {
 
   // Deleting a session permanently removes any scheduled task bound to it —
   // the task existed only to run in that session. Best-effort: a failure here
-  // must not turn a successful session delete into an error.
+  // must not turn a successful session delete into an error, but LOG it (like
+  // the archive/unarchive paths) — the session is already gone, so a swallowed
+  // write failure leaves the still-enabled bound task a permanent ghost the
+  // keepalive retries a doomed revive on every tick.
   await removeTasksForSessions(service.getProjectRoot(), removed).catch(
-    () => {},
+    (err: unknown) => {
+      logSessionArchiveWarning(
+        `removeTasksForSessions failed for [${removed.join(', ')}]: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    },
   );
 
   return { removed, notFound, errors: [...closeErrors, ...removeErrors] };
