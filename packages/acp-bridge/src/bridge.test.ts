@@ -1632,7 +1632,7 @@ describe('createAcpSessionBridge', () => {
 
     await expect(artifactChanges).resolves.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ action: 'removed' }),
+        expect.objectContaining({ action: 'removed', reason: 'eviction' }),
         expect.objectContaining({
           action: 'created',
           artifactId: rewoundArtifactId,

@@ -2642,7 +2642,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           action: 'removed',
           artifactId: artifact.id,
           artifact,
-          reason: 'explicit',
+          reason: 'eviction',
         });
       }
     }
