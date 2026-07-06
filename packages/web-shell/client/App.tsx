@@ -1215,6 +1215,20 @@ export function App({
     null,
   );
   const closePanel = useCallback(() => setActivePanel(null), []);
+  // The Settings/Status panel (activePanel) and the Scheduled Tasks page
+  // (mainView) are mutually-exclusive full-pane views — the latter is a
+  // position:absolute overlay that would otherwise cover the former — so opening
+  // one closes the other. Without this, opening Scheduled Tasks then Daemon
+  // Status left the panel rendered behind the Scheduled Tasks overlay, looking
+  // like the button did nothing.
+  const openPanel = useCallback((panel: 'settings' | 'status') => {
+    setMainView('chat');
+    setActivePanel(panel);
+  }, []);
+  const openScheduledTasks = useCallback(() => {
+    setActivePanel(null);
+    setMainView('scheduledTasks');
+  }, []);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus to the Back button when a panel
   // opens (or when switching directly between panels) and back to the composer
@@ -3056,11 +3070,11 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
-            setActivePanel('settings');
+            openPanel('settings');
             return true;
           }
           if (cmd === 'schedule') {
-            setMainView('scheduledTasks');
+            openScheduledTasks();
             return true;
           }
           if (cmd === 'context') {
@@ -3467,6 +3481,8 @@ export function App({
       branchCurrentSession,
       closeMobileDrawer,
       closePanel,
+      openPanel,
+      openScheduledTasks,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -4232,15 +4248,15 @@ export function App({
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
                     closeMobileDrawer();
-                    setActivePanel('settings');
+                    openPanel('settings');
                   }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
-                    setActivePanel('status');
+                    openPanel('status');
                   }}
                   onOpenScheduledTasks={() => {
                     closeMobileDrawer();
-                    setMainView('scheduledTasks');
+                    openScheduledTasks();
                   }}
                   onNewSession={() => {
                     setMainView('chat');
@@ -4635,7 +4651,7 @@ export function App({
                         onShowContext={() =>
                           showContextUsage('/context', false)
                         }
-                        onOpenSettings={() => setActivePanel('settings')}
+                        onOpenSettings={() => openPanel('settings')}
                         ref={statusBarRef}
                         onOpenTasks={() => openTasksPanel()}
                         onReturnToInput={handleReturnToEditor}

@@ -786,6 +786,52 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('opening Daemon Status closes the Scheduled Tasks page (mutually exclusive full-pane views)', async () => {
+    // Regression: both are full-pane views; the Scheduled Tasks fullPage is a
+    // position:absolute overlay, so opening Daemon Status while it was up left
+    // the panel rendered *behind* it — the button looked dead.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-daemon-status"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).toBeNull();
+  });
+
+  it('opening Scheduled Tasks closes an open Settings/Status panel', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
   it('keeps the panel open when transcript blocks carry no actionable approval', async () => {
     // Negative control: a resolved permission is not actionable, so the panel
     // must stay put (guards against an unconditional "close on any block").
