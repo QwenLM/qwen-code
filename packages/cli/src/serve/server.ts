@@ -68,6 +68,7 @@ import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-git
 import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceStatusRoutes,
@@ -783,6 +784,16 @@ export function createServeApp(
     sendBridgeError,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, bridge),
+  });
+
+  // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).
+  // Reads/writes the per-project cron file only; firing stays with the
+  // session-side scheduler. Non-strict mutate: creating a scheduled prompt
+  // is the same capability class as POST /session/:id/prompt.
+  registerScheduledTasksRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
   });
 
   registerPermissionRoutes(app, {
