@@ -392,7 +392,6 @@ describe('pdf utilities', () => {
       expect(result).toEqual({
         success: true,
         text: 'Hello World\nThis is a PDF.',
-        truncated: false,
       });
     });
 
@@ -520,7 +519,6 @@ describe('pdf utilities', () => {
       const result = await extractPDFText('/test.pdf');
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.truncated).toBe(true);
         expect(result.text.length).toBeLessThan(110000);
         expect(result.text).toContain('text truncated');
         expect(result.text).toContain("'pages' parameter");
@@ -545,8 +543,23 @@ describe('pdf utilities', () => {
       const result = await extractPDFText('/test.pdf');
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.truncated).toBe(true);
         expect(result.text.length).toBeLessThan(110000);
+        expect(result.text).toContain('text truncated');
+        expect(result.text).toContain("'pages' parameter");
+      }
+    });
+
+    it('should recover maxBuffer overrun when UTF-8 bytes exceed the threshold', async () => {
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      mockMaxBufferExceeded('\u4e00'.repeat(70_000));
+
+      const result = await extractPDFText('/test.pdf');
+      expect(result.success).toBe(true);
+      if (result.success) {
         expect(result.text).toContain('text truncated');
         expect(result.text).toContain("'pages' parameter");
       }

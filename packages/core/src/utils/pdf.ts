@@ -266,7 +266,7 @@ export async function getPDFPageCount(
 }
 
 export type PDFTextResult =
-  | { success: true; text: string; truncated: boolean }
+  | { success: true; text: string }
   | { success: false; error: string };
 
 /**
@@ -325,10 +325,12 @@ export async function extractPDFText(
     // the buffer overrun was driven by pathological stderr rather than
     // real text output) and still give the password/corrupt detectors a
     // chance to kick in on the partial stderr.
-    if (maxBufferExceeded && stdout.length >= MAX_PDF_TEXT_OUTPUT_CHARS) {
+    if (
+      maxBufferExceeded &&
+      Buffer.byteLength(stdout, 'utf8') >= MAX_PDF_TEXT_OUTPUT_CHARS
+    ) {
       return {
         success: true,
-        truncated: true,
         text:
           stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
           `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
@@ -366,14 +368,13 @@ export async function extractPDFText(
     if (stdout.length > MAX_PDF_TEXT_OUTPUT_CHARS) {
       return {
         success: true,
-        truncated: true,
         text:
           stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
           `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
       };
     }
 
-    return { success: true, text: stdout, truncated: false };
+    return { success: true, text: stdout };
   } catch (e: unknown) {
     return {
       success: false,

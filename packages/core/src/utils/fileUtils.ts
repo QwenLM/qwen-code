@@ -29,6 +29,7 @@ import {
   getPDFPageCount,
   isPdftotextAvailable,
   parsePDFPageRange,
+  PDF_MAX_PAGES_PER_READ,
   PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
   PDF_TEXT_RESULT_MAX_TOKENS,
   shouldRequirePDFPageRange,
@@ -40,14 +41,13 @@ const debugLogger = createDebugLogger('FILE_UTILS');
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
 
-// Upper bound on the on-disk size of a PDF we will hand to the
-// pdftotext text-extraction path. The 10MB inline-data cap is bypassed
-// for this branch (pdftotext streams the file rather than base64-
-// encoding it), so a separate ceiling prevents handing pdftotext an
-// arbitrarily large file it would spend the full 30s timeout chewing
-// on. 100MB is large enough for typical scanned documents and reports
-// while keeping wall-clock and RSS bounded.
-const PDF_EXTRACTION_MAX_MB = 100;
+// Upper bounds on the on-disk size of PDFs we will hand to pdftotext.
+// The 10MB inline-data cap is bypassed for this path, so keep explicit
+// ceilings before spawning poppler. Full reads are tighter because they
+// are the path that triggered context overflows; page-range reads get a
+// larger ceiling so legitimate large documents can still be sampled.
+const PDF_FULL_TEXT_EXTRACTION_MAX_MB = 100;
+const PDF_PAGED_TEXT_EXTRACTION_MAX_MB = 512;
 
 // --- Unicode BOM detection & decoding helpers --------------------------------
 
@@ -1003,27 +1003,76 @@ export async function processSingleFileContent(
       config.getContentGeneratorConfig?.()?.modalities ?? {};
 
     const fileSizeInMB = stats.size / (1024 * 1024);
+    const normalizedPages = pages?.trim();
+    let pageRange:
+      | NonNullable<ReturnType<typeof parsePDFPageRange>>
+      | undefined;
+    if (fileType === 'pdf' && normalizedPages !== undefined) {
+      const invalidPagesDisplay = `Invalid PDF pages parameter: ${relativePathForDisplay}`;
+      const invalidPagesResult = (message: string) => ({
+        llmContent: message,
+        returnDisplay: invalidPagesDisplay,
+        error: message,
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      });
+      const parsedPageRange = parsePDFPageRange(normalizedPages);
+      if (!parsedPageRange) {
+        return invalidPagesResult(
+          `Invalid pages parameter: '${normalizedPages}'. Use formats like '5' or '1-10'.`,
+        );
+      }
+      if (parsedPageRange.lastPage === Infinity) {
+        return invalidPagesResult(
+          `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the ${PDF_MAX_PAGES_PER_READ}-page limit (e.g. '3-22').`,
+        );
+      }
+      if (
+        parsedPageRange.lastPage - parsedPageRange.firstPage + 1 >
+        PDF_MAX_PAGES_PER_READ
+      ) {
+        return invalidPagesResult(
+          `Pages range exceeds maximum of ${PDF_MAX_PAGES_PER_READ} pages per request.`,
+        );
+      }
+      pageRange = parsedPageRange;
+    }
+
     // The 10MB cap exists for inline-data paths (base64 images / audio /
     // video / PDFs), where the encoded payload must fit in the model's
     // data-URI budget. PDF text extraction streams through pdftotext, so
-    // explicit page reads can bypass the inline-data cap. Full-document text
-    // fallback is separately gated by page count or size heuristic below. Use
-    // 9.9MB to leave margin for base64 encoding overhead (#1880). A separate
-    // upper bound applies to full-document extraction so a multi-GB file can't
-    // hang pdftotext until the 30s timeout.
+    // explicit page reads can bypass the inline-data cap but not the
+    // pdftotext-specific ceilings above. Use 9.9MB to leave margin for
+    // base64 encoding overhead (#1880).
     const willExtractPdfText =
-      fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
-    if (!pages && willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
+      fileType === 'pdf' && (pageRange !== undefined || !modalities.pdf);
+    if (
+      !pageRange &&
+      willExtractPdfText &&
+      fileSizeInMB > PDF_FULL_TEXT_EXTRACTION_MAX_MB
+    ) {
       return {
-        llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Split the document into smaller files before retrying.`,
-        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_EXTRACTION_MAX_MB}MB).`,
+        llmContent: `PDF file is too large for full text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document into smaller files before retrying.`,
+        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB).`,
         error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
-    if (willExtractPdfText && !pages) {
-      const pageCount = await getPDFPageCount(filePath);
-      const requirement = shouldRequirePDFPageRange(pageCount, stats.size);
+    if (pageRange && fileSizeInMB > PDF_PAGED_TEXT_EXTRACTION_MAX_MB) {
+      return {
+        llmContent: `PDF file is too large for page-range text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB limit. Split the document into smaller files before retrying.`,
+        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB).`,
+        error: `PDF exceeds page-range extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
+    if (willExtractPdfText && !pageRange) {
+      const heuristicRequirement = shouldRequirePDFPageRange(null, stats.size);
+      let pageCount: number | null = null;
+      let requirement = heuristicRequirement;
+      if (heuristicRequirement.required) {
+        pageCount = await getPDFPageCount(filePath);
+        requirement = shouldRequirePDFPageRange(pageCount, stats.size);
+      }
       debugLogger.debug(
         `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pageCount ?? 'unknown'}, required=${requirement.required}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
       );
@@ -1235,7 +1284,7 @@ export async function processSingleFileContent(
         // When `pages` is provided, always extract text (even if model supports PDF natively).
         // When model supports PDF modality and no pages requested, send as base64.
         // Otherwise, fall back to pdftotext for text extraction.
-        if (!pages && modalities.pdf) {
+        if (!pageRange && modalities.pdf) {
           // Model supports PDF natively — send as base64
           const contentBuffer = await fs.promises.readFile(filePath);
           const base64Data = contentBuffer.toString('base64');
@@ -1261,20 +1310,16 @@ export async function processSingleFileContent(
         }
 
         // Extract text via pdftotext (for pages parameter, or models without PDF support)
-        const pageRange = pages ? parsePDFPageRange(pages) : undefined;
-        const pdfResult = await extractPDFText(
-          filePath,
-          pageRange ?? undefined,
-        );
+        const pdfResult = await extractPDFText(filePath, pageRange);
         if (pdfResult.success) {
           const estimatedTokens = estimatePDFTextOutputTokens(pdfResult.text);
           if (estimatedTokens > PDF_TEXT_RESULT_MAX_TOKENS) {
             const guidance = buildPDFTextTooLargeGuidance(
               displayName,
               estimatedTokens,
-              pages,
+              normalizedPages,
             );
-            if (!pages && largePdfBehavior === 'reference') {
+            if (!pageRange && largePdfBehavior === 'reference') {
               return {
                 llmContent: guidance,
                 returnDisplay: `Referenced large PDF: ${relativePathForDisplay}`,
@@ -1290,7 +1335,9 @@ export async function processSingleFileContent(
             };
           }
 
-          const pagesLabel = pages ? ` (pages ${pages})` : '';
+          const pagesLabel = normalizedPages
+            ? ` (pages ${normalizedPages})`
+            : '';
           return {
             llmContent: pdfResult.text,
             returnDisplay: `Read pdf as text${pagesLabel}: ${relativePathForDisplay}`,
