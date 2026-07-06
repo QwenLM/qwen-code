@@ -931,15 +931,15 @@ describe('<TableRenderer />', () => {
           .find((l) => l.includes('┌')) ?? '';
       return stringWidth(line.trim());
     };
-    // Defaults to isPending (this block covers streaming behavior); pass false
-    // to exercise a committed table's all-rows format decision.
-    const render = (rows: string[][], isPending = true) =>
+    // Defaults to streaming (this block covers streaming behavior); pass false
+    // to exercise a completed table's all-rows format decision.
+    const render = (rows: string[][], isStreaming = true) =>
       renderWithProviders(
         <TableRenderer
           headers={headers}
           rows={rows}
           contentWidth={80}
-          isPending={isPending}
+          isStreaming={isStreaming}
         />,
       ).lastFrame() ?? '';
 

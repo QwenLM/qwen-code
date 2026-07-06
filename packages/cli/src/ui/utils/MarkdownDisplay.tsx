@@ -494,6 +494,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             aligns={tableAligns}
             enableInlineMath={renderVisualBlocks}
             isPending={isPending}
+            // A following non-table line closed this table: it is COMPLETE and
+            // will gain no more rows, so it is not the streaming frontier. Decide
+            // its format from all rows (not just the first) so it does not flip
+            // horizontal→vertical when the message finally commits.
+            isFrontier={false}
             availableTerminalHeight={availableTerminalHeight}
           />,
         );
@@ -705,6 +710,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
         isPending={isPending}
+        // End of content: this table is at the streaming frontier and may still
+        // gain rows, so anchor its format to the first row while pending.
+        isFrontier={true}
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
@@ -1018,7 +1026,15 @@ interface RenderTableProps {
   contentWidth: number;
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
+  /** True while the whole message is still streaming — drives the height clamp. */
   isPending?: boolean;
+  /**
+   * True only for the table at the streaming frontier (end of content, may still
+   * gain rows). A completed mid-content table passes false so its format is
+   * decided from all rows and does not flip when the message commits. Defaults
+   * true so a bare RenderTable behaves like the frontier.
+   */
+  isFrontier?: boolean;
   availableTerminalHeight?: number;
 }
 
@@ -1029,8 +1045,15 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   aligns,
   enableInlineMath = false,
   isPending = false,
+  isFrontier = true,
   availableTerminalHeight,
 }) => {
+  // The height clamp tracks whether the MESSAGE is streaming (overflow can grow
+  // on any tick). The format anchor tracks whether THIS TABLE is still streaming
+  // — only the frontier table anchors its format to the first row; a completed
+  // mid-content table measures all rows. Keeping the clamp on isPending (not
+  // isFrontier) means a mid-content table is still bounded, so the estimator's
+  // clamped cost still matches the render and cannot under-estimate.
   const maxHeight =
     isPending && availableTerminalHeight !== undefined
       ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
@@ -1042,7 +1065,7 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
       contentWidth={contentWidth}
       aligns={aligns}
       enableInlineMath={enableInlineMath}
-      isPending={isPending}
+      isStreaming={isPending && isFrontier}
       maxHeight={maxHeight}
     />
   );

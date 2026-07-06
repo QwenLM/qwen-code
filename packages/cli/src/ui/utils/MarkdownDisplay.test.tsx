@@ -568,6 +568,25 @@ Done.`.replace(/\n/g, eol);
       expect(stripAnsi(lastFrame() ?? '')).toContain('ZZZ');
     });
 
+    it('does not let a backtick fence close an open tilde fence', () => {
+      // An open ~~~ fence must not be closed by an inner ``` (different char), so
+      // the `| … |` line after it stays code content. Guards the fence-char check
+      // for tilde fences (existing tests only cover backticks).
+      const text = `~~~
+| code |
+\`\`\`
+| ZZZ | YYY |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={20}
+        />,
+      );
+      expect(stripAnsi(lastFrame() ?? '')).toContain('ZZZ');
+    });
+
     it('renders the table once the separator matches the header columns', () => {
       const text = `| Alpha | Beta |
 |---|---|
@@ -608,6 +627,30 @@ Done.`.replace(/\n/g, eol);
       const output = lastFrame() ?? '';
       expect(output).toContain('Alpha');
       expect(output).toContain('│');
+    });
+
+    it('uses the final (all-rows) format for a completed mid-content table while streaming', () => {
+      // A table CLOSED by a following line is complete even while the message
+      // streams on, so its format is decided from all rows now — it must not
+      // render horizontal and then flip to vertical at commit. Short first row +
+      // a tall later row → vertical (no box border), not a horizontal grid.
+      const tall = Array.from({ length: 80 }, (_, i) => `w${i}`).join(' ');
+      const text = `| A | B |
+|---|---|
+| x | y |
+| ${tall} | y |
+trailing text`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={40}
+        />,
+      );
+      const output = stripAnsi(lastFrame() ?? '');
+      expect(output).toContain('trailing text'); // the table is mid-content
+      expect(output).not.toContain('┌'); // vertical, no horizontal box
     });
 
     it('does not hold back pipe lines inside a pending code block', () => {

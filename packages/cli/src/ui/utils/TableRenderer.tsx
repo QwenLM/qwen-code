@@ -64,12 +64,13 @@ interface TableRendererProps {
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
   /**
-   * True while the table is still streaming. The horizontal-vs-vertical decision
-   * is then anchored to the first row so the format cannot flip as later rows
-   * arrive; a committed table (false/undefined) measures every row for the most
-   * readable layout.
+   * True while THIS table is still streaming its rows (the frontier). The
+   * horizontal-vs-vertical decision is then anchored to the first row so the
+   * format cannot flip as later rows arrive; a completed table (false/undefined)
+   * — committed, or a mid-content table already closed by following text —
+   * measures every row for the most readable layout.
    */
-  isPending?: boolean;
+  isStreaming?: boolean;
   /**
    * Maximum rendered text lines the table may occupy. When set (streaming
    * preview) and the fully rendered table exceeds it, output is clipped to
@@ -442,7 +443,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
-  isPending = false,
+  isStreaming = false,
   maxHeight,
 }) => {
   const colCount = headers.length;
@@ -559,18 +560,19 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
-  // While STREAMING (isPending), measure only the header + the FIRST data row.
+  // While STREAMING (isStreaming), measure only the header + the FIRST data row.
   // Using every row lets a later, taller row push maxRowLines over the threshold
   // and flip an already-horizontal table to vertical mid-stream — a visible
   // format change. The first row is representative for the common case, so
-  // anchoring to it keeps the format stable as rows stream in. A COMMITTED table
-  // has all its rows and no flip concern, so it measures EVERY row for the most
-  // readable layout (a short first row followed by tall rows still goes vertical).
-  // Column WIDTHS always track all rows (redraw-on-wider is unchanged); only the
+  // anchoring to it keeps the format stable as rows stream in. A COMPLETED table
+  // (committed, or a mid-content table already closed by text) has all its rows
+  // and no flip concern, so it measures EVERY row for the most readable layout (a
+  // short first row followed by tall rows still goes vertical). Column WIDTHS
+  // always track all rows (redraw-on-wider is unchanged); only the
   // horizontal-vs-vertical CHOICE is anchored to the first row while streaming.
   function calculateMaxRowLines(): number {
     let maxLines = 1;
-    const rowsToMeasure = isPending ? rowMetrics.slice(0, 1) : rowMetrics;
+    const rowsToMeasure = isStreaming ? rowMetrics.slice(0, 1) : rowMetrics;
     for (let i = 0; i < colCount; i++) {
       const headerWrapped = wrapText(
         headerMetrics[i]!.rendered,
