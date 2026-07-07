@@ -76,7 +76,7 @@ function userMessage(id: string): Message {
 }
 
 function userShellMessage(id: string): Message {
-  return { id, role: 'user_shell', command: 'npm test' };
+  return { id, role: 'user_shell', command: 'npm test', output: '' };
 }
 
 function assistantMessage(id: string): Message {
@@ -155,6 +155,17 @@ describe('getFloatingTodos', () => {
       todoWriteMessage('m2', [todo('2', 'pending')]),
     ]);
     expect(state.todos.map((t) => t.id)).toEqual(['2']);
+    expect(state.sourceMessageId).toBe('m2');
+  });
+
+  it('shows a new active list started after clearing a stale active one', () => {
+    const state = getFloatingTodos([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      userMessage('u1'),
+      todoWriteMessage('m2', [todo('2', 'pending')]),
+    ]);
+    expect(state.todos.map((t) => t.id)).toEqual(['2']);
+    expect(state.allCompleted).toBe(false);
     expect(state.sourceMessageId).toBe('m2');
   });
 
