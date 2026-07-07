@@ -8,7 +8,7 @@ type TokenCount = number;
  */
 export type TokenLimitType = 'input' | 'output';
 
-export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
+export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;

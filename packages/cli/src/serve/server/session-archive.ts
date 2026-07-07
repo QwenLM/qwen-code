@@ -14,6 +14,11 @@ import {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
+import {
+  disableTasksForSessions,
+  enableTasksForSessions,
+  removeTasksForSessions,
+} from '../scheduled-task-session-lifecycle.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -173,6 +178,22 @@ export async function deleteDaemonSessions(params: {
         closeErrors.push({ sessionId, error: message });
       }
     }),
+  );
+
+  // Deleting a session permanently removes any scheduled task bound to it —
+  // the task existed only to run in that session. Best-effort: a failure here
+  // must not turn a successful session delete into an error, but LOG it (like
+  // the archive/unarchive paths) — the session is already gone, so a swallowed
+  // write failure leaves the still-enabled bound task a permanent ghost the
+  // keepalive retries a doomed revive on every tick.
+  await removeTasksForSessions(service.getProjectRoot(), removed).catch(
+    (err: unknown) => {
+      logSessionArchiveWarning(
+        `removeTasksForSessions failed for [${removed.join(', ')}]: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    },
   );
 
   return { removed, notFound, errors: [...closeErrors, ...removeErrors] };
@@ -381,6 +402,22 @@ export async function archiveDaemonSessions(params: {
     errors,
   });
 
+  // Archiving a session pauses any scheduled task bound to it (kept on disk,
+  // recoverable on unarchive). Best-effort — never fail the archive over it, but
+  // LOG a write failure: if the task's `enabled` flag isn't flipped, the
+  // keepalive still sees it enabled + bound and will revive the just-archived
+  // session so the task keeps firing. Logging makes that broken coupling
+  // diagnosable rather than silent.
+  await disableTasksForSessions(service.getProjectRoot(), archived).catch(
+    (err: unknown) => {
+      logSessionArchiveWarning(
+        `disableTasksForSessions failed for [${archived.join(', ')}]: ${
+          err instanceof Error ? err.message : String(err)
+        } — bound tasks may keep firing until reconciled`,
+      );
+    },
+  );
+
   return { archived, alreadyArchived, notFound, errors };
 }
 
@@ -437,6 +474,30 @@ export async function unarchiveDaemonSessions(params: {
     notFound,
     errors,
   });
+
+  // Unarchiving a session resumes any scheduled task bound to it (re-enabled,
+  // anchor reset to now). Also run it for sessions that were ALREADY active:
+  // enableTasksForSessions is idempotent (it only re-enables archive-disabled
+  // tasks), so re-unarchiving a session whose task was stranded
+  // (`disabledByArchive: true`) by a PRIOR failed enable recovers it — otherwise
+  // that task is unrecoverable (PATCH-enable 409s on the stale flag, keepalive
+  // skips it). Surface a write failure in `errors` (and log it) instead of
+  // swallowing, so a stranded task isn't left silent.
+  const resumeSessionIds = [...new Set([...unarchived, ...alreadyActive])];
+  try {
+    await enableTasksForSessions(service.getProjectRoot(), resumeSessionIds);
+  } catch (err) {
+    logSessionArchiveWarning(
+      `enableTasksForSessions failed for [${resumeSessionIds.join(', ')}]: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    // Report against the full resume set: a failed already-active recovery must
+    // surface too, or its stranded task stays silently unrecoverable.
+    for (const sessionId of resumeSessionIds) {
+      errors.push({ sessionId, error: err });
+    }
+  }
 
   return { unarchived, alreadyActive, notFound, errors };
 }

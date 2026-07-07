@@ -167,6 +167,12 @@ export interface OpenDialogActionReturn {
   /** Optional session name for /branch — passed through to handleBranch. */
   name?: string;
 
+  /**
+   * Optional persist scope for model dialog — controls which settings file
+   * the model selection is written to ('workspace' = project, 'user' = global).
+   */
+  persistScope?: 'workspace' | 'user';
+
   dialog:
     | 'help'
     | 'arena_start'

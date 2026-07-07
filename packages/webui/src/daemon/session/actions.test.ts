@@ -28,6 +28,8 @@ describe('getConnectionAfterSessionClear', () => {
         loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
+        errorStatus: 404,
+        missingSession: true,
       } as DaemonConnectionState,
       'session-a',
     );
@@ -38,6 +40,8 @@ describe('getConnectionAfterSessionClear', () => {
       loadingTranscript: undefined,
       catchingUp: undefined,
       error: undefined,
+      errorStatus: undefined,
+      missingSession: false,
     });
     expect(next).not.toHaveProperty('sessionId');
     expect(next).not.toHaveProperty('clientId');
