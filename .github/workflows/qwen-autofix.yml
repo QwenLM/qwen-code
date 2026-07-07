@@ -1409,7 +1409,7 @@ jobs:
               echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
               echo "**Failure:**"
-              head -c 1500 "${WORKDIR}/failure.md"
+              head -c 1500 "${WORKDIR}/failure.md" | sed 's/<!--[^>]*-->//g'
               echo
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"

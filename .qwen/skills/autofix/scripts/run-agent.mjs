@@ -84,7 +84,9 @@ function runQwen(options, prompt) {
   const log = createWriteStream(file(options.workdir, 'agent.log'), {
     flags: 'w',
   });
+  log.on('error', () => {});
   let outputTail = '';
+  let loopDetected = false;
   let settled = false;
   let timedOut = false;
   let timer;
@@ -102,13 +104,14 @@ function runQwen(options, prompt) {
         resolve({
           ...result,
           timedOut,
-          loopDetected: isLoopGuardOutput(outputTail),
+          loopDetected: loopDetected || isLoopGuardOutput(outputTail),
         });
       });
     };
 
     const record = (chunk, stream) => {
       const text = chunk.toString('utf8');
+      if (!loopDetected && isLoopGuardOutput(text)) loopDetected = true;
       outputTail = (outputTail + text).slice(-20_000);
       log.write(chunk);
       stream.write(chunk);

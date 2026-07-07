@@ -913,13 +913,14 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
     expect(reviewAddressReportStep).toContain('human should take over');
+    expect(reviewAddressReportStep).toContain("sed 's/<!--[^>]*-->//g'");
   });
 
   it('writes agent output to a log and marks loop guard failures for handoff', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run (turn_tool_call_cap: too many tool calls)\\n');",
+        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
         'process.exit(1);',
       ]);
 
@@ -929,6 +930,33 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
         'turn_tool_call_cap',
       );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'turn_tool_call_cap',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('handles agent log stream errors without crashing immediately', () => {
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
+      "log.on('error', () => {});",
+    );
+  });
+
+  it('detects loop guard output before it falls out of the log tail', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Loop detection halted the run\\n');",
+        "process.stdout.write('x'.repeat(21_000));",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'turn_tool_call_cap',
       );
