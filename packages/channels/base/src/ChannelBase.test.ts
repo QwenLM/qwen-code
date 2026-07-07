@@ -8485,6 +8485,30 @@ describe('ChannelBase', () => {
         expect(prompt).toContain('Unit tests failed');
         expect(Array.from(prompt).length).toBeLessThanOrEqual(8_500);
       });
+
+      it('keeps the payload present with oversized title and summary', () => {
+        const target = resolveChannelWebhookTarget(
+          'dingtalk-main',
+          config,
+          'github-ci',
+          'default',
+        );
+        const task: ChannelWebhookTask = {
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'T'.repeat(20_000),
+          summary: 'S'.repeat(20_000),
+          payload: { marker: 'payload-survives' },
+        };
+
+        const prompt = buildChannelWebhookPrompt(task, target);
+
+        expect(prompt.length).toBeLessThanOrEqual(8_500);
+        expect(prompt).toContain('Event:');
+        expect(prompt).toContain('payload-survives');
+      });
     });
 
     it('runs a loop prompt as a follow-up and pushes the result proactively', async () => {

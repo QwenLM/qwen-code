@@ -3,6 +3,8 @@ import { sanitizePromptText, sanitizeQuotedText } from './sanitize.js';
 
 const MAX_WEBHOOK_PROMPT_CHARS = 8_500;
 const MAX_WEBHOOK_PAYLOAD_CHARS = 6_000;
+const MAX_WEBHOOK_TITLE_CHARS = 500;
+const MAX_WEBHOOK_SUMMARY_CHARS = 1_000;
 
 export interface ChannelWebhookTargetConfig {
   chatId: string;
@@ -73,7 +75,10 @@ export function buildChannelWebhookPrompt(
 ): string {
   const eventType = sanitizeQuotedText(task.eventType, 128);
   const source = sanitizeQuotedText(task.source, 128);
-  const title = sanitizePromptText(task.title);
+  const title = truncateCodePoints(
+    sanitizePromptText(task.title),
+    MAX_WEBHOOK_TITLE_CHARS,
+  );
   const payload = truncateCodePoints(
     sanitizePromptText(JSON.stringify(task.payload, null, 2)),
     MAX_WEBHOOK_PAYLOAD_CHARS,
@@ -83,12 +88,18 @@ export function buildChannelWebhookPrompt(
     'Webhook task running unattended. No human is present.',
     'Your final response is delivered to this chat automatically; do the required work and put the result in your final response.',
     '',
+    `Event: ${eventType} from ${source}`,
     `Target chat: ${sanitizeQuotedText(target.chatId, 128)}`,
     `Title: ${title}`,
   ];
 
   if (task.summary !== undefined) {
-    lines.push(`Summary: ${sanitizePromptText(task.summary)}`);
+    lines.push(
+      `Summary: ${truncateCodePoints(
+        sanitizePromptText(task.summary),
+        MAX_WEBHOOK_SUMMARY_CHARS,
+      )}`,
+    );
   }
 
   lines.push('', 'Payload:', payload);
