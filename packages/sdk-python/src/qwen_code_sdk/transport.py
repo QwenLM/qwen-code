@@ -240,4 +240,10 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     elif options.session_id:
         args.extend(["--session-id", options.session_id])
 
+    if options.fallback_model:
+        args.extend(["--fallback-model", ",".join(options.fallback_model)])
+
+    if options.proxy:
+        args.extend(["--proxy", options.proxy])
+
     return args

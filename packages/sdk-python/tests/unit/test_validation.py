@@ -172,3 +172,15 @@ def test_rejects_mcp_servers() -> None:
         validate_query_options(
             QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
         )
+
+
+def test_rejects_fallback_model_exceeding_max() -> None:
+    with pytest.raises(ValidationError, match="fallback_model supports a maximum of 3"):
+        validate_query_options(
+            QueryOptions(fallback_model=["a", "b", "c", "d"])
+        )
+
+
+def test_rejects_empty_proxy() -> None:
+    with pytest.raises(ValidationError, match="proxy cannot be empty"):
+        validate_query_options(QueryOptions(proxy="   "))

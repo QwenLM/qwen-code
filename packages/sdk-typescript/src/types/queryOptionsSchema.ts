@@ -181,6 +181,11 @@ export const QueryOptionsSchema = z
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    fallbackModel: z
+      .array(z.string())
+      .max(3, 'fallbackModel supports a maximum of 3 models')
+      .optional(),
+    proxy: z.string().min(1, 'proxy cannot be empty').optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

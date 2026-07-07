@@ -70,6 +70,8 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    fallbackModel: options.fallbackModel,
+    proxy: options.proxy,
   });
 
   const queryOptions: QueryOptions = {

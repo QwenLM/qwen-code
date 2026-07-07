@@ -94,4 +94,51 @@ describe('query()', () => {
       }),
     ).toThrow(/systemPrompt/);
   });
+
+  it('passes fallbackModel to ProcessTransport', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    query({
+      prompt: 'hello',
+      options: {
+        fallbackModel: ['qwen-plus', 'qwen-turbo'],
+      } satisfies QueryOptions,
+    });
+
+    expect(mockProcessTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fallbackModel: ['qwen-plus', 'qwen-turbo'],
+      }),
+    );
+  });
+
+  it('passes proxy to ProcessTransport', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    query({
+      prompt: 'hello',
+      options: {
+        proxy: 'http://user:pass@proxy.example.com:8080',
+      } satisfies QueryOptions,
+    });
+
+    expect(mockProcessTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: 'http://user:pass@proxy.example.com:8080',
+      }),
+    );
+  });
+
+  it('rejects more than 3 fallbackModel entries', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    expect(() =>
+      query({
+        prompt: 'hello',
+        options: {
+          fallbackModel: ['a', 'b', 'c', 'd'],
+        } satisfies QueryOptions,
+      }),
+    ).toThrow(/fallbackModel/);
+  });
 });

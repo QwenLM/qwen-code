@@ -352,6 +352,55 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should include --fallback-model argument when provided', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        fallbackModel: ['qwen-plus', 'qwen-turbo'],
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining(['--fallback-model', 'qwen-plus,qwen-turbo']),
+        expect.any(Object),
+      );
+    });
+
+    it('should include --proxy argument when provided', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        proxy: 'http://user:pass@proxy.example.com:8080',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--proxy',
+          'http://user:pass@proxy.example.com:8080',
+        ]),
+        expect.any(Object),
+      );
+    });
+
     it('should throw if aborted before initialization', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

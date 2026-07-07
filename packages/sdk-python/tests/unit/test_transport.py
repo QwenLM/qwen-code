@@ -68,6 +68,23 @@ def test_build_cli_arguments_maps_supported_options() -> None:
     ]
 
 
+def test_build_cli_arguments_includes_fallback_model_and_proxy() -> None:
+    args = build_cli_arguments(
+        QueryOptions(
+            fallback_model=["qwen-plus", "qwen-turbo"],
+            proxy="http://user:pass@proxy.example.com:8080",
+        )
+    )
+
+    assert "--fallback-model" in args
+    assert args[args.index("--fallback-model") + 1] == "qwen-plus,qwen-turbo"
+    assert "--proxy" in args
+    assert (
+        args[args.index("--proxy") + 1]
+        == "http://user:pass@proxy.example.com:8080"
+    )
+
+
 def test_cli_argument_precedence_prefers_resume_then_continue_then_session_id() -> None:
     args = build_cli_arguments(
         QueryOptions(

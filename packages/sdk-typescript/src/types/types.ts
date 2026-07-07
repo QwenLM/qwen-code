@@ -46,6 +46,8 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  fallbackModel?: string[];
+  proxy?: string;
 };
 
 export interface QuerySystemPromptPreset {
@@ -464,6 +466,21 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Fallback model(s) for capacity errors (429/503/529).
+   * Up to 3 models, tried in order when the primary model is unavailable.
+   * @example ['qwen-plus', 'qwen-turbo']
+   */
+  fallbackModel?: string[];
+
+  /**
+   * Proxy URL for the Qwen CLI process.
+   * Format: `schema://user:password@host:port`
+   * @example 'http://user:pass@proxy.example.com:8080'
+   * @deprecated Use the "proxy" setting in settings.json instead.
+   */
+  proxy?: string;
 
   /**
    * Timeout configuration for various SDK operations.

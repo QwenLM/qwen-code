@@ -70,6 +70,15 @@ def validate_query_options(options: QueryOptions) -> None:
             "Remove the mcp_servers option or use the TypeScript SDK."
         )
 
+    if options.fallback_model and len(options.fallback_model) > 3:
+        raise ValidationError(
+            "fallback_model supports a maximum of 3 models. "
+            f"Got {len(options.fallback_model)}."
+        )
+
+    if options.proxy is not None and not options.proxy.strip():
+        raise ValidationError("proxy cannot be empty")
+
 
 def _validate_optional_callable(
     value: object,

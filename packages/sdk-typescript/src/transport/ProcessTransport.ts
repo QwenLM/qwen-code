@@ -335,6 +335,14 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    if (this.options.fallbackModel && this.options.fallbackModel.length > 0) {
+      args.push('--fallback-model', this.options.fallbackModel.join(','));
+    }
+
+    if (this.options.proxy) {
+      args.push('--proxy', this.options.proxy);
+    }
+
     return args;
   }
 
