@@ -54,6 +54,15 @@ const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
     mockRunManagedRememberByAgent: vi.fn(),
   }));
 
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
 vi.mock('@agentclientprotocol/sdk', () => ({
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
@@ -119,12 +128,7 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  createDebugLogger: () => ({
-    debug: vi.fn(),
-    error: vi.fn(),
-    warn: vi.fn(),
-    info: vi.fn(),
-  }),
+  createDebugLogger: () => mockDebugLogger,
   registerAcpEventLoopLagGauge: vi.fn(),
   startEventLoopLagMonitor: vi.fn(() => ({
     snapshot: vi.fn(() => ({
@@ -3463,6 +3467,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         details: 'remember agent stopped early',
       },
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('logs sanitized details for workspace memory failures', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue(
+      new Error('Authorization: Bearer secret-token-value'),
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      }),
+    ).rejects.toMatchObject({
+      code: -32099,
+      message: 'Workspace memory remember failed',
+      data: {
+        errorKind: 'remember_failed',
+        details: 'Authorization: <redacted>',
+      },
+    });
+
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      'Authorization: <redacted>',
+    );
+    expect(JSON.stringify(mockDebugLogger.error.mock.calls)).not.toContain(
+      'secret-token-value',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

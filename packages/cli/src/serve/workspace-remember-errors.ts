@@ -8,6 +8,10 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 
 const MAX_REMEMBER_ERROR_DETAILS_CHARS = 1000;
 const MAX_REMEMBER_ERROR_CAUSE_DEPTH = 50;
+const REMEMBER_ERROR_INVISIBLE_RE =
+  /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+// eslint-disable-next-line no-control-regex
+const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
 
 function errorCodeFromRecord(
   record: Record<string, unknown>,
@@ -95,32 +99,10 @@ function rawRememberErrorDetails(
   return detailFromRecord(err as Record<string, unknown>, seen, depth);
 }
 
-function shouldReplaceControlChar(code: number): boolean {
-  return (
-    code <= 31 ||
-    (code >= 127 && code <= 159) ||
-    (code >= 0x200b && code <= 0x200f) ||
-    (code >= 0x2028 && code <= 0x202e) ||
-    (code >= 0x2060 && code <= 0x2064) ||
-    (code >= 0x2066 && code <= 0x2069) ||
-    code === 0xfeff
-  );
-}
-
 function replaceControlChars(details: string): string {
-  let normalized = '';
-  let last = 0;
-  for (let index = 0; index < details.length; ) {
-    const code = details.codePointAt(index);
-    if (code === undefined) break;
-    const width = code > 0xffff ? 2 : 1;
-    if (shouldReplaceControlChar(code)) {
-      normalized += details.slice(last, index) + ' ';
-      last = index + width;
-    }
-    index += width;
-  }
-  return last === 0 ? details : normalized + details.slice(last);
+  return details
+    .replace(REMEMBER_ERROR_INVISIBLE_RE, ' ')
+    .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
 
 function sanitizeRememberErrorDetails(details: string): string | undefined {

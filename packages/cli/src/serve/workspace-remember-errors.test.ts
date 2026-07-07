@@ -85,7 +85,14 @@ describe('extractRememberErrorDetails', () => {
   });
 
   it('normalizes hidden separators before redacting credentials', () => {
-    for (const separator of ['\u200b', '\u2060', '\u2064']) {
+    for (const separator of [
+      '\u00ad',
+      '\u061c',
+      '\u180e',
+      '\u200b',
+      '\u2060',
+      '\u2064',
+    ]) {
       const details = extractRememberErrorDetails(
         new Error(`Authorization: Bearer${separator}secret-token-value`),
       );
@@ -96,7 +103,14 @@ describe('extractRememberErrorDetails', () => {
   });
 
   it('redacts credentials with hidden separators inside token values', () => {
-    for (const separator of ['\u200b', '\u2060', '\u2064']) {
+    for (const separator of [
+      '\u00ad',
+      '\u061c',
+      '\u180e',
+      '\u200b',
+      '\u2060',
+      '\u2064',
+    ]) {
       const details = extractRememberErrorDetails(
         new Error(`Authorization: Bearer secret${separator}token-value`),
       );

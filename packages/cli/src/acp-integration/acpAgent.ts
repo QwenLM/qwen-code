@@ -289,6 +289,14 @@ function workspaceMemoryErrorData(
   }
 }
 
+function workspaceMemoryDebugDetails(err: unknown): string {
+  try {
+    return extractRememberErrorDetails(err) ?? '<details unavailable>';
+  } catch {
+    return '<details unavailable>';
+  }
+}
+
 function parseAcpLocalReadRootsEnv(
   raw = process.env[QWEN_ACP_LOCAL_READ_ROOTS_ENV],
 ): string[] {
@@ -5839,7 +5847,10 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          debugLogger.error('Workspace memory remember failed:', err);
+          debugLogger.error(
+            'Workspace memory remember failed:',
+            workspaceMemoryDebugDetails(err),
+          );
           if (childSignal.aborted) {
             throw new RequestError(
               -32099,
@@ -5910,7 +5921,10 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          debugLogger.error('Workspace memory forget failed:', err);
+          debugLogger.error(
+            'Workspace memory forget failed:',
+            workspaceMemoryDebugDetails(err),
+          );
           if (childSignal.aborted) {
             throw new RequestError(
               -32099,
@@ -5968,7 +5982,10 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          debugLogger.error('Workspace memory dream failed:', err);
+          debugLogger.error(
+            'Workspace memory dream failed:',
+            workspaceMemoryDebugDetails(err),
+          );
           if (childSignal.aborted) {
             throw new RequestError(-32099, 'Workspace memory dream timed out', {
               errorKind: 'dream_timeout',
