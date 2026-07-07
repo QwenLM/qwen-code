@@ -1858,8 +1858,7 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_request') {
-      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${envelope.senderId ?? ''}`;
-      this.setPendingClear(pendingKey);
+      this.setPendingClear(this.clearPendingKey(envelope));
       await this.sendMessage(
         envelope.chatId,
         'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
@@ -1917,7 +1916,7 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
-      const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${envelope.senderId ?? ''}`;
+      const pendingKey = this.clearPendingKey(envelope);
       const expiresAt = this.pendingClears.get(pendingKey);
       this.pendingClears.delete(pendingKey);
       if (expiresAt === undefined || expiresAt < Date.now()) {
@@ -1959,10 +1958,17 @@ export abstract class ChannelBase {
   private shouldClassifyChannelMemoryIntent(text: string): boolean {
     const normalized = text.replace(PROMPT_UNSAFE_INVISIBLES, '').trim();
     return (
+      this.channelMemory !== undefined &&
       this.memoryIntentClassifier !== undefined &&
       !normalized.startsWith('/') &&
       CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE.test(normalized)
     );
+  }
+
+  private clearPendingKey(envelope: Envelope): string {
+    return `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${
+      envelope.senderId ?? ''
+    }`;
   }
 
   private setPendingClear(key: string): void {

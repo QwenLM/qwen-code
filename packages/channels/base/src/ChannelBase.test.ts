@@ -882,6 +882,32 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('llm memory classifier is skipped when channel memory is not configured', async () => {
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'list',
+          confidence: 0.88,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '你现在都记住了哪些东西',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
     it('llm memory classifier can list memory for natural questions', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
@@ -1265,6 +1291,36 @@ describe('ChannelBase', () => {
       });
       expect(ch.sent).toEqual([
         { chatId: 'group-1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('natural clear rejects confirm from a different sender', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice', 'bob'] },
+        { channelMemory },
+      );
+
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
+      await ch.handleInbound(
+        envelope({ text: '确认清空记忆', senderId: 'bob' }),
+      );
+
+      expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
+        {
+          chatId: 'chat1',
+          text: 'No pending clear request. Say "清空记忆" first.',
+        },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
