@@ -1857,6 +1857,14 @@ export abstract class ChannelBase {
       return;
     }
 
+    if (envelope.isGroup && intent.kind !== 'list') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Channel memory cannot be changed in group chats.',
+      );
+      return;
+    }
+
     if (intent.kind === 'clear_request') {
       this.setPendingClear(this.clearPendingKey(envelope));
       await this.sendMessage(

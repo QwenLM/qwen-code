@@ -73,7 +73,7 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
     expect(secondBridge.newSession).toHaveBeenCalledWith('/tmp');
   });
 
-  it('rejects prose-wrapped JSON output', async () => {
+  it('rejects prose-wrapped JSON output with a diagnostic excerpt', async () => {
     const bridge = bridgeWithResponse(
       'Here is the classification: {"intent":"list","confidence":0.86}',
     );
@@ -81,7 +81,9 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
 
     await expect(
       classifier.classifyChannelMemoryIntent('你记住了什么'),
-    ).rejects.toThrow('Classifier response did not contain a JSON object.');
+    ).rejects.toThrow(
+      'Classifier response did not contain a JSON object. Got: Here is the classification:',
+    );
   });
 
   it('normalizes invalid classifier fields to none', async () => {

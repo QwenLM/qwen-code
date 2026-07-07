@@ -3,6 +3,7 @@ import type {
   ChannelMemoryIntentClassifier,
   ChannelMemoryIntentClassifierResult,
 } from '@qwen-code/channel-base';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 
 const CLASSIFIER_PROMPT = `Classify whether the user is trying to manage channel memory.
 
@@ -29,7 +30,12 @@ function extractJsonObject(text: string): unknown {
   const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```$/iu);
   const json = (fenced?.[1] ?? trimmed).trim();
   if (!json.startsWith('{') || !json.endsWith('}')) {
-    throw new Error('Classifier response did not contain a JSON object.');
+    throw new Error(
+      `Classifier response did not contain a JSON object. Got: ${sanitizeLogText(
+        text,
+        200,
+      )}`,
+    );
   }
   return JSON.parse(json) as unknown;
 }

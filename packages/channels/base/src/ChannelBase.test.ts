@@ -805,7 +805,7 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).not.toContain('/global-only');
     });
 
-    it('natural remember appends memory for an allowed group user', async () => {
+    it('natural remember rejects group memory writes', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -826,16 +826,12 @@ describe('ChannelBase', () => {
         }),
       );
 
-      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
-        {
-          channelName: 'test-chan',
-          chatId: 'group-1',
-          threadId: undefined,
-        },
-        '发布前跑 npm run build',
-      );
+      expect(channelMemory.appendChannelMemory).not.toHaveBeenCalled();
       expect(ch.sent).toEqual([
-        { chatId: 'group-1', text: 'Channel memory updated.' },
+        {
+          chatId: 'group-1',
+          text: 'Channel memory cannot be changed in group chats.',
+        },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
@@ -1244,7 +1240,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('natural group clear requires confirmation and then clears group memory', async () => {
+    it('natural group clear requests are rejected', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
@@ -1269,28 +1265,8 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([
         {
           chatId: 'group-1',
-          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+          text: 'Channel memory cannot be changed in group chats.',
         },
-      ]);
-
-      ch.sent = [];
-      await ch.handleInbound(
-        envelope({
-          text: '确认清空记忆',
-          senderId: 'alice',
-          isGroup: true,
-          chatId: 'group-1',
-          isMentioned: true,
-        }),
-      );
-
-      expect(channelMemory.clearChannelMemory).toHaveBeenCalledWith({
-        channelName: 'test-chan',
-        chatId: 'group-1',
-        threadId: undefined,
-      });
-      expect(ch.sent).toEqual([
-        { chatId: 'group-1', text: 'Channel memory cleared.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
