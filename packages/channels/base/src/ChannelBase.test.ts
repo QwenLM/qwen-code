@@ -8543,7 +8543,7 @@ describe('ChannelBase', () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
           'CI failed because lint broke.',
         );
-        const ch = createChannel({ approvalMode: 'auto', webhooks });
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
         ch.proactiveSupported = true;
 
         await expect(ch.runWebhookTask(webhookTask)).resolves.toBe(
@@ -8586,7 +8586,7 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).not.toHaveBeenCalled();
       });
 
-      it.each([undefined, 'default', 'auto-edit'] as const)(
+      it.each([undefined, 'default', 'auto-edit', 'auto'] as const)(
         'rejects %s approval mode before prompting',
         async (approvalMode) => {
           const ch = createChannel({ approvalMode, webhooks });
@@ -8603,7 +8603,7 @@ describe('ChannelBase', () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
           'CI failed because lint broke.',
         );
-        const ch = createChannel({ approvalMode: 'auto', webhooks });
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
         ch.proactiveSupported = true;
         ch.proactiveError = new Error('delivery failed');
 
@@ -8627,7 +8627,7 @@ describe('ChannelBase', () => {
           (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
             new Promise<string>(() => {}),
           );
-          const ch = createChannel({ approvalMode: 'auto', webhooks });
+          const ch = createChannel({ approvalMode: 'yolo', webhooks });
           ch.proactiveSupported = true;
 
           const run = ch.runWebhookTask(webhookTask, { timeoutMs: 1000 });
@@ -8654,7 +8654,7 @@ describe('ChannelBase', () => {
         (bridge.prompt as ReturnType<typeof vi.fn>)
           .mockRejectedValueOnce(new Error('agent failed'))
           .mockResolvedValueOnce('second response');
-        const ch = createChannel({ approvalMode: 'auto', webhooks });
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
         ch.proactiveSupported = true;
 
         await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
@@ -8680,7 +8680,7 @@ describe('ChannelBase', () => {
               }),
           )
           .mockResolvedValueOnce('second response');
-        const ch = createChannel({ approvalMode: 'auto', webhooks });
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
         ch.proactiveSupported = true;
 
         const firstRun = ch.runWebhookTask(webhookTask);

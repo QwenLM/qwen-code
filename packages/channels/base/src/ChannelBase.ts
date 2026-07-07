@@ -171,7 +171,7 @@ function parseLoopAddArgs(
 }
 
 function isUnattendedWebhookApprovalMode(mode: string | undefined): boolean {
-  return mode === 'auto' || mode === 'yolo';
+  return mode === 'yolo';
 }
 
 export abstract class ChannelBase {
