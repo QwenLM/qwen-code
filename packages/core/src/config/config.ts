@@ -5674,6 +5674,7 @@ export class Config {
       terminalHeight:
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
+      // pager: undefined is a valid explicit clear; ?? would preserve the old value.
       pager: Object.prototype.hasOwnProperty.call(config, 'pager')
         ? config.pager
         : this.shellExecutionConfig.pager,

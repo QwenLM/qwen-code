@@ -3232,7 +3232,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('');
-      expect(spawnOptions.env['GIT_PAGER']).toBe('');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
       mockGetShellConfiguration.mockReturnValue({
         executable: 'bash',
         argsPrefix: ['-c'],
@@ -3252,7 +3252,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('cat');
-      expect(spawnOptions.env['GIT_PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
       mockGetShellConfiguration.mockReturnValue({
         executable: 'bash',
         argsPrefix: ['-c'],

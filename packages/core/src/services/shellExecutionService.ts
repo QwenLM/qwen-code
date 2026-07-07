@@ -723,7 +723,7 @@ export class ShellExecutionService {
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(pager, {
-            includeGitPager: true,
+            includeGitPager: false,
             platform: os.platform(),
           }),
           ...getShellContextEnvVars(),

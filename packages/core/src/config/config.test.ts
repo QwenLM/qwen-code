@@ -511,6 +511,16 @@ describe('Server Config (config.ts)', () => {
       config.setShellExecutionConfig({ pager: undefined });
       expect(config.getShellExecutionConfig().pager).toBeUndefined();
     });
+
+    it('preserves the existing pager when an update omits the pager key', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ terminalWidth: 120 });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
   });
 
   describe('getMaxSubagentDepth', () => {
