@@ -17,6 +17,7 @@ import {
   extractContextFilename,
   formatChannelWorkerDaemonUrl,
   InvalidPolicyConfigError,
+  createDisabledChannelWorkerSupervisor,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
@@ -3101,6 +3102,9 @@ describe('runQwenServe channel worker supervisor', () => {
       stop: vi.fn().mockResolvedValue(undefined),
       killAllSync: vi.fn(),
       snapshot: vi.fn(() => snapshot),
+      enqueueWebhookTask: vi.fn().mockRejectedValue(
+        new Error('Channel worker is not running.'),
+      ),
     };
   }
 
@@ -3122,6 +3126,21 @@ describe('runQwenServe channel worker supervisor', () => {
       removeServeServiceInfo: vi.fn(() => true),
     };
   }
+
+  it('rejects webhook tasks when the channel worker is disabled', async () => {
+    const supervisor = createDisabledChannelWorkerSupervisor();
+
+    await expect(
+      supervisor.enqueueWebhookTask({
+        channelName: 'telegram',
+        source: 'github-ci',
+        eventType: 'check_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: { runId: 123 },
+      }),
+    ).rejects.toThrow('Channel worker is not running.');
+  });
 
   it('starts the channel worker after runtime mount and stops it before bridge shutdown', async () => {
     tmpDir = fs.realpathSync(

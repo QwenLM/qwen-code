@@ -528,7 +528,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   return channelWorkerRuntimePromise;
 }
 
-function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+export function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
   const snapshot = {
     enabled: false,
     state: 'disabled' as const,
@@ -539,6 +539,9 @@ function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
     async stop() {},
     killAllSync() {},
     snapshot: () => ({ ...snapshot, channels: [] }),
+    async enqueueWebhookTask() {
+      throw new Error('Channel worker is not running.');
+    },
   };
 }
 

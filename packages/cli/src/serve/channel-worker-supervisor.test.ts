@@ -2017,7 +2017,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    const accepted = supervisor.enqueueWebhookTask!(webhookTask);
+    const accepted = supervisor.enqueueWebhookTask(webhookTask);
     const sent = child.send.mock.calls[0]![0] as { id: string };
     expect(sent).toMatchObject({
       type: 'webhook_task',
@@ -2043,7 +2043,7 @@ describe('createChannelWorkerSupervisor', () => {
       spawnWorker: vi.fn(() => new FakeChild()),
     });
 
-    await expect(supervisor.enqueueWebhookTask!(webhookTask)).rejects.toThrow(
+    await expect(supervisor.enqueueWebhookTask(webhookTask)).rejects.toThrow(
       'Channel worker is not running.',
     );
   });
@@ -2067,7 +2067,7 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    const accepted = supervisor.enqueueWebhookTask!(webhookTask);
+    const accepted = supervisor.enqueueWebhookTask(webhookTask);
     const sent = child.send.mock.calls[0]![0] as { id: string };
     child.emit('message', {
       type: 'webhook_task_result',

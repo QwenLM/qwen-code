@@ -76,7 +76,7 @@ export interface ChannelWorkerSupervisor {
   stop(): Promise<void>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
-  enqueueWebhookTask?(
+  enqueueWebhookTask(
     task: ChannelWebhookTask,
   ): Promise<ChannelWebhookAccepted>;
 }
