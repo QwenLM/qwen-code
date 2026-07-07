@@ -238,6 +238,14 @@ export interface SendPromptOptions {
    * message in the JSONL transcript. Used by Ctrl+Y retry.
    */
   retry?: boolean;
+  /**
+   * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
+   * runs to completion. Lets a caller act on "the prompt reached the session"
+   * without waiting for the whole turn — e.g. the scheduled-tasks "run now",
+   * which records the run at admission so a long/stalled turn or a closed tab
+   * can't lose the record.
+   */
+  onAdmitted?: () => void;
 }
 
 export interface SubmitPromptOptions extends SendPromptOptions {

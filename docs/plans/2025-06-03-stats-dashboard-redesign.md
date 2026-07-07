@@ -13,6 +13,7 @@
 ### Task 1: Extend UsageSummaryRecord with latency and tool duration
 
 **Files:**
+
 - Modify: `packages/core/src/services/usageHistoryService.ts:16-44`
 - Modify: `packages/core/src/services/usageHistoryService.ts:111-158` (metricsToUsageRecord)
 - Test: `packages/core/src/services/usageHistoryService.test.ts` (create)
@@ -32,7 +33,13 @@ function makeMetrics(): SessionMetrics {
     models: {
       'qwen-max': {
         api: { totalRequests: 5, totalErrors: 0, totalLatencyMs: 9500 },
-        tokens: { prompt: 1000, candidates: 500, total: 1500, cached: 800, thoughts: 0 },
+        tokens: {
+          prompt: 1000,
+          candidates: 500,
+          total: 1500,
+          cached: 800,
+          thoughts: 0,
+        },
         bySource: {},
       },
     },
@@ -48,8 +55,30 @@ function makeMetrics(): SessionMetrics {
         [ToolCallDecision.AUTO_ACCEPT]: 4,
       },
       byName: {
-        edit: { count: 6, success: 6, fail: 0, durationMs: 3000, decisions: { [ToolCallDecision.ACCEPT]: 3, [ToolCallDecision.REJECT]: 0, [ToolCallDecision.MODIFY]: 0, [ToolCallDecision.AUTO_ACCEPT]: 3 } },
-        bash: { count: 4, success: 3, fail: 1, durationMs: 2000, decisions: { [ToolCallDecision.ACCEPT]: 2, [ToolCallDecision.REJECT]: 1, [ToolCallDecision.MODIFY]: 0, [ToolCallDecision.AUTO_ACCEPT]: 1 } },
+        edit: {
+          count: 6,
+          success: 6,
+          fail: 0,
+          durationMs: 3000,
+          decisions: {
+            [ToolCallDecision.ACCEPT]: 3,
+            [ToolCallDecision.REJECT]: 0,
+            [ToolCallDecision.MODIFY]: 0,
+            [ToolCallDecision.AUTO_ACCEPT]: 3,
+          },
+        },
+        bash: {
+          count: 4,
+          success: 3,
+          fail: 1,
+          durationMs: 2000,
+          decisions: {
+            [ToolCallDecision.ACCEPT]: 2,
+            [ToolCallDecision.REJECT]: 1,
+            [ToolCallDecision.MODIFY]: 0,
+            [ToolCallDecision.AUTO_ACCEPT]: 1,
+          },
+        },
       },
     },
     files: { totalLinesAdded: 50, totalLinesRemoved: 10 },
@@ -58,12 +87,24 @@ function makeMetrics(): SessionMetrics {
 
 describe('metricsToUsageRecord', () => {
   it('includes totalLatencyMs from all models', () => {
-    const record = metricsToUsageRecord('s1', '/proj', 1000, 2000, makeMetrics());
+    const record = metricsToUsageRecord(
+      's1',
+      '/proj',
+      1000,
+      2000,
+      makeMetrics(),
+    );
     expect(record.totalLatencyMs).toBe(9500);
   });
 
   it('includes per-tool totalDurationMs in byName', () => {
-    const record = metricsToUsageRecord('s1', '/proj', 1000, 2000, makeMetrics());
+    const record = metricsToUsageRecord(
+      's1',
+      '/proj',
+      1000,
+      2000,
+      makeMetrics(),
+    );
     expect(record.tools.byName['edit']!.totalDurationMs).toBe(3000);
     expect(record.tools.byName['bash']!.totalDurationMs).toBe(2000);
   });
@@ -103,7 +144,10 @@ export interface UsageSummaryRecord {
     totalCalls: number;
     totalSuccess: number;
     totalFail: number;
-    byName: Record<string, { count: number; success: number; fail: number; totalDurationMs?: number }>;
+    byName: Record<
+      string,
+      { count: number; success: number; fail: number; totalDurationMs?: number }
+    >;
   };
   files: {
     linesAdded: number;
@@ -186,6 +230,7 @@ git commit -m "feat(stats): extend UsageSummaryRecord with latency and tool dura
 ### Task 2: Add delta calculation and aggregation extensions
 
 **Files:**
+
 - Modify: `packages/core/src/services/usageHistoryService.ts:283-394` (aggregateUsage)
 - Test: `packages/core/src/services/usageHistoryService.test.ts` (extend)
 
@@ -194,9 +239,15 @@ git commit -m "feat(stats): extend UsageSummaryRecord with latency and tool dura
 Add to `packages/core/src/services/usageHistoryService.test.ts`:
 
 ```typescript
-import { aggregateUsage, type UsageSummaryRecord, type TimeRange } from './usageHistoryService.js';
+import {
+  aggregateUsage,
+  type UsageSummaryRecord,
+  type TimeRange,
+} from './usageHistoryService.js';
 
-function makeRecord(overrides: Partial<UsageSummaryRecord> = {}): UsageSummaryRecord {
+function makeRecord(
+  overrides: Partial<UsageSummaryRecord> = {},
+): UsageSummaryRecord {
   return {
     version: 1,
     sessionId: 's1',
@@ -231,7 +282,10 @@ function makeRecord(overrides: Partial<UsageSummaryRecord> = {}): UsageSummaryRe
 
 describe('aggregateUsage', () => {
   it('includes totalLatencyMs in aggregated result', () => {
-    const records = [makeRecord({ totalLatencyMs: 2000 }), makeRecord({ totalLatencyMs: 3000 })];
+    const records = [
+      makeRecord({ totalLatencyMs: 2000 }),
+      makeRecord({ totalLatencyMs: 3000 }),
+    ];
     const report = aggregateUsage(records, 'all');
     expect(report.totalLatencyMs).toBe(5000);
   });
@@ -452,6 +506,7 @@ git commit -m "feat(stats): add latency/duration/requests to aggregated report"
 ### Task 3: Add delta calculation to statsDataService
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/utils/statsDataService.ts`
 - Test: `packages/cli/src/ui/utils/statsDataService.test.ts` (create)
 
@@ -465,7 +520,8 @@ import type { UsageSummaryRecord } from '@qwen-code/qwen-code-core';
 
 // Mock loadUsageHistory to return controlled data
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const orig = await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const orig =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...orig,
     loadUsageHistory: vi.fn(),
@@ -500,7 +556,9 @@ function makeRecord(ts: number, tokens: number): UsageSummaryRecord {
       totalCalls: 5,
       totalSuccess: 4,
       totalFail: 1,
-      byName: { edit: { count: 5, success: 4, fail: 1, totalDurationMs: 1000 } },
+      byName: {
+        edit: { count: 5, success: 4, fail: 1, totalDurationMs: 1000 },
+      },
     },
     files: { linesAdded: 10, linesRemoved: 5 },
   };
@@ -585,9 +643,12 @@ function computeDelta(
     return ((cur - prev) / prev) * 100;
   };
 
-  let curTokens = 0, prevTokens = 0;
-  let curInput = 0, prevInput = 0;
-  let curCached = 0, prevCached = 0;
+  let curTokens = 0,
+    prevTokens = 0;
+  let curInput = 0,
+    prevInput = 0;
+  let curCached = 0,
+    prevCached = 0;
   for (const m of Object.values(current.models)) {
     curTokens += m.totalTokens;
     curInput += m.inputTokens;
@@ -601,14 +662,22 @@ function computeDelta(
 
   const curCacheRate = curInput > 0 ? (curCached / curInput) * 100 : 0;
   const prevCacheRate = prevInput > 0 ? (prevCached / prevInput) * 100 : 0;
-  const curToolSuccess = current.tools.totalCalls > 0
-    ? (current.tools.totalSuccess / current.tools.totalCalls) * 100 : 0;
-  const prevToolSuccess = previous.tools.totalCalls > 0
-    ? (previous.tools.totalSuccess / previous.tools.totalCalls) * 100 : 0;
-  const curLatency = current.totalRequests > 0
-    ? current.totalLatencyMs / current.totalRequests : null;
-  const prevLatency = previous.totalRequests > 0
-    ? previous.totalLatencyMs / previous.totalRequests : null;
+  const curToolSuccess =
+    current.tools.totalCalls > 0
+      ? (current.tools.totalSuccess / current.tools.totalCalls) * 100
+      : 0;
+  const prevToolSuccess =
+    previous.tools.totalCalls > 0
+      ? (previous.tools.totalSuccess / previous.tools.totalCalls) * 100
+      : 0;
+  const curLatency =
+    current.totalRequests > 0
+      ? current.totalLatencyMs / current.totalRequests
+      : null;
+  const prevLatency =
+    previous.totalRequests > 0
+      ? previous.totalLatencyMs / previous.totalRequests
+      : null;
 
   return {
     sessions: pctChange(current.sessionCount, previous.sessionCount),
@@ -616,8 +685,10 @@ function computeDelta(
     tokens: pctChange(curTokens, prevTokens),
     cacheRate: curCacheRate - prevCacheRate,
     toolSuccess: curToolSuccess - prevToolSuccess,
-    avgLatency: curLatency !== null && prevLatency !== null
-      ? curLatency - prevLatency : null,
+    avgLatency:
+      curLatency !== null && prevLatency !== null
+        ? curLatency - prevLatency
+        : null,
   };
 }
 ```
@@ -625,7 +696,9 @@ function computeDelta(
 Add a helper to get previous range bounds:
 
 ```typescript
-function getPreviousRangeBounds(range: TimeRange): { start: Date; end: Date } | null {
+function getPreviousRangeBounds(
+  range: TimeRange,
+): { start: Date; end: Date } | null {
   if (range === 'all') return null;
   const { start, end } = getTimeRangeBounds(range);
   const durationMs = end.getTime() - start.getTime();
@@ -653,24 +726,31 @@ export async function loadStatsData(
   const prevBounds = getPreviousRangeBounds(range);
   if (prevBounds) {
     const prevFiltered = records.filter(
-      (r) => r.timestamp >= prevBounds.start.getTime() && r.timestamp < prevBounds.end.getTime(),
+      (r) =>
+        r.timestamp >= prevBounds.start.getTime() &&
+        r.timestamp < prevBounds.end.getTime(),
     );
     const prevReport = aggregateUsage(prevFiltered, 'all');
     delta = computeDelta(report, prevReport);
   }
 
   // Efficiency
-  let totalInput = 0, totalCached = 0;
+  let totalInput = 0,
+    totalCached = 0;
   for (const m of Object.values(report.models)) {
     totalInput += m.inputTokens;
     totalCached += m.cachedTokens;
   }
   const efficiency: StatsData['efficiency'] = {
     cacheHitRate: totalInput > 0 ? (totalCached / totalInput) * 100 : 0,
-    toolSuccessRate: report.tools.totalCalls > 0
-      ? (report.tools.totalSuccess / report.tools.totalCalls) * 100 : 0,
-    avgLatencyMs: report.totalRequests > 0
-      ? report.totalLatencyMs / report.totalRequests : null,
+    toolSuccessRate:
+      report.tools.totalCalls > 0
+        ? (report.tools.totalSuccess / report.tools.totalCalls) * 100
+        : 0,
+    avgLatencyMs:
+      report.totalRequests > 0
+        ? report.totalLatencyMs / report.totalRequests
+        : null,
   };
 
   // Tool leaderboard
@@ -765,6 +845,7 @@ git commit -m "feat(stats): add delta calculation, efficiency metrics, tool lead
 ### Task 4: Change heatmap to token-based with today highlight
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/utils/statsDataService.ts:69-82` (buildHeatmap)
 - Modify: `packages/cli/src/ui/utils/asciiCharts.ts` (HeatmapCell interface + buildHeatmapData)
 
@@ -849,6 +930,7 @@ git commit -m "feat(stats): token-based heatmap with today highlight"
 ### Task 5: Add 'today' to TimeRange and update range cycle
 
 **Files:**
+
 - Modify: `packages/core/src/services/usageHistoryService.ts:46,253-281`
 - Modify: `packages/cli/src/ui/components/StatsDialog.tsx:34`
 
@@ -888,6 +970,7 @@ git commit -m "feat(stats): add 'today' to range cycle"
 ### Task 6: Implement ActivityTab component
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/StatsDialog.tsx`
 
 - [ ] **Step 1: Replace OverviewTab with ActivityTab**
@@ -1085,6 +1168,7 @@ git commit -m "feat(stats): implement ActivityTab with KPI deltas, heatmap, tren
 ### Task 7: Implement EfficiencyTab component
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/StatsDialog.tsx`
 
 - [ ] **Step 1: Replace ModelsTab with EfficiencyTab**
@@ -1243,9 +1327,11 @@ Remove the `chartFilter` state and the `e` key handler (no longer needed).
 Update the hints text:
 
 ```typescript
-{activeTab === 'session'
-  ? t('tab · esc')
-  : t('tab · r dates · ←→ month · esc')}
+{
+  activeTab === 'session'
+    ? t('tab · esc')
+    : t('tab · r dates · ←→ month · esc');
+}
 ```
 
 - [ ] **Step 3: Commit**
@@ -1260,6 +1346,7 @@ git commit -m "feat(stats): implement EfficiencyTab with perf cards, tool leader
 ### Task 8: Add i18n keys
 
 **Files:**
+
 - Modify: `packages/cli/src/i18n/mustTranslateKeys.ts`
 
 - [ ] **Step 1: Add new translation keys**
@@ -1304,6 +1391,7 @@ git commit -m "feat(stats): add i18n keys for new dashboard tabs"
 ### Task 9: Clean up unused code and verify
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/StatsDialog.tsx`
 
 - [ ] **Step 1: Remove dead code**
@@ -1323,6 +1411,7 @@ Expected: All pass (fix any snapshot updates with `--update` if needed).
 - [ ] **Step 4: Visual verification**
 
 Run: `npm run dev`, then type `/stats`:
+
 - Verify Session tab unchanged
 - Verify Activity tab shows KPI row with deltas, token heatmap with today highlight, sparkline, projects
 - Verify Efficiency tab shows performance cards, tool leaderboard with bars, model table, code impact

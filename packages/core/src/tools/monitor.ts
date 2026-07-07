@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import stripAnsi from 'strip-ansi';
@@ -54,6 +55,7 @@ import {
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -366,7 +368,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
           ...process.env,
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
-          PAGER: 'cat',
+          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });
@@ -696,12 +701,12 @@ export class MonitorTool extends BaseDeclarativeTool<
               'Brief description of what this monitor watches (e.g., "webpack build output"). Truncated to 80 characters in display.',
           },
           max_events: {
-            type: 'number',
+            type: 'integer',
             description:
               'Stop the monitor after this many events. Default 1000. Max 10000.',
           },
           idle_timeout_ms: {
-            type: 'number',
+            type: 'integer',
             description:
               'Stop the monitor if no output for this many milliseconds. Default 300000 (5 min). Max 600000.',
           },
@@ -734,6 +739,8 @@ export class MonitorTool extends BaseDeclarativeTool<
     if (hasUnsafeMonitorBackgroundOperator(params.command)) {
       return 'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
     }
+    // AJV enforces type: 'integer' from the schema. This method adds
+    // range checks (min/max) that the schema does not express.
     if (params.max_events !== undefined) {
       if (
         typeof params.max_events !== 'number' ||

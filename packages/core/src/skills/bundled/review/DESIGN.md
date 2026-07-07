@@ -33,10 +33,6 @@ Bugfix PRs often carry their own diagnosis in the PR body, but that diagnosis ca
 
 The agent also enforces the root-cause ownership gate: a client-side parser/sanitizer workaround for malformed upstream output is not acceptable as a root-cause fix unless a maintainer explicitly asked for that defensive mitigation.
 
-### Why the core infrastructure gate runs before agents
-
-Large external core changes are a governance decision before they are a review-quality problem. Running the full agent ensemble on a PR that should be maintainer-initiated wastes review budget and can produce a misleading "looks good" narrative. The prompt therefore applies the repository's two-tier core gate in Step 1: hard-block external 500+ line core changes, and escalate smaller core changes whenever downstream impact cannot be named with 100% confidence.
-
 ### Why three undirected personas instead of one or many
 
 A single undirected agent has prompt-induced bias and tends to find the same kinds of issues across runs. Three personas — attacker / 3am-oncall / maintainer — force completely different mental traversals, and the union of findings is meaningfully larger than 1.5× a single agent.

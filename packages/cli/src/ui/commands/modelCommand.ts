@@ -22,7 +22,7 @@ import {
   parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
@@ -41,6 +41,50 @@ const FAST_MODEL_CONFIGURATION_HINT =
 const VISION_MODEL_CONFIGURATION_HINT =
   'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
 
+/**
+ * Parse --project / --global scope flags from the argument string.
+ * Returns the resolved scope override and the remaining args with flags stripped.
+ */
+function parseScopeFlags(args: string): {
+  scopeOverride: SettingScope | undefined;
+  remaining: string;
+  hasProject: boolean;
+  hasGlobal: boolean;
+} {
+  let scopeOverride: SettingScope | undefined;
+  let remaining = args;
+  const hasProject = /(?:^|\s)--project(?:\s|$)/.test(remaining);
+  const hasGlobal = /(?:^|\s)--global(?:\s|$)/.test(remaining);
+
+  if (hasProject) {
+    scopeOverride = SettingScope.Workspace;
+    remaining = remaining.replace(/(?:^|\s)--project(?:\s|$)/, ' ').trim();
+  } else if (hasGlobal) {
+    scopeOverride = SettingScope.User;
+    remaining = remaining.replace(/(?:^|\s)--global(?:\s|$)/, ' ').trim();
+  }
+
+  return { scopeOverride, remaining, hasProject, hasGlobal };
+}
+
+function resolveScope(
+  settings: LoadedSettings,
+  scopeOverride: SettingScope | undefined,
+): SettingScope {
+  return scopeOverride ?? getPersistScopeForModelSelection(settings);
+}
+
+function persistScopeSpread(
+  scopeOverride: SettingScope | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
+): { persistScope: 'workspace' } | { persistScope: 'user' } | {} {
+  if (scopeOverride === SettingScope.Workspace)
+    return { persistScope: 'workspace' as const };
+  if (scopeOverride === SettingScope.User)
+    return { persistScope: 'user' as const };
+  return {};
+}
+
 function formatVisionModelSettingForDisplay(setting: string): string {
   const parsed = parseVisionModelSetting(setting);
   if (!parsed) return setting.replace(/\0/g, '\\0');
@@ -53,8 +97,9 @@ function persistSetting(
   settings: LoadedSettings,
   path: string,
   value: unknown,
+  scopeOverride?: SettingScope,
 ): void {
-  settings.setValue(getPersistScopeForModelSelection(settings), path, value);
+  settings.setValue(resolveScope(settings, scopeOverride), path, value);
 }
 
 async function switchMainModel(
@@ -62,6 +107,7 @@ async function switchMainModel(
   settings: LoadedSettings,
   currentAuthType: AuthType,
   modelArg: string,
+  scopeOverride?: SettingScope,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
 
@@ -74,20 +120,25 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
-    persistSetting(settings, 'security.auth.selectedType', parsed.authType);
-    persistSetting(settings, 'model.name', parsed.modelId);
+    persistSetting(
+      settings,
+      'security.auth.selectedType',
+      parsed.authType,
+      scopeOverride,
+    );
+    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
     // by a previous model-picker selection — otherwise next launch would
     // resolve to a different provider than this switch just chose. Use an
     // empty-string tombstone so the clear overrides a lower-scope value (an
     // undefined write is dropped from JSON and would not override on merge).
-    persistSetting(settings, 'model.baseUrl', '');
+    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
-  persistSetting(settings, 'model.name', modelArg);
-  persistSetting(settings, 'model.baseUrl', '');
+  persistSetting(settings, 'model.name', modelArg, scopeOverride);
+  persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   return modelArg;
 }
 
@@ -264,10 +315,11 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   },
-  argumentHint: '[--fast|--voice|--vision] [<model-id>] | <model-id> <prompt>',
+  argumentHint:
+    '[--fast|--voice|--vision] [--project|--global] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -289,6 +341,18 @@ export const modelCommand: SlashCommand = {
             'Set the image-capable model used to transcribe images for a text-only main model',
           ),
         },
+        {
+          value: '--project',
+          description: t(
+            'Persist the model selection to the project settings (workspace scope)',
+          ),
+        },
+        {
+          value: '--global',
+          description: t(
+            'Persist the model selection to the user settings (global scope)',
+          ),
+        },
       ].filter((item) => item.value.startsWith(partialArg));
       if (flagCompletions.length > 0) {
         return flagCompletions;
@@ -296,17 +360,17 @@ export const modelCommand: SlashCommand = {
       const trimmed = partialArg.trim();
       if (trimmed) {
         let mode: 'main' | 'fast' | 'voice' | 'vision' = 'main';
-        let modelPrefix = trimmed;
-        if (trimmed.startsWith('--fast ')) {
-          mode = 'fast';
-          modelPrefix = trimmed.slice('--fast '.length);
-        } else if (trimmed.startsWith('--voice ')) {
-          mode = 'voice';
-          modelPrefix = trimmed.slice('--voice '.length);
-        } else if (trimmed.startsWith('--vision ')) {
-          mode = 'vision';
-          modelPrefix = trimmed.slice('--vision '.length);
-        }
+        // Strip all known flags to isolate the model prefix for completion
+        const modelPrefix = trimmed
+          .replace(/(?:^|\s)--fast(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--voice(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--vision(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+          .trim();
+        if (/(?:^|\s)--fast(?:\s|$)/.test(trimmed)) mode = 'fast';
+        else if (/(?:^|\s)--voice(?:\s|$)/.test(trimmed)) mode = 'voice';
+        else if (/(?:^|\s)--vision(?:\s|$)/.test(trimmed)) mode = 'vision';
         return getAvailableModelIds(context, mode).filter((id) =>
           id.startsWith(modelPrefix),
         );
@@ -333,8 +397,43 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    // Handle --fast flag: /model --fast <modelName>
-    const args = context.invocation?.args?.trim() || actionArgs.trim();
+    // Parse --project / --global scope flags first, then process the rest
+    const rawArgs = context.invocation?.args?.trim() || actionArgs.trim();
+    const {
+      scopeOverride,
+      remaining: args,
+      hasProject,
+      hasGlobal,
+    } = parseScopeFlags(rawArgs);
+    // Reject mutually exclusive scope flags
+    if (hasProject && hasGlobal) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Cannot use both --project and --global. Choose one scope flag.',
+        ),
+      };
+    }
+    // Reject --project when workspace is untrusted — workspace settings are
+    // ignored on merge, so the save would silently not take effect.
+    if (
+      scopeOverride === SettingScope.Workspace &&
+      settings &&
+      !settings.isTrusted
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Workspace is untrusted; run /trust first or use --global.'),
+      };
+    }
+    const scopeSuffix =
+      scopeOverride === SettingScope.Workspace
+        ? t(' (this project)')
+        : scopeOverride === SettingScope.User
+          ? t(' (global)')
+          : '';
     const isVoiceModelCommand =
       args === '--voice' || args.startsWith('--voice ');
     if (isVoiceModelCommand) {
@@ -356,6 +455,7 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'dialog',
           dialog: 'voice-model',
+          ...persistScopeSpread(scopeOverride),
         };
       }
 
@@ -399,11 +499,11 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'voiceModel', modelName);
+      persistSetting(settings, 'voiceModel', modelName, scopeOverride);
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Voice Model') + ': ' + modelName,
+        content: t('Voice Model') + ': ' + modelName + scopeSuffix,
       };
     }
 
@@ -424,6 +524,7 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'dialog',
           dialog: 'fast-model',
+          ...persistScopeSpread(scopeOverride),
         };
       }
       // Set fast model
@@ -480,14 +581,14 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', modelName);
+      persistSetting(settings, 'fastModel', modelName, scopeOverride);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
       config.setFastModel(modelName);
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Fast Model') + ': ' + modelName,
+        content: t('Fast Model') + ': ' + modelName + scopeSuffix,
       };
     }
 
@@ -517,6 +618,7 @@ export const modelCommand: SlashCommand = {
         return {
           type: 'dialog',
           dialog: 'vision-model',
+          ...persistScopeSpread(scopeOverride),
         };
       }
       if (!settings) {
@@ -593,7 +695,7 @@ export const modelCommand: SlashCommand = {
       const visionModel = matched.baseUrl
         ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
-      persistSetting(settings, 'visionModel', visionModel);
+      persistSetting(settings, 'visionModel', visionModel, scopeOverride);
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
       // The pin is honored even if the model isn't image-capable (the user may
@@ -604,7 +706,8 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Vision Model') + ': ' + modelName + visionWarning,
+        content:
+          t('Vision Model') + ': ' + modelName + scopeSuffix + visionWarning,
       };
     }
 
@@ -669,6 +772,25 @@ export const modelCommand: SlashCommand = {
             ),
           };
         }
+        // Scope flags are silently consumed by parseScopeFlags but the inline
+        // prompt path doesn't persist the model. Reject the combination to avoid
+        // surprising the user with a "(this project)" confirmation that never
+        // took effect.
+        if (scopeOverride) {
+          const scopeFlag = hasProject
+            ? '--project'
+            : hasGlobal
+              ? '--global'
+              : '';
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Cannot combine {{flag}} with an inline prompt. Run '/model {{flag}} {{model}}' first, then send your prompt.",
+              { flag: scopeFlag },
+            ),
+          };
+        }
         // The per-turn override reuses the active provider's endpoint and
         // credentials and only swaps the model id; it cannot rebuild
         // baseUrl/envKey for a different provider. So the target must resolve to
@@ -713,11 +835,12 @@ export const modelCommand: SlashCommand = {
         settings,
         authType,
         modelName,
+        scopeOverride,
       );
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Model') + ': ' + effectiveModelName,
+        content: t('Model') + ': ' + effectiveModelName + scopeSuffix,
       };
     }
 
@@ -728,13 +851,17 @@ export const modelCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `Current model: ${currentModel}\nUse "/model <model-id>" to switch models or "/model --fast <model-id>" to set the fast model.`,
+        content: t(
+          'Current model: {{model}}\nUse "/model <model-id>" to switch models, "/model --fast <model-id>" to set the fast model, "/model --project <model-id>" to persist to project settings, or "/model --global <model-id>" to persist to user settings.',
+          { model: currentModel },
+        ),
       };
     }
 
     return {
       type: 'dialog',
       dialog: 'model',
+      ...persistScopeSpread(scopeOverride),
     };
   },
 };

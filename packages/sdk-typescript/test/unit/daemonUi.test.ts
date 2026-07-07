@@ -522,6 +522,39 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ).toMatchObject([{ type: 'user.text.delta', text: 'hello' }]);
   });
 
+  it('preserves user message metadata on transcript blocks', () => {
+    const events = normalizeDaemonEvent({
+      id: 23,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'scheduled prompt' },
+          _meta: { source: 'cron' },
+        },
+      },
+    } as const);
+
+    expect(events).toMatchObject([
+      {
+        type: 'user.text.delta',
+        text: 'scheduled prompt',
+        meta: { source: 'cron' },
+      },
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'scheduled prompt',
+      meta: { source: 'cron' },
+    });
+  });
+
   it('carries user shell command metadata into user shell transcript blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     const commandEvents = normalizeDaemonEvent({

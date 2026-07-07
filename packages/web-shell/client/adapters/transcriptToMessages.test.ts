@@ -125,6 +125,21 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('preserves user source metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'scheduled prompt', 1, false, {
+        meta: { source: 'cron' },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'scheduled prompt',
+      source: 'cron',
+    });
+  });
+
   it('hides background task notifications by metadata', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
