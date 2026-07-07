@@ -265,8 +265,10 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
             Storage.getGlobalQwenDir(),
             getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
           );
-        default:
-          return managedUserMemoryPath;
+        default: {
+          const _exhaustive: never = item.value;
+          return _exhaustive;
+        }
       }
     },
     [config, managedMemoryPath, managedUserMemoryPath],
