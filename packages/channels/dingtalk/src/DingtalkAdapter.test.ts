@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHmac } from 'node:crypto';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelTaskLifecycleEvent,
@@ -76,7 +77,9 @@ vi.mock('@qwen-code/channel-base', async () => {
 const { DingtalkChannel } = await import('./DingtalkAdapter.js');
 type DingtalkChannelInstance = InstanceType<typeof DingtalkChannel>;
 
-function createChannel(): DingtalkChannelInstance {
+function createChannel(
+  overrides: Record<string, unknown> = {},
+): DingtalkChannelInstance {
   return new DingtalkChannel(
     'test-dingtalk',
     {
@@ -90,6 +93,7 @@ function createChannel(): DingtalkChannelInstance {
       cwd: '/tmp',
       groupPolicy: 'open',
       groups: {},
+      ...overrides,
     },
     {} as never,
   );
@@ -1233,5 +1237,153 @@ describe('DingtalkChannel proactive send', () => {
     await channel.pushProactive(groupTarget, '   \n ');
 
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('DingtalkChannel webhook events', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function webhook(channel: DingtalkChannelInstance) {
+    return channel as unknown as {
+      verifySignature(timestamp: string, sign: string, secret: string): boolean;
+      onDocChange(data: Record<string, unknown>, eventId?: string): void;
+      sendGroupMessage(text: string): Promise<void>;
+      disconnect(): void;
+      startWebhookServer(): void;
+      webhookPort: number;
+      webhookServer: {
+        address(): { port: number } | string | null;
+        once(event: 'listening', listener: () => void): void;
+      };
+    };
+  }
+
+  function validSign(timestamp: string, secret = 'client-secret'): string {
+    return createHmac('sha256', secret)
+      .update(`${timestamp}\n${secret}`)
+      .digest('base64');
+  }
+
+  async function startWebhook(channel: ReturnType<typeof webhook>) {
+    channel.webhookPort = 0;
+    channel.startWebhookServer();
+    await new Promise<void>((resolve) => {
+      channel.webhookServer.once('listening', resolve);
+    });
+    const address = channel.webhookServer.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Webhook server did not expose a TCP port');
+    }
+    return address.port;
+  }
+
+  it('rejects stale webhook signatures', () => {
+    const channel = webhook(createChannel());
+    const timestamp = String(Date.now() - 10 * 60 * 1000);
+
+    expect(
+      channel.verifySignature(timestamp, validSign(timestamp), 'client-secret'),
+    ).toBe(false);
+  });
+
+  it('compares webhook signatures without accepting prefixes', () => {
+    const channel = webhook(createChannel());
+    const timestamp = String(Date.now());
+    const sign = validSign(timestamp);
+
+    expect(
+      channel.verifySignature(timestamp, sign.slice(0, -2), 'client-secret'),
+    ).toBe(false);
+    expect(channel.verifySignature(timestamp, sign, 'client-secret')).toBe(
+      true,
+    );
+  });
+
+  it('rejects webhook requests with missing signature headers', async () => {
+    const channel = webhook(
+      createChannel({ openConversationId: 'cid-webhook' }),
+    );
+    const sendGroupMessage = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as { sendGroupMessage: typeof sendGroupMessage }
+    ).sendGroupMessage = sendGroupMessage;
+    const port = await startWebhook(channel);
+
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          EventType: 'doc_change',
+          data: { dentryName: 'Roadmap' },
+        }),
+      });
+
+      expect(resp.status).toBe(401);
+      expect(sendGroupMessage).not.toHaveBeenCalled();
+    } finally {
+      channel.disconnect();
+    }
+  });
+
+  it('deduplicates doc_change webhook events by EventId', () => {
+    const channel = webhook(
+      createChannel({ openConversationId: 'cid-webhook' }),
+    );
+    const sendGroupMessage = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as { sendGroupMessage: typeof sendGroupMessage }
+    ).sendGroupMessage = sendGroupMessage;
+
+    channel.onDocChange({ dentryName: 'Roadmap' }, 'event-1');
+    channel.onDocChange({ dentryName: 'Roadmap' }, 'event-1');
+
+    expect(sendGroupMessage).toHaveBeenCalledOnce();
+  });
+
+  it('escapes markdown fields and blocks unsafe doc URLs', () => {
+    const channel = webhook(
+      createChannel({ openConversationId: 'cid-webhook' }),
+    );
+    const sendGroupMessage = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as { sendGroupMessage: typeof sendGroupMessage }
+    ).sendGroupMessage = sendGroupMessage;
+
+    channel.onDocChange({
+      dentryName: '[Release](https://evil.example)',
+      url: 'javascript:alert(1)',
+      operatorName: 'Mallory_(ops)',
+      operateType: 'update',
+    });
+
+    const text = sendGroupMessage.mock.calls[0]![0] as string;
+    expect(text).toContain('\\[Release\\]\\(https://evil.example\\)');
+    expect(text).not.toContain('javascript:alert');
+    expect(text).toContain('Mallory\\_\\(ops\\)');
+  });
+
+  it('sends webhook notifications through the proactive path', async () => {
+    const channel = webhook(
+      createChannel({ openConversationId: 'cid-webhook' }),
+    );
+    const pushProactive = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as { pushProactive: typeof pushProactive }
+    ).pushProactive = pushProactive;
+
+    await channel.sendGroupMessage('# Doc changed');
+
+    expect(pushProactive).toHaveBeenCalledWith(
+      {
+        channelName: 'test-dingtalk',
+        senderId: 'dingtalk-webhook',
+        chatId: 'cid-webhook',
+        isGroup: true,
+      },
+      '# Doc changed',
+    );
   });
 });

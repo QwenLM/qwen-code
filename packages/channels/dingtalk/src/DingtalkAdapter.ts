@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
@@ -97,6 +97,8 @@ const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
+const WEBHOOK_SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 interface DingTalkTokenResponse {
   errcode?: number;
@@ -297,6 +299,7 @@ export class DingtalkChannel extends ChannelBase {
     await this.client.connect();
 
     if (this.webhookPort) {
+      this.closeWebhookServer();
       this.startWebhookServer();
     }
 
@@ -502,57 +505,57 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
 
-    const token = await this.getProactiveToken();
-    const robotCode = this.config.clientId;
-    if (!token || !robotCode) {
-      process.stderr.write(
-        `[DingTalk:${this.name}] Cannot send group message: missing token or robotCode.\n`,
-      );
-      return;
-    }
-
-    const title = extractTitle(text);
-    const resp = await fetch(GROUP_MSG_API, {
-      method: 'POST',
-      headers: {
-        'x-acs-dingtalk-access-token': token,
-        'Content-Type': 'application/json',
+    await this.pushProactive(
+      {
+        channelName: this.name,
+        senderId: 'dingtalk-webhook',
+        chatId: this.openConversationId,
+        isGroup: true,
       },
-      body: JSON.stringify({
-        robotCode,
-        openConversationId: this.openConversationId,
-        msgKey: GROUP_MSG_KEY,
-        msgParam: JSON.stringify({ title, text }),
-      }),
-    });
-
-    if (!resp.ok) {
-      const detail = await resp.text().catch(() => '');
-      process.stderr.write(
-        `[DingTalk:${this.name}] sendGroupMessage failed: HTTP ${resp.status} ${detail}\n`,
-      );
-    }
+      text,
+    );
   }
 
   private startWebhookServer(): void {
+    this.closeWebhookServer();
     const port = this.webhookPort!;
     const appSecret = this.config.clientSecret!;
 
     this.webhookServer = createServer((req, res) => {
       const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      let bodyBytes = 0;
+      let bodyTooLarge = false;
+
+      req.on('data', (chunk: Buffer) => {
+        if (bodyTooLarge) return;
+        bodyBytes += chunk.length;
+        if (bodyBytes > WEBHOOK_MAX_BODY_BYTES) {
+          bodyTooLarge = true;
+          chunks.length = 0;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'payload too large' }));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
       req.on('end', () => {
+        if (bodyTooLarge || res.writableEnded) return;
         try {
           const body = Buffer.concat(chunks).toString('utf-8');
           const payload: DingTalkEventPayload = body ? JSON.parse(body) : {};
 
-          const timestamp = req.headers['timestamp'] as string | undefined;
-          const sign = req.headers['sign'] as string | undefined;
-          if (
-            timestamp &&
-            sign &&
-            !this.verifySignature(timestamp, sign, appSecret)
-          ) {
+          const timestamp = this.firstHeader(req.headers['timestamp']);
+          const sign = this.firstHeader(req.headers['sign']);
+          if (!timestamp || !sign) {
+            process.stderr.write(
+              `[DingTalk:${this.name}] Webhook missing signature headers.\n`,
+            );
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'missing signature' }));
+            return;
+          }
+          if (!this.verifySignature(timestamp, sign, appSecret)) {
             process.stderr.write(
               `[DingTalk:${this.name}] Webhook signature verification failed.\n`,
             );
@@ -576,7 +579,7 @@ export class DingtalkChannel extends ChannelBase {
           }
 
           if (eventType === 'doc_change') {
-            this.onDocChange(payload.data || {});
+            this.onDocChange(payload.data || {}, payload.EventId);
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -585,10 +588,18 @@ export class DingtalkChannel extends ChannelBase {
           process.stderr.write(
             `[DingTalk:${this.name}] Webhook error: ${err}\n`,
           );
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'internal error' }));
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'internal error' }));
+          }
         }
       });
+    });
+
+    this.webhookServer.on('error', (err) => {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Webhook server error: ${err}\n`,
+      );
     });
 
     this.webhookServer.listen(port, () => {
@@ -603,17 +614,37 @@ export class DingtalkChannel extends ChannelBase {
     sign: string,
     appSecret: string,
   ): boolean {
+    const timestampMs = Number(timestamp);
+    if (
+      !Number.isFinite(timestampMs) ||
+      Math.abs(Date.now() - timestampMs) > WEBHOOK_SIGNATURE_TOLERANCE_MS
+    ) {
+      return false;
+    }
     const expected = createHmac('sha256', appSecret)
       .update(`${timestamp}\n${appSecret}`)
       .digest('base64');
-    return sign === expected;
+    const signBuf = Buffer.from(sign);
+    const expectedBuf = Buffer.from(expected);
+    if (signBuf.length !== expectedBuf.length) return false;
+    return timingSafeEqual(signBuf, expectedBuf);
   }
 
-  private onDocChange(data: Record<string, unknown>): void {
-    const docName = (data['dentryName'] as string) || '未知文档';
-    const docUrl = (data['url'] as string) || '';
-    const operator = (data['operatorName'] as string) || '未知用户';
-    const operateType = (data['operateType'] as string) || '变更';
+  private onDocChange(data: Record<string, unknown>, eventId?: string): void {
+    if (eventId) {
+      const dedupKey = `webhook:${eventId}`;
+      if (this.seenMessages.has(dedupKey)) return;
+      this.seenMessages.set(dedupKey, Date.now());
+    }
+
+    const docName = this.escapeMarkdown(
+      this.stringField(data['dentryName']) || '未知文档',
+    );
+    const docUrl = this.safeDingTalkDocUrl(this.stringField(data['url']));
+    const operator = this.escapeMarkdown(
+      this.stringField(data['operatorName']) || '未知用户',
+    );
+    const operateType = this.stringField(data['operateType']) || '变更';
 
     const operateLabel: Record<string, string> = {
       add: '新建',
@@ -625,7 +656,9 @@ export class DingtalkChannel extends ChannelBase {
       edit: '编辑',
     };
 
-    const action = operateLabel[operateType] || operateType;
+    const action = this.escapeMarkdown(
+      operateLabel[operateType] || operateType,
+    );
 
     const text = [
       `### 📄 文档变更通知`,
@@ -645,6 +678,50 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(
       `[DingTalk:${this.name}] doc_change: ${action} "${docName}" by ${operator}\n`,
     );
+  }
+
+  private firstHeader(
+    value: string | string[] | undefined,
+  ): string | undefined {
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  private stringField(value: unknown): string {
+    return typeof value === 'string' ? value : '';
+  }
+
+  private safeDingTalkDocUrl(value: string): string {
+    if (!value) return '';
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return '';
+    }
+    if (url.protocol !== 'https:' || url.username || url.password) {
+      return '';
+    }
+    const hostname = url.hostname.toLowerCase();
+    if (
+      hostname !== 'dingtalk.com' &&
+      !hostname.endsWith('.dingtalk.com') &&
+      hostname !== 'dingtalkapps.com' &&
+      !hostname.endsWith('.dingtalkapps.com')
+    ) {
+      return '';
+    }
+    return url.toString();
+  }
+
+  private escapeMarkdown(value: string): string {
+    return value.replace(/[\\[\]()_*`<>]/g, '\\$&');
+  }
+
+  private closeWebhookServer(): void {
+    if (!this.webhookServer) return;
+    this.webhookServer.closeAllConnections();
+    this.webhookServer.close();
+    this.webhookServer = undefined;
   }
 
   private getAccessToken(): string | undefined {
@@ -714,9 +791,7 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
-    if (this.webhookServer) {
-      this.webhookServer.close();
-    }
+    this.closeWebhookServer();
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
