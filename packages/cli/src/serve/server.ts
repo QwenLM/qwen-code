@@ -6,6 +6,8 @@
 
 import express from 'express';
 import type { Application } from 'express';
+import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
   DaemonMetricsBucket,
@@ -25,7 +27,6 @@ import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
 } from './auth/device-flow.js';
-import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
@@ -149,6 +150,15 @@ export { getActiveSseCount } from './routes/sse-events.js';
  */
 let warnedDefaultTrust = false;
 
+function describeRegistryPrimaryForConflict(
+  registry: WorkspaceRegistry,
+): string {
+  return (
+    `registry primary cwd=${JSON.stringify(registry.primary.workspaceCwd)}, ` +
+    `workspaceId=${JSON.stringify(registry.primary.workspaceId)}`
+  );
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -262,6 +272,8 @@ export interface ServeAppDeps {
    * builds its own registry and wires it into the bridge it creates.
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
+  workspaceRegistry?: WorkspaceRegistry;
+  primaryWorkspaceTrusted?: boolean;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
@@ -311,15 +323,71 @@ export function createServeApp(
   // AND passed into the bridge must be the SAME canonical form.
   // `deps.boundWorkspace` is the pre-canonicalized fast-path from
   // `runQwenServe`; when omitted we canonicalize ourselves.
+  const injectedWorkspaceRegistry = deps.workspaceRegistry;
   const boundWorkspace =
+    injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (injectedWorkspaceRegistry) {
+    const primary = injectedWorkspaceRegistry.primary;
+    const registryConflictCandidates = [
+      {
+        depName: 'deps.boundWorkspace',
+        depValue: deps.boundWorkspace,
+        registryValue: primary.workspaceCwd,
+        detail: `deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}`,
+      },
+      {
+        depName: 'deps.bridge',
+        depValue: deps.bridge,
+        registryValue: primary.bridge,
+        detail: 'deps.bridge is a different object',
+      },
+      {
+        depName: 'deps.workspace',
+        depValue: deps.workspace,
+        registryValue: primary.workspaceService,
+        detail: 'deps.workspace is a different object',
+      },
+      {
+        depName: 'deps.fsFactory',
+        depValue: deps.fsFactory,
+        registryValue: primary.routeFileSystemFactory,
+        detail: 'deps.fsFactory is a different object',
+      },
+      {
+        depName: 'deps.clientMcpSenderRegistry',
+        depValue: deps.clientMcpSenderRegistry,
+        registryValue: primary.clientMcpSenderRegistry,
+        detail: 'deps.clientMcpSenderRegistry is a different object',
+      },
+    ];
+    for (const candidate of registryConflictCandidates) {
+      if (
+        candidate.depValue === undefined ||
+        candidate.depValue === candidate.registryValue
+      ) {
+        continue;
+      }
+      throw new Error(
+        'createServeApp: workspaceRegistry conflicts with ' +
+          `${candidate.depName}: ${describeRegistryPrimaryForConflict(
+            injectedWorkspaceRegistry,
+          )}; ${candidate.detail}.`,
+      );
+    }
+  }
   // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
   // through `BridgeFileSystem` for ACP-side writeTextFile/readTextFile.
   // Default trust is `false` (test-safe). Embeds without `deps.fsFactory`
   // or `deps.bridge` will see agent writes rejected with
   // `untrusted_workspace` — warn once so the asymmetry is visible.
-  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+  if (
+    !injectedWorkspaceRegistry &&
+    !deps.fsFactory &&
+    !deps.bridge &&
+    !warnedDefaultTrust
+  ) {
     warnedDefaultTrust = true;
     process.stderr.write(
       'qwen serve: createServeApp default fsFactory uses trusted=false ' +
@@ -327,11 +395,13 @@ export function createServeApp(
         'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
     );
   }
-  const fsFactory = resolveBridgeFsFactory({
-    boundWorkspaces: [boundWorkspace],
-    injected: deps.fsFactory,
-    trusted: false,
-  });
+  const fsFactory =
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory ??
+    resolveBridgeFsFactory({
+      boundWorkspaces: [boundWorkspace],
+      injected: deps.fsFactory,
+      trusted: false,
+    });
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
@@ -354,6 +424,7 @@ export function createServeApp(
   if (
     opts.clientMcpOverWs === true &&
     deps.bridge &&
+    !injectedWorkspaceRegistry &&
     !deps.clientMcpSenderRegistry
   ) {
     throw new Error(
@@ -363,17 +434,23 @@ export function createServeApp(
     );
   }
   const clientMcpSenderRegistry =
-    deps.clientMcpSenderRegistry ?? new ClientMcpSenderRegistry();
+    injectedWorkspaceRegistry?.primary.clientMcpSenderRegistry ??
+    deps.clientMcpSenderRegistry ??
+    new ClientMcpSenderRegistry();
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
-      reloadAvailable: deps.workspace !== undefined,
+      // Registry injection supplies the primary workspace service through the
+      // runtime, so it has the same reload surface as legacy deps.workspace.
+      reloadAvailable:
+        deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
       sessionShellCommandEnabled,
     });
   const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
   const bridge =
+    injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
@@ -424,6 +501,7 @@ export function createServeApp(
   ) => sendPermissionVoteErrorResponse(res, err, ctx, daemonLog);
 
   const workspace: DaemonWorkspaceService =
+    injectedWorkspaceRegistry?.primary.workspaceService ??
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
@@ -460,13 +538,19 @@ export function createServeApp(
         bridge.publishWorkspaceEvent(event);
       },
     });
-  const workspaceRegistry = createSingleWorkspaceRegistry({
-    workspaceCwd: boundWorkspace,
-    bridge,
-    workspaceService: workspace,
-    routeFileSystemFactory: fsFactory,
-    clientMcpSenderRegistry,
-  });
+  const workspaceRegistry =
+    injectedWorkspaceRegistry ??
+    createSingleWorkspaceRegistry({
+      workspaceId: hashDaemonWorkspace(boundWorkspace),
+      workspaceCwd: boundWorkspace,
+      primary: true,
+      trusted: deps.primaryWorkspaceTrusted ?? false,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge,
+      workspaceService: workspace,
+      routeFileSystemFactory: fsFactory,
+      clientMcpSenderRegistry,
+    });
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;

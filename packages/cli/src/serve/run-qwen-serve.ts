@@ -27,6 +27,7 @@ import {
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
+import { resolveSingleWorkspaceInput } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -219,21 +220,6 @@ function envFlagDisabled(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   const normalized = raw.trim().toLowerCase();
   return normalized === '0' || normalized === 'false';
-}
-
-function resolveSingleWorkspaceInput(workspace: unknown): string {
-  if (Array.isArray(workspace)) {
-    if (workspace.length === 0) return process.cwd();
-    if (workspace.length > 1) {
-      throw new Error(
-        'Multiple --workspace values are not supported yet. ' +
-          'Multi-workspace serve is not enabled; pass one --workspace.',
-      );
-    }
-    return String(workspace[0]);
-  }
-  if (workspace === undefined) return process.cwd();
-  return String(workspace);
 }
 
 function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
@@ -2546,6 +2532,7 @@ export async function runQwenServe(
         pathLocks: sharedPathLocks,
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       }),
+      primaryWorkspaceTrusted: trustedWorkspace,
       daemonLog,
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({
