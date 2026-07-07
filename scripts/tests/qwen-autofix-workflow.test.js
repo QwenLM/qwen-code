@@ -1022,10 +1022,51 @@ describe('qwen-autofix workflow', () => {
   it('bounds qwen subprocess runtime', () => {
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
-    expect(runner).toContain('const QWEN_TIMEOUT_MS = 50 * 60 * 1000');
+    expect(runner).toContain('50 * 60 * 1000');
     expect(runner).toContain('setTimeout(() =>');
-    expect(runner).toContain("child.kill('SIGKILL')");
+    expect(runner).toContain("killQwen(child, 'SIGKILL')");
     expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
+  });
+
+  it('kills qwen subprocess descendants on timeout', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "import { spawn } from 'node:child_process';",
+        "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], {",
+        "  stdio: ['ignore', 'inherit', 'inherit'],",
+        '});',
+        'setTimeout(() => process.exit(0), 3000);',
+      ]);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_TIMEOUT_MS: '100' },
+          timeout: 2000,
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'timeout (100ms)',
+      );
+    });
   });
 
   it('reports external qwen subprocess signals without calling them timeouts', () => {

@@ -18,7 +18,7 @@ const skillPath = resolve(
   '..',
   'SKILL.md',
 );
-const QWEN_TIMEOUT_MS = 50 * 60 * 1000;
+const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -79,6 +79,14 @@ function isLoopGuardOutput(output) {
   );
 }
 
+function killQwen(child, signal) {
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
 function runQwen(options, prompt) {
   mkdirSync(options.workdir, { recursive: true });
   const log = createWriteStream(file(options.workdir, 'agent.log'), {
@@ -95,6 +103,7 @@ function runQwen(options, prompt) {
   return new Promise((resolve) => {
     const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
       stdio: ['inherit', 'pipe', 'pipe'],
+      detached: true,
     });
 
     const finish = (result) => {
@@ -131,9 +140,9 @@ function runQwen(options, prompt) {
 
     timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      killQwen(child, 'SIGTERM');
       killTimer = setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
+        if (!settled) killQwen(child, 'SIGKILL');
       }, 10_000);
     }, QWEN_TIMEOUT_MS);
   });
