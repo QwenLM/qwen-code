@@ -81,6 +81,8 @@
 }
 
 .table {
+  --action-column-width: 72px;
+
   width: max-content;
   min-width: 100%;
   border-collapse: separate;
@@ -110,6 +112,11 @@
   color: var(--foreground);
   font-weight: 600;
   text-align: left;
+}
+
+.frozenHeaderCell {
+  left: var(--action-column-width);
+  z-index: 5;
 }
 
 .headerControls {
@@ -160,6 +167,43 @@
   color: var(--muted-foreground);
   font: inherit;
   cursor: pointer;
+}
+
+.reorderHandle {
+  flex: 0 0 28px;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  cursor: grab;
+}
+
+.reorderHandle:active {
+  cursor: grabbing;
+}
+
+.reorderHandle:hover {
+  background: var(--subtle-bg-strong);
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  z-index: 7;
+  width: 6px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.resizeHandle:hover,
+.resizeHandle:focus-visible {
+  background: color-mix(in srgb, var(--agent-blue-500) 45%, transparent);
+  outline: none;
 }
 
 .filterTriggerActive {
@@ -342,16 +386,33 @@ tr:hover .selectedCell {
 
 .actionHeaderCell,
 .actionCell {
-  width: 72px;
-  min-width: 72px;
-  max-width: 72px;
+  width: var(--action-column-width);
+  min-width: var(--action-column-width);
+  max-width: var(--action-column-width);
   text-align: center;
+}
+
+.stickyActionHeaderCell,
+.stickyActionCell {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+}
+
+.stickyActionHeaderCell {
+  z-index: 8;
 }
 
 .actionCell {
   padding: 4px 6px;
   cursor: default;
   user-select: none;
+}
+
+.frozenCell {
+  position: sticky;
+  left: var(--action-column-width);
+  z-index: 4;
 }
 
 .rowDetailButton {

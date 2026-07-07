@@ -255,6 +255,71 @@ function dispatchCopy(target: Element) {
   return { event, setData };
 }
 
+function dragColumn(
+  container: HTMLElement,
+  fromLabel: string,
+  toLabel: string,
+): void {
+  const data = new Map<string, string>();
+  const dataTransfer = {
+    dropEffect: '',
+    effectAllowed: '',
+    get types() {
+      return [...data.keys()];
+    },
+    setData: vi.fn((type: string, value: string) => data.set(type, value)),
+    getData: vi.fn((type: string) => data.get(type) ?? ''),
+  };
+  const from = button(container, fromLabel);
+  const to = button(container, toLabel);
+  act(() => {
+    from.dispatchEvent(
+      Object.assign(new Event('dragstart', { bubbles: true }), {
+        dataTransfer,
+      }),
+    );
+    to.dispatchEvent(
+      Object.assign(
+        new Event('dragover', { bubbles: true, cancelable: true }),
+        {
+          dataTransfer,
+        },
+      ),
+    );
+    to.dispatchEvent(
+      Object.assign(new Event('drop', { bubbles: true, cancelable: true }), {
+        dataTransfer,
+      }),
+    );
+  });
+}
+
+function dropExternalColumn(container: HTMLElement, toLabel: string): void {
+  const dataTransfer = {
+    dropEffect: '',
+    effectAllowed: '',
+    types: ['text/plain'],
+    setData: vi.fn(),
+    getData: vi.fn(() => ''),
+  };
+  const to = button(container, toLabel);
+  act(() => {
+    to.dispatchEvent(
+      Object.assign(
+        new Event('dragover', { bubbles: true, cancelable: true }),
+        {
+          dataTransfer,
+        },
+      ),
+    );
+    to.dispatchEvent(
+      Object.assign(new Event('drop', { bubbles: true, cancelable: true }), {
+        dataTransfer,
+      }),
+    );
+  });
+}
+
 function touchEvent(
   type: string,
   touches: Array<Pick<Touch, 'clientX' | 'clientY'>>,
@@ -664,6 +729,132 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenCalledWith(
       ['Score', '10', '2', '30'].join('\n'),
     );
+  });
+
+  it('resizes a column from its header handle', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 160 }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '220px',
+    );
+    expect(dataCell(container, 0, 0).style.width).toBe('220px');
+  });
+
+  it('reorders columns and quick copies in the visible order', () => {
+    const writeText = mockClipboard();
+    const container = renderWideTable();
+
+    dragColumn(container, 'Move Score', 'Move Team');
+
+    expect(rowTexts(container)).toEqual(['10|Alpha|US', '2|Beta|EMEA']);
+    click(textButton(container, 'Quick copy'));
+    expect(writeText).toHaveBeenCalledWith(
+      ['Score\tTeam\tRegion', '10\tAlpha\tUS', '2\tBeta\tEMEA'].join('\n'),
+    );
+  });
+
+  it('ignores external drops on column move handles', () => {
+    const container = renderWideTable();
+
+    dropExternalColumn(container, 'Move Score');
+
+    expect(rowTexts(container)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
+  });
+
+  it('keeps hidden columns out of reordered selections', () => {
+    const writeText = mockClipboard();
+    const container = renderWideTable();
+
+    dragColumn(container, 'Move Score', 'Move Team');
+    click(button(container, 'Filter Region'));
+    click(textButton(container, 'Hide column'));
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
+  });
+
+  it('toggles sticky classes for the action column and first visible column', () => {
+    const container = renderWideTable();
+
+    click(textButton(container, 'Freeze first column'));
+
+    expect(textButton(container, 'Unfreeze first column')).toBeDefined();
+    expect(container.querySelector('thead th')?.className).toContain(
+      'stickyActionHeaderCell',
+    );
+    expect(
+      button(container, 'Sort by Team').closest('th')?.className,
+    ).toContain('frozenHeaderCell');
+    expect(dataCell(container, 0, 0).className).toContain('frozenCell');
+
+    dragColumn(container, 'Move Score', 'Move Team');
+    expect(
+      button(container, 'Sort by Score').closest('th')?.className,
+    ).toContain('frozenHeaderCell');
+
+    click(textButton(container, 'Unfreeze first column'));
+    expect(container.textContent).toContain('Freeze first column');
+    expect(
+      button(container, 'Sort by Score').closest('th')?.className,
+    ).not.toContain('frozenHeaderCell');
+  });
+
+  it('keeps selected cell classes visible on a frozen column', () => {
+    const container = renderWideTable();
+
+    click(textButton(container, 'Freeze first column'));
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+
+    expect(container.textContent).toContain('4 cells selected');
+    expect(dataCell(container, 0, 0).className).toContain('frozenCell');
+    expect(dataCell(container, 0, 0).className).toContain('selectedCell');
+    expect(dataCell(container, 0, 1).className).toContain('selectedCell');
+  });
+
+  it('copies reordered selections from the keyboard copy event', () => {
+    const container = renderWideTable();
+
+    dragColumn(container, 'Move Score', 'Move Team');
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
+    expect(scroller).not.toBeNull();
+    const { event, setData } = dispatchCopy(scroller!);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(setData).toHaveBeenCalledWith(
+      'text/plain',
+      ['10\tAlpha', '2\tBeta'].join('\n'),
+    );
+  });
+
+  it('copies reordered selections after freezing the first column', () => {
+    const writeText = mockClipboard();
+    const container = renderWideTable();
+
+    dragColumn(container, 'Move Score', 'Move Team');
+    click(textButton(container, 'Freeze first column'));
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+    click(textButton(container, 'Copy TSV'));
+
+    expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
   });
 
   it('shows checkmark feedback after quick copy', async () => {
@@ -1381,6 +1572,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable('zh-CN');
 
     expect(container.textContent).toContain('快捷复制');
+    expect(container.textContent).toContain('冻结首列');
     expect(container.textContent).toContain('详情');
     click(button(container, '筛选 Team'));
     expect(container.textContent).toContain('隐藏列');
