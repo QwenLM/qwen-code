@@ -172,6 +172,7 @@ import {
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
+  type UserMessageContentRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
@@ -401,6 +402,8 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
+  renderUserMessageContent?: UserMessageContentRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -792,6 +795,7 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  renderUserMessageContent,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -903,6 +907,7 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -917,6 +922,7 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -4552,29 +4558,38 @@ export function App({
                   : styles.chatPane
               }
             >
-              {sidebarOptions.enabled && (
-                <button
-                  type="button"
-                  className={styles.hamburgerButton}
-                  onClick={() => setMobileDrawerOpen((open) => !open)}
-                  aria-label={t('sidebar.toggleMenu')}
-                  aria-expanded={mobileDrawerOpen}
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
+              {sidebarOptions.enabled &&
+                !activePanel &&
+                mainView === 'chat' && (
+                  <button
+                    type="button"
+                    className={[
+                      styles.hamburgerButton,
+                      isChatEmptyState
+                        ? styles.hamburgerButtonFloating
+                        : undefined,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    onClick={() => setMobileDrawerOpen((open) => !open)}
+                    aria-label={t('sidebar.toggleMenu')}
+                    aria-expanded={mobileDrawerOpen}
                   >
-                    <line x1="3" y1="6" x2="21" y2="6" />
-                    <line x1="3" y1="12" x2="21" y2="12" />
-                    <line x1="3" y1="18" x2="21" y2="18" />
-                  </svg>
-                </button>
-              )}
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <line x1="3" y1="6" x2="21" y2="6" />
+                      <line x1="3" y1="12" x2="21" y2="12" />
+                      <line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
               {activePanel && (
                 <section
                   className={styles.panelHost}

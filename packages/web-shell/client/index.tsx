@@ -115,6 +115,8 @@ export type {
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  UserMessageContentRenderer,
+  UserMessageContentRenderInfo,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellComposerToolbarRenderInfo,
