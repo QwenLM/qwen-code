@@ -335,6 +335,10 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    if (this.options.extraArgs && this.options.extraArgs.length > 0) {
+      args.push(...this.options.extraArgs);
+    }
+
     return args;
   }
 

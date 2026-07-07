@@ -240,4 +240,7 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     elif options.session_id:
         args.extend(["--session-id", options.session_id])
 
+    if options.extra_args:
+        args.extend(options.extra_args)
+
     return args

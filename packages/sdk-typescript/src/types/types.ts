@@ -46,6 +46,13 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * Additional CLI arguments to pass to the qwen process.
+   * Escape hatch for flags not explicitly supported by the SDK.
+   * Cannot include --input-format, --output-format, or --channel
+   * (managed by the SDK).
+   */
+  extraArgs?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -503,4 +510,12 @@ export interface QueryOptions {
      */
     streamClose?: number;
   };
+
+  /**
+   * Additional CLI arguments to pass to the qwen process.
+   * Escape hatch for flags not explicitly supported by the SDK.
+   * Cannot include --input-format, --output-format, or --channel
+   * (managed by the SDK).
+   */
+  extraArgs?: string[];
 }

@@ -64,6 +64,19 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
 
+    if options.extra_args:
+        _CONFLICTING_FLAGS = {
+            "--input-format",
+            "--output-format",
+            "--channel",
+        }
+        for arg in options.extra_args:
+            if arg in _CONFLICTING_FLAGS:
+                raise ValidationError(
+                    f"extra_args cannot include '{arg}' — "
+                    "it is managed by the SDK"
+                )
+
     if options.mcp_servers:
         raise ValidationError(
             "mcp_servers is not supported in Python SDK v1. "

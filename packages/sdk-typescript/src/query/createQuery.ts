@@ -70,6 +70,7 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    extraArgs: options.extraArgs,
   });
 
   const queryOptions: QueryOptions = {
