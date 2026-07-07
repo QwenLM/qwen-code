@@ -145,6 +145,12 @@ class TestChannel extends ChannelBase {
   }
 }
 
+class UnsafeProcessChannel extends TestChannel {
+  processWithoutPreflight(envelope: Envelope): Promise<void> {
+    return this.processInbound(envelope);
+  }
+}
+
 function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
@@ -228,6 +234,31 @@ describe('ChannelBase', () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('rejects direct processing without preflight', async () => {
+      const ch = new UnsafeProcessChannel('test-chan', defaultConfig(), bridge);
+
+      await expect(ch.processWithoutPreflight(envelope())).rejects.toThrow(
+        'processInbound called without a successful preflightInbound check.',
+      );
+    });
+
+    it('waits for thenable preflight results', async () => {
+      class ThenablePreflightChannel extends TestChannel {
+        protected override preflightInbound(): PromiseLike<boolean> {
+          return { then: (resolve) => resolve(false) };
+        }
+      }
+      const ch = new ThenablePreflightChannel(
+        'test-chan',
+        defaultConfig(),
+        bridge,
+      );
+
+      await ch.handleInbound(envelope());
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('rejects sender with allowlist policy', async () => {

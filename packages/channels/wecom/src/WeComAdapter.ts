@@ -88,6 +88,8 @@ const KICK_RECONNECT_RESET_MS = 60_000;
 const KICK_RECONNECT_RETRY_MS = 5 * 60 * 1000;
 const KICK_RECONNECT_LONG_RETRY_MS = 15 * 60 * 1000;
 const DISCONNECT_RECONNECT_FALLBACK_MS = 30_000;
+const ACTIVITY_WATCHDOG_INTERVAL_MS = 60_000;
+const ACTIVITY_STALE_MS = 5 * 60_000;
 
 export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
@@ -107,6 +109,8 @@ export class WeComChannel extends ChannelBase {
   private kickReconnectReset?: ReturnType<typeof setTimeout>;
   private kickReconnectRetry?: ReturnType<typeof setTimeout>;
   private disconnectReconnectFallback?: ReturnType<typeof setTimeout>;
+  private activityWatchdog?: ReturnType<typeof setInterval>;
+  private lastActivityAt = 0;
   private connecting?: Promise<void>;
   private connectingClient?: WeComClient;
   private authentication?: ReturnType<typeof waitForAuthentication>;
@@ -159,6 +163,7 @@ export class WeComChannel extends ChannelBase {
     let authenticated = false;
     const connectionGeneration = this.disconnectGeneration;
     const messageHandler = (payload: unknown) => {
+      this.recordActivity();
       if (!authenticated) {
         process.stderr.write(
           `[WeCom:${this.name}] dropping message before authentication.\n`,
@@ -167,8 +172,9 @@ export class WeComChannel extends ChannelBase {
       }
       this.clearDisconnectReconnectFallback();
       this.onMessage(payload, connectionGeneration).catch((err: unknown) => {
+        const logMessageId = getLogMessageId(payload);
         process.stderr.write(
-          `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
+          `[WeCom:${this.name}] message handling failed for ${logMessageId}: ${sanitizeLogText(
             formatSdkError(err),
             200,
           )}\n`,
@@ -176,11 +182,13 @@ export class WeComChannel extends ChannelBase {
       });
     };
     const errorHandler = (err: unknown) => {
+      this.recordActivity();
       process.stderr.write(
         `[WeCom:${this.name}] SDK error: ${sanitizeLogText(formatSdkError(err), 200)}\n`,
       );
     };
     const disconnectedHandler = (reason: unknown) => {
+      this.recordActivity();
       if (this.disconnectGeneration !== connectionGeneration) return;
       process.stderr.write(
         `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; waiting for SDK reconnect.\n`,
@@ -194,6 +202,7 @@ export class WeComChannel extends ChannelBase {
       }
     };
     const kickedHandler = (reason: unknown) => {
+      this.recordActivity();
       if (this.disconnectGeneration !== connectionGeneration) return;
       this.clearDisconnectReconnectFallback();
       this.startKickReconnect(reason);
@@ -233,6 +242,8 @@ export class WeComChannel extends ChannelBase {
       this.client = client;
       this.connectingClient = undefined;
       this.authentication = undefined;
+      this.recordActivity();
+      this.startActivityWatchdog(connectionGeneration);
     } catch (err) {
       authentication.cancel();
       this.detachClientHandlers(client, handlers);
@@ -267,6 +278,7 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectRetry = undefined;
     }
     this.clearDisconnectReconnectFallback();
+    this.clearActivityWatchdog();
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
       this.dedupTimer = undefined;
@@ -780,6 +792,7 @@ export class WeComChannel extends ChannelBase {
     this.authentication = undefined;
     this.client = undefined;
     this.connectingClient = undefined;
+    this.clearActivityWatchdog();
     if (client) this.detachClientHandlers(client);
     try {
       client?.disconnect();
@@ -797,6 +810,35 @@ export class WeComChannel extends ChannelBase {
     if (!this.disconnectReconnectFallback) return;
     clearTimeout(this.disconnectReconnectFallback);
     this.disconnectReconnectFallback = undefined;
+  }
+
+  private recordActivity(): void {
+    this.lastActivityAt = Date.now();
+  }
+
+  private clearActivityWatchdog(): void {
+    if (!this.activityWatchdog) return;
+    clearInterval(this.activityWatchdog);
+    this.activityWatchdog = undefined;
+  }
+
+  private startActivityWatchdog(disconnectGeneration: number): void {
+    this.clearActivityWatchdog();
+    this.activityWatchdog = setInterval(() => {
+      if (this.disconnectGeneration !== disconnectGeneration) return;
+      if (!this.client || this.reconnectingAfterKick) return;
+      if (Date.now() - this.lastActivityAt < ACTIVITY_STALE_MS) return;
+
+      process.stderr.write(
+        `[WeCom:${this.name}] no SDK activity for ${ACTIVITY_STALE_MS / 60_000} minutes; reconnecting adapter.\n`,
+      );
+      this.kickReconnectAttempts = 0;
+      this.kickReconnectRetryCycles = 0;
+      this.startKickReconnect(
+        new Error('WeCom SDK activity watchdog timed out.'),
+        'activity watchdog',
+      );
+    }, ACTIVITY_WATCHDOG_INTERVAL_MS);
   }
 
   private scheduleDisconnectReconnectFallback(
@@ -963,6 +1005,7 @@ export class WeComChannel extends ChannelBase {
             this.disconnectGeneration,
             KICK_RECONNECT_LONG_RETRY_MS,
             reconnectReason,
+            true,
           );
         }
       },
@@ -1187,6 +1230,12 @@ function extractBody(payload: unknown): Record<string, unknown> | undefined {
   const raw = asRecord(payload);
   if (!raw) return undefined;
   return getRecord(raw, 'body') ?? raw;
+}
+
+function getLogMessageId(payload: unknown): string {
+  const body = extractBody(payload);
+  if (!body) return '(unknown id)';
+  return sanitizeLogText(getString(body, 'msgid') || '(no id)', 100);
 }
 
 function extractText(body: Record<string, unknown>): string {

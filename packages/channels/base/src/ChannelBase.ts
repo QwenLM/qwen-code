@@ -190,6 +190,7 @@ export abstract class ChannelBase {
   private activePrompts: Map<string, ActivePrompt> = new Map();
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
+  private readonly preflightedEnvelopes = new WeakSet<Envelope>();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
   };
@@ -732,6 +733,7 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
+          this.markPreflighted(syntheticEnvelope);
           this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
@@ -2231,14 +2233,19 @@ export abstract class ChannelBase {
       return false;
     }
 
+    this.markPreflighted(envelope);
     return true;
   }
 
   async handleInbound(envelope: Envelope): Promise<void> {
     const preflight = this.preflightInbound(envelope);
-    if (!(preflight instanceof Promise ? await preflight : preflight)) return;
+    if (!(isPromiseLike(preflight) ? await preflight : preflight)) return;
 
     await this.processInbound(envelope);
+  }
+
+  protected markPreflighted(envelope: Envelope): void {
+    this.preflightedEnvelopes.add(envelope);
   }
 
   /**
@@ -2249,6 +2256,12 @@ export abstract class ChannelBase {
    * already preflighted, such as during collect-buffer drain.
    */
   protected async processInbound(envelope: Envelope): Promise<void> {
+    if (!this.preflightedEnvelopes.delete(envelope)) {
+      throw new Error(
+        'processInbound called without a successful preflightInbound check.',
+      );
+    }
+
     // 3. Slash command handling — before session/agent routing
     const parsed = this.parseCommand(envelope.text);
     if (parsed) {
@@ -2855,6 +2868,7 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
+          this.markPreflighted(syntheticEnvelope);
           // Queue the coalesced prompt (don't await to avoid deadlock on the queue).
           // Surface a drain failure instead of silently losing buffered turns.
           this.processInbound(syntheticEnvelope).catch((err) => {
@@ -2894,6 +2908,14 @@ export abstract class ChannelBase {
 
 function truncateGroupHistoryField(value: string): string {
   return value.slice(0, GROUP_HISTORY_ENTRY_METADATA_LIMIT);
+}
+
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 function truncateLoopLabel(prompt: string): string {

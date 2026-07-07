@@ -733,6 +733,38 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('resets retry cycles for long retry after unexpected kick reconnect failure', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    const inspectable = channel as unknown as {
+      reconnectAfterKick(
+        reason: unknown,
+        reconnectReason?: string,
+      ): Promise<void>;
+      startKickReconnect(reason: unknown, reconnectReason?: string): void;
+      kickReconnectRetryCycles: number;
+    };
+    inspectable.kickReconnectRetryCycles = 3;
+    inspectable.reconnectAfterKick = vi.fn(async () => {
+      throw new Error('state corrupt');
+    });
+
+    inspectable.startKickReconnect('kicked', 'server kick');
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] kick-reconnect failed: state corrupt\n',
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    expect(inspectable.kickReconnectRetryCycles).toBe(0);
+
+    stderr.mockRestore();
+  });
+
   it('does not keep the SDK disconnect fallback reconnect alive', () => {
     const unref = vi.fn();
     const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
@@ -774,6 +806,28 @@ describe('WeComChannel', () => {
     expect(oldClient.disconnect).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       '[WeCom:bot] SDK reconnect did not recover after WebSocket closed; reconnecting adapter.\n',
+    );
+
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
+  it('reconnects when the SDK stays silent past the activity watchdog', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    expect(oldClient.disconnect).toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] no SDK activity for 5 minutes; reconnecting adapter.\n',
     );
 
     channel.disconnect();
@@ -1728,7 +1782,7 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
     await vi.waitFor(() =>
       expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining('message handling failed'),
+        '[WeCom:bot] message handling failed for msg-preflight-fails: preflight failed\n',
       ),
     );
 
@@ -1823,7 +1877,7 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.processes).toHaveBeenCalledTimes(1));
     await vi.waitFor(() =>
       expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining('message handling failed'),
+        '[WeCom:bot] message handling failed for msg-process-fails: process failed after side effects started\n',
       ),
     );
 

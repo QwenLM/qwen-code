@@ -36,6 +36,11 @@ function resolveOptionalStringField(
   return resolveConfigEnvVar(value, envResolution);
 }
 
+/**
+ * false: leave string values unchanged.
+ * true: resolve $VAR references with the legacy generic not-set error.
+ * 'available': resolve $VAR references with explicit unset vs empty errors.
+ */
 type EnvResolution = boolean | 'available';
 const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
 
