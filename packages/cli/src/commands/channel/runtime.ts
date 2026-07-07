@@ -170,8 +170,11 @@ function cancelPermissionRequest(
   bridge: ChannelAgentBridge,
   requestId: string,
 ): void {
+  if (!bridge.respondToPermission) {
+    return;
+  }
   void bridge
-    .respondToPermission?.(requestId, { outcome: { outcome: 'cancelled' } })
+    .respondToPermission(requestId, { outcome: { outcome: 'cancelled' } })
     .catch((err: unknown) => {
       writeStderrLine(
         `[Channel] Permission cancellation failed for ${sanitizeLogText(requestId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
@@ -187,11 +190,17 @@ export function registerPermissionRelay(
   bridge.on('permissionRequest', (event: PermissionRequestEvent) => {
     const target = router.getTarget(event.sessionId);
     if (!target) {
+      writeStderrLine(
+        `[Channel] No route for session ${sanitizeLogText(event.sessionId, 128)}; cancelling permission ${sanitizeLogText(event.requestId, 128)}`,
+      );
       cancelPermissionRequest(bridge, event.requestId);
       return;
     }
     const channel = channels.get(target.channelName);
     if (!channel) {
+      writeStderrLine(
+        `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for session ${sanitizeLogText(event.sessionId, 128)}; cancelling permission ${sanitizeLogText(event.requestId, 128)}`,
+      );
       cancelPermissionRequest(bridge, event.requestId);
       return;
     }

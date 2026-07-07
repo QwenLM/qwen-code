@@ -360,6 +360,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         if (!pending) {
           return;
         }
+        process.stderr.write(
+          `[AcpBridge] permission request ${sanitizeLogText(requestId, 128)} timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=${sanitizeLogText(pending.sessionId, 128)})\n`,
+        );
         this.pendingPermissions.delete(requestId);
         const response: RequestPermissionResponse = {
           outcome: { outcome: 'cancelled' },

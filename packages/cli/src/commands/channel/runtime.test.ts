@@ -115,28 +115,71 @@ describe('registerPermissionRelay', () => {
   }
 
   it('cancels permission requests when no route exists', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const bridge = createBridge();
     const router = { getTarget: vi.fn() };
 
-    registerPermissionRelay(bridge, router as never, new Map());
-    bridge.emit('permissionRequest', {
-      requestId: 'req-1',
-      sessionId: 'missing-session',
-      request: {
-        toolCall: {
-          toolCallId: 'tool-1',
-          kind: 'shell',
-          title: 'Run command',
+    try {
+      registerPermissionRelay(bridge, router as never, new Map());
+      bridge.emit('permissionRequest', {
+        requestId: 'req-1',
+        sessionId: 'missing-session',
+        request: {
+          toolCall: {
+            toolCallId: 'tool-1',
+            kind: 'shell',
+            title: 'Run command',
+          },
+          options: [],
         },
-        options: [],
-      },
-    });
+      });
 
-    await vi.waitFor(() =>
-      expect(bridge.respondToPermission).toHaveBeenCalledWith('req-1', {
-        outcome: { outcome: 'cancelled' },
-      }),
-    );
+      await vi.waitFor(() =>
+        expect(bridge.respondToPermission).toHaveBeenCalledWith('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      );
+      expect(stderr.mock.calls.join('')).toContain(
+        'No route for session missing-session; cancelling permission req-1',
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('does not crash cancelling permission requests without a responder', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = createBridge();
+    delete (bridge as { respondToPermission?: unknown }).respondToPermission;
+    const router = { getTarget: vi.fn() };
+
+    try {
+      registerPermissionRelay(bridge, router as never, new Map());
+
+      expect(() =>
+        bridge.emit('permissionRequest', {
+          requestId: 'req-1',
+          sessionId: 'missing-session',
+          request: {
+            toolCall: {
+              toolCallId: 'tool-1',
+              kind: 'shell',
+              title: 'Run command',
+            },
+            options: [],
+          },
+        }),
+      ).not.toThrow();
+      expect(stderr.mock.calls.join('')).toContain(
+        'No route for session missing-session; cancelling permission req-1',
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('cancels permission requests when channel dispatch fails', async () => {
@@ -174,6 +217,43 @@ describe('registerPermissionRelay', () => {
         outcome: { outcome: 'cancelled' },
       }),
     );
+  });
+
+  it('logs before cancelling permission requests with no channel', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = createBridge();
+    const router = {
+      getTarget: vi.fn(() => ({ channelName: 'telegram', chatId: 'chat1' })),
+    };
+
+    try {
+      registerPermissionRelay(bridge, router as never, new Map());
+      bridge.emit('permissionRequest', {
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        request: {
+          toolCall: {
+            toolCallId: 'tool-1',
+            kind: 'shell',
+            title: 'Run command',
+          },
+          options: [],
+        },
+      });
+
+      await vi.waitFor(() =>
+        expect(bridge.respondToPermission).toHaveBeenCalledWith('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      );
+      expect(stderr.mock.calls.join('')).toContain(
+        'No channel "telegram" for session session-1; cancelling permission req-1',
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('broadcasts resolved permission requests to channels', () => {

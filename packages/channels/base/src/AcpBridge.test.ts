@@ -555,6 +555,9 @@ describe('AcpBridge', () => {
       cwd: '/tmp',
     });
     const permissionResolved = vi.fn();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     bridge.on('permissionResolved', permissionResolved);
 
     await bridge.start();
@@ -581,7 +584,11 @@ describe('AcpBridge', () => {
         requestId: 'acp-permission-1',
         outcome: { outcome: 'cancelled' },
       });
+      expect(stderr.mock.calls.join('')).toContain(
+        `[AcpBridge] permission request acp-permission-1 timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=session-1)`,
+      );
     } finally {
+      stderr.mockRestore();
       vi.useRealTimers();
     }
   });
