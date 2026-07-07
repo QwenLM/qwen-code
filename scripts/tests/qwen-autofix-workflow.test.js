@@ -1001,6 +1001,9 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'agent detail',
       );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
     });
   });
 
