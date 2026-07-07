@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
+  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -66,6 +67,67 @@ function writeFailure(workdir, message) {
   );
 }
 
+function writeHandoff(workdir, message) {
+  mkdirSync(workdir, { recursive: true });
+  writeFileSync(file(workdir, 'handoff.md'), `${message}\n`);
+}
+
+function isLoopGuardOutput(output) {
+  return (
+    output.includes('turn_tool_call_cap') ||
+    output.includes('Loop detection halted the run')
+  );
+}
+
+function runQwen(options, prompt) {
+  mkdirSync(options.workdir, { recursive: true });
+  const log = createWriteStream(file(options.workdir, 'agent.log'), {
+    flags: 'w',
+  });
+  let outputTail = '';
+  let settled = false;
+  let timedOut = false;
+  let timer;
+
+  return new Promise((resolve) => {
+    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
+      stdio: ['inherit', 'pipe', 'pipe'],
+    });
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      log.end(() => {
+        resolve({
+          ...result,
+          timedOut,
+          loopDetected: isLoopGuardOutput(outputTail),
+        });
+      });
+    };
+
+    const record = (chunk, stream) => {
+      const text = chunk.toString('utf8');
+      outputTail = (outputTail + text).slice(-20_000);
+      log.write(chunk);
+      stream.write(chunk);
+    };
+
+    child.stdout.on('data', (chunk) => record(chunk, process.stdout));
+    child.stderr.on('data', (chunk) => record(chunk, process.stderr));
+    child.on('error', (error) => finish({ error, status: null, signal: null }));
+    child.on('close', (status, signal) =>
+      finish({ error: null, status, signal }),
+    );
+
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, QWEN_TIMEOUT_MS);
+  });
+}
+
 function promptFor(options, spec) {
   const skill = readFileSync(skillPath, 'utf8')
     .replace(/\r\n/g, '\n')
@@ -123,22 +185,36 @@ if (missingInputs.length > 0) {
   );
 }
 
-const result = spawnSync(options.qwenBin, ['--yolo', '--prompt', prompt], {
-  stdio: 'inherit',
-  timeout: QWEN_TIMEOUT_MS,
-});
+const result = await runQwen(options, prompt);
 if (result.error || result.signal || result.status !== 0) {
   const detail = result.error
     ? result.error.message
-    : result.signal
-      ? `signal ${result.signal}`
-      : `status ${String(result.status)}`;
+    : result.timedOut
+      ? `timeout (${QWEN_TIMEOUT_MS}ms)`
+      : result.signal
+        ? `signal ${result.signal}`
+        : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
-    writeFailure(
-      options.workdir,
-      `Qwen failed during ${options.mode}: ${detail}.`,
-    );
+    if (result.loopDetected) {
+      writeFailure(
+        options.workdir,
+        `Qwen hit the tool-call loop guard during ${options.mode}: turn_tool_call_cap. A human should take over this feedback batch.`,
+      );
+      writeHandoff(
+        options.workdir,
+        'Qwen hit the tool-call loop guard; a human should take over this feedback batch.',
+      );
+    } else {
+      writeFailure(
+        options.workdir,
+        `Qwen failed during ${options.mode}: ${detail}.`,
+      );
+    }
   } else {
+    writeHandoff(
+      options.workdir,
+      'The agent wrote failure.md before qwen exited; a human should take over this feedback batch.',
+    );
     console.error(
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
     );
@@ -148,6 +224,10 @@ if (result.error || result.signal || result.status !== 0) {
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
   const content = readFileSync(file(options.workdir, 'failure.md'), 'utf8');
+  writeHandoff(
+    options.workdir,
+    'The agent wrote failure.md; a human should take over this feedback batch.',
+  );
   console.error(`Autofix agent wrote failure.md:\n${content}`);
   process.exit(0);
 }

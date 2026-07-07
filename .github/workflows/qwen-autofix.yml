@@ -1281,7 +1281,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -1391,7 +1391,7 @@ jobs:
             echo "### PR #${PR} (issue #${ISSUE}) — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo "- Base conflict: ${CONFLICT:-unknown}"
             echo
-            for f in address-summary.md no-action.md failure.md; do
+            for f in address-summary.md no-action.md failure.md handoff.md; do
               if [[ -s "${WORKDIR}/${f}" ]]; then
                 echo "**${f}:**"
                 cat "${WORKDIR}/${f}"
@@ -1400,7 +1400,7 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          if [[ "${DRY_RUN}" != "true" && "${OUTCOME:-unknown}" == "failed" && -n "${NEWEST:-}" && -n "${GITHUB_TOKEN:-}" && -s "${WORKDIR}/failure.md" ]]; then
+          if [[ "${DRY_RUN}" != "true" && "${OUTCOME:-unknown}" == "failed" && -n "${NEWEST:-}" && -n "${GITHUB_TOKEN:-}" && -s "${WORKDIR}/handoff.md" ]]; then
             {
               echo "🤖 Could not address the latest review feedback automatically."
               echo

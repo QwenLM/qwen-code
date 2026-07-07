@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -895,7 +896,7 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('posts a human-handoff marker when review addressing fails', () => {
+  it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
     expect(reviewAddressReportStep).toContain(
       "GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'",
     );
@@ -903,7 +904,7 @@ describe('qwen-autofix workflow', () => {
       "NEWEST: '${{ steps.prepare.outputs.newest }}'",
     );
     expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
-    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/failure.md"');
+    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/handoff.md"');
     expect(reviewAddressReportStep).toContain(
       '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->',
     );
@@ -912,6 +913,50 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
     expect(reviewAddressReportStep).toContain('human should take over');
+  });
+
+  it('writes agent output to a log and marks loop guard failures for handoff', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Loop detection halted the run (turn_tool_call_cap: too many tool calls)\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
+        'turn_tool_call_cap',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'turn_tool_call_cap',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('does not mark generic qwen subprocess failures for handoff', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('temporary upstream error\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
+        'temporary upstream error',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+    });
   });
 
   it('preserves agent-written failure details when the qwen subprocess fails', () => {
@@ -935,7 +980,8 @@ describe('qwen-autofix workflow', () => {
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
     expect(runner).toContain('const QWEN_TIMEOUT_MS = 50 * 60 * 1000');
-    expect(runner).toContain('timeout: QWEN_TIMEOUT_MS');
+    expect(runner).toContain('setTimeout(() =>');
+    expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
   });
 
   it('reports external qwen subprocess signals without calling them timeouts', () => {
@@ -994,6 +1040,9 @@ describe('qwen-autofix workflow', () => {
       expect(result.stderr).toContain('cannot proceed');
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'cannot proceed',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
       );
     });
   });
