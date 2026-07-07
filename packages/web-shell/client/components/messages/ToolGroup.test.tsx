@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
+import { WebShellCustomizationProvider } from '../../customization';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -56,14 +57,17 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
-function renderToolLine(tool: ACPToolCall): HTMLElement {
+function renderToolLine(
+  tool: ACPToolCall,
+  props: Partial<Parameters<typeof ToolLine>[0]> = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <ToolLine tool={tool} />
+        <ToolLine tool={tool} {...props} />
       </I18nProvider>,
     );
   });
@@ -71,14 +75,19 @@ function renderToolLine(tool: ACPToolCall): HTMLElement {
   return container;
 }
 
-function renderToolGroup(tools: ACPToolCall[]): HTMLElement {
+function renderToolGroup(
+  tools: ACPToolCall[],
+  customization = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <ToolGroup tools={tools} />
+        <WebShellCustomizationProvider value={customization}>
+          <ToolGroup tools={tools} />
+        </WebShellCustomizationProvider>
       </I18nProvider>,
     );
   });
@@ -185,16 +194,49 @@ describe('tool group summary logic', () => {
     );
   });
 
-  it('formats a single tool summary from the tool itself', () => {
+  it('formats a single shell summary as only the semantic description', () => {
+    expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'run_shell_command',
+          args: {
+            command: 'dataworks-infra workspace list',
+            description: '查询用户工作空间列表',
+            timeout: 30000,
+          },
+        }),
+        t,
+      ),
+    ).toBe('查询用户工作空间列表');
+  });
+
+  it('falls back to command text for shell summaries without descriptions', () => {
     expect(
       formatSingleToolSummary(
         makeTool({
           toolName: 'Shell',
-          args: { command: 'npm run build' },
+          args: { command: 'npm run build', timeout: 30000 },
         }),
         t,
       ),
     ).toBe('Shell npm run build');
+  });
+
+  it('uses only skill names in single tool summaries', () => {
+    expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'skill',
+          title:
+            'Skill: Use skill: "qc-helper" with args: "weather in Hangzhou next 5 days"',
+          args: {
+            skill: 'qc-helper',
+            args: 'weather in Hangzhou next 5 days',
+          },
+        }),
+        t,
+      ),
+    ).toBe('Skill qc-helper');
   });
 
   it('uses action summaries for single todo and ask-user tools', () => {
@@ -232,6 +274,61 @@ describe('tool group summary logic', () => {
     expect(summary.length).toBeLessThan(140);
     expect(summary).toContain('...');
   });
+
+  it('lets custom tool header extras render single-tool chat summaries', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'run_shell_command',
+          args: {
+            command: 'dataworks-infra workspace list',
+            description: '查询用户工作空间列表',
+            timeout: 30000,
+          },
+        }),
+      ],
+      {
+        renderToolHeaderExtra: (info) => (
+          <span data-testid="custom-summary">
+            {info.kind}:{info.description}
+          </span>
+        ),
+      },
+    );
+
+    const summary = container.querySelector('button');
+    expect(summary?.textContent).not.toContain('Shell');
+    expect(summary?.textContent).toContain('shell:查询用户工作空间列表');
+    expect(summary?.textContent).not.toContain('timeout: 30000ms');
+  });
+
+  it('uses action descriptions for shell rows inside grouped summaries', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'shell',
+        toolName: 'run_shell_command',
+        title:
+          'Shell: dataworks-infra workspace list [timeout: 30000ms] (查询用户工作空间列表)',
+        args: {
+          command: 'dataworks-infra workspace list',
+          description: '查询用户工作空间列表',
+          timeout: 30000,
+        },
+      }),
+      makeTool({
+        callId: 'read',
+        toolName: 'read_file',
+        args: { file_path: 'README.md' },
+      }),
+    ]);
+
+    expect(container.textContent).toContain('Shell');
+    expect(container.textContent).toContain('查询用户工作空间列表');
+    expect(container.textContent).not.toContain(
+      'dataworks-infra workspace list',
+    );
+    expect(container.textContent).not.toContain('timeout: 30000ms');
+  });
 });
 
 describe('tool expandability', () => {
@@ -252,6 +349,31 @@ describe('tool expandability', () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it('does not expand skill rows that only have the skill name', () => {
+    expect(
+      hasExpandableContent(
+        makeTool({
+          toolName: 'skill',
+          args: { skill: 'review' },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasExpandableContent(
+        makeTool({
+          toolName: 'skill',
+          args: { skill: 'review' },
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: '# Code Review' },
+            },
+          ],
+        }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -362,6 +484,68 @@ describe('tool row rendering', () => {
     act(() => header.click());
     expect(header.textContent).toContain(pattern);
     expect(header.textContent).toContain('packages/web-shell/client');
+  });
+
+  it('uses the shell tool name for expanded cards from action summaries', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'run_shell_command',
+        args: {
+          command: 'dataworks-infra workspace list',
+          description: '查询用户工作空间列表',
+          timeout: 30000,
+        },
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: 'failed\nwith details' },
+          },
+        ],
+      }),
+      { summaryOnly: true },
+    );
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+
+    expect(header.textContent).toContain('Shell');
+    expect(header.textContent).toContain('查询用户工作空间列表');
+
+    act(() => header.click());
+
+    const cardTitle = container.querySelector('[class*="expandedCardTitle"]');
+    expect(cardTitle?.textContent).toBe('Shell');
+  });
+
+  it('shows complete skill content in the expanded card body', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'skill',
+        title: 'Skill: Use skill: "review" with args: "check the current diff"',
+        args: {
+          skill: 'review',
+        },
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: 'Base directory for this skill: /repo\n# Code Review',
+            },
+          },
+        ],
+      }),
+    );
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+
+    expect(header.textContent).toContain('Skill');
+    expect(header.textContent).toContain('review');
+    expect(header.textContent).not.toContain('check the current diff');
+
+    act(() => header.click());
+
+    const output = container.querySelector('pre');
+    expect(output?.textContent).toBe(
+      'Base directory for this skill: /repo\n# Code Review',
+    );
   });
 });
 

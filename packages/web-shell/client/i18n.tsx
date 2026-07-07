@@ -1641,7 +1641,7 @@ const ZH: Messages = {
   'toolName.todo_write': '任务清单',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': 'Agent',
-  'toolName.skill': '技能',
+  'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
   'toolName.web_fetch': '网络搜索',
