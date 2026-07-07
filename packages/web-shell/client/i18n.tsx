@@ -827,6 +827,8 @@ const EN: Messages = {
   'bug.submitted': 'Bug report opened in a new tab.',
   'clear.blocked': 'Cannot clear while streaming — cancel first (Esc).',
   'error.unknown': 'Unknown error',
+  'error.modelStreamInterrupted':
+    'Model response stream was interrupted. Please retry.',
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
@@ -2439,6 +2441,7 @@ const ZH: Messages = {
   'bug.submitted': 'Bug 报告已在新标签页中打开。',
   'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
   'error.unknown': '未知错误',
+  'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',

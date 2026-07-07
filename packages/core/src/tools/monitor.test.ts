@@ -191,8 +191,15 @@ describe('MonitorTool', () => {
   let monitorRegistry: MonitorRegistry;
   let mockChild: ReturnType<typeof createMockChild>;
   let mockIsPathWithinWorkspace: ReturnType<typeof vi.fn>;
+  let originalPager: string | undefined;
+  let originalGitPager: string | undefined;
 
   beforeEach(() => {
+    originalPager = process.env['PAGER'];
+    originalGitPager = process.env['GIT_PAGER'];
+    delete process.env['PAGER'];
+    delete process.env['GIT_PAGER'];
+
     vi.clearAllMocks();
     mockOsPlatform.mockReturnValue('linux');
 
@@ -229,6 +236,18 @@ describe('MonitorTool', () => {
 
   afterEach(() => {
     monitorRegistry.abortAll();
+
+    if (originalPager === undefined) {
+      delete process.env['PAGER'];
+    } else {
+      process.env['PAGER'] = originalPager;
+    }
+
+    if (originalGitPager === undefined) {
+      delete process.env['GIT_PAGER'];
+    } else {
+      process.env['GIT_PAGER'] = originalGitPager;
+    }
   });
 
   // Helper to access protected validateToolParamValues
@@ -682,7 +701,33 @@ describe('MonitorTool', () => {
 
       const spawnOptions = mockSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('cat');
-      expect(spawnOptions.env['GIT_PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
+    });
+
+    it('preserves inherited git pager values for spawned processes', async () => {
+      process.env['GIT_PAGER'] = 'delta';
+      const invocation = createInvocation({
+        command: 'git log --oneline',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBe('delta');
+    });
+
+    it('does not inject Unix pager defaults into Windows monitor env when unset', async () => {
+      mockOsPlatform.mockReturnValue('win32');
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
     });
 
     it('propagates explicit pager configuration to spawned processes', async () => {
@@ -697,7 +742,7 @@ describe('MonitorTool', () => {
 
       const spawnOptions = mockSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('more');
-      expect(spawnOptions.env['GIT_PAGER']).toBe('more');
+      expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
     });
 
     it('does not spawn when the turn signal is already aborted', async () => {
