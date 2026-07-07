@@ -50,9 +50,15 @@ export function registerChannelWebhookRoutes(
 
     const body = deps.safeBody(req);
     const eventType = readRequiredBodyString(body, 'eventType', res);
+    if (!eventType) {
+      return;
+    }
     const targetRef = readRequiredBodyString(body, 'targetRef', res);
+    if (!targetRef) {
+      return;
+    }
     const title = readRequiredBodyString(body, 'title', res);
-    if (!eventType || !targetRef || !title) {
+    if (!title) {
       return;
     }
 

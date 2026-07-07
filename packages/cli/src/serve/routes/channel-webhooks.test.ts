@@ -12,6 +12,15 @@ import { registerChannelWebhookRoutes } from './channel-webhooks.js';
 function appHarness(opts?: { enqueueWebhookTask?: ReturnType<typeof vi.fn> }) {
   const app = express();
   app.use(express.json());
+  let jsonCallCount = 0;
+  app.use((_req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      jsonCallCount += 1;
+      return originalJson(body);
+    }) as typeof res.json;
+    next();
+  });
   const enqueueWebhookTask =
     opts?.enqueueWebhookTask ??
     vi.fn(async () => ({
@@ -42,7 +51,11 @@ function appHarness(opts?: { enqueueWebhookTask?: ReturnType<typeof vi.fn> }) {
     enqueueWebhookTask,
   });
 
-  return { app, enqueueWebhookTask };
+  return {
+    app,
+    enqueueWebhookTask,
+    getJsonCallCount: () => jsonCallCount,
+  };
 }
 
 describe('channel webhook routes', () => {
@@ -144,6 +157,21 @@ describe('channel webhook routes', () => {
       expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
     },
   );
+
+  it('rejects an empty body with a single 400 response', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'Body field "eventType" must be a non-empty string',
+    });
+    expect(h.getJsonCallCount()).toBe(1);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
 
   it('returns 500 when enqueueing fails', async () => {
     const h = appHarness({
