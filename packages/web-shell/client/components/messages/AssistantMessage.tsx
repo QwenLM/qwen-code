@@ -10,6 +10,7 @@ import { Markdown } from './Markdown';
 import { CompactModeContext } from '../../App';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
@@ -19,6 +20,7 @@ interface AssistantMessageProps {
   onBranchSession?: () => void;
   showFooterActions?: boolean;
   showBranchAction?: boolean;
+  isLocateFlashing?: boolean;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -28,6 +30,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   onBranchSession,
   showFooterActions = false,
   showBranchAction = false,
+  isLocateFlashing = false,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -47,13 +50,16 @@ export const AssistantMessage = memo(function AssistantMessage({
   return (
     <div className={styles.message}>
       {content && (
-        <div className={styles.content}>
+        <div
+          className={`${styles.content}${
+            isLocateFlashing ? ` ${flashStyles.flash}` : ''
+          }`}
+        >
           <div className={styles.contentBody}>
             <Markdown
               content={content}
               source="assistant"
-              deferMermaid={isStreaming}
-              enhanceTables={!isStreaming}
+              isStreaming={isStreaming}
             />
           </div>
         </div>
@@ -161,12 +167,14 @@ interface ThinkingMessageProps {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+  isLocateFlashing?: boolean;
 }
 
 export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   isStreaming,
   timestamp,
+  isLocateFlashing = false,
 }: ThinkingMessageProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
@@ -209,7 +217,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   }, []);
 
   return (
-    <div className={styles.message}>
+    <div
+      className={`${styles.message}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       {content && !compactMode && (
         <div className={styles.thinking}>
           <div className={styles.thinkingBody}>
@@ -232,9 +244,10 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                     : styles.thinkingSummaryText
                 }
               >
-                {t(thinkingSummaryKey, {
-                  duration: thinkingDuration,
-                })}
+                {t(
+                  thinkingSummaryKey,
+                  thinkingActive ? { duration: thinkingDuration } : {},
+                )}
               </span>
               <span
                 className={
@@ -257,7 +270,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                   <Markdown
                     content={content}
                     source="thinking"
-                    deferMermaid={isStreaming}
+                    isStreaming={isStreaming}
                   />
                 </div>
               </div>

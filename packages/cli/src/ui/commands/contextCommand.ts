@@ -207,7 +207,10 @@ export async function collectContextData(
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
-  const thresholds = computeThresholds(contextWindowSize);
+  const thresholds = computeThresholds(
+    contextWindowSize,
+    config.getAutoCompactThreshold(),
+  );
   // Keep the `(window - auto)` buffer for the legacy three-segment progress
   // bar in ContextUsage.tsx — it visualizes the headroom between the auto
   // threshold and the window edge, which is exactly `contextWindowSize -

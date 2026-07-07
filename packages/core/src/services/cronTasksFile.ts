@@ -16,6 +16,41 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
+/**
+ * One entry in a recurring task's bounded run history — a record that the
+ * task actually fired, surfaced by the Web Shell scheduled-tasks page. Only
+ * recurring tasks accrue these: a one-shot is removed from disk the moment it
+ * fires, so there is no surviving entry to attach history to.
+ */
+export interface CronTaskRun {
+  /** Fire time (epoch ms), minute-aligned like `lastFiredAt`. */
+  at: number;
+  /**
+   * How the run was delivered:
+   *  - `'scheduled'` — fired on time by the running scheduler tick.
+   *  - `'catch-up'` — a recurring fire that came due while no session owned
+   *    the schedule, delivered late when a session took over.
+   *  - `'manual'` — triggered by the user via the management UI's "run now",
+   *    not by the scheduler.
+   * Absent is treated as `'scheduled'` by consumers. Typed loosely (any
+   * string is accepted on read) so a future kind can't fail validation on an
+   * older reader.
+   */
+  kind?: 'scheduled' | 'catch-up' | 'manual';
+  /**
+   * Id of the session that owned the schedule when this fire ran — the session
+   * whose transcript contains the run. Lets a management UI link a run back to
+   * the conversation it happened in. Absent on tool-created history or when no
+   * owner id was known.
+   */
+  sessionId?: string;
+}
+
+/** Cap on a task's on-disk run history. A ring, newest kept — this bounds the
+ * per-task growth of the tasks file (every fire already rewrites it to stamp
+ * `lastFiredAt`, so appending a capped run adds no extra write, only bytes). */
+export const MAX_TASK_RUNS = 20;
+
 export interface DurableCronTask {
   id: string;
   cron: string;
@@ -23,6 +58,75 @@ export interface DurableCronTask {
   recurring: boolean;
   createdAt: number;
   lastFiredAt: number | null;
+  /**
+   * Optional display name, shown in management UIs (the Web Shell
+   * scheduled-tasks page). Absent on tool-created tasks — consumers fall
+   * back to the prompt. Never used for scheduling.
+   */
+  name?: string;
+  /**
+   * Whether the task is active. Absent or `true` = scheduled; `false` =
+   * kept on disk but skipped by the scheduler — a reversible "off" switch
+   * for the management UI. Absent defaults to enabled so tool-created
+   * tasks (which never write this field) keep firing.
+   */
+  enabled?: boolean;
+  /**
+   * Set when a task was disabled BY archiving its bound session (not by the
+   * user's own off-switch). Only such tasks are re-enabled when the session is
+   * unarchived, so a task the user deliberately disabled stays disabled across
+   * an archive/unarchive cycle. Cleared on re-enable.
+   */
+  disabledByArchive?: boolean;
+  /**
+   * Id of the dedicated session this task is bound to. A task created through
+   * the Web Shell management page mints its own session and stores its id here;
+   * the task then fires ONLY inside that session (not via the shared per-project
+   * durable owner), so the session's transcript is the task's run history, and
+   * archiving/deleting that session stops the task. Absent on tool-created
+   * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
+   */
+  sessionId?: string;
+  /**
+   * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
+   * Absent on tool-created tasks and on any task that has not fired yet.
+   * Appended at the scheduler's persist sites via {@link appendCronRun}.
+   */
+  runs?: CronTaskRun[];
+}
+
+/**
+ * Appends a run record to a task's bounded history ring (newest last), capping
+ * at {@link MAX_TASK_RUNS} by dropping the oldest. Pure — returns a fresh
+ * array and treats an absent/foreign `runs` as empty, so it is safe on a task
+ * that predates the field. Shared by every scheduler persist site so the cap
+ * is enforced in exactly one place.
+ */
+export function appendCronRun(
+  runs: CronTaskRun[] | undefined,
+  entry: CronTaskRun,
+): CronTaskRun[] {
+  const base = Array.isArray(runs) ? runs : [];
+  const next = [...base, entry];
+  return next.length > MAX_TASK_RUNS
+    ? next.slice(next.length - MAX_TASK_RUNS)
+    : next;
+}
+
+/**
+ * Generates an 8-character base36 id for a durable task. Shared by the
+ * scheduler (`CronScheduler`) and the daemon's scheduled-tasks route so
+ * route-created and tool-created tasks use one id scheme — changing it here
+ * changes it everywhere. Math.random is fine: ids only need to be unique
+ * within a <50-entry file, not unpredictable.
+ */
+export function generateCronTaskId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
 }
 
 const TASKS_FILENAME = 'scheduled_tasks.json';
@@ -241,6 +345,32 @@ export async function removeCronTasks(
   return removed;
 }
 
+// Finite, not just number: JSON like -1e999 parses to -Infinity, and a
+// non-finite timestamp poisons downstream date math — new Date(...)
+// .toISOString() throws mid-load, and age/expiry comparisons go
+// degenerate. Rejecting the entry routes it through the same
+// fix-or-delete contract as any other corrupt field.
+function isFiniteTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/** Validates the optional run-history ring. Each entry needs a finite `at`
+ * timestamp; `kind` is optional and accepted as any string (forward-compat
+ * with kinds a newer writer may add). A present-but-malformed `runs` routes
+ * through the same fix-or-delete contract as any other corrupt field. */
+function isValidRuns(value: unknown): value is CronTaskRun[] {
+  if (!Array.isArray(value)) return false;
+  return value.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const run = entry as Record<string, unknown>;
+    return (
+      isFiniteTimestamp(run['at']) &&
+      (run['kind'] === undefined || typeof run['kind'] === 'string') &&
+      (run['sessionId'] === undefined || typeof run['sessionId'] === 'string')
+    );
+  });
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -249,7 +379,21 @@ function isValidTask(value: unknown): value is DurableCronTask {
     typeof obj['cron'] === 'string' &&
     typeof obj['prompt'] === 'string' &&
     typeof obj['recurring'] === 'boolean' &&
-    typeof obj['createdAt'] === 'number' &&
-    (obj['lastFiredAt'] === null || typeof obj['lastFiredAt'] === 'number')
+    isFiniteTimestamp(obj['createdAt']) &&
+    (obj['lastFiredAt'] === null || isFiniteTimestamp(obj['lastFiredAt'])) &&
+    // Optional fields (added for the management UI): absent is valid and
+    // means "unnamed" / "enabled". Present-but-wrong-type routes through
+    // the same fix-or-delete contract as any other corrupt field rather
+    // than being silently coerced or dropped.
+    (obj['name'] === undefined || typeof obj['name'] === 'string') &&
+    (obj['enabled'] === undefined || typeof obj['enabled'] === 'boolean') &&
+    (obj['disabledByArchive'] === undefined ||
+      typeof obj['disabledByArchive'] === 'boolean') &&
+    // A bound sessionId must be a NON-EMPTY string: an empty string would pass
+    // a bare `typeof` check but the scheduler's truthy `task.sessionId` guard
+    // would treat it as unbound, so a "bound" task would silently run unbound.
+    (obj['sessionId'] === undefined ||
+      (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

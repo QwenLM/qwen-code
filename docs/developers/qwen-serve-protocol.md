@@ -111,6 +111,30 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 
 Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry — the underlying restore completes within `initTimeoutMs` (default 10s). Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring.
 
+`SessionArchivedError` is emitted when a caller tries to load or resume a session whose JSONL is under `chats/archive/`:
+
+```json
+{
+  "error": "Session \"<sid>\" is archived. Unarchive it before loading.",
+  "code": "session_archived",
+  "sessionId": "<sid>"
+}
+```
+
+with status `409`.
+
+`SessionArchivingError` is emitted when a session archive or unarchive transition is already in flight for the same id:
+
+```json
+{
+  "error": "Session \"<sid>\" is being archived or unarchived; retry later.",
+  "code": "session_archiving",
+  "sessionId": "<sid>"
+}
+```
+
+with status `409` and `Retry-After: 5`.
+
 ## Capabilities
 
 The daemon advertises its supported feature tags from the serve capability
@@ -129,8 +153,9 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
- 'session_lsp',
- 'session_close', 'session_metadata', 'mcp_guardrails',
+ 'session_lsp', 'session_status',
+ 'session_close', 'session_metadata', 'session_organization',
+ 'session_archive', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
@@ -151,7 +176,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_load` and `session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. `unstable_session_resume` is still advertised as a deprecated alias for compatibility with SDKs that shipped while the underlying ACP method was named `connection.unstable_resumeSession`; new clients should gate on `session_resume`.
 
-`slow_client_warning` covers two co-released SSE backpressure knobs introduced in #4175 Wave 2.5 PR 10: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's queue crosses 75% full, once per overflow episode (rearmed after the queue drains below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber backlog for cold reconnects against a large replay ring. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack both — pre-flight this tag before opting in.
+`slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
 
 `typed_event_schema` advertises daemon event payloads that match the SDK's `KnownDaemonEvent` schema. Older daemons may still stream compatible frames, but SDK clients should pre-flight this tag before assuming typed event coverage.
 
@@ -159,7 +184,13 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
 
+`session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight this tag before showing grouping or pinning UI.
+
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
+
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
+
+`session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id (`clientCount` / `hasActivePrompt` and the core fields). Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
 
 `session_approval_mode_control`, `workspace_tool_toggle`, `workspace_init`, and `workspace_mcp_restart` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) advertise the four mutation control routes documented under "Mutation: approval, tools, init, MCP restart" below. All four are strict-gated by the PR 15 mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
@@ -275,6 +306,11 @@ Response shape:
     "sessions": { "active": 0 },
     "permissions": { "pending": 0, "policy": "first-responder" },
     "channel": { "live": false },
+    "channelWorker": {
+      "enabled": false,
+      "state": "disabled",
+      "channels": []
+    },
     "transport": {
       "restSseActive": 0,
       "acp": {
@@ -286,20 +322,77 @@ Response shape:
         "wsStreams": 0,
         "pendingClientRequests": 0
       }
+    },
+    "perf": {
+      "eventLoop": { "meanMs": 0, "p50Ms": 0, "p99Ms": 0, "maxMs": 0 },
+      "promptQueueWait": {
+        "count": 0,
+        "meanMs": 0,
+        "maxMs": 0,
+        "lastMs": null
+      },
+      "pipe": {
+        "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
+        "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
+      }
+    },
+    "activity": {
+      "activePrompts": 0,
+      "pendingPrompts": 0,
+      "queuedPrompts": 0,
+      "lastActivityAt": null,
+      "idleSinceMs": null
     }
   }
 }
 ```
 
+`runtime.perf` is optional. When present, it reports daemon-process event loop
+lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
+ACP child event loop lag is not included in `/daemon/status`.
+
 `status` is `error` if any issue has error severity, `warning` if any issue has
 warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
-`mcp_budget_exhausted`, `rate_limit_hits`, and
-`workspace_status_unavailable`. During the short window after the listener is
-ready but before the full runtime is mounted, `/daemon/status` may report
-`daemon_runtime_starting`; if the async runtime mount fails, it reports
-`daemon_runtime_failed` while non-status runtime routes return `503`.
+`mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`, and
+`channel_worker_partial_connect`, and `workspace_status_unavailable`. During
+the short window after the listener is ready but before the full runtime is
+mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
+runtime mount fails, it reports `daemon_runtime_failed` while non-status
+runtime routes return `503`.
+
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `pendingPrompts` counts all accepted prompts that have not settled yet, including the running prompt and FIFO-waiting prompts. `queuedPrompts` counts FIFO-waiting prompts that have been accepted but not dispatched. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
+
+`runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
+not the channel-adapter worker. Daemon-managed channels use
+`runtime.channelWorker`, whose `state` is one of `disabled`, `starting`,
+`running`, `exited`, `failed`, or `stopped`. When a worker reaches `running`
+and then exits, `/daemon/status` keeps the daemon online and reports warning
+issue code `channel_worker_exited`.
+
+Daemon-managed channel worker startup remains fail-fast: if `qwen serve
+--channel ...` cannot start a worker that reaches ready, serve startup fails.
+After a worker has reached ready, unexpected exits are restarted by the serve
+supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
+window, with 1s, 5s, then 15s backoff. The worker sends IPC heartbeats every
+15s; if no heartbeat is observed for 45s, the supervisor treats the worker as
+stale, kills it, records `staleHeartbeatAt`, and uses the same restart path.
+
+`runtime.channelWorker` may include additive operational fields:
+`requestedChannels`, `pid`, `startedAt`, `exitCode`, `signal`, `error`,
+`restartCount`, `lastExitAt`, `lastRestartAt`, `nextRestartAt`,
+`lastHeartbeatAt`, and `staleHeartbeatAt`. `restartCount` is the lifetime
+number of restart attempts made by this serve process; a running worker with
+`restartCount > 0` is healthy unless another issue applies. A running worker
+whose `requestedChannels` include names missing from `channels` reports
+`channel_worker_partial_connect`.
+
+`qwen channel status` continues to read pidfile metadata. During a restart
+window the serve-owned pidfile remains reserved, but `workerPid` is omitted so
+clients do not display a stale worker process. Worker stdout/stderr are
+forwarded into the daemon log with bearer tokens, sensitive worker environment
+values, and proxy URL credentials redacted.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits
@@ -349,6 +442,7 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_status` → `GET /session/:id/status`
 
 Common status cell:
 
@@ -998,6 +1092,21 @@ names only; clients must not expect skill bodies or paths over this route.
       "outputFile": "/tmp/agent-1.jsonl",
       "isBackgrounded": true,
       "subagentType": "reviewer"
+    },
+    {
+      "kind": "agent",
+      "id": "agent-2",
+      "label": "general-purpose: run the failing test",
+      "description": "run the failing test",
+      "status": "running",
+      "startTime": 1699999999500,
+      "runtimeMs": 500,
+      "outputFile": "/tmp/agent-2.jsonl",
+      "isBackgrounded": false,
+      "subagentType": "general-purpose",
+      "parentAgentId": "agent-1",
+      "parentName": "reviewer",
+      "depth": 1
     }
   ]
 }
@@ -1008,6 +1117,15 @@ prompt and can be queried while the session is streaming. The response only
 contains whitelisted metadata from the agent, shell, and monitor task
 registries; controllers, timers, offsets, pending messages, and raw registry
 objects are never exposed.
+
+Agent tasks spawned by another sub-agent (nested sub-agents, bounded by
+`maxSubagentDepth`) carry three optional lineage fields: `parentAgentId` (the
+spawning agent task's `id`), `parentName` (the spawning agent's
+`subagentType`, captured at registration so it survives the parent's eviction
+from the registry), and `depth` (0-based launch depth; 0 = spawned by the
+top-level session). Agents launched by the top-level session omit
+`parentAgentId` and `parentName`; clients should treat all three fields as
+optional and fall back to a flat list when they are absent.
 
 ### `GET /session/:id/lsp`
 
@@ -1078,6 +1196,13 @@ Response:
 
 `attached: true` means a session for that workspace already existed and you're now sharing it.
 
+Multi-client integrations that want independent conversations should send
+`sessionScope: "thread"` on each `POST /session`. Use the default `single`
+scope only when clients intentionally share one collaborative session; shared
+sessions serialize prompts through one FIFO, visible through
+`/daemon/status` as `runtime.activity.pendingPrompts` and
+`runtime.activity.queuedPrompts`.
+
 Concurrent `POST /session` calls for the same workspace are **coalesced** to one spawn — both callers get the same `sessionId`, exactly one reports `attached: false`. If the underlying spawn fails (init timeout, malformed agent output, OOM), **all coalesced callers receive the same error** — the in-flight slot is cleared so a follow-up call can retry from scratch.
 
 > ⚠️ **`modelServiceId` rejection on a fresh session is silent on the
@@ -1136,6 +1261,9 @@ Response:
 - `400` — `workspace_mismatch` (same shape as `POST /session`).
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight). `Retry-After: 5`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
+- `409` — `session_archived` when the id exists only under `chats/archive/`; call `POST /sessions/unarchive` before `load` or `resume`.
+- `409` — `session_archiving` when archive or unarchive is in flight for the same id. `Retry-After: 5`.
+- `409` — `session_conflict` when the id exists in both `chats/` and `chats/archive/`; delete the session with `POST /sessions/delete` before loading.
 
 ### `POST /session/:id/resume`
 
@@ -1149,11 +1277,22 @@ Use `/load` when the client has no history rendered (cold reconnect, picker → 
 
 ### `GET /workspace/:id/sessions`
 
-List all live sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd).
+List persisted sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd). The default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. `archiveState=all` is not supported in v1. The default response and numeric `cursor` semantics are unchanged by `session_organization`.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
+curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions?archiveState=archived
 ```
+
+Query parameters:
+
+| Field          | Required | Notes                                                                                                                                                                                           |
+| -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `archiveState` | no       | `active` (default) or `archived`. Any other value returns `400 { code: "invalid_archive_state" }`.                                                                                              |
+| `cursor`       | no       | Pagination cursor from the previous response.                                                                                                                                                   |
+| `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation.                                                                                         |
+| `view`         | no       | Omit for the legacy recent list. `organized` opts into server-side pinned/group ordering and adds optional organization fields. Any other value returns `400 { code: "invalid_session_view" }`. |
+| `group`        | no       | Only meaningful with `view=organized`. `all` (default), `pinned`, `ungrouped`, or a custom group id. Unknown group ids return `404 { code: "group_not_found" }`.                                |
 
 Response:
 
@@ -1166,13 +1305,156 @@ Response:
       "createdAt": "2026-05-17T08:30:00.000Z",
       "displayName": "My Session",
       "clientCount": 2,
-      "hasActivePrompt": false
+      "hasActivePrompt": false,
+      "isArchived": false
     }
-  ]
+  ],
+  "nextCursor": 1772251200000
 }
 ```
 
-Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+With `view=organized`, the daemon reads `<Storage.getProjectDir(cwd)>/session-organization.v1.json`, returns pinned sessions first, then activity time descending, and then `sessionId` for stable ties. The organized cursor is opaque base64url JSON and must not be reused with the legacy recent list. `pinned` is a virtual filter, not a group. `groupId: null` means ungrouped. Archived sessions keep their organization metadata, but `archiveState=archived&view=organized` still returns only archived sessions.
+
+Additional fields may appear on each session when `view=organized`:
+
+```json
+{
+  "isPinned": true,
+  "pinnedAt": "2026-07-04T12:00:00.000Z",
+  "groupId": "018f..."
+}
+```
+
+Active lists include live daemon overlay fields such as `clientCount` and `hasActivePrompt`. Archived lists are storage-only: `isArchived` is `true`, and live overlay fields remain absent or false. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+
+### `GET /workspace/:id/session-groups`
+
+List user-defined session groups for a workspace. Pre-flight `caps.features.includes('session_organization')`.
+
+Response:
+
+```json
+{
+  "groups": [
+    {
+      "id": "018f...",
+      "name": "Frontend",
+      "color": "blue",
+      "order": 0,
+      "createdAt": "2026-07-04T12:00:00.000Z",
+      "updatedAt": "2026-07-04T12:00:00.000Z"
+    }
+  ],
+  "colorOptions": ["red", "orange", "yellow", "green", "blue", "purple"]
+}
+```
+
+Colors are protocol tokens only; clients localize display names. No default color-named groups are created.
+
+### `POST /workspace/:id/session-groups`
+
+Create a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`.
+
+Request:
+
+```json
+{ "name": "Frontend", "color": "blue" }
+```
+
+`name` is trimmed, must be 1-64 characters, cannot contain control characters, and is unique within the workspace by case-insensitive trimmed comparison. Duplicate names return `409 { code: "group_name_conflict" }`. `color` must be one of the returned `colorOptions`.
+
+Response:
+
+```json
+{
+  "group": {
+    "id": "018f...",
+    "name": "Frontend",
+    "color": "blue",
+    "order": 0,
+    "createdAt": "...",
+    "updatedAt": "..."
+  }
+}
+```
+
+### `PATCH /workspace/:id/session-groups/:groupId`
+
+Update a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`. Body fields are optional: `{ "name"?: string, "color"?: string, "order"?: number }`. Unknown group ids return `404 { code: "group_not_found" }`; duplicate/invalid names and colors use the same errors as create.
+
+### `DELETE /workspace/:id/session-groups/:groupId`
+
+Delete a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`. Sessions referencing the group are cleared to `groupId: null`; pinned state is preserved. Response is `{ "deleted": true }` when a group was removed and `{ "deleted": false }` when the id did not exist.
+
+### `POST /sessions/delete`
+
+Hard-delete one or more persisted session JSONL files. The daemon first best-effort closes live sessions, then removes the active or archived JSONL. If both active and archived copies exist for the same id, both are removed. Worktree sidecars on both sides are cleaned; file history, subagent transcripts, and runtime sidecars are intentionally preserved.
+
+Request:
+
+```json
+{ "sessionIds": ["<uuid>"] }
+```
+
+Response:
+
+```json
+{
+  "removed": ["<uuid>"],
+  "notFound": [],
+  "errors": []
+}
+```
+
+### `POST /sessions/archive`
+
+Archive one or more sessions. Archive is a state transition, not deletion: the JSONL moves from `chats/<id>.jsonl` to `chats/archive/<id>.jsonl`. File history, subagent transcripts, and runtime sidecars stay in place. If a session is live, the daemon first performs a strict close and requires the ACP agent's close handler to flush the chat recording; if close or flush fails, the JSONL is not moved. Pre-flight `caps.features.session_archive`.
+
+Request:
+
+```json
+{ "sessionIds": ["<uuid>"] }
+```
+
+`sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
+
+Response:
+
+```json
+{
+  "archived": ["<uuid>"],
+  "alreadyArchived": [],
+  "notFound": [],
+  "errors": []
+}
+```
+
+`errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`. Active and archived files with the same id are treated as a conflict and reported in `errors`; no file is overwritten.
+
+### `POST /sessions/unarchive`
+
+Restore archived sessions to the active directory. This does not resume the session by itself; it only moves `chats/archive/<id>.jsonl` back to `chats/<id>.jsonl`. After unarchive succeeds, clients may call `POST /session/:id/load` or `POST /session/:id/resume`.
+
+Request:
+
+```json
+{ "sessionIds": ["<uuid>"] }
+```
+
+Response:
+
+```json
+{
+  "unarchived": ["<uuid>"],
+  "alreadyActive": [],
+  "notFound": [],
+  "errors": []
+}
+```
+
+If an active JSONL already exists for the id, unarchive reports a conflict in `errors` and does not overwrite it. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
+
+ACP-over-HTTP uses the same request and response bodies through vendor methods `_qwen/sessions/archive` and `_qwen/sessions/unarchive`. The REST route table maps `POST /sessions/archive` and `POST /sessions/unarchive` to those methods for ACP transports.
 
 ### `POST /session/:id/prompt`
 
@@ -1221,6 +1503,11 @@ curl -X POST http://127.0.0.1:4170/session/$SID/cancel
 
 > **Multi-prompt contract:** cancel only affects the active prompt. Any prompts the same client previously POSTed and are still queued behind the active one will continue to execute. Multi-prompt queueing is a daemon-introduced behavior (not in ACP spec); the contract for queued prompts is "they keep running unless you cancel each, or kill the session via channel exit".
 
+If queued prompts are unexpected in a multi-client deployment, first confirm
+whether callers are sharing a default `sessionScope: "single"` session. For
+independent per-thread conversations, create sessions with
+`sessionScope: "thread"` so prompts serialize only within that thread.
+
 ### `DELETE /session/:id`
 
 Explicitly close a live session. Force-closes even when other clients are attached — cancels any active prompt, resolves pending permissions as cancelled, publishes `session_closed` event, closes the EventBus, and removes the session from daemon maps. On-disk persisted sessions are NOT deleted — they can be reloaded via `POST /session/:id/load`. Pre-flight `caps.features.session_close`.
@@ -1236,7 +1523,7 @@ Idempotent: returns `404` for unknown sessions (same `SessionNotFoundError` shap
 
 ### `PATCH /session/:id/metadata`
 
-Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`.
+Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`. Grouping and pinning are intentionally not part of this route; use `PATCH /session/:id/organization` under `session_organization`.
 
 Request:
 
@@ -1255,6 +1542,35 @@ Response:
 ```
 
 Publishes a `session_metadata_updated` event on the session's SSE stream with `{ sessionId, displayName }`.
+
+### `PATCH /session/:id/organization`
+
+Update local session organization state. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`.
+
+Request:
+
+```json
+{ "isPinned": true, "groupId": "018f..." }
+```
+
+| Field      | Required | Notes                                                                                                |
+| ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `isPinned` | no       | Boolean. `true` sets `pinnedAt` if it was not already pinned; `false` clears `pinnedAt`.             |
+| `groupId`  | no       | Custom group id or `null` for ungrouped. Unknown group ids return `404 { code: "group_not_found" }`. |
+
+Response:
+
+```json
+{
+  "sessionId": "<uuid>",
+  "groupId": "018f...",
+  "isPinned": true,
+  "pinnedAt": "2026-07-04T12:00:00.000Z",
+  "updatedAt": "2026-07-04T12:00:00.000Z"
+}
+```
+
+This state is stored in the project-level session organization sidecar under the daemon runtime storage directory. It is not transcript content, does not update transcript `mtime`, is not exported with transcripts, and is preserved across archive/unarchive.
 
 ### `POST /session/:id/heartbeat`
 
@@ -1493,9 +1809,9 @@ Last-Event-ID: 42        ← optional, replays from after id 42
 
 Query params:
 
-| Param       | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ----------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `maxQueued` | no       | Per-subscriber **live-backlog** cap. Range `[16, 2048]`, default 256. Replay frames force-pushed at subscribe time are exempt from the cap; what actually consumes it is live events that arrive while the subscriber is still draining a large `Last-Event-ID: 0` replay. Bump for cold reconnects so the live tail doesn't trip the slow-client warning / eviction before the consumer catches up. Out-of-range / non-decimal / present-but-empty values return `400 invalid_max_queued` before the SSE handshake opens. Pre-flight `caps.features.slow_client_warning` — old daemons silently ignore the param. |
+| Param       | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxQueued` | no       | Per-subscriber **live frame backlog** cap. Range `[16, 2048]`, default 256. Replay frames force-pushed at subscribe time are exempt from the frame and byte caps; what actually consumes them is live events that arrive while the subscriber is still draining a large `Last-Event-ID: 0` replay. Bump for cold reconnects so the live tail doesn't trip the slow-client warning / eviction before the consumer catches up. The live serialized-byte cap is fixed daemon-side (default 2 MiB) and has no query parameter. Out-of-range / non-decimal / present-but-empty values return `400 invalid_max_queued` before the SSE handshake opens. Pre-flight `caps.features.slow_client_warning` — old daemons silently ignore the param. |
 
 Frame format. The `data:` line is the **full event envelope**, JSON-stringified on a single line — `{id?, v, type, data, originatorClientId?}`. The ACP-specific payload (`sessionUpdate`, `requestPermission` arguments, etc.) sits under the envelope's `data` field; the envelope's own `type` matches the SSE `event:` line.
 
@@ -1511,24 +1827,27 @@ data: {"id":8,"v":1,"type":"permission_request","data":{"requestId":"<uuid>","se
 : heartbeat              ← every 15s, no payload
 
 event: client_evicted    ← terminal frame, no id (synthetic)
-data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedAfter":42}}
+data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedAfter":42,"queueSize":256,"maxQueued":256,"queuedBytes":1800000,"maxQueuedBytes":2097152}}
+
+event: client_evicted    ← terminal frame for byte overflow, no id (synthetic)
+data: {"v":1,"type":"client_evicted","data":{"reason":"queue_bytes_overflow","droppedAfter":43,"queueSize":1,"maxQueued":256,"queuedBytes":1900000,"maxQueuedBytes":2097152,"eventBytes":300000}}
 ```
 
 The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` for EventSource compatibility. Raw-`fetch` consumers (the SDK's `parseSseStream`) read everything off the JSON envelope and ignore the SSE preamble lines.
 
-| Event type                | Trigger                                                                                                                                                                                                                                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session_update`          | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                     |
-| `permission_request`      | Agent asked for tool approval                                                                                                                                                                                                                                                                                            |
-| `permission_resolved`     | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                      |
-| `permission_partial_vote` | (consensus only) A vote was recorded but quorum not yet reached. Carries `{requestId, sessionId, votesReceived, votesNeeded, quorum, optionTallies}`. Pre-flight `caps.features.permission_mediation`.                                                                                                                   |
-| `permission_forbidden`    | A vote was rejected by the active policy (`designated` mismatch, `local-only` non-loopback, or `consensus` voter not in snapshot). Carries `{requestId, sessionId, clientId?, reason}`. Pre-flight `caps.features.permission_mediation`.                                                                                 |
-| `model_switched`          | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                      |
-| `model_switch_failed`     | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                       |
-| `session_died`            | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                              |
-| `slow_client_warning`     | Subscriber-local: queue ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId}`. Fires ONCE per overflow episode; re-arms after the queue drains below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
-| `client_evicted`          | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                |
-| `stream_error`            | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                |
+| Event type                | Trigger                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_update`          | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `permission_request`      | Agent asked for tool approval                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `permission_resolved`     | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `permission_partial_vote` | (consensus only) A vote was recorded but quorum not yet reached. Carries `{requestId, sessionId, votesReceived, votesNeeded, quorum, optionTallies}`. Pre-flight `caps.features.permission_mediation`.                                                                                                                                                                                                                                                                                |
+| `permission_forbidden`    | A vote was rejected by the active policy (`designated` mismatch, `local-only` non-loopback, or `consensus` voter not in snapshot). Carries `{requestId, sessionId, clientId?, reason}`. Pre-flight `caps.features.permission_mediation`.                                                                                                                                                                                                                                              |
+| `model_switched`          | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `model_switch_failed`     | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `session_died`            | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                                                                                                                                                                                           |
+| `slow_client_warning`     | Subscriber-local: live frame backlog or live serialized-byte backlog ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId, queuedBytes?, maxQueuedBytes?, threshold?}` where `threshold` is `frames`, `bytes`, or `frames_and_bytes`. Fires ONCE per overflow episode; re-arms after both measurements drain below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
+| `client_evicted`          | Subscriber-local: queue overflow. `reason` is `queue_overflow` for the live frame cap and `queue_bytes_overflow` for the live serialized-byte cap. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                                                            |
+| `stream_error`            | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                                                                                                                                                                             |
 
 Reconnect semantics:
 
@@ -1539,9 +1858,10 @@ Reconnect semantics:
 
 Backpressure:
 
-- Per-subscriber queue defaults to `maxQueued: 256` live items (replay frames during reconnect bypass the cap). Override via `?maxQueued=N` (range `[16, 2048]`) on the SSE request.
-- When a subscriber's queue crosses 75% full the bus force-pushes a `slow_client_warning` synthetic frame to that subscriber (once per overflow episode; re-armed after drain below 37.5%). The stream stays open — the warning is a heads-up so the client can drain faster or detach + reconnect cleanly.
-- If the queue actually overflows the warning, the bus emits the `client_evicted` terminal frame and closes the subscription.
+- Per-subscriber queue defaults to `maxQueued: 256` live items plus a daemon-owned 2 MiB live serialized-byte cap. Replay frames during reconnect, `slow_client_warning`, and `client_evicted` bypass both caps.
+- Override only the frame cap via `?maxQueued=N` (range `[16, 2048]`) on the SSE request. There is deliberately no `?maxQueuedBytes`; clients cannot raise daemon memory budget.
+- When a subscriber's live frame backlog or live byte backlog crosses 75% full the bus force-pushes a `slow_client_warning` synthetic frame to that subscriber (once per overflow episode; re-armed after both measurements drain below 37.5%). The stream stays open — the warning is a heads-up so the client can drain faster or detach + reconnect cleanly.
+- If the live frame cap overflows, the bus emits `client_evicted` with `reason: "queue_overflow"`. If the live byte cap overflows, it emits `reason: "queue_bytes_overflow"`. In both cases the terminal frame is force-pushed and the subscription closes.
 
 ### `POST /permission/:requestId`
 
@@ -1723,10 +2043,11 @@ The connection then closes.
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                                                                |
 | `packages/cli/src/serve/run-qwen-serve.ts`           | listener lifecycle + signal handling                                                                       |
-| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                                                                |
+| `packages/cli/src/serve/server.ts`                   | Express app assembly, middleware ordering, and remaining direct routes                                     |
+| `packages/cli/src/serve/routes/*.ts`                 | Focused Express route groups, including session, SSE, workspace auth, workspace status, and file routes    |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
-| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry                                                   |
-| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
+| `packages/cli/src/serve/acp-session-bridge.ts`       | CLI-local bridge compatibility facade for spawn-or-attach, per-session FIFO, and permission registry       |
+| `packages/acp-bridge/src/status.ts`                  | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
 | `packages/cli/src/serve/env-snapshot.ts`             | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
 | `packages/acp-bridge/src/eventBus.ts`                | bounded async queue + replay ring                                                                          |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                                                                  |

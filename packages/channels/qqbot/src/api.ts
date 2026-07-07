@@ -35,10 +35,9 @@ export async function fetchAccessToken(
   });
 
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(
-      `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
-    );
+    await resp.body?.cancel().catch(() => {});
+    process.stderr.write(`[QQ] Token request failed (HTTP ${resp.status})\n`);
+    throw new Error(`QQ Bot token request failed (HTTP ${resp.status})`);
   }
 
   const data = (await resp.json()) as {
@@ -52,6 +51,43 @@ export async function fetchAccessToken(
     accessToken: data.access_token,
     expiresIn: data.expires_in ?? 7200,
   };
+}
+
+/**
+ * Validate the WebSocket Gateway URL to enforce TLS and known hostname.
+ * - Enforces wss:// protocol (hard boundary — throws on non-wss).
+ * - Rejects hostnames outside `*.qq.com` (hard boundary).
+ *
+ * The QQ Bot Open Platform documents all endpoints under qq.com domains
+ * (api.sgroup.qq.com, sandbox.api.sgroup.qq.com, bots.qq.com). Broader
+ * suffixes like *.tencentcs.com would accept attacker-controlled Tencent
+ * Cloud API Gateway default domains, creating a token-exfiltration vector
+ * if /gateway is tampered with or misdirected.
+ */
+export function validateGatewayUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'wss:') {
+      throw new Error(
+        `QQ Bot gateway URL must use wss:// protocol, got: ${parsed.protocol}`,
+      );
+    }
+    // Hard reject: only allow documented QQ gateway hostnames
+    if (!parsed.hostname.toLowerCase().endsWith('.qq.com')) {
+      throw new Error(
+        `QQ Bot gateway URL has unexpected hostname: ${parsed.hostname} (expected *.qq.com)`,
+      );
+    }
+    const clean = new URL(url);
+    clean.username = '';
+    clean.password = '';
+    return clean.href;
+  } catch (e) {
+    if (e instanceof TypeError) {
+      throw new Error('QQ Bot gateway URL is not a valid URL');
+    }
+    throw e;
+  }
 }
 
 /**
@@ -70,6 +106,7 @@ export async function fetchGatewayUrl(
   });
 
   if (!resp.ok) {
+    await resp.body?.cancel().catch(() => {});
     throw new Error(`QQ Bot gateway request failed (HTTP ${resp.status})`);
   }
 
@@ -77,7 +114,7 @@ export async function fetchGatewayUrl(
   if (!data['url']) {
     throw new Error('QQ Bot gateway response missing WebSocket URL');
   }
-  return data['url'];
+  return validateGatewayUrl(data['url']);
 }
 
 /** Determine the API base URL from the sandbox flag. */

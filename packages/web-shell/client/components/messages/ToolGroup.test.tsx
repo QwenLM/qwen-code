@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
+import { I18nProvider } from '../../i18n';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -13,16 +16,36 @@ vi.mock('../../App', async () => {
 
 const {
   buildUnifiedDiff,
+  extractDiff,
+  fencedCodeBlock,
+  formatSingleToolSummary,
+  formatRunningSingleToolSummary,
   formatToolGroupSummary,
   getActiveTool,
   getRawFileDiff,
   getToolHeaderKind,
   hasActiveTool,
+  hasExpandableContent,
   isActiveToolStatus,
   isWebFetchToolName,
-  resolveShellOutputMaxLines,
+  languageForPath,
   shouldAutoExpand,
+  ToolGroup,
+  ToolLine,
 } = await import('./ToolGroup');
+
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+afterEach(() => {
+  for (const { root, container } of mounted.splice(0)) {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
 
 function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   return {
@@ -33,14 +56,65 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
+function renderToolLine(tool: ACPToolCall): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <ToolLine tool={tool} />
+      </I18nProvider>,
+    );
+  });
+  mounted.push({ root, container });
+  return container;
+}
+
+function renderToolGroup(tools: ACPToolCall[]): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <ToolGroup tools={tools} />
+      </I18nProvider>,
+    );
+  });
+  mounted.push({ root, container });
+  return container;
+}
+
 const t = (key: string, values?: Record<string, string | number>): string => {
   if (key === 'toolGroup.running') {
-    return `Running ${values?.name ?? 'tool'}${
+    return `Running ${values?.name ?? 'tool'}${values?.duration ? ` ${values.duration}` : ''}${
       Number(values?.count ?? 0) > 1 ? ` · ${values?.count ?? 0} tools` : ''
     }`;
   }
   if (key === 'toolGroup.summary') {
     return `Ran ${values?.count ?? 0} tool${values?.count === 1 ? '' : 's'}`;
+  }
+  if (key === 'toolGroup.summary.editedFiles') {
+    return `Edited ${values?.count ?? 0} files`;
+  }
+  if (key === 'toolGroup.summary.ranCommands') {
+    return `Ran ${values?.count ?? 0} commands`;
+  }
+  if (key === 'toolGroup.summary.readFiles') {
+    return `Read ${values?.count ?? 0} files`;
+  }
+  if (key === 'toolGroup.summary.searched') {
+    return `Searched ${values?.count ?? 0} times`;
+  }
+  if (key === 'toolGroup.summary.updatedTodos') {
+    return `Updated todos ${values?.count ?? 0} times`;
+  }
+  if (key === 'toolGroup.summary.askedUser') {
+    return 'Asked user';
+  }
+  if (key === 'toolGroup.summary.otherTools') {
+    return `Called ${values?.count ?? 0} other tools`;
   }
   return key;
 };
@@ -49,18 +123,6 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
   if (key === 'toolName.readfile') return '读取文件';
   return t(key, values);
 };
-
-function setting(value: unknown): DaemonSettingDescriptor {
-  return {
-    key: 'ui.shellOutputMaxLines',
-    type: 'number',
-    label: 'Shell output max lines',
-    category: 'ui',
-    requiresRestart: false,
-    default: 5,
-    values: { effective: value },
-  };
-}
 
 describe('tool group summary logic', () => {
   it('detects active tool statuses', () => {
@@ -98,15 +160,98 @@ describe('tool group summary logic', () => {
     expect(formatToolGroupSummary(tools, zhT)).toBe('Running 读取文件');
   });
 
-  it('falls back to a completed summary without tool names', () => {
+  it('summarizes completed tool groups by common action type', () => {
     const tools = [
       makeTool({ callId: 'shell', status: 'completed' }),
       makeTool({ callId: 'read', toolName: 'ReadFile', status: 'completed' }),
+      makeTool({ callId: 'edit', toolName: 'edit', status: 'completed' }),
+      makeTool({ callId: 'grep', toolName: 'grep', status: 'completed' }),
+      makeTool({
+        callId: 'todo',
+        toolName: 'todo_write',
+        status: 'completed',
+      }),
+      makeTool({
+        callId: 'ask',
+        toolName: 'ask_user_question',
+        status: 'completed',
+      }),
     ];
 
     expect(hasActiveTool(tools)).toBe(false);
-    expect(getActiveTool(tools).callId).toBe('read');
-    expect(formatToolGroupSummary(tools, t)).toBe('Ran 2 tools');
+    expect(getActiveTool(tools).callId).toBe('ask');
+    expect(formatToolGroupSummary(tools, t)).toBe(
+      'Edited 1 files Ran 1 commands Read 1 files Searched 1 times Updated todos 1 times Asked user',
+    );
+  });
+
+  it('formats a single tool summary from the tool itself', () => {
+    expect(
+      formatSingleToolSummary(
+        makeTool({
+          toolName: 'Shell',
+          args: { command: 'npm run build' },
+        }),
+        t,
+      ),
+    ).toBe('Shell npm run build');
+  });
+
+  it('uses action summaries for single todo and ask-user tools', () => {
+    expect(
+      formatSingleToolSummary(makeTool({ toolName: 'todo_write' }), t),
+    ).toBe('Updated todos 1 times');
+    expect(
+      formatSingleToolSummary(makeTool({ toolName: 'ask_user_question' }), t),
+    ).toBe('Asked user');
+  });
+
+  it('keeps running state and command details for a single active tool', () => {
+    expect(
+      formatRunningSingleToolSummary(
+        makeTool({
+          toolName: 'Shell',
+          status: 'in_progress',
+          args: { command: 'npm run build' },
+        }),
+        t,
+        '0:03',
+      ),
+    ).toBe('Running Shell npm run build 0:03');
+  });
+
+  it('truncates long single tool descriptions in the chat summary', () => {
+    const summary = formatSingleToolSummary(
+      makeTool({
+        toolName: 'Shell',
+        args: { command: 'x'.repeat(200) },
+      }),
+      t,
+    );
+
+    expect(summary.length).toBeLessThan(140);
+    expect(summary).toContain('...');
+  });
+});
+
+describe('tool expandability', () => {
+  it('only marks tools with actual detail views as expandable by output', () => {
+    expect(
+      hasExpandableContent(
+        makeTool({
+          toolName: 'Shell',
+          content: [{ type: 'content', content: { text: 'first\nsecond' } }],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasExpandableContent(
+        makeTool({
+          toolName: 'list_directory',
+          rawOutput: 'a\nb',
+        }),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -123,6 +268,9 @@ describe('tool kind logic', () => {
     );
     expect(getToolHeaderKind(makeTool({ toolName: 'todo_write' }))).toBe(
       'todo',
+    );
+    expect(getToolHeaderKind(makeTool({ toolName: 'ask_user_question' }))).toBe(
+      'ask',
     );
   });
 
@@ -149,13 +297,82 @@ describe('tool kind logic', () => {
   });
 });
 
+describe('tool row rendering', () => {
+  it('renders ANSI shell output as styled spans instead of escape text', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [
+          {
+            type: 'content',
+            content: { text: '\u001b[31mfailed\u001b[0m\nplain' },
+          },
+        ],
+      }),
+    );
+
+    expect(container.textContent).toContain('failed');
+    expect(container.textContent).not.toContain('\u001b[31m');
+    expect(container.querySelector('pre span[style*="color"]')).not.toBeNull();
+  });
+
+  it('wraps a single expanded agent body in a headerless card', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Task',
+        status: 'in_progress',
+        args: { description: 'Investigate build failure' },
+        subContent: 'working through the issue',
+      }),
+    ]);
+    const summary = container.querySelector('button') as HTMLButtonElement;
+
+    act(() => summary.click());
+
+    const card = container.querySelector('[class*="expandedAgentCard"]');
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('working through the issue');
+    expect(container.querySelector('[class*="expandedCardHeader"]')).toBeNull();
+  });
+
+  it('keeps glob details visible in the header after expanding', () => {
+    const pattern =
+      '**/very-long-component-pattern-that-crosses-the-expand-threshold-*.tsx';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'glob',
+        args: {
+          pattern,
+          path: 'packages/web-shell/client',
+        },
+        content: [
+          {
+            type: 'content',
+            content: {
+              text: 'packages/web-shell/client/App.tsx',
+            },
+          },
+        ],
+      }),
+    );
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+
+    expect(header.textContent).toContain(pattern);
+    act(() => header.click());
+    expect(header.textContent).toContain(pattern);
+    expect(header.textContent).toContain('packages/web-shell/client');
+  });
+});
+
 describe('tool output logic', () => {
-  it('resolves shell output max lines from settings', () => {
-    expect(resolveShellOutputMaxLines([])).toBe(5);
-    expect(resolveShellOutputMaxLines([setting(12)])).toBe(12);
-    expect(resolveShellOutputMaxLines([setting(2.8)])).toBe(2);
-    expect(resolveShellOutputMaxLines([setting(-1)])).toBe(0);
-    expect(resolveShellOutputMaxLines([setting('bad')])).toBe(5);
+  it('sanitizes read-file languages before building markdown fences', () => {
+    expect(languageForPath('src/App.tsx')).toBe('tsx');
+    expect(languageForPath('diagram.mermaid')).toBe('text');
+    expect(languageForPath('bad.weird\nlang')).toBe('text');
+    expect(fencedCodeBlock('tsx', 'const fence = "~~~";')).toBe(
+      '~~~~tsx\nconst fence = "~~~";\n~~~~',
+    );
   });
 
   it('suppresses truncated session diffs from raw output', () => {
@@ -182,6 +399,32 @@ describe('tool output logic', () => {
         }),
       ),
     ).toBe('');
+  });
+
+  it('prefers raw fileDiff over content old/new text', () => {
+    const fileDiff =
+      'Index: file.ts\n@@ -10,1 +10,2 @@\n old context\n+precise line';
+
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          content: [
+            {
+              type: 'diff',
+              oldText: 'full old text',
+              newText: 'full new text',
+            },
+          ],
+          rawOutput: {
+            fileDiff,
+            fileName: 'file.ts',
+            originalContent: 'full old text',
+            newContent: 'full new text',
+          },
+        }),
+      ),
+    ).toBe(fileDiff);
   });
 
   it('builds a unified diff for changed content blocks', () => {

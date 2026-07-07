@@ -8,9 +8,9 @@
   display: inline-flex;
   width: fit-content;
   align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-  color: var(--text-dimmed);
+  gap: 4px;
+  margin-left: -2px;
+  color: var(--muted-foreground);
   opacity: 0;
   transition: opacity 0.12s ease;
 }
@@ -30,14 +30,14 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   cursor: pointer;
 }
 
 .copyButton:hover,
 .copyButton:focus-visible {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
+  color: var(--muted-foreground);
+  background: var(--secondary);
   outline: none;
 }
 
@@ -52,7 +52,7 @@
 }
 
 .prefix {
-  color: var(--assist-color);
+  color: var(--agent-purple-400);
   flex-shrink: 0;
   margin-right: 6px;
   line-height: 1.2;
@@ -65,7 +65,7 @@
 }
 
 .thinking .prefix {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -74,7 +74,7 @@
   flex: 1;
   min-width: 0;
   font-size: 13px;
-  color: var(--thinking-pre-color);
+  color: var(--muted-foreground);
   line-height: 1.5;
 }
 
@@ -104,11 +104,10 @@
 .thinkingSummary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
-  color: #a1a2a3;
+  color: var(--muted-foreground);
   display: flex;
   align-items: center;
   gap: 7px;
@@ -120,8 +119,14 @@
 
 .thinkingSummary:hover,
 .thinkingSummary:focus-visible {
-  color: var(--text-primary);
+  color: var(--primary);
   outline: none;
+}
+
+.thinkingSummary:hover .thinkingSummaryTextActive,
+.thinkingSummary:focus-visible .thinkingSummaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
 }
 
 .thinkingSummaryIcon {
@@ -155,14 +160,14 @@
 }
 
 .thinkingSummaryTextActive {
-  color: #a1a2a3;
+  color: var(--muted-foreground);
   background-image: linear-gradient(
     105deg,
-    #a1a2a3 0%,
-    #a1a2a3 46%,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 46%,
     rgba(255, 255, 255, 0.92) 50%,
-    #a1a2a3 54%,
-    #a1a2a3 100%
+    var(--muted-foreground) 54%,
+    var(--muted-foreground) 100%
   );
   background-size: 300% 100%;
   background-position: 150% 0;
@@ -183,13 +188,24 @@
 
 .thinkingChevronRight,
 .thinkingChevronDown {
-  width: 7px;
-  height: 7px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
+  width: 14px;
+  height: 14px;
+  position: relative;
   flex-shrink: 0;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+
+.thinkingChevronRight::before,
+.thinkingChevronRight::after,
+.thinkingChevronDown::before,
+.thinkingChevronDown::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
 }
 
 .thinkingSummary:hover .thinkingChevronRight,
@@ -200,13 +216,36 @@
 }
 
 .thinkingChevronRight {
+  transform: none;
+}
+
+.thinkingChevronRight::before {
+  top: calc(50% - 2px);
+  left: calc(50% - 3px);
+  transform: rotate(45deg);
+}
+
+.thinkingChevronRight::after {
+  top: calc(50% + 2px);
+  left: calc(50% - 3px);
   transform: rotate(-45deg);
 }
 
 .thinkingChevronDown {
-  transform: rotate(45deg);
-  margin-top: -3px;
+  transform: none;
   opacity: 1;
+}
+
+.thinkingChevronDown::before {
+  top: 50%;
+  left: calc(50% - 5px);
+  transform: rotate(45deg);
+}
+
+.thinkingChevronDown::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  transform: rotate(-45deg);
 }
 
 .thinkingExpandedWrap {
@@ -234,7 +273,7 @@
   display: block;
   background: none;
   border: none;
-  color: color-mix(in srgb, var(--text-dimmed) 72%, transparent);
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
   font-size: 12px;
   cursor: pointer;
   padding: 0 4px;
@@ -245,7 +284,7 @@
   position: absolute;
   right: 0;
   bottom: 2px;
-  background: var(--bg-primary);
+  background: var(--background);
   margin: 0;
   opacity: 0;
   pointer-events: none;
@@ -270,7 +309,7 @@
 }
 
 .expandToggle:hover {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .content {
@@ -289,6 +328,6 @@
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.6;
-  color: var(--text-primary);
+  color: var(--foreground);
   margin: 0;
 }

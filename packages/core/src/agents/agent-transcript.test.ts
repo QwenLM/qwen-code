@@ -13,6 +13,7 @@ import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  normalizeResumedAgentDepth,
   readAgentMeta,
   readLastTranscriptRecordUuidSync,
   writeAgentMeta,
@@ -580,6 +581,31 @@ describe('agent-transcript', () => {
       expect(records).toHaveLength(2);
       expect(records[1].parentUuid).toBe(records[0].uuid);
       expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(records[1].uuid);
+    });
+  });
+
+  describe('normalizeResumedAgentDepth', () => {
+    it('passes through valid persisted depths and absent values', () => {
+      expect(normalizeResumedAgentDepth(undefined)).toBeUndefined();
+      expect(normalizeResumedAgentDepth(0)).toBe(0);
+      expect(normalizeResumedAgentDepth(3)).toBe(3);
+      expect(normalizeResumedAgentDepth(100)).toBe(100);
+    });
+
+    it('fails closed (no spawn capacity) on tampered or corrupt values', () => {
+      // A negative depth would make canSpawnNestedAgent() pass for every
+      // cap; clamping down to 0 would likewise fail open by granting full
+      // spawn capacity. Anything invalid pins to the ceiling instead.
+      expect(normalizeResumedAgentDepth(-50)).toBe(100);
+      // JSON `-1e309` parses to -Infinity.
+      expect(normalizeResumedAgentDepth(-Infinity)).toBe(100);
+      expect(normalizeResumedAgentDepth(Infinity)).toBe(100);
+      expect(normalizeResumedAgentDepth(NaN)).toBe(100);
+      expect(normalizeResumedAgentDepth(2.5)).toBe(100);
+      expect(normalizeResumedAgentDepth(101)).toBe(100);
+      expect(normalizeResumedAgentDepth(null as unknown as number)).toBe(
+        undefined,
+      );
     });
   });
 });

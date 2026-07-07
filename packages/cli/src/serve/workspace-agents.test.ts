@@ -18,10 +18,10 @@ import {
   vi,
   type MockInstance,
 } from 'vitest';
-import { Storage, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import type { BridgeEvent } from './event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
@@ -114,7 +114,7 @@ function buildApp(opts: {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   const mutate = createMutationGate({
-    tokenConfigured: !opts.strictNoToken,
+    tokenConfigured: opts.strictNoToken !== true,
     requireAuth: false,
   });
   mountWorkspaceAgentsRoutes(app, {
@@ -155,7 +155,7 @@ describe('workspace agents routes', () => {
   let tmp: string;
   let workspace: string;
   let globalDir: string;
-  let getGlobalQwenDirSpy: MockInstance<() => string>;
+  let getGlobalQwenDirSpy: MockInstance<typeof Storage.getGlobalQwenDir>;
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-agents-'));
@@ -172,6 +172,10 @@ describe('workspace agents routes', () => {
     getGlobalQwenDirSpy.mockRestore();
     await fs.rm(tmp, { recursive: true, force: true });
   });
+
+  function missingAgentName(prefix = 'missing-agent') {
+    return `${prefix}-${path.basename(tmp)}`;
+  }
 
   it('lists built-in agents alongside on-disk project agents', async () => {
     const projectAgentsDir = path.join(workspace, QWEN_DIR, 'agents');
@@ -241,18 +245,27 @@ describe('workspace agents routes', () => {
   it('returns the full detail (with systemPrompt) on GET /workspace/agents/:agentType', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).get('/workspace/agents/general-purpose');
+    const create = await request(app).post('/workspace/agents').send({
+      name: 'detail-agent',
+      description: 'detail agent description',
+      systemPrompt: 'you are the detail agent',
+      scope: 'workspace',
+    });
+    expect(create.status).toBe(201);
+
+    const res = await request(app).get('/workspace/agents/detail-agent');
     expect(res.status).toBe(200);
-    expect(res.body.name).toBe('general-purpose');
-    expect(typeof res.body.systemPrompt).toBe('string');
-    expect(res.body.isBuiltin).toBe(true);
-    expect(res.body.level).toBe('builtin');
+    expect(res.body.name).toBe('detail-agent');
+    expect(res.body.systemPrompt).toBe('you are the detail agent');
+    expect(res.body.isBuiltin).toBe(false);
+    expect(res.body.level).toBe('project');
   });
 
   it('returns 404 agent_not_found for unknown agent', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).get('/workspace/agents/no-such-agent');
+    const name = missingAgentName();
+    const res = await request(app).get(`/workspace/agents/${name}`);
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('agent_not_found');
   });
@@ -340,31 +353,22 @@ describe('workspace agents routes', () => {
     expect(second.body.code).toBe('agent_already_exists');
   });
 
-  it('rejects 422 invalid_config when create uses a builtin agent name', async () => {
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).post('/workspace/agents').send({
-      name: 'general-purpose',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'this is a system prompt',
-      scope: 'workspace',
-    });
-    expect(res.status).toBe(422);
-    expect(res.body.code).toBe('invalid_config');
-    expect(res.body.error).toMatch(/built-in/i);
-
-    // BuiltinAgentRegistry.isBuiltinAgent is case-insensitive — both
-    // `Explore` and `explore` must reject so a project-level shadow
-    // can never land regardless of how the client cases the name.
-    const res2 = await request(app).post('/workspace/agents').send({
-      name: 'explore',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'this is a system prompt',
-      scope: 'workspace',
-    });
-    expect(res2.status).toBe(422);
-    expect(res2.body.code).toBe('invalid_config');
-  });
+  it.each(['general-purpose', 'explore'])(
+    'rejects 422 invalid_config when create uses builtin agent name %s',
+    async (name) => {
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).post('/workspace/agents').send({
+        name,
+        description: 'a description longer than ten chars',
+        systemPrompt: 'this is a system prompt',
+        scope: 'workspace',
+      });
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('invalid_config');
+      expect(res.body.error).toMatch(/built-in/i);
+    },
+  );
 
   it('returns 422 invalid_config for missing required fields', async () => {
     const bridge = buildBridgeStub();
@@ -416,8 +420,9 @@ describe('workspace agents routes', () => {
   it('returns 404 agent_not_found when updating an unknown agent', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
+    const name = missingAgentName();
     const res = await request(app)
-      .post('/workspace/agents/no-such-agent')
+      .post(`/workspace/agents/${name}`)
       .send({ description: 'x' });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('agent_not_found');
@@ -464,7 +469,8 @@ describe('workspace agents routes', () => {
   it('returns 404 when deleting a missing agent', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
-    const res = await request(app).delete('/workspace/agents/no-such-agent');
+    const name = missingAgentName();
+    const res = await request(app).delete(`/workspace/agents/${name}`);
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('agent_not_found');
   });

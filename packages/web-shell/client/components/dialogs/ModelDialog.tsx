@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { dp } from './dialogStyles';
 import styles from './ModelDialog.module.css';
 
-export type ModelDialogMode = 'main' | 'fast' | 'voice';
+export type ModelDialogMode = 'main' | 'fast' | 'voice' | 'vision';
 
 interface ModelDialogProps {
   mode?: ModelDialogMode;
@@ -105,45 +107,101 @@ export function ModelDialog({
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';
   const isVoiceMode = mode === 'voice';
-  const selectedIdx = availableModels.findIndex((m) => m.id === currentModel);
-  const selectedModel =
-    selectedIdx >= 0 ? availableModels[selectedIdx] : availableModels[0];
+  const isVisionMode = mode === 'vision';
+  const currentIdx = availableModels.findIndex((m) => m.id === currentModel);
+  const [activeIndex, setActiveIndex] = useState(
+    currentIdx >= 0 ? currentIdx : 0,
+  );
+  // Follow the current model until the user first navigates: models arrive
+  // asynchronously, and the current model itself can change while the dialog
+  // is open (e.g. another client sharing the session switches models) — the
+  // highlight, detail panel and Enter must track it. Once the user has moved
+  // the highlight themselves, it is theirs and must not be stolen.
+  const userNavigatedRef = useRef(false);
+  useEffect(() => {
+    if (userNavigatedRef.current || availableModels.length === 0) return;
+    setActiveIndex(currentIdx >= 0 ? currentIdx : 0);
+  }, [availableModels.length, currentIdx]);
+
+  const moveHighlight = (index: number) => {
+    userNavigatedRef.current = true;
+    setActiveIndex(index);
+  };
+
+  // Keep the highlight in bounds if the model list refreshes/shrinks while open,
+  // so aria-activedescendant, the detail panel and Enter all stay in sync.
+  useEffect(() => {
+    if (activeIndex >= availableModels.length && availableModels.length > 0) {
+      setActiveIndex(availableModels.length - 1);
+    }
+  }, [availableModels.length, activeIndex]);
+
+  const selectedModel = availableModels[activeIndex] ?? availableModels[0];
+
+  const confirm = (index: number) => {
+    const model = availableModels[index];
+    if (model) onSelect(getModelSelectId(model, isFastMode));
+  };
+
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: availableModels.length,
+    activeIndex,
+    onActiveIndexChange: moveHighlight,
+    onConfirm: confirm,
+  });
 
   useEffect(() => {
-    const el = listRef.current?.children[selectedIdx] as
+    const el = listRef.current?.children[activeIndex] as
       | HTMLElement
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [selectedIdx]);
+  }, [activeIndex]);
 
   return (
     <div className={styles.layout}>
       <div
-        className={styles.list}
+        className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
         ref={listRef}
         role="listbox"
+        tabIndex={0}
+        aria-activedescendant={
+          availableModels.length > 0 ? `model-opt-${activeIndex}` : undefined
+        }
         aria-label={
           isFastMode
             ? t('model.setFast')
             : isVoiceMode
               ? t('model.setVoice')
-              : t('model.select')
+              : isVisionMode
+                ? t('model.setVision')
+                : t('model.select')
         }
       >
         {availableModels.length === 0 ? (
           <div className={styles.empty}>{t('model.none')}</div>
         ) : null}
         {availableModels.map((model, index) => {
-          const selected = model.id === currentModel;
+          const selected = index === activeIndex;
+          // Only the first id match is the "current" one. `currentModel` is just
+          // an id string, so when two providers expose the same model id we
+          // cannot tell them apart here — mark one, consistent with the initial
+          // highlight (which also lands on `currentIdx`, the first match).
+          const isCurrent = index === currentIdx;
           const authType = getAuthType(model);
           return (
-            <button
+            <div
               key={getModelKey(model)}
-              type="button"
+              id={`model-opt-${index}`}
               role="option"
-              aria-selected={selected}
-              className={`${styles.row} ${selected ? styles.selected : ''}`}
-              onClick={() => onSelect(getModelSelectId(model, isFastMode))}
+              // aria-selected marks the actual current model; the roving
+              // keyboard highlight is conveyed by aria-activedescendant + the
+              // visual `.selected` class, not by aria-selected.
+              aria-selected={isCurrent}
+              className={`${styles.row} ${selected ? styles.selected : ''} ${
+                isCurrent ? dp('dialog-current') : ''
+              }`}
+              onClick={() => confirm(index)}
+              onMouseMove={() => moveHighlight(index)}
             >
               <span className={styles.number}>{index + 1}.</span>
               {authType ? (
@@ -153,7 +211,7 @@ export function ModelDialog({
               {model.isRuntime ? (
                 <span className={styles.badge}>Runtime</span>
               ) : null}
-            </button>
+            </div>
           );
         })}
       </div>

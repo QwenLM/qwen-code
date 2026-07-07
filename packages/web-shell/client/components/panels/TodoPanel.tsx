@@ -56,7 +56,12 @@ export const TodoPanel = memo(function TodoPanel({
           aria-hidden="true"
         />
         <span className={styles.stepText}>
-          {t('todo.stepProgress', { current: stepIndex, total })}
+          <span className={styles.fullText}>
+            {t('todo.stepProgress', { current: stepIndex, total })}
+          </span>
+          <span className={styles.compactText}>
+            {t('todo.stepFraction', { current: stepIndex, total })}
+          </span>
         </span>
       </div>
 

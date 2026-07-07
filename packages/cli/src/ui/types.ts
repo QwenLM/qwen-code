@@ -173,6 +173,13 @@ export type HistoryItemRetryCountdown = HistoryItemBase & {
   text: string;
 };
 
+// Dim, tip-style disclosure shown when the vision bridge runs (success or
+// cancellation). Failures use the prominent ERROR variant instead.
+export type HistoryItemVisionNotice = HistoryItemBase & {
+  type: 'vision_notice';
+  text: string;
+};
+
 export type HistoryItemAbout = HistoryItemBase & {
   type: 'about';
   systemInfo: {
@@ -323,6 +330,8 @@ export interface ToolDefinition {
 
 export interface SkillDefinition {
   name: string;
+  description?: string;
+  level?: string;
 }
 
 export type HistoryItemToolsList = HistoryItemBase & {
@@ -557,12 +566,7 @@ export type HistoryItemDoctor = HistoryItemBase & {
 };
 
 export type GoalStatusKind =
-  | 'set'
-  | 'achieved'
-  | 'cleared'
-  | 'failed'
-  | 'aborted'
-  | 'checking';
+  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',
@@ -606,6 +610,7 @@ export type HistoryItemWithoutId =
   | HistoryItemWarning
   | HistoryItemSuccess
   | HistoryItemRetryCountdown
+  | HistoryItemVisionNotice
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
@@ -667,6 +672,7 @@ export enum MessageType {
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  VISION_NOTICE = 'vision_notice',
 }
 
 export interface InsightProgressProps {
@@ -773,6 +779,11 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. Applies to this submitted prompt (and its
+   * tool-call continuations) only — no session change, no persistence.
+   */
+  modelOverride?: string;
 }
 
 /**

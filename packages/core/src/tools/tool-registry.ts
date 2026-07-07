@@ -12,7 +12,7 @@ import type {
   ToolInvocation,
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
-import type { Config } from '../config/config.js';
+import { type Config, matchesAnyServerPattern } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -215,6 +215,19 @@ export class ToolRegistry {
       sendSdkMcpMessage,
       pool: this.config.getMcpTransportPool(),
     });
+  }
+
+  // Stable declaration order keeps the serialized tools block independent of
+  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  private static compareToolsByDeclarationName(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    const byName = aName.localeCompare(bName);
+    if (byName !== 0) return byName;
+    return a.displayName.localeCompare(b.displayName);
   }
 
   /**
@@ -449,7 +462,7 @@ export class ToolRegistry {
         // while isMcpServerDisabled still returns false, mis-reporting
         // an intentional disable as a connectivity failure.
         const currentExcluded = this.config.getExcludedMcpServers() || [];
-        if (!currentExcluded.includes(serverName)) {
+        if (!matchesAnyServerPattern(serverName, currentExcluded)) {
           this.config.setExcludedMcpServers([...currentExcluded, serverName]);
         }
       } finally {
@@ -679,19 +692,16 @@ export class ToolRegistry {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
-    const declarations: FunctionDeclaration[] = [];
-    this.tools.forEach((tool) => {
-      if (
-        !includeDeferred &&
-        tool.shouldDefer &&
-        !tool.alwaysLoad &&
-        !this.revealedDeferred.has(tool.name)
-      ) {
-        return;
-      }
-      declarations.push(tool.schema);
-    });
-    return declarations;
+    return Array.from(this.tools.values())
+      .filter(
+        (tool) =>
+          includeDeferred ||
+          !tool.shouldDefer ||
+          tool.alwaysLoad ||
+          this.revealedDeferred.has(tool.name),
+      )
+      .sort(ToolRegistry.compareToolsByDeclarationName)
+      .map((tool) => tool.schema);
   }
 
   /**

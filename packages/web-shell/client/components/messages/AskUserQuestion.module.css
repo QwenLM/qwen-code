@@ -1,221 +1,270 @@
 .question {
-  margin: 8px 0 12px 12px;
-  padding: 12px 16px;
-  border: 1px solid var(--border-color);
-  font-family: var(--font-mono);
-  font-size: 13px;
+  position: relative;
+  margin: 12px auto;
+  width: 100%;
+  max-width: min(800px, var(--chat-content-width, 800px));
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
 }
 
 .floating {
-  max-height: min(420px, 58vh);
-  margin: 0;
+  max-height: min(520px, 64vh);
+  margin: 0 auto;
   overflow: auto;
-  border-radius: 14px;
-  background: var(--command-panel-bg);
-  box-shadow: 0 18px 48px color-mix(in srgb, #000 18%, transparent);
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
   font-family: var(--font-sans);
 }
 
 .titleLine {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  min-height: 22px;
+  margin-bottom: 16px;
+  padding-right: 72px;
 }
 
 .icon {
-  color: var(--accent-color);
-  font-weight: bold;
-  font-size: 14px;
+  display: none;
 }
 
 .toolName {
-  font-weight: bold;
-  color: var(--text-primary);
+  display: none;
 }
 
 .toolDesc {
-  color: var(--text-secondary);
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
 }
 
 .tabs {
+  position: absolute;
+  top: 16px;
+  right: 16px;
   display: flex;
   gap: 4px;
-  margin-bottom: 10px;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 6px;
-  flex-wrap: wrap;
+  margin: 0;
+  border-bottom: 0;
+  padding: 0;
+  flex-wrap: nowrap;
 }
 
 .tab {
-  padding: 3px 8px;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  background: transparent;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-secondary);
+  overflow: hidden;
+  width: 12px;
+  height: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: transparent;
   cursor: pointer;
 }
 
 .tabActive {
-  background: var(--accent-color);
-  color: #fff;
-  border-color: var(--accent-color);
+  background: var(--agent-blue-500);
+  color: transparent;
 }
 
 .tabCheck {
-  color: var(--success-color, #4caf50);
-}
-
-.tabActive .tabCheck {
-  color: #fff;
+  display: none;
 }
 
 .header {
-  font-size: 13px;
-  font-weight: bold;
-  color: var(--accent-color);
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
 }
 
 .text {
-  font-size: 13px;
-  color: var(--text-primary);
-  margin-bottom: 12px;
+  margin: 0;
+  padding-right: 72px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.description {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
 }
 
 .multiHint {
-  color: var(--text-secondary);
-  font-size: 12px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .options {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin-left: 4px;
+  gap: 4px;
+  margin-top: 18px;
+  margin-left: 0;
 }
 
 .option {
   display: flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 3px 0;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  color: var(--foreground);
   cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
 }
 
-.optionActive .optionLabel,
-.optionSelected .optionLabel {
-  font-weight: bold;
-  color: var(--accent-color);
-  text-decoration: underline;
-  text-decoration-color: var(--accent-color);
-  text-underline-offset: 3px;
+.optionActive,
+.optionSelected {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.optionActive .optionLabel {
+  font-weight: 500;
+  color: var(--foreground);
 }
 
 .pointer {
-  width: 12px;
-  flex-shrink: 0;
-  color: var(--accent-color);
-  font-weight: bold;
-}
-
-.checkbox {
-  font-size: 14px;
-  font-weight: bold;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-  min-width: 24px;
-}
-
-.optionSelected .checkbox {
-  color: var(--accent-color);
+  display: none;
 }
 
 .optionNum {
-  color: var(--text-secondary);
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  min-width: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+  margin-top: 1px;
+}
+
+.editIcon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-weight: 400;
+  margin-top: 1px;
+}
+
+.editIcon svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.25;
+}
+
+.optionActive .optionNum,
+.optionSelected .optionNum {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.optionActive .editIcon,
+.optionSelected .editIcon {
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .optionContent {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  min-width: 0;
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .optionLabel {
-  color: var(--text-primary);
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
 }
 
 .optionPlaceholder {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   opacity: 0.6;
 }
 
 .optionDesc {
+  color: var(--muted-foreground);
   font-size: 12px;
-  color: var(--text-secondary);
-  padding-left: 16px;
+  font-weight: 400;
+  line-height: 18px;
 }
 
 .customInput {
   flex: 1;
-  padding: 2px 6px;
+  min-width: 0;
+  padding: 4px 0;
   background: transparent;
   border: none;
-  border-bottom: 1px solid var(--accent-color);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
   outline: none;
 }
 
 .customInput:focus {
-  border-bottom-color: var(--accent-color);
-}
-
-.submitTab {
-  margin-top: 4px;
-}
-
-.summary {
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  border-radius: 4px;
-  background: var(--bg-secondary, rgba(255, 255, 255, 0.03));
-}
-
-.summaryRow {
-  display: flex;
-  gap: 8px;
-  padding: 3px 0;
-}
-
-.summaryLabel {
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.summaryValue {
-  color: var(--accent-color);
-  font-weight: bold;
+  border-bottom-color: var(--agent-blue-500);
 }
 
 .actions {
   display: flex;
-  gap: 8px;
-  margin-top: 12px;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 16px;
+  margin-top: 24px;
 }
 
 .button {
-  padding: 4px 14px;
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 12px;
   font-weight: 500;
-  font-family: var(--font-mono);
-  border: none;
-  border-radius: 4px;
+  line-height: 22px;
   cursor: pointer;
 }
 
@@ -224,11 +273,32 @@
 }
 
 .button:disabled {
-  opacity: 0.4;
+  background: var(--secondary);
+  border-color: transparent;
+  color: var(--secondary-foreground);
+  opacity: 1;
   cursor: not-allowed;
 }
 
 .submitButton {
-  background: var(--accent-color);
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+
+.ignoreButton {
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.ignoreButton:hover {
+  color: var(--foreground);
 }

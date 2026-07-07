@@ -31,7 +31,7 @@ type TextFilterOperator =
   | 'endsWith';
 type NumberFilterOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'between';
 
-interface CellData {
+export interface EnhancedTableCell {
   key: string;
   content: ReactNode;
   text: string;
@@ -39,14 +39,14 @@ interface CellData {
   textAlign?: CSSProperties['textAlign'];
 }
 
-interface RowData {
+export interface EnhancedTableRow {
   key: string;
-  cells: CellData[];
+  cells: EnhancedTableCell[];
 }
 
-interface ParsedTable {
-  headers: CellData[];
-  rows: RowData[];
+export interface EnhancedTableData {
+  headers: EnhancedTableCell[];
+  rows: EnhancedTableRow[];
   columnCount: number;
 }
 
@@ -103,8 +103,8 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
   between: 'markdownTable.filter.number.between',
 };
 
-const MAX_ENHANCED_TABLE_ROWS = 500;
-const MAX_ENHANCED_TABLE_COLUMNS = 50;
+export const MAX_ENHANCED_TABLE_ROWS = 500;
+export const MAX_ENHANCED_TABLE_COLUMNS = 50;
 const FOCUSABLE_FILTER_MENU_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -155,7 +155,7 @@ function getTextContent(node: ReactNode): string {
   return '';
 }
 
-function emptyCell(rowKey: string, columnIndex: number): CellData {
+function emptyCell(rowKey: string, columnIndex: number): EnhancedTableCell {
   return {
     key: `${rowKey}-empty-${columnIndex}`,
     content: '',
@@ -164,7 +164,7 @@ function emptyCell(rowKey: string, columnIndex: number): CellData {
   };
 }
 
-function parseRow(rowNode: TableElement, rowKey: string): RowData {
+function parseRow(rowNode: TableElement, rowKey: string): EnhancedTableRow {
   const cellNodes = Children.toArray(rowNode.props.children).filter(
     (child) => isTagElement(child, 'td') || isTagElement(child, 'th'),
   );
@@ -180,13 +180,19 @@ function parseRow(rowNode: TableElement, rowKey: string): RowData {
   };
 }
 
-function parseRows(sectionNode: TableElement, prefix: string): RowData[] {
+function parseRows(
+  sectionNode: TableElement,
+  prefix: string,
+): EnhancedTableRow[] {
   return Children.toArray(sectionNode.props.children)
     .filter((child) => isTagElement(child, 'tr'))
     .map((rowNode, rowIndex) => parseRow(rowNode, `${prefix}-${rowIndex}`));
 }
 
-function normalizeRow(row: RowData, columnCount: number): RowData {
+function normalizeRow(
+  row: EnhancedTableRow,
+  columnCount: number,
+): EnhancedTableRow {
   return {
     ...row,
     cells: Array.from(
@@ -200,11 +206,11 @@ function normalizeRow(row: RowData, columnCount: number): RowData {
 function parseTable(
   children: ReactNode,
   defaultColumnLabel: (columnIndex: number) => string,
-): ParsedTable {
+): EnhancedTableData {
   const topLevel = Children.toArray(children);
-  const headerRows: RowData[] = [];
-  const bodyRows: RowData[] = [];
-  const directRows: RowData[] = [];
+  const headerRows: EnhancedTableRow[] = [];
+  const bodyRows: EnhancedTableRow[] = [];
+  const directRows: EnhancedTableRow[] = [];
 
   topLevel.forEach((child, index) => {
     if (isTagElement(child, 'thead')) {
@@ -291,7 +297,7 @@ function sanitizeForClipboard(value: string): string {
 
 function getSelectionText(
   range: SelectionRange | null,
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
 ): string {
   if (!range) return '';
@@ -317,8 +323,8 @@ function getSelectionText(
 }
 
 function getVisibleTableText(
-  headers: CellData[],
-  rows: RowData[],
+  headers: EnhancedTableCell[],
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
 ): string {
   if (visibleColumnIndexes.length === 0) return '';
@@ -422,10 +428,10 @@ function matchesColumnFilter(value: string, filter: ColumnFilter): boolean {
 }
 
 function applyFilters(
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   filters: Record<number, ColumnFilter>,
   excludeColumnIndex?: number,
-): RowData[] {
+): EnhancedTableRow[] {
   const activeFilters = Object.entries(filters)
     .map(([key, value]) => [Number(key), value] as const)
     .filter(
@@ -441,7 +447,10 @@ function applyFilters(
   );
 }
 
-function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
+function sortRows(
+  rows: EnhancedTableRow[],
+  sort: SortState | null,
+): EnhancedTableRow[] {
   if (!sort) return rows;
   return rows
     .map((row, index) => ({ row, index }))
@@ -457,7 +466,7 @@ function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
 }
 
 function getColumnOptions(
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   columnIndex: number,
   blankLabel: string,
 ): FilterOption[] {
@@ -476,7 +485,10 @@ function getColumnOptions(
     .sort((a, b) => compareCellText(a.value, b.value));
 }
 
-function isMostlyNumericColumn(rows: RowData[], columnIndex: number): boolean {
+function isMostlyNumericColumn(
+  rows: EnhancedTableRow[],
+  columnIndex: number,
+): boolean {
   let filledCount = 0;
   let numericCount = 0;
   rows.forEach((row) => {
@@ -1012,11 +1024,13 @@ function ColumnFilterMenu({
 interface EnhancedMarkdownTableProps {
   children?: ReactNode;
   fallback?: ReactNode;
+  toolbarExtra?: ReactNode;
 }
 
 export function EnhancedMarkdownTable({
   children,
   fallback,
+  toolbarExtra,
 }: EnhancedMarkdownTableProps) {
   const { t } = useI18n();
   const table = useMemo(
@@ -1036,10 +1050,16 @@ export function EnhancedMarkdownTable({
     return <>{fallback ?? <table>{children}</table>}</>;
   }
 
-  return <InteractiveMarkdownTable table={table} />;
+  return <EnhancedTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
-function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
+export function EnhancedTable({
+  table,
+  toolbarExtra,
+}: {
+  table: EnhancedTableData;
+  toolbarExtra?: ReactNode;
+}) {
   const { t } = useI18n();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
@@ -1053,7 +1073,18 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   );
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [copiedVisible, setCopiedVisible] = useState(false);
+  const [copiedSelection, setCopiedSelection] = useState(false);
   const draggingRef = useRef(false);
+  const copiedVisibleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const copiedVisibleGenRef = useRef(0);
+  const copiedSelectionGenRef = useRef(0);
+  const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1086,6 +1117,24 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     setOpenFilterMenu(null);
     focusFilterTrigger();
   }, [focusFilterTrigger]);
+
+  const resetCopiedVisible = useCallback(() => {
+    copiedVisibleGenRef.current += 1;
+    if (copiedVisibleTimerRef.current) {
+      clearTimeout(copiedVisibleTimerRef.current);
+      copiedVisibleTimerRef.current = null;
+    }
+    setCopiedVisible(false);
+  }, []);
+
+  const resetCopiedSelection = useCallback(() => {
+    copiedSelectionGenRef.current += 1;
+    if (copiedSelectionTimerRef.current) {
+      clearTimeout(copiedSelectionTimerRef.current);
+      copiedSelectionTimerRef.current = null;
+    }
+    setCopiedSelection(false);
+  }, []);
 
   const flushPendingSelection = useCallback(() => {
     if (selectionFrameRef.current) {
@@ -1141,9 +1190,32 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
     setOpenFilterMenu(null);
     setHiddenColumns(new Set());
     setDetailRowKey(null);
+    resetCopiedVisible();
+    resetCopiedSelection();
     draggingRef.current = false;
     setIsDragging(false);
-  }, [tableStructureKey]);
+  }, [resetCopiedSelection, resetCopiedVisible, tableStructureKey]);
+
+  useEffect(() => {
+    resetCopiedSelection();
+  }, [resetCopiedSelection, selection]);
+
+  useEffect(() => {
+    // StrictMode simulates an unmount/remount without re-running useRef's
+    // initializer, so restore this before clipboard callbacks can run.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copiedVisibleTimerRef.current) {
+        clearTimeout(copiedVisibleTimerRef.current);
+        copiedVisibleTimerRef.current = null;
+      }
+      if (copiedSelectionTimerRef.current) {
+        clearTimeout(copiedSelectionTimerRef.current);
+        copiedSelectionTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!openFilterMenu) return;
@@ -1238,6 +1310,10 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
         .filter((index) => !hiddenColumns.has(index)),
     [hiddenColumns, table.headers],
   );
+
+  useEffect(() => {
+    resetCopiedVisible();
+  }, [resetCopiedVisible, visibleColumnIndexes, visibleRows]);
 
   useEffect(() => {
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
@@ -1449,8 +1525,21 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
   const copySelection = () => {
     const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
     if (!text || !navigator.clipboard) return;
+    const copyGeneration = copiedSelectionGenRef.current;
     void navigator.clipboard
       .writeText(text)
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedSelectionGenRef.current !== copyGeneration) return;
+        if (copiedSelectionTimerRef.current) {
+          clearTimeout(copiedSelectionTimerRef.current);
+        }
+        setCopiedSelection(true);
+        copiedSelectionTimerRef.current = setTimeout(
+          () => setCopiedSelection(false),
+          2000,
+        );
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -1463,8 +1552,21 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
       visibleColumnIndexes,
     );
     if (!text || !navigator.clipboard) return;
+    const copyGeneration = copiedVisibleGenRef.current;
     void navigator.clipboard
       .writeText(text)
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedVisibleGenRef.current !== copyGeneration) return;
+        if (copiedVisibleTimerRef.current) {
+          clearTimeout(copiedVisibleTimerRef.current);
+        }
+        setCopiedVisible(true);
+        copiedVisibleTimerRef.current = setTimeout(
+          () => setCopiedVisible(false),
+          2000,
+        );
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -1511,7 +1613,14 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
           type="button"
           onClick={copyVisibleTable}
         >
-          {t('markdownTable.copyVisible')}
+          {copiedVisible ? (
+            <>
+              <span className={styles.copyCheck}>✓</span>
+              {t('code.copied')}
+            </>
+          ) : (
+            t('markdownTable.copyVisible')
+          )}
         </button>
         {hiddenColumns.size > 0 && (
           <button
@@ -1539,10 +1648,18 @@ function InteractiveMarkdownTable({ table }: { table: ParsedTable }) {
               type="button"
               onClick={copySelection}
             >
-              {t('markdownTable.copyTsv')}
+              {copiedSelection ? (
+                <>
+                  <span className={styles.copyCheck}>✓</span>
+                  {t('code.copied')}
+                </>
+              ) : (
+                t('markdownTable.copyTsv')
+              )}
             </button>
           </>
         )}
+        {toolbarExtra}
       </div>
       <div
         ref={containerRef}

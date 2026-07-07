@@ -1753,6 +1753,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders managed memory events without a source fallback leak', () => {
+    const output = daemonUiEventToTerminalText({
+      type: 'workspace.memory.changed',
+      scope: 'managed',
+      touchedScopes: ['project'],
+    });
+
+    expect(output).toContain('managed_memory');
+    expect(output).not.toContain('undefined');
+  });
+
   it('renders extension failures without assuming install failed', () => {
     const output = daemonUiEventToTerminalText({
       type: 'workspace.extensions.changed',
@@ -2172,6 +2183,45 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes managed memory_changed from workspace remember', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project'],
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.memory.changed',
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project'],
+      }),
+    ]);
+  });
+
+  it('rejects malformed managed memory_changed payloads', () => {
+    for (const data of [
+      {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        touchedScopes: ['project'],
+      },
+      {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['bad'],
+      },
+    ]) {
+      const events = normalizeDaemonEvent(envelopeOf('memory_changed', data));
+      expect(events[0]).toMatchObject({ type: 'debug' });
+    }
+  });
+
   it('normalizes agent_changed for create/update/delete', () => {
     for (const change of ['created', 'updated', 'deleted'] as const) {
       const events = normalizeDaemonEvent(
@@ -2203,6 +2253,33 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         enabled: false,
       }),
     ]);
+  });
+
+  it('normalizes settings_reloaded as a settings refresh signal', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_reloaded', {
+        env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+        changedKeys: ['env', 'hooks'],
+        childReloaded: true,
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'settings_reloaded',
+        scope: 'workspace',
+        value: expect.objectContaining({
+          childReloaded: true,
+          sessionsRefreshed: ['session-1'],
+        }) as unknown,
+      }),
+    ]);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'debug' }),
+    );
   });
 
   it('normalizes workspace_initialized actions', () => {

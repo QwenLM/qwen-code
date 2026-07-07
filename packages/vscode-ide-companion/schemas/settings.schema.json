@@ -96,12 +96,14 @@
         "sessionRecapAwayThresholdMinutes": {
           "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
           "type": "number",
-          "default": 5
+          "default": 5,
+          "minimum": 1
         },
         "cleanupPeriodDays": {
           "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
           "type": "number",
-          "default": 30
+          "default": 30,
+          "minimum": 0
         },
         "gitCoAuthor": {
           "description": "Attribution added to git commits and pull requests created through Qwen Code.",
@@ -276,6 +278,11 @@
               "description": "Whether to collapse history by default when resuming a session.",
               "type": "boolean",
               "default": false
+            },
+            "collapsePreviewCount": {
+              "description": "Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.",
+              "type": "number",
+              "default": 0
             }
           }
         },
@@ -365,7 +372,7 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
           "default": false
         },
@@ -538,6 +545,16 @@
       "type": "string",
       "default": ""
     },
+    "visionModel": {
+      "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+      "type": "string",
+      "default": ""
+    },
+    "modelFallbacks": {
+      "description": "Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: \"qwen-plus,qwen-turbo\". Set via CLI with --fallback-model.",
+      "type": "string",
+      "default": ""
+    },
     "voiceModel": {
       "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",
@@ -555,6 +572,16 @@
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"
         },
+        "reasoningEffort": {
+          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default. Options: low, medium, high, xhigh, max",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
           "type": "number",
@@ -569,6 +596,11 @@
           "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
           "type": "number",
           "default": -1
+        },
+        "maxSubagentDepth": {
+          "description": "Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.",
+          "type": "number",
+          "default": 5
         },
         "chatCompression": {
           "description": "Chat compression settings.",
@@ -590,9 +622,14 @@
           "default": false
         },
         "skipLoopDetection": {
-          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap, see model.maxToolCallsPerTurn) still runs regardless of this setting.",
           "type": "boolean",
           "default": true
+        },
+        "maxToolCallsPerTurn": {
+          "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "type": "number",
+          "default": 100
         },
         "skipStartupContext": {
           "description": "Avoid sending the workspace startup context at the beginning of each session.",
@@ -753,6 +790,12 @@
               "default": true
             }
           }
+        },
+        "autoCompactThreshold": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1,
+          "description": "Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%)."
         }
       }
     },
@@ -779,6 +822,16 @@
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
           "type": "boolean",
           "default": true
+        },
+        "enableTeamMemory": {
+          "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableTeamMemorySync": {
+          "description": "When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -908,6 +961,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "classifyAllShell": {
+              "description": "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
+              "type": "boolean",
+              "default": false
             }
           }
         }
@@ -953,9 +1011,8 @@
               "default": true
             },
             "pager": {
-              "description": "The pager command to use for shell output. Defaults to `cat`.",
-              "type": "string",
-              "default": "cat"
+              "description": "The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.",
+              "type": "string"
             },
             "showColor": {
               "description": "Show color in shell output.",
@@ -1046,9 +1103,16 @@
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.",
               "type": "boolean",
               "default": true
+            },
+            "idleTimeoutMs": {
+              "description": "Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.",
+              "type": "number",
+              "default": 300000,
+              "minimum": 0,
+              "maximum": 2147483647
             },
             "maxImageDimension": {
               "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
@@ -1089,18 +1153,25 @@
           "type": "string"
         },
         "allowed": {
-          "description": "A list of MCP servers to allow.",
+          "description": "A list of MCP servers to allow. Supports glob patterns (e.g. \"*puppeteer*\").",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "excluded": {
-          "description": "A list of MCP servers to exclude.",
+          "description": "A list of MCP servers to exclude. Supports glob patterns (e.g. \"*puppeteer*\"). Takes precedence over mcp.allowed.",
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "toolIdleTimeoutMs": {
+          "description": "Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.",
+          "type": "number",
+          "default": 300000,
+          "minimum": 10000,
+          "maximum": 3600000
         }
       }
     },
@@ -1197,6 +1268,11 @@
       "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
       "type": "object",
       "properties": {
+        "maxParallelAgents": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet."
+        },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
           "enum": [
@@ -2706,13 +2782,19 @@
           "type": "boolean",
           "default": true
         },
+        "cronRecurringMaxAgeDays": {
+          "type": "number",
+          "minimum": 0,
+          "default": 7,
+          "description": "Days a recurring cron/loop job lives before auto-expiring (it fires one final time, then is deleted). Set to 0 to disable expiry so jobs run until deleted — useful for long-running daemon deployments. Can be overridden via the QWEN_CODE_CRON_MAX_AGE_DAYS environment variable."
+        },
         "agentTeam": {
           "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
           "type": "boolean",
           "default": false
         },
         "artifact": {
-          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_CODE_DISABLE_ARTIFACT=1.",
+          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.",
           "type": "boolean",
           "default": false
         },

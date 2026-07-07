@@ -209,6 +209,47 @@ describe('HookAggregator', () => {
       ).toBe('ctx\nctx2');
     });
 
+    it('should concatenate artifact arrays and drop malformed artifacts fields', () => {
+      const outputs: HookOutput[] = [
+        {
+          hookSpecificOutput: {
+            artifacts: [
+              {
+                title: 'Report',
+                workspacePath: 'report.html',
+              },
+              { workspacePath: 'missing-title.html' },
+              null,
+            ],
+          },
+        },
+        {
+          hookSpecificOutput: {
+            artifacts: { title: 'Malformed' },
+            other: 'kept',
+          },
+        },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PostToolUse,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PostToolUse,
+      );
+
+      expect(result.finalOutput?.hookSpecificOutput).toMatchObject({
+        artifacts: [{ title: 'Report', workspacePath: 'report.html' }],
+        other: 'kept',
+      });
+    });
+
     it('should preserve PostToolBatch stop decisions across multiple hooks', () => {
       const outputs: HookOutput[] = [
         { continue: false, stopReason: 'first hook stopped' },

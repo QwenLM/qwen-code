@@ -370,6 +370,26 @@ describe('<LoadingIndicator />', () => {
       expect(output).not.toContain('130 t/s');
     });
 
+    it('should not count excluded tool tokens toward response tokens/sec', () => {
+      const streamingCharsRef = { current: 400 };
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={8000}
+          taskStartTokens={8000}
+          streamingCharsRef={streamingCharsRef}
+          isStreaming
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 8.1k tokens');
+      expect(output).toContain('20 t/s');
+      expect(output).not.toContain('1620 t/s');
+    });
+
     it('should format sub-10 response tokens/sec with one decimal place', () => {
       const { lastFrame } = renderWithContext(
         <LoadingIndicator

@@ -16,7 +16,7 @@ import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
 
 const baseOpts: ServeOptions = {
@@ -44,7 +44,7 @@ async function makeHarness(opts?: {
   const workspace = canonicalizeWorkspace(wsDir);
   const events: BridgeEvent[] = [];
   const fsFactory = createWorkspaceFileSystemFactory({
-    boundWorkspace: workspace,
+    boundWorkspaces: [workspace],
     trusted: opts?.trusted ?? true,
     emit: (e) => events.push(e),
     ignore: opts?.ignore,

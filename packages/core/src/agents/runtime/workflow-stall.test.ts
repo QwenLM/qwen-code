@@ -32,6 +32,14 @@ describe('resolveStallMs', () => {
       resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: '0' }),
     ).toBe(0);
   });
+  it.each(['0x10', '1e3', '1.0', '2.5', '0x0'])(
+    'ignores malformed env seconds %j',
+    (value) => {
+      expect(
+        resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: value }),
+      ).toBe(DEFAULT_STALL_MS);
+    },
+  );
   it('falls back to default when nothing set', () => {
     expect(resolveStallMs(undefined, {})).toBe(DEFAULT_STALL_MS);
   });

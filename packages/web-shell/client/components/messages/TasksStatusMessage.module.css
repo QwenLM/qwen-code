@@ -2,11 +2,11 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  color: var(--foreground);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 14px;
-  background: var(--command-panel-bg);
+  background: var(--background);
 }
 
 .embeddedPanel {
@@ -18,7 +18,7 @@
 
 .title {
   font-weight: 700;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .sectionTitle {
@@ -26,7 +26,7 @@
 }
 
 .overflowHint {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   padding-left: 2ch;
 }
 
@@ -37,7 +37,7 @@
 }
 
 .secondary {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .row {
@@ -49,13 +49,13 @@
 }
 
 .selected {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .pointer {
   display: inline-block;
   width: 2ch;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .nameCell {
@@ -65,6 +65,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.treeMarker {
+  color: var(--muted-foreground);
+}
+
+.orphanNote {
+  color: var(--muted-foreground);
 }
 
 .status {
@@ -80,7 +88,7 @@
   justify-content: center;
   width: 18px;
   height: 18px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .chevron {
@@ -101,7 +109,7 @@
 }
 
 .separator {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .list {
@@ -117,7 +125,7 @@
 }
 
 .taskExpanded {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
   padding: 4px;
 }
 
@@ -176,13 +184,13 @@
 }
 
 .embeddedPanel .row:hover {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
+  color: var(--foreground);
+  background: var(--secondary);
 }
 
 .embeddedPanel .selected {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
+  color: var(--foreground);
+  background: var(--secondary);
 }
 
 .embeddedPanel .pointer {
@@ -190,14 +198,20 @@
 }
 
 .embeddedPanel .inlineDetail {
-  padding: 0;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 5px 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .embeddedPanel .detail {
-  margin: 8px;
-  border-radius: 6px;
-  background: var(--bg-primary);
-  padding: 8px;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .embeddedPanel .nameCell {
@@ -212,7 +226,7 @@
   height: 14px;
   border: 1.5px solid currentColor;
   border-radius: 4px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .taskIcon::before,
@@ -242,20 +256,20 @@
 }
 
 .detailFieldLabel {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
 }
 
 .detailContent {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .compactSummary {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -278,10 +292,10 @@
 }
 
 .actionButton {
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 5px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+  background: var(--muted);
+  color: var(--foreground);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
@@ -289,7 +303,7 @@
 }
 
 .actionButton:hover:not(:disabled) {
-  border-color: var(--accent-color);
+  border-color: var(--agent-blue-500);
 }
 
 .actionButton:disabled {
@@ -302,8 +316,8 @@
 }
 
 .shortcuts {
-  color: var(--text-dimmed);
-  border-top: 1px solid var(--border-color);
+  color: var(--muted-foreground);
+  border-top: 1px solid var(--border);
   padding-top: 8px;
 }
 
@@ -318,21 +332,21 @@
 }
 
 .activityCurrent {
-  color: var(--text-primary);
+  color: var(--foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .activityPast {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .promptContent {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
