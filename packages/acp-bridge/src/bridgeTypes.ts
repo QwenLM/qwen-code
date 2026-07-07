@@ -120,7 +120,13 @@ export interface BridgeLoadReplayEnvelope {
   replayError?: string;
 }
 
-export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
+export type BridgeSessionState = (
+  | LoadSessionResponse
+  | ResumeSessionResponse
+) & {
+  artifactSnapshot?: unknown;
+  artifactSnapshotUnavailable?: unknown;
+};
 
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */

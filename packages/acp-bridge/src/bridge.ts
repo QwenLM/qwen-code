@@ -2830,21 +2830,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const restoredArtifactSnapshotFromState = (
     state: BridgeSessionState,
   ): RebuiltSessionArtifactSnapshot | undefined => {
-    const candidate = (state as { artifactSnapshot?: unknown })
-      .artifactSnapshot;
+    const candidate = state.artifactSnapshot;
     const warnings: string[] = [];
     const snapshot = normalizeSnapshotPayload(candidate, warnings);
     if (!snapshot) return undefined;
-    const snapshotWarnings = Array.isArray(
-      (candidate as { warnings?: unknown }).warnings,
-    )
-      ? (candidate as { warnings: unknown[] }).warnings
-          .filter(
-            (warning): warning is string =>
-              typeof warning === 'string' && warning.length <= 1000,
-          )
-          .slice(-500)
-      : [];
+    const snapshotWarnings =
+      isRecord(candidate) && Array.isArray(candidate['warnings'])
+        ? candidate['warnings']
+            .filter(
+              (warning): warning is string =>
+                typeof warning === 'string' && warning.length <= 1000,
+            )
+            .slice(-500)
+        : [];
     return {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: snapshot.sessionId,
@@ -2859,8 +2857,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const artifactSnapshotUnavailableReason = (
     state: BridgeSessionState,
   ): string | undefined => {
-    const reason = (state as { artifactSnapshotUnavailable?: unknown })
-      .artifactSnapshotUnavailable;
+    const reason = state.artifactSnapshotUnavailable;
     return typeof reason === 'string' && reason ? reason : undefined;
   };
 

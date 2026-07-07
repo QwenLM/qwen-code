@@ -609,7 +609,7 @@ describe('session artifact persistence records', () => {
     ]);
   });
 
-  it('remaps forked snapshot payloads and drops bare tombstone state', () => {
+  it('remaps forked snapshot payloads and marker state', () => {
     const source = artifact('source-session', 'https://example.com/snapshot', {
       retention: 'pinned',
       contentRef: {
@@ -629,21 +629,34 @@ describe('session artifact persistence records', () => {
         sequence: 7,
         recordedAt: '2026-07-04T00:00:00.000Z',
         artifacts: [source],
-        tombstonedIds: ['deleted-in-source'],
-        stickyEphemeralIds: ['ephemeral-in-source'],
+        tombstonedIds: [source.id, 'deleted-in-source'],
+        stickyEphemeralIds: [source.id, 'ephemeral-in-source'],
       },
       'source-session',
       'forked-session',
     ) as SessionArtifactSnapshotRecordPayload;
+    const forkedSourceId = stableSessionArtifactId(
+      'forked-session',
+      'url:https://example.com/snapshot',
+    );
 
     expect(remapped.sessionId).toBe('forked-session');
-    expect(remapped.tombstonedIds).toBeUndefined();
-    expect(remapped.stickyEphemeralIds).toBeUndefined();
-    expect(remapped.artifacts[0]).toMatchObject({
-      id: stableSessionArtifactId(
+    expect(remapped.tombstonedIds).toEqual([
+      forkedSourceId,
+      stableSessionArtifactId(
         'forked-session',
-        'url:https://example.com/snapshot',
+        'fork:source-session:deleted-in-source',
       ),
+    ]);
+    expect(remapped.stickyEphemeralIds).toEqual([
+      forkedSourceId,
+      stableSessionArtifactId(
+        'forked-session',
+        'fork:source-session:ephemeral-in-source',
+      ),
+    ]);
+    expect(remapped.artifacts[0]).toMatchObject({
+      id: forkedSourceId,
       retention: 'restorable',
     });
     expect(remapped.artifacts[0]).not.toHaveProperty('contentRef');

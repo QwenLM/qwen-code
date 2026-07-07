@@ -281,8 +281,23 @@ export function remapSessionArtifactPayloadForFork(
       ...snapshot,
       sessionId: newSessionId,
       artifacts,
-      tombstonedIds: undefined,
-      stickyEphemeralIds: undefined,
+      tombstonedIds: (snapshot.tombstonedIds ?? []).map((artifactId) =>
+        remapArtifactIdForFork(
+          artifactId,
+          sourceSessionId,
+          newSessionId,
+          remappedArtifactIds,
+        ),
+      ),
+      stickyEphemeralIds: (snapshot.stickyEphemeralIds ?? []).map(
+        (artifactId) =>
+          remapArtifactIdForFork(
+            artifactId,
+            sourceSessionId,
+            newSessionId,
+            remappedArtifactIds,
+          ),
+      ),
     } satisfies SessionArtifactSnapshotRecordPayload;
   }
 
@@ -309,18 +324,33 @@ export function remapSessionArtifactPayloadForFork(
         if (change.action === 'removed') {
           return {
             ...change,
-            artifactId:
-              remappedArtifactIds.get(change.artifactId) ??
-              stableSessionArtifactId(
-                newSessionId,
-                `fork:${sourceSessionId}:${change.artifactId}`,
-              ),
+            artifactId: remapArtifactIdForFork(
+              change.artifactId,
+              sourceSessionId,
+              newSessionId,
+              remappedArtifactIds,
+            ),
           };
         }
         return change;
       })
       .filter((change) => change !== undefined),
   } satisfies SessionArtifactEventRecordPayload;
+}
+
+function remapArtifactIdForFork(
+  artifactId: string,
+  sourceSessionId: string,
+  newSessionId: string,
+  remappedArtifactIds: ReadonlyMap<string, string>,
+): string {
+  return (
+    remappedArtifactIds.get(artifactId) ??
+    stableSessionArtifactId(
+      newSessionId,
+      `fork:${sourceSessionId}:${artifactId}`,
+    )
+  );
 }
 
 function remapSessionArtifactForFork(
