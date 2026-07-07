@@ -225,6 +225,24 @@ describe('WebShellSidebar — version footer', () => {
   });
 });
 
+describe('WebShellSidebar — brand logo', () => {
+  it('renders the Qwen brand mark beside the new-chat button when expanded', () => {
+    const { container } = renderSidebar(false);
+    // Filled brand mark (shared with the favicon), not a stroked nav icon.
+    const mark = container.querySelector('svg path[fill="#6D44E8"]');
+    expect(mark).not.toBeNull();
+    // The mark and the new-chat button share the same top row.
+    const topRow = mark!.closest('div');
+    expect(topRow?.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+
+  it('hides the brand mark when collapsed (only the new-chat button remains)', () => {
+    const { container } = renderSidebar(true);
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+});
+
 describe('WebShellSidebar — daemon status entry', () => {
   it('invokes onOpenDaemonStatus when the footer button is clicked', () => {
     const onOpenDaemonStatus = vi.fn();

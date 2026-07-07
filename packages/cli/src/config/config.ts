@@ -1739,6 +1739,10 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.disabled);
+  const visibleTools =
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.visible);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1999,6 +2003,7 @@ export async function loadCliConfig(
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
+    visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
@@ -2220,6 +2225,7 @@ export async function loadCliConfig(
     },
     agents: settings.agents
       ? {
+          maxParallelAgents: settings.agents.maxParallelAgents,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena
             ? {

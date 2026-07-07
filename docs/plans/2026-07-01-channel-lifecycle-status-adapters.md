@@ -61,7 +61,7 @@ helpers must be idempotent and must not double-append streamed Feishu content.
 
 **Files:**
 
-- Read: `.qwen/design/2026-07-01-channel-lifecycle-status-adapters.md`
+- Read: `docs/design/2026-07-01-channel-lifecycle-status-adapters.md`
 - Read: `packages/channels/base/src/types.ts`
 - Read: `packages/channels/base/src/ChannelBase.ts`
 
@@ -308,8 +308,7 @@ Add the behavior test:
 it('maps lifecycle start and terminal events to typing state', () => {
   const channel = createChannel();
   const setTyping = vi.fn().mockResolvedValue(undefined);
-  (channel as unknown as { setTyping: typeof setTyping }).setTyping =
-    setTyping;
+  (channel as unknown as { setTyping: typeof setTyping }).setTyping = setTyping;
 
   const baseEvent = {
     channelName: 'weixin',
@@ -485,8 +484,9 @@ it('maps lifecycle start and terminal events to the eye reaction', () => {
 it('does not attach lifecycle reactions without a conversation id', () => {
   const channel = createChannel();
   const attachReaction = vi.fn().mockResolvedValue(undefined);
-  (channel as unknown as { attachReaction: typeof attachReaction })
-    .attachReaction = attachReaction;
+  (
+    channel as unknown as { attachReaction: typeof attachReaction }
+  ).attachReaction = attachReaction;
 
   getLifecycleHook(channel)({
     type: 'started',
@@ -973,9 +973,7 @@ state:
 const terminalStatus = cs.terminalStatus || 'failed';
 const terminalLabel = this.statusLabelFor(terminalStatus);
 const text = cs.accumulatedText
-  ? (atPrefix
-      ? `${atPrefix}\n\n${cs.accumulatedText}`
-      : cs.accumulatedText) +
+  ? (atPrefix ? `${atPrefix}\n\n${cs.accumulatedText}` : cs.accumulatedText) +
     '\n\n---\n' +
     `*${terminalLabel}*`
   : (atPrefix ? `${atPrefix}\n\n` : '') + `*${terminalLabel}*`;

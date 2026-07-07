@@ -17,12 +17,12 @@ import type { Intent, ResolvedPath } from './paths.js';
  * typical source files, small enough that an SSE replay buffer
  * doesn't fill on a single read.
  *
- * Files **above** this cap are refused with `file_too_large` rather
- * than truncated — the underlying `readFileWithLineAndLimit`
- * reads the whole file into memory before slicing lines, so soft
- * truncation past the cap would still OOM the daemon. Files
- * **at or below** the cap honor a tighter `opts.maxBytes` via
- * post-decode truncation (`enforceReadSize`); that's where the
+ * Full-snapshot reads above this cap are refused with `file_too_large`
+ * rather than truncated. `readText` can serve explicit line windows
+ * from larger files, but the default read/edit contract still needs a
+ * bounded snapshot for hash stability, SSE buffering, and oldText
+ * matching. Files at or below the cap honor a tighter `opts.maxBytes`
+ * via post-decode truncation (`enforceReadSize`); that's where the
  * `meta.truncated = true` flag fires.
  *
  * `enforceReadBytesSize` (the `readBytes` gate) and `edit()` use the

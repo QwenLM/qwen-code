@@ -735,6 +735,20 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(after).toBe('foo=42\nbar=2\n');
   });
 
+  it('edit() preserves the tail of files larger than the default range cap', async () => {
+    const target = path.join(h.workspace, 'large-edit.txt');
+    const tail = 'tail-marker\n';
+    const content = `foo=1\n${'body\n'.repeat(6_000)}${tail}`;
+    await fsp.writeFile(target, content);
+    const r = await h.fs.resolve('large-edit.txt', 'edit');
+
+    const out = await h.fs.edit(r, 'foo=1', 'foo=42');
+
+    expect(out.writtenBytes).toBeGreaterThan(25_000);
+    const after = await fsp.readFile(target, 'utf-8');
+    expect(after).toBe(`foo=42\n${'body\n'.repeat(6_000)}${tail}`);
+  });
+
   it('throws parse_error when oldText is not present', async () => {
     const target = path.join(h.workspace, 'c.txt');
     await fsp.writeFile(target, 'abc');

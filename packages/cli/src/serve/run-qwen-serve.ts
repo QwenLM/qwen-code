@@ -2523,6 +2523,10 @@ export async function runQwenServe(
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
+      // The real long-running daemon keeps scheduled-task sessions resident
+      // (keepalive) and reloads them on boot (rehydration). Off by default so
+      // direct createServeApp embeds/tests don't spawn sessions.
+      manageScheduledTaskSessions: true,
       fsFactory: runtime.resolveBridgeFsFactory({
         // REST routes still return primary-relative paths, so keep their
         // filesystem boundary primary-only until responses carry root IDs.
@@ -3101,6 +3105,13 @@ export async function runQwenServe(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            // Stop the scheduled-task keepalive timer before tearing down the
+            // bridge it heartbeats. It's already unref()'d so it can't hold the
+            // process open, but stopping it here keeps it from firing against a
+            // disposed bridge (matters for embedders that don't process.exit).
+            (
+              app.locals as { stopScheduledTaskKeepalive?: () => void }
+            ).stopScheduledTaskKeepalive?.();
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();

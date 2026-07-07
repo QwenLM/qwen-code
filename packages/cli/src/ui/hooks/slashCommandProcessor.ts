@@ -55,7 +55,11 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
-import { parseSlashCommand } from '../../utils/commands.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+  MAX_STACKED_SKILLS,
+} from '../../utils/commands.js';
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
@@ -700,6 +704,85 @@ export const useSlashCommandProcessor = (
       };
 
       try {
+        // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+        const stackedResult = parseStackedSlashCommands(trimmed, commands);
+        if (stackedResult.skills.length >= 2) {
+          const combinedContent: PartListUnion[] = [];
+          let firstModelOverride: string | undefined;
+          const onCompleteCallbacks: Array<() => Promise<void>> = [];
+
+          for (const skill of stackedResult.skills) {
+            if (!skill.action) continue;
+            const skillContext: CommandContext = {
+              invocation: {
+                raw: `/${skill.name}`,
+                name: skill.name,
+                args: '',
+              },
+              services: { config, settings, logger: null },
+            } as unknown as CommandContext;
+
+            const skillResult = await skill.action(skillContext, '');
+            if (skillResult?.type === 'submit_prompt') {
+              combinedContent.push(skillResult.content);
+              firstModelOverride ??= skillResult.modelOverride;
+              if (skillResult.onComplete) {
+                onCompleteCallbacks.push(skillResult.onComplete);
+              }
+            } else if (
+              skillResult?.type === 'message' &&
+              skillResult.messageType === 'error'
+            ) {
+              addMessage({
+                type: MessageType.ERROR,
+                content: `Skill "/${skill.name}" error: ${skillResult.content}`,
+                timestamp: new Date(),
+              });
+            }
+
+            if (config) {
+              recordSkillInvocation(config, {
+                skillName: getSkillCommandName(skill),
+                success: skillResult?.type === 'submit_prompt',
+              });
+            }
+          }
+
+          // Append user's remaining text after skill tokens
+          if (stackedResult.remainingText) {
+            combinedContent.push([{ text: stackedResult.remainingText }]);
+          }
+
+          if (stackedResult.exceededMax) {
+            addMessage({
+              type: MessageType.WARNING,
+              content: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
+              timestamp: new Date(),
+            });
+          }
+
+          // Mark as sent to model so chat recording and telemetry work correctly
+          invocationSentToModel = true;
+          if (invocationItemId !== undefined) {
+            updateItem(invocationItemId, { sentToModel: true });
+          }
+
+          // Combine all content into a single submit_prompt
+          const mergedContent: PartListUnion = combinedContent.flat();
+          return {
+            type: 'submit_prompt',
+            content: mergedContent,
+            ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+            ...(onCompleteCallbacks.length
+              ? {
+                  onComplete: async () => {
+                    for (const cb of onCompleteCallbacks) await cb();
+                  },
+                }
+              : {}),
+          };
+        }
+
         if (commandToExecute) {
           if (!commandToExecute.hidden) {
             setRecentCommands((previous) => {
@@ -1172,6 +1255,7 @@ export const useSlashCommandProcessor = (
     },
     [
       config,
+      settings,
       addItem,
       actions,
       commands,

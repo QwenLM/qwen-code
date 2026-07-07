@@ -543,13 +543,16 @@ export async function getInitialChatHistory(
     ? await buildAvailableSkillsReminder(config)
     : null;
 
+  // Stable parts first (MCP, skills, startup) so prefix-caching servers
+  // retain the KV-cache for the shared prefix. Deferred-tools is last
+  // because tool_search revelations change it — only the tail recomputes.
   const reminderParts = [
-    includeDeferredToolsReminder
-      ? buildDeferredToolsReminder(toolRegistry)
-      : null,
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,
     startupReminder,
+    includeDeferredToolsReminder
+      ? buildDeferredToolsReminder(toolRegistry)
+      : null,
   ]
     .filter((text): text is string => text !== null)
     .map((text) => ({ text }));
@@ -571,23 +574,30 @@ export async function getInitialChatHistory(
 }
 
 /**
- * Returns the number of initial API entries occupied by the startup reminder
- * (0 or 1). A single user message wrapped in <system-reminder> is the only
- * shape getInitialChatHistory currently produces, but routes through this
- * helper so detection stays consistent across the CLI and ACP integration.
+ * Returns the number of initial API entries occupied by structural context
+ * that should be skipped when counting real user turns:
+ *
+ *  - The startup reminder prelude (0 or 1 entry) — a single user message
+ *    wrapped in `<system-reminder>…</system-reminder>`, produced by
+ *    `getInitialChatHistory`.
+ *  - The legacy ack-pair prelude (2 entries) — sessions saved before the
+ *    startup context moved into system reminders.
+ *  - The compressed-history prefix (2-4 entries) — summary, ack, and
+ *    optionally a post-compact attachments entry produced by
+ *    `composePostCompactHistory`. These synthetic entries must not be
+ *    counted as real user prompts for rewind indexing.
  */
-export function getStartupContextLength(history: Content[]): number {
+export function getStartupContextLength(
+  history: Content[],
+  options: { includeCompressed?: boolean } = {},
+): number {
   const firstEntry = history[0];
   if (firstEntry?.role !== 'user') return 0;
-  const firstText = firstEntry.parts?.[0]?.text;
-  // Open prefix, and close tag AT THE END (not merely present). Excludes a
-  // prompt quoting the literal tag, and — since IDE mode merges the reminder
-  // into the prompt's text part — a real first turn trailing after the close.
-  if (
-    typeof firstText === 'string' &&
-    firstText.startsWith(SYSTEM_REMINDER_OPEN) &&
-    firstText.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
-  ) {
+  if (isSystemReminderContent(firstEntry)) {
+    if (options.includeCompressed) {
+      const compressedLength = detectCompressedPrefixLength(history, 1);
+      if (compressedLength > 0) return 1 + compressedLength;
+    }
     return 1;
   }
   // Legacy format (sessions saved before startup context moved into system
@@ -601,7 +611,62 @@ export function getStartupContextLength(history: Content[]): number {
   ) {
     return 2;
   }
-  return 0;
+  if (!options.includeCompressed) return 0;
+
+  return detectCompressedPrefixLength(history, 0);
+}
+
+function detectCompressedPrefixLength(
+  history: Content[],
+  offset: number,
+): number {
+  const firstEntry = history[offset];
+  if (firstEntry?.role !== 'user') return 0;
+  const firstText = firstEntry.parts?.[0]?.text;
+  // Post-compression prefix for rewind indexing only. The startup-context
+  // refresh/restore paths need compressed history to look like "no startup
+  // prelude" so they don't strip or skip the compressed summary.
+  if (
+    typeof firstText !== 'string' ||
+    !firstText.includes('Resume the prior task') ||
+    history[offset + 1]?.role !== 'model' ||
+    history[offset + 1]?.parts?.[0]?.text !==
+      'Got it. Thanks for the additional context!'
+  ) {
+    return 0;
+  }
+  if (isPostCompactAttachmentEntry(history[offset + 2])) {
+    if (isModelFunctionCallEntry(history[offset + 3])) return 4;
+    return 3;
+  }
+  return 2;
+}
+
+function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
+  if (content?.role !== 'user') return false;
+  const parts = content.parts ?? [];
+  return parts.some(
+    (part) =>
+      typeof part.text === 'string' &&
+      (part.text.startsWith('<plan-mode-active>') ||
+        part.text.startsWith('<background-tasks>') ||
+        part.text.startsWith(
+          'The following files were recently accessed before context was compacted.',
+        ) ||
+        part.text.startsWith(
+          'Recently accessed file (full current content embedded):',
+        ) ||
+        part.text.startsWith(
+          'Recent visual snapshots preserved from before context was compacted',
+        )),
+  );
+}
+
+function isModelFunctionCallEntry(content: Content | undefined): boolean {
+  return (
+    content?.role === 'model' &&
+    (content.parts ?? []).some((part) => 'functionCall' in part)
+  );
 }
 
 /**
@@ -637,6 +702,27 @@ export function isSystemReminderContent(content: Content): boolean {
       part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
       part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE),
   );
+}
+
+export function stripSystemReminderBlocks(text: string): string {
+  let out = '';
+  let offset = 0;
+
+  while (offset < text.length) {
+    const open = text.indexOf(SYSTEM_REMINDER_OPEN, offset);
+    if (open === -1) return out + text.slice(offset);
+
+    const close = text.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      open + SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) return out + text.slice(offset, open);
+
+    out += text.slice(offset, open);
+    offset = close + SYSTEM_REMINDER_CLOSE.length;
+  }
+
+  return out;
 }
 
 /**
