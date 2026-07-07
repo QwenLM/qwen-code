@@ -236,7 +236,7 @@ describe('readManyFiles', () => {
       expect(content.length).toBeLessThan(1000);
       expect(mockGetPDFPageCount).toHaveBeenCalledTimes(1);
       expect(mockGetPDFPageCount).toHaveBeenCalledWith(absolutePath);
-      expect(mockIsPdftotextAvailable).toHaveBeenCalledTimes(1);
+      expect(mockIsPdftotextAvailable).not.toHaveBeenCalled();
 
       const status = cache.check(nodeFs.statSync(absolutePath));
       expect(status.state).toBe('fresh');

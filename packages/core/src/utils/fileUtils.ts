@@ -1074,12 +1074,13 @@ export async function processSingleFileContent(
         `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pageCount ?? 'unknown'}, required=${requirement.required}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
       );
       if (requirement.required) {
-        if (!(await isPdftotextAvailable())) {
+        if (largePdfBehavior === 'error' && !(await isPdftotextAvailable())) {
           return {
             llmContent: `[Cannot extract text from PDF: "${displayName}". ${PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE}]`,
             returnDisplay: `Failed to read pdf: ${relativePathForDisplay}`,
             error: PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
             errorType: ToolErrorType.READ_CONTENT_FAILURE,
+            stats,
           };
         }
         const guidance = buildLargePDFGuidance(displayName, requirement);

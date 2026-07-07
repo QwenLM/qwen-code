@@ -1387,6 +1387,7 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('pdftotext is not installed');
       expect(result.llmContent).not.toContain("Use the 'pages' parameter");
       expect(result.returnDisplay).toContain('Failed to read pdf');
+      expect(result.stats).toBeDefined();
     });
 
     it('returns a reference instead of an error for large @-attached PDFs', async () => {
@@ -1417,6 +1418,37 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain("Use the 'pages' parameter");
       expect(result.returnDisplay).toContain('Referenced large PDF');
       expect(result.stats).toBeDefined();
+    });
+
+    it('returns a reference for large @-attached PDFs when pdftotext is unavailable', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          42\n',
+        stderr: '',
+        code: 0,
+      });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { largePdfBehavior: 'reference' },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain("Use the 'pages' parameter");
+      expect(result.returnDisplay).toContain('Referenced large PDF');
+      expect(result.stats).toBeDefined();
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
+      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
     });
 
     it('keeps explicit pages reads on the pdftotext path', async () => {
@@ -1576,6 +1608,29 @@ describe('fileUtils', () => {
       expect(result.error).toBeUndefined();
       expect(result.returnDisplay).toContain('Referenced large PDF');
       expect(result.llmContent).toContain('too large to return safely');
+    });
+
+    it('rejects dense page-range PDF extraction for @ attachments', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { pages: '1-5', largePdfBehavior: 'reference' },
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.returnDisplay).toContain('PDF text too large');
+      expect(String(result.llmContent).length).toBeLessThan(1000);
+      expect(result.stats).toBeDefined();
     });
 
     it('allows full PDF text extraction at the full-text size cap', async () => {

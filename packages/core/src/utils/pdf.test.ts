@@ -520,7 +520,7 @@ describe('pdf utilities', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.text.length).toBeLessThan(110000);
-        expect(result.text).toContain('text truncated');
+        expect(result.text).toContain('text truncated at 100000 characters');
         expect(result.text).toContain("'pages' parameter");
       }
     });
@@ -561,6 +561,8 @@ describe('pdf utilities', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.text).toContain('text truncated');
+        expect(result.text).toContain('PDF text buffer limit');
+        expect(result.text).not.toContain('100000 characters');
         expect(result.text).toContain("'pages' parameter");
       }
     });

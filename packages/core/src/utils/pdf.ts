@@ -8,9 +8,9 @@ import { execFile, type ExecFileOptions } from 'node:child_process';
 import { estimateTextTokens } from './request-tokenizer/textTokenizer.js';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
-export const PDF_FULL_TEXT_PAGE_LIMIT = 10;
+const PDF_FULL_TEXT_PAGE_LIMIT = 10;
 export const PDF_MAX_PAGES_PER_READ = 20;
-export const PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES = 100 * 1024;
+const PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES = 100 * 1024;
 export const PDF_TEXT_RESULT_MAX_TOKENS = 12_000;
 const PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS = 64;
 const PDF_TEXT_RESULT_CHARS_PER_TOKEN = 4;
@@ -329,11 +329,18 @@ export async function extractPDFText(
       maxBufferExceeded &&
       Buffer.byteLength(stdout, 'utf8') >= MAX_PDF_TEXT_OUTPUT_CHARS
     ) {
+      const wasCharTruncated = stdout.length > MAX_PDF_TEXT_OUTPUT_CHARS;
+      const text = wasCharTruncated
+        ? stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS)
+        : stdout;
+      const truncationReason = wasCharTruncated
+        ? `at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters`
+        : 'after reaching the PDF text buffer limit';
       return {
         success: true,
         text:
-          stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
-          `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
+          text +
+          `\n\n... [text truncated ${truncationReason}. Use the 'pages' parameter to read specific page ranges.]`,
       };
     }
 
