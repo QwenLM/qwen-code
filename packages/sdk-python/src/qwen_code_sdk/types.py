@@ -114,6 +114,7 @@ class QueryOptionsDict(TypedDict, total=False):
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
     stderr: Callable[[str], None]
+    allowed_mcp_server_names: list[str]
 
 
 @dataclass
@@ -139,6 +140,7 @@ class QueryOptions:
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
     stderr: Callable[[str], None] | None = None
+    allowed_mcp_server_names: list[str] | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> QueryOptions:
@@ -182,6 +184,9 @@ class QueryOptions:
             stderr=cast(
                 Callable[[str], None] | None,
                 _as_optional_callable(data, "stderr"),
+            ),
+            allowed_mcp_server_names=_as_optional_str_list(
+                data, "allowed_mcp_server_names"
             ),
         )
 

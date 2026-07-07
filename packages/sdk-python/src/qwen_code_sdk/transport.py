@@ -227,6 +227,9 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     if options.allowed_tools:
         args.extend(["--allowed-tools", ",".join(options.allowed_tools)])
 
+    if options.allowed_mcp_server_names:
+        args.extend(["--allowed-mcp-server-names", ",".join(options.allowed_mcp_server_names)])
+
     if options.auth_type:
         args.extend(["--auth-type", options.auth_type])
 

@@ -66,6 +66,7 @@ export function query({
     coreTools: options.coreTools,
     excludeTools: options.excludeTools,
     allowedTools: options.allowedTools,
+    allowedMcpServerNames: options.allowedMcpServerNames,
     authType: options.authType,
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,

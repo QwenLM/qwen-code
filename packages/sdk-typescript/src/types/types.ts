@@ -46,6 +46,11 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * Allowed MCP server names. When provided, only these MCP servers
+   * will be available. Equivalent to CLI's `--allowed-mcp-server-names`.
+   */
+  allowedMcpServerNames?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -503,4 +508,10 @@ export interface QueryOptions {
      */
     streamClose?: number;
   };
+
+  /**
+   * Allowed MCP server names. When provided, only these MCP servers
+   * will be available. Equivalent to CLI's `--allowed-mcp-server-names`.
+   */
+  allowedMcpServerNames?: string[];
 }
