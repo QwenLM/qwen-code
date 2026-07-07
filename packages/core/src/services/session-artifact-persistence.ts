@@ -8,8 +8,8 @@ import { createHash } from 'node:crypto';
 
 export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
-const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
-const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
+export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
+export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_IDS = 500;
 const MAX_PERSISTED_ID_CHARS = 200;
@@ -622,20 +622,24 @@ function normalizeMetadata(
   return normalized;
 }
 
-function isPrototypeMetadataKey(key: string): boolean {
+export function isPrototypeMetadataKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
-function isReservedWorkspaceMetadataKey(key: string): boolean {
+export function isReservedWorkspaceMetadataKey(key: string): boolean {
   return (
     key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
     key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
   );
 }
 
-function metadataBudgetBytes(
+export function metadataBudgetBytes(
   metadata: Record<string, string | number | boolean | null>,
+  budget: 'user' | 'persisted' = 'persisted',
 ): number {
+  if (budget === 'user') {
+    return Buffer.byteLength(JSON.stringify(metadata), 'utf8');
+  }
   const userMetadata = Object.fromEntries(
     Object.entries(metadata).filter(
       ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
@@ -644,7 +648,7 @@ function metadataBudgetBytes(
   return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
 }
 
-function isWorkspaceContentMetadataEntry(
+export function isWorkspaceContentMetadataEntry(
   key: string,
   value: string | number | boolean | null,
 ): boolean {

@@ -9,8 +9,13 @@ import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  isPrototypeMetadataKey,
+  isReservedWorkspaceMetadataKey,
+  metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
+  WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
+  WORKSPACE_CONTENT_SHA256_METADATA_KEY,
 } from '@qwen-code/qwen-code-core';
 import type {
   PersistedSessionArtifact,
@@ -53,8 +58,6 @@ const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
   client: 50,
   hook: 50,
 };
-const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
-const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
@@ -2242,45 +2245,6 @@ function normalizeMetadata(
     );
   }
   return normalized;
-}
-
-function isPrototypeMetadataKey(key: string): boolean {
-  return key === '__proto__' || key === 'constructor' || key === 'prototype';
-}
-
-function isReservedWorkspaceMetadataKey(key: string): boolean {
-  return (
-    key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
-  );
-}
-
-function metadataBudgetBytes(
-  metadata: Record<string, string | number | boolean | null>,
-  budget: 'user' | 'persisted',
-): number {
-  if (budget === 'user') {
-    return Buffer.byteLength(JSON.stringify(metadata), 'utf8');
-  }
-  const userMetadata = Object.fromEntries(
-    Object.entries(metadata).filter(
-      ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
-    ),
-  );
-  return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
-}
-
-function isWorkspaceContentMetadataEntry(
-  key: string,
-  value: string | number | boolean | null,
-): boolean {
-  if (key === WORKSPACE_CONTENT_SHA256_METADATA_KEY) {
-    return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-  }
-  if (key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) {
-    return typeof value === 'number' && Number.isFinite(value);
-  }
-  return false;
 }
 
 function normalizeRetention(
