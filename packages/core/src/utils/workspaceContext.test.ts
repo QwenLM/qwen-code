@@ -370,6 +370,27 @@ describe('WorkspaceContext with real filesystem', () => {
       expect(dirs1).toEqual(dirs2);
     });
   });
+
+  describe('applyRootDirectories', () => {
+    it('should preserve runtime-added directories when changing roots', () => {
+      const runtimeDir = path.join(tempDir, 'runtime-added');
+      const nextRoot = path.join(tempDir, 'next-project');
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      fs.mkdirSync(nextRoot, { recursive: true });
+
+      const workspaceContext = new WorkspaceContext(cwd);
+      workspaceContext.addDirectory(runtimeDir);
+
+      workspaceContext.applyRootDirectories(
+        WorkspaceContext.resolveRootDirectories(nextRoot),
+      );
+
+      expect(workspaceContext.getDirectories()).toEqual([nextRoot, runtimeDir]);
+      expect(workspaceContext.getInitialDirectories()).toEqual([nextRoot]);
+      expect(workspaceContext.removeDirectory(runtimeDir)).toBe(true);
+      expect(workspaceContext.removeDirectory(nextRoot)).toBe(false);
+    });
+  });
 });
 
 describe('WorkspaceContext with optional directories', () => {

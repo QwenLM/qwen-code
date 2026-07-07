@@ -32,7 +32,7 @@ describe('AgentStatistics', () => {
 
     it('should track tool calls', () => {
       stats.recordToolCall('file_read', true, 100);
-      stats.recordToolCall('web_search', false, 200, 'Network timeout');
+      stats.recordToolCall('web_fetch', false, 200, 'Network timeout');
 
       const summary = stats.getSummary();
       expect(summary.totalToolCalls).toBe(2);
@@ -81,14 +81,14 @@ describe('AgentStatistics', () => {
     it('should track individual tool usage', () => {
       stats.recordToolCall('file_read', true, 100);
       stats.recordToolCall('file_read', false, 150, 'Permission denied');
-      stats.recordToolCall('web_search', true, 300);
+      stats.recordToolCall('web_fetch', true, 300);
 
       const summary = stats.getSummary();
       const fileReadTool = summary.toolUsage.find(
         (t) => t.name === 'file_read',
       );
-      const webSearchTool = summary.toolUsage.find(
-        (t) => t.name === 'web_search',
+      const webFetchTool = summary.toolUsage.find(
+        (t) => t.name === 'web_fetch',
       );
 
       expect(fileReadTool).toEqual({
@@ -101,8 +101,8 @@ describe('AgentStatistics', () => {
         averageDurationMs: 125,
       });
 
-      expect(webSearchTool).toEqual({
-        name: 'web_search',
+      expect(webFetchTool).toEqual({
+        name: 'web_fetch',
         count: 1,
         success: 1,
         failure: 0,
@@ -122,10 +122,10 @@ describe('AgentStatistics', () => {
 
       const result = stats.formatCompact('Test task', baseTime + 5000);
 
-      expect(result).toContain('📋 Task Completed: Test task');
-      expect(result).toContain('🔧 Tool Usage: 1 calls, 100.0% success');
-      expect(result).toContain('⏱️ Duration: 5.0s | 🔁 Rounds: 2');
-      expect(result).toContain('🔢 Tokens: 1,520 (in 1000, out 500)');
+      expect(result).toContain('▸ Task Completed: Test task');
+      expect(result).toContain('● Tool Usage: 1 calls, 100.0% success');
+      expect(result).toContain('● Duration: 5.0s | ● Rounds: 2');
+      expect(result).toContain('● Tokens: 1,520 (in 1000, out 500)');
     });
 
     it('should handle zero tool calls', () => {
@@ -133,7 +133,7 @@ describe('AgentStatistics', () => {
 
       const result = stats.formatCompact('Empty task', baseTime + 1000);
 
-      expect(result).toContain('🔧 Tool Usage: 0 calls');
+      expect(result).toContain('● Tool Usage: 0 calls');
       expect(result).not.toContain('% success');
     });
 
@@ -143,7 +143,7 @@ describe('AgentStatistics', () => {
 
       const result = stats.formatCompact('No tokens task', baseTime + 1000);
 
-      expect(result).toContain('🔢 Tokens: 0');
+      expect(result).toContain('● Tokens: 0');
     });
   });
 
@@ -153,7 +153,7 @@ describe('AgentStatistics', () => {
       stats.setRounds(3);
       stats.recordToolCall('file_read', true, 100);
       stats.recordToolCall('file_read', true, 150);
-      stats.recordToolCall('web_search', false, 2000, 'Network timeout');
+      stats.recordToolCall('web_fetch', false, 2000, 'Network timeout');
       stats.recordTokens(2000, 1000);
     });
 
@@ -161,14 +161,14 @@ describe('AgentStatistics', () => {
       const result = stats.formatDetailed('Complex task', baseTime + 30000);
 
       expect(result).toContain(
-        '✅ Quality: Poor execution (66.7% tool success)',
+        '✓ Quality: Poor execution (66.7% tool success)',
       );
     });
 
     it('should include speed assessment', () => {
       const result = stats.formatDetailed('Fast task', baseTime + 5000);
 
-      expect(result).toContain('🚀 Speed: Fast completion - under 10 seconds');
+      expect(result).toContain('● Speed: Fast completion - under 10 seconds');
     });
 
     it('should show top tools', () => {
@@ -176,14 +176,14 @@ describe('AgentStatistics', () => {
 
       expect(result).toContain('Top tools:');
       expect(result).toContain('- file_read: 2 calls (2 ok, 0 fail');
-      expect(result).toContain('- web_search: 1 calls (0 ok, 1 fail');
+      expect(result).toContain('- web_fetch: 1 calls (0 ok, 1 fail');
       expect(result).toContain('last error: Network timeout');
     });
 
     it('should include performance insights', () => {
       const result = stats.formatDetailed('Slow task', baseTime + 120000);
 
-      expect(result).toContain('💡 Performance Insights:');
+      expect(result).toContain('★ Performance Insights:');
       expect(result).toContain(
         'Long execution time - consider breaking down complex tasks',
       );
@@ -288,7 +288,7 @@ describe('AgentStatistics', () => {
     });
 
     it('should identify network failures', () => {
-      stats.recordToolCall('web_search', false, 100, 'Network timeout');
+      stats.recordToolCall('web_fetch', false, 100, 'Network timeout');
 
       const result = stats.formatDetailed('Network task');
       expect(result).toContain(

@@ -7,11 +7,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildAgentContentGeneratorConfig,
+  createRuntimeContentGeneratorView,
   resolveCredentialField,
 } from './content-generator-config.js';
+import { createContentGenerator } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from './types.js';
+
+vi.mock('../core/contentGenerator.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../core/contentGenerator.js')>();
+  return {
+    ...actual,
+    createContentGenerator: vi.fn(),
+  };
+});
 
 function createMockConfig(
   parentConfig: ContentGeneratorConfig,
@@ -180,6 +191,25 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.apiKey).toBe('explicit-key');
       expect(result.baseUrl).toBe('https://explicit.example.com');
     });
+
+    it('should use explicit baseUrl when looking up a registry model', () => {
+      const getResolvedModel = vi.fn().mockReturnValue(resolvedModel);
+      const config = {
+        getContentGeneratorConfig: () => parentConfig,
+        getModelsConfig: () => ({ getResolvedModel }),
+      } as unknown as Config;
+
+      buildAgentContentGeneratorConfig(config, 'registry-model-id', {
+        authType: 'anthropic',
+        baseUrl: 'https://registry.example.com',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        'anthropic',
+        'registry-model-id',
+        'https://registry.example.com',
+      );
+    });
   });
 
   describe('edge cases', () => {
@@ -208,6 +238,44 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.proxy).toBe('http://proxy.example.com');
       expect(result.userAgent).toBe('custom-agent/1.0');
     });
+  });
+});
+
+describe('createRuntimeContentGeneratorView', () => {
+  const parentConfig: ContentGeneratorConfig = {
+    model: 'parent-model',
+    authType: 'openai' as ContentGeneratorConfig['authType'],
+    apiKey: 'parent-key',
+    baseUrl: 'https://parent.example.com',
+  };
+
+  beforeEach(() => {
+    vi.mocked(createContentGenerator).mockReset();
+  });
+
+  it('should bind the new ContentGenerator to contentGeneratorOwner, not base', async () => {
+    const baseConfig = createMockConfig(parentConfig);
+    // Distinct instance — represents the per-agent override Config.
+    const ownerConfig = createMockConfig(parentConfig);
+    const fakeGenerator = { generateContentStream: vi.fn() };
+    vi.mocked(createContentGenerator).mockResolvedValueOnce(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fakeGenerator as any,
+    );
+
+    const view = await createRuntimeContentGeneratorView(
+      baseConfig,
+      ownerConfig,
+      'custom-model',
+      { authType: 'openai' },
+    );
+
+    expect(createContentGenerator).toHaveBeenCalledTimes(1);
+    const [, ownerArg] = vi.mocked(createContentGenerator).mock.calls[0];
+    expect(ownerArg).toBe(ownerConfig);
+    expect(ownerArg).not.toBe(baseConfig);
+    expect(view.contentGenerator).toBe(fakeGenerator);
+    expect(view.contentGeneratorConfig.model).toBe('custom-model');
   });
 });
 

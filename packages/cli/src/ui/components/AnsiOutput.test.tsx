@@ -29,7 +29,7 @@ describe('<AnsiOutputText />', () => {
         createAnsiToken({ text: 'world!' }),
       ],
     ];
-    const { lastFrame } = render(<AnsiOutputText data={data} />);
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     expect(lastFrame()).toBe('Hello, world!');
   });
 
@@ -45,7 +45,7 @@ describe('<AnsiOutputText />', () => {
     ];
     // Note: ink-testing-library doesn't render styles, so we can only check the text.
     // We are testing that it renders without crashing.
-    const { lastFrame } = render(<AnsiOutputText data={data} />);
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     expect(lastFrame()).toBe('BoldItalicUnderlineDimInverse');
   });
 
@@ -58,7 +58,7 @@ describe('<AnsiOutputText />', () => {
     ];
     // Note: ink-testing-library doesn't render colors, so we can only check the text.
     // We are testing that it renders without crashing.
-    const { lastFrame } = render(<AnsiOutputText data={data} />);
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     expect(lastFrame()).toBe('Red FGBlue BG');
   });
 
@@ -69,12 +69,15 @@ describe('<AnsiOutputText />', () => {
       [createAnsiToken({ text: 'Third line' })],
       [createAnsiToken({ text: '' })],
     ];
-    const { lastFrame } = render(<AnsiOutputText data={data} />);
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     const output = lastFrame();
     expect(output).toBeDefined();
     const lines = output!.split('\n');
     expect(lines[0]).toBe('First line');
-    expect(lines[1]).toBe('Third line');
+    // Empty AnsiLines are preserved as blank rows so shell output layout
+    // matches the terminal it came from.
+    expect(lines[1]).toBe('');
+    expect(lines[2]).toBe('Third line');
   });
 
   it('respects the availableTerminalHeight prop and slices the lines correctly', () => {
@@ -85,7 +88,7 @@ describe('<AnsiOutputText />', () => {
       [createAnsiToken({ text: 'Line 4' })],
     ];
     const { lastFrame } = render(
-      <AnsiOutputText data={data} availableTerminalHeight={2} />,
+      <AnsiOutputText data={data} availableTerminalHeight={2} maxWidth={80} />,
     );
     const output = lastFrame();
     expect(output).not.toContain('Line 1');
@@ -99,8 +102,48 @@ describe('<AnsiOutputText />', () => {
     for (let i = 0; i < 1000; i++) {
       largeData.push([createAnsiToken({ text: `Line ${i}` })]);
     }
-    const { lastFrame } = render(<AnsiOutputText data={largeData} />);
+    const { lastFrame } = render(
+      <AnsiOutputText data={largeData} maxWidth={80} />,
+    );
     // We are just checking that it renders something without crashing.
     expect(lastFrame()).toBeDefined();
+  });
+
+  it('truncates wide lines to fit within maxWidth', () => {
+    const wideText = 'A'.repeat(100);
+    const data: AnsiOutput = [[createAnsiToken({ text: wideText })]];
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={20} />);
+    const output = lastFrame()!;
+    // The line should be truncated to fit within maxWidth
+    expect(output.length).toBeLessThanOrEqual(20);
+  });
+
+  it('truncates multi-token wide lines (styled-column output) to maxWidth', () => {
+    // Mirrors the real-world shape produced by commands like `gh run list`:
+    // a single logical row composed of many styled-column tokens whose
+    // combined width far exceeds the available box width. This exercises
+    // the MaxSizedBox row.segments.length === 0 path, where truncation
+    // depends on per-token wrap="truncate" + ink's flex layout rather
+    // than MaxSizedBox performing the crop itself.
+    const data: AnsiOutput = [
+      [
+        createAnsiToken({ text: 'STATUS  ', bold: true }),
+        createAnsiToken({ text: 'TITLE  ', bold: true }),
+        createAnsiToken({ text: 'WORKFLOW  ', bold: true }),
+        createAnsiToken({ text: 'BRANCH  ', bold: true }),
+        createAnsiToken({ text: 'EVENT  ', bold: true }),
+        createAnsiToken({ text: 'ID  ', bold: true }),
+        createAnsiToken({ text: 'ELAPSED  ', bold: true }),
+        createAnsiToken({ text: 'AGE', bold: true }),
+      ],
+    ];
+    const maxWidth = 30;
+    const { lastFrame } = render(
+      <AnsiOutputText data={data} maxWidth={maxWidth} />,
+    );
+    const output = lastFrame()!;
+    for (const line of output.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(maxWidth);
+    }
   });
 });

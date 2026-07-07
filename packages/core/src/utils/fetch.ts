@@ -5,6 +5,7 @@
  */
 
 import { getErrorMessage, isNodeError } from './errors.js';
+import { isTlsVerificationDisabled } from './runtimeFetchOptions.js';
 import { URL } from 'node:url';
 
 const PRIVATE_IP_RANGES = [
@@ -59,12 +60,16 @@ export function isPrivateIp(url: string): boolean {
 export async function fetchWithTimeout(
   url: string,
   timeout: number,
+  headers?: Record<string, string>,
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers,
+    });
     return response;
   } catch (error) {
     if (isNodeError(error) && error.code === 'ABORT_ERR') {
@@ -182,9 +187,14 @@ export function formatFetchErrorForUser(
       : []),
     '- If you are behind a proxy, pass `--proxy <url>` (or set `proxy` in settings).',
     ...(shouldShowTlsHint
-      ? [
-          '- If your network uses a corporate TLS inspection CA, set `NODE_EXTRA_CA_CERTS` to your CA bundle.',
-        ]
+      ? isTlsVerificationDisabled()
+        ? [
+            '- TLS verification is already disabled (`--insecure` / `QWEN_TLS_INSECURE`), so this is likely a network or protocol issue rather than a certificate trust problem.',
+          ]
+        : [
+            '- If your network uses a corporate TLS inspection CA, set `NODE_EXTRA_CA_CERTS` to your CA bundle.',
+            '- For a trusted self-signed endpoint, pass `--insecure` (or set `QWEN_TLS_INSECURE=1`) to skip certificate verification.',
+          ]
       : []),
   ];
 

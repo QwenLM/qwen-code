@@ -31,6 +31,14 @@ import {
 
 const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
 
+/**
+ * Maximum allowed timeout for canUseTool requests (10 minutes).
+ * Node.js setTimeout coerces delays > 2^31-1 to 32-bit signed integers,
+ * which can cause timeouts to fire immediately or never. This cap prevents
+ * such edge cases while still allowing reasonable timeout values.
+ */
+const MAX_CAN_USE_TOOL_TIMEOUT_MS = 600_000;
+
 export class SystemController extends BaseController {
   /**
    * Handle system control requests
@@ -52,6 +60,9 @@ export class SystemController extends BaseController {
 
       case 'interrupt':
         return this.handleInterrupt();
+
+      case 'continue_last_turn':
+        return this.handleContinueLastTurn();
 
       case 'set_model':
         return this.handleSetModel(
@@ -131,6 +142,16 @@ export class SystemController extends BaseController {
     }
 
     this.context.config.setSdkMode(true);
+
+    const canUseToolTimeout = payload.timeout?.canUseTool;
+    if (
+      typeof canUseToolTimeout === 'number' &&
+      Number.isFinite(canUseToolTimeout) &&
+      canUseToolTimeout > 0 &&
+      canUseToolTimeout <= MAX_CAN_USE_TOOL_TIMEOUT_MS
+    ) {
+      this.context.sdkCanUseToolTimeoutMs = canUseToolTimeout;
+    }
 
     // Process SDK MCP servers
     if (
@@ -370,6 +391,28 @@ export class SystemController extends BaseController {
   }
 
   /**
+   * Handle continue_last_turn request
+   *
+   * Delegates to the session-provided callback, which classifies the last
+   * turn from chat history and (when interrupted) schedules a continuation
+   * turn. The response reports `{ accepted, interruption }`; the resumed
+   * turn's output flows as regular stream messages afterwards.
+   */
+  private async handleContinueLastTurn(): Promise<Record<string, unknown>> {
+    if (!this.context.onContinueLastTurn) {
+      throw new Error(
+        'continue_last_turn callback (onContinueLastTurn) was not registered on ' +
+          'ControlContext — check session wiring',
+      );
+    }
+
+    const result = await this.context.onContinueLastTurn();
+    debugLogger.debug('[SystemController] continue_last_turn handled:', result);
+
+    return { subtype: 'continue_last_turn', ...result };
+  }
+
+  /**
    * Handle set_model request
    *
    * Implements actual model switching with validation and error handling
@@ -444,7 +487,11 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const commands = await getAvailableCommands(this.context.config, signal);
+      const commands = await getAvailableCommands(
+        this.context.config,
+        signal,
+        'non_interactive',
+      );
 
       if (signal.aborted) {
         return [];

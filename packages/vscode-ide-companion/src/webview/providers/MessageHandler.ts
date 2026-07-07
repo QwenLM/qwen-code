@@ -75,10 +75,15 @@ export class MessageHandler {
   }
 
   /**
-   * Set login handler
+   * Set auth interactive handler — interactive auth flow.
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.router.setLoginHandler(handler);
+  setAuthInteractiveHandler(
+    handler: (
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
+    ) => Promise<void>,
+  ): void {
+    this.router.setAuthInteractiveHandler(handler);
   }
 
   /**

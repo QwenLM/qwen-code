@@ -7,12 +7,24 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import {
+  MarkdownDisplay,
+  type MarkdownSourceCopyIndexOffsets,
+} from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
+import { t } from '../../../i18n/index.js';
+import { wrapToVisualLines } from '../../utils/textUtils.js';
+import { formatDuration } from '../../utils/displayUtils.js';
+
+export const THINKING_ICON = '∴ ';
+export const THINKING_ICON_PENDING = '∵ ';
+
+export const toggleKeyHint =
+  process.platform === 'darwin' ? 'option+t' : 'alt+t';
 
 interface UserMessageProps {
   text: string;
@@ -27,6 +39,7 @@ interface AssistantMessageProps {
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 interface AssistantMessageContentProps {
@@ -34,18 +47,23 @@ interface AssistantMessageContentProps {
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 interface ThinkMessageProps {
   text: string;
   isPending: boolean;
+  /** When committed (not pending), whether to show the full reasoning. */
+  expanded?: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  durationMs?: number;
 }
 
 interface ThinkMessageContentProps {
   text: string;
   isPending: boolean;
+  expanded?: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
 }
@@ -69,6 +87,7 @@ interface PrefixedMarkdownMessageProps {
   contentWidth: number;
   ariaLabel?: string;
   textColor?: string;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 interface ContinuationMarkdownMessageProps {
@@ -78,6 +97,7 @@ interface ContinuationMarkdownMessageProps {
   contentWidth: number;
   basePrefix: string;
   textColor?: string;
+  sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
 function getPrefixWidth(prefix: string): number {
@@ -126,6 +146,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   contentWidth,
   ariaLabel,
   textColor,
+  sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
 
@@ -143,6 +164,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - prefixWidth}
           textColor={textColor}
+          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       </Box>
     </Box>
@@ -158,6 +180,7 @@ const ContinuationMarkdownMessage: React.FC<
   contentWidth,
   basePrefix,
   textColor,
+  sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
 
@@ -169,12 +192,15 @@ const ContinuationMarkdownMessage: React.FC<
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth - prefixWidth}
         textColor={textColor}
+        sourceCopyIndexOffsets={sourceCopyIndexOffsets}
       />
     </Box>
   );
 };
 
 export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
+  // The TUI paints no background of its own; user messages render directly on
+  // the terminal background so they blend in across terminals and themes.
   <PrefixedTextMessage
     text={text}
     prefix=">"
@@ -182,6 +208,7 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
     textColor={theme.text.accent}
     ariaLabel={SCREEN_READER_USER_PREFIX}
     alignSelf="flex-start"
+    marginTop={1}
   />
 );
 
@@ -203,59 +230,176 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
   isPending,
   availableTerminalHeight,
   contentWidth,
+  sourceCopyIndexOffsets,
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="✦"
+    prefix="◆"
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
+    sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
 
 export const AssistantMessageContent: React.FC<
   AssistantMessageContentProps
-> = ({ text, isPending, availableTerminalHeight, contentWidth }) => (
+> = ({
+  text,
+  isPending,
+  availableTerminalHeight,
+  contentWidth,
+  sourceCopyIndexOffsets,
+}) => (
   <ContinuationMarkdownMessage
     text={text}
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="✦"
+    basePrefix="◆"
+    sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );
+
+const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
+
+function tailVisualLines(
+  text: string,
+  width: number,
+  maxLines: number,
+): string {
+  const charBudget = maxLines * width * 2;
+  let sliceStart = Math.max(0, text.length - charBudget);
+  if (sliceStart > 0) {
+    const nl = text.indexOf('\n', sliceStart);
+    if (nl !== -1 && nl < text.length - 1) {
+      sliceStart = nl + 1;
+    }
+  }
+  const lines = wrapToVisualLines(text.slice(sliceStart), width);
+  return lines.slice(-maxLines).join('\n');
+}
 
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   text,
   isPending,
+  expanded = false,
   availableTerminalHeight,
   contentWidth,
-}) => (
-  <PrefixedMarkdownMessage
-    text={text}
-    prefix="✦"
-    prefixColor={theme.text.secondary}
-    isPending={isPending}
-    availableTerminalHeight={availableTerminalHeight}
-    contentWidth={contentWidth}
-    textColor={theme.text.secondary}
-  />
-);
+  durationMs,
+}) => {
+  const durationSuffix =
+    durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+
+  if (!isPending && !expanded) {
+    const label =
+      durationMs != null
+        ? `${t('Thought for')} ${formatDuration(durationMs)}`
+        : t('Thinking');
+    return (
+      <Text dimColor italic>
+        {THINKING_ICON}
+        {label} {t('({{keyHint}} to expand)', { keyHint: toggleKeyHint })}
+      </Text>
+    );
+  }
+
+  if (isPending) {
+    const innerWidth = Math.max(contentWidth - 2, 20);
+    const maxLines =
+      availableTerminalHeight != null
+        ? Math.max(
+            1,
+            Math.min(
+              MAX_STREAMING_THINKING_VISUAL_LINES,
+              Math.floor(availableTerminalHeight / 3),
+            ),
+          )
+        : MAX_STREAMING_THINKING_VISUAL_LINES;
+    const display = tailVisualLines(text, innerWidth, maxLines);
+    return (
+      <Box flexDirection="column">
+        <Text dimColor italic>
+          {THINKING_ICON_PENDING}
+          {t('Thinking')}…{durationSuffix}
+        </Text>
+        <Box paddingLeft={2}>
+          <Text dimColor wrap="truncate">
+            {display}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  const expandedLabel =
+    durationMs != null
+      ? `${t('Thought for')} ${formatDuration(durationMs)}`
+      : `${t('Thinking')}…`;
+  return (
+    <Box flexDirection="column">
+      <Text dimColor italic>
+        {THINKING_ICON}
+        {expandedLabel}{' '}
+        {t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}
+      </Text>
+      <Box paddingLeft={2} flexDirection="column">
+        <MarkdownDisplay
+          text={text}
+          isPending={false}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - 2}
+          textColor={theme.text.secondary}
+        />
+      </Box>
+    </Box>
+  );
+};
 
 export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
   text,
   isPending,
+  expanded = false,
   availableTerminalHeight,
   contentWidth,
-}) => (
-  <ContinuationMarkdownMessage
-    text={text}
-    isPending={isPending}
-    availableTerminalHeight={availableTerminalHeight}
-    contentWidth={contentWidth}
-    basePrefix="✦"
-    textColor={theme.text.secondary}
-  />
-);
+}) => {
+  if (!isPending && !expanded) {
+    return null;
+  }
+
+  if (isPending) {
+    const innerWidth = Math.max(contentWidth - 2, 20);
+    const maxLines =
+      availableTerminalHeight != null
+        ? Math.max(
+            1,
+            Math.min(
+              MAX_STREAMING_THINKING_VISUAL_LINES,
+              Math.floor(availableTerminalHeight / 3),
+            ),
+          )
+        : MAX_STREAMING_THINKING_VISUAL_LINES;
+    const display = tailVisualLines(text, innerWidth, maxLines);
+    return (
+      <Box paddingLeft={2}>
+        <Text dimColor wrap="truncate">
+          {display}
+        </Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Box paddingLeft={2} flexDirection="column">
+      <MarkdownDisplay
+        text={text}
+        isPending={false}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth - 2}
+        textColor={theme.text.secondary}
+      />
+    </Box>
+  );
+};

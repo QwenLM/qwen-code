@@ -5,16 +5,18 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName, HookType } from './types.js';
+import { createHookOutput, HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
   PreToolUseInput,
+  UserPromptExpansionInput,
   UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
+  PromptHookConfig,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -25,7 +27,10 @@ import {
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
 import { FunctionHookRunner } from './functionHookRunner.js';
+import { PromptHookRunner } from './promptHookRunner.js';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
+import type { Config } from '../config/config.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -47,16 +52,18 @@ const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
 /**
- * Hook runner that executes command, HTTP, and function hooks
+ * Hook runner that executes command, HTTP, function, and prompt hooks
  */
 export class HookRunner {
   private readonly httpRunner: HttpHookRunner;
   private readonly functionRunner: FunctionHookRunner;
+  private readonly promptRunner: PromptHookRunner | null;
   private readonly asyncRegistry: AsyncHookRegistry;
 
-  constructor(allowedHttpUrls?: string[]) {
+  constructor(allowedHttpUrls?: string[], config?: Config) {
     this.httpRunner = new HttpHookRunner(allowedHttpUrls);
     this.functionRunner = new FunctionHookRunner();
+    this.promptRunner = config ? new PromptHookRunner(config) : null;
     this.asyncRegistry = new AsyncHookRegistry();
   }
 
@@ -149,6 +156,20 @@ export class HookRunner {
             functionContext,
           );
         }
+        case HookType.Prompt: {
+          // Prompt hooks require Config for LLM access
+          if (!this.promptRunner) {
+            throw new Error(
+              'Prompt hook requires Config to be provided to HookRunner',
+            );
+          }
+          return await this.promptRunner.execute(
+            hookConfig as PromptHookConfig,
+            eventName,
+            input,
+            signal,
+          );
+        }
         default:
           throw new Error(
             `Unknown hook type: ${(hookConfig as HookConfig).type}`,
@@ -191,6 +212,8 @@ export class HookRunner {
         return hookConfig.url || 'unknown-url';
       case HookType.Function:
         return hookConfig.id || 'unknown-function';
+      case HookType.Prompt:
+        return 'prompt-hook';
       default:
         return 'unknown';
     }
@@ -464,15 +487,28 @@ export class HookRunner {
     if (hookOutput.hookSpecificOutput) {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
-          if ('additionalContext' in hookOutput.hookSpecificOutput) {
-            // For UserPromptSubmit, we could modify the prompt with additional context
+          {
             const additionalContext =
               hookOutput.hookSpecificOutput['additionalContext'];
             if (
               typeof additionalContext === 'string' &&
+              additionalContext &&
               'prompt' in modifiedInput
             ) {
               (modifiedInput as UserPromptSubmitInput).prompt +=
+                '\n\n' + additionalContext;
+            }
+          }
+          break;
+
+        case HookEventName.UserPromptExpansion:
+          {
+            const additionalContext = createHookOutput(
+              eventName,
+              hookOutput,
+            ).getAdditionalContext();
+            if (additionalContext && 'prompt' in modifiedInput) {
+              (modifiedInput as UserPromptExpansionInput).prompt +=
                 '\n\n' + additionalContext;
             }
           }
@@ -552,6 +588,7 @@ export class HookRunner {
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
+        ...getShellContextEnvVars(),
         ...hookConfig.env,
       };
 
@@ -593,7 +630,7 @@ export class HookRunner {
       };
 
       if (signal) {
-        signal.addEventListener('abort', abortHandler);
+        signal.addEventListener('abort', abortHandler, { once: true });
       }
 
       // Send input to stdin
@@ -704,7 +741,11 @@ export class HookRunner {
             // Not JSON, convert plain text to structured output
             output = this.convertPlainTextToHookOutput(
               textToParse,
-              isBlockingError ? exitCode : exitCode || EXIT_CODE_SUCCESS,
+              isBlockingError
+                ? exitCode
+                : exitCode === EXIT_CODE_SUCCESS
+                  ? EXIT_CODE_SUCCESS
+                  : EXIT_CODE_NON_BLOCKING_ERROR,
             );
           }
         }

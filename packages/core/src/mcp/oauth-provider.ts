@@ -21,6 +21,7 @@ import {
 } from './constants.js';
 
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
+export const OAUTH_AUTH_URL_EVENT = 'oauth-auth-url' as const;
 
 /**
  * Structured display message for i18n support.
@@ -77,6 +78,34 @@ export interface OAuthTokenResponse {
   expires_in?: number;
   refresh_token?: string;
   scope?: string;
+}
+
+function parseExpiresIn(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  const seconds =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value.trim())
+        ? Number(value.trim())
+        : NaN;
+
+  if (!Number.isSafeInteger(seconds) || seconds < 0) {
+    throw new Error(`Invalid expires_in value: ${String(value)}`);
+  }
+
+  return seconds;
+}
+
+function normalizeTokenResponse(
+  response: OAuthTokenResponse,
+): OAuthTokenResponse {
+  return {
+    ...response,
+    expires_in: parseExpiresIn(response.expires_in),
+  };
 }
 
 /**
@@ -495,8 +524,16 @@ export class MCPOAuthProvider {
 
     // Try to parse as JSON first, fall back to form-urlencoded
     try {
-      return JSON.parse(responseText) as OAuthTokenResponse;
-    } catch {
+      return normalizeTokenResponse(
+        JSON.parse(responseText) as OAuthTokenResponse,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('Invalid expires_in value')
+      ) {
+        throw error;
+      }
       // Parse form-urlencoded response
       const tokenParams = new URLSearchParams(responseText);
       const accessToken = tokenParams.get('access_token');
@@ -517,7 +554,7 @@ export class MCPOAuthProvider {
       return {
         access_token: accessToken,
         token_type: tokenType,
-        expires_in: expiresIn ? parseInt(expiresIn, 10) : undefined,
+        expires_in: parseExpiresIn(expiresIn),
         refresh_token: refreshToken || undefined,
         scope: scope || undefined,
       } as OAuthTokenResponse;
@@ -617,8 +654,16 @@ export class MCPOAuthProvider {
 
     // Try to parse as JSON first, fall back to form-urlencoded
     try {
-      return JSON.parse(responseText) as OAuthTokenResponse;
-    } catch {
+      return normalizeTokenResponse(
+        JSON.parse(responseText) as OAuthTokenResponse,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('Invalid expires_in value')
+      ) {
+        throw error;
+      }
       // Parse form-urlencoded response
       const tokenParams = new URLSearchParams(responseText);
       const accessToken = tokenParams.get('access_token');
@@ -639,7 +684,7 @@ export class MCPOAuthProvider {
       return {
         access_token: accessToken,
         token_type: tokenType,
-        expires_in: expiresIn ? parseInt(expiresIn, 10) : undefined,
+        expires_in: parseExpiresIn(expiresIn),
         refresh_token: refreshToken || undefined,
         scope: scope || undefined,
       } as OAuthTokenResponse;
@@ -814,10 +859,17 @@ export class MCPOAuthProvider {
     displayMessage({
       key: 'If the browser does not open, copy and paste this URL into your browser:',
     });
-    displayMessage(`\n${authUrl.toString()}\n`);
     displayMessage({
       key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
     });
+    if (events) {
+      // UI consumers render the URL from this event (as a clickable OSC 8
+      // hyperlink). Avoid also pushing the raw URL through displayMessage —
+      // hard-wrapping it inside the message list breaks link detection.
+      events.emit(OAUTH_AUTH_URL_EVENT, authUrl.toString());
+    } else {
+      displayMessage(`\n${authUrl.toString()}\n`);
+    }
 
     // Start callback server
     const callbackPromise = this.startCallbackServer(pkceParams.state);
@@ -858,8 +910,9 @@ export class MCPOAuthProvider {
       scope: tokenResponse.scope,
     };
 
-    if (tokenResponse.expires_in) {
-      token.expiresAt = Date.now() + tokenResponse.expires_in * 1000;
+    const expiresIn = parseExpiresIn(tokenResponse.expires_in);
+    if (expiresIn !== undefined) {
+      token.expiresAt = Date.now() + expiresIn * 1000;
     }
 
     // Save token
@@ -950,8 +1003,9 @@ export class MCPOAuthProvider {
           scope: newTokenResponse.scope || token.scope,
         };
 
-        if (newTokenResponse.expires_in) {
-          newToken.expiresAt = Date.now() + newTokenResponse.expires_in * 1000;
+        const expiresIn = parseExpiresIn(newTokenResponse.expires_in);
+        if (expiresIn !== undefined) {
+          newToken.expiresAt = Date.now() + expiresIn * 1000;
         }
 
         await this.tokenStorage.saveToken(

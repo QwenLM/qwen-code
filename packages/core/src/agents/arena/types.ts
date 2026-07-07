@@ -93,6 +93,30 @@ export interface ArenaAgentStats {
 }
 
 /**
+ * Per-file change counts parsed from an agent's unified diff.
+ */
+export interface ArenaFileChangeSummary {
+  /** Repository-relative file path */
+  path: string;
+  /** Added lines in this file */
+  additions: number;
+  /** Removed lines in this file */
+  deletions: number;
+}
+
+/**
+ * Aggregate change counts parsed from an agent's unified diff.
+ */
+export interface ArenaDiffSummary {
+  /** Files changed by this agent */
+  files: ArenaFileChangeSummary[];
+  /** Total added lines */
+  additions: number;
+  /** Total removed lines */
+  deletions: number;
+}
+
+/**
  * Result from a single Arena agent.
  */
 export interface ArenaAgentResult {
@@ -112,8 +136,12 @@ export interface ArenaAgentResult {
   stats: ArenaAgentStats;
   /** Git diff of changes made */
   diff?: string;
+  /** Parsed summary of the git diff */
+  diffSummary?: ArenaDiffSummary;
   /** Files modified by this agent */
   modifiedFiles?: string[];
+  /** High-level implementation approach summary */
+  approachSummary?: string;
   /** Start timestamp */
   startedAt: number;
   /** End timestamp */

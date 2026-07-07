@@ -21,7 +21,7 @@ describe('statuslineCommand', () => {
     expect(statuslineCommand.description).toBeDefined();
   });
 
-  it('should return submit_prompt with default prompt when no args', () => {
+  it('should open the preset dialog when no args are provided', () => {
     if (!statuslineCommand.action) {
       throw new Error('statusline command must have an action');
     }
@@ -29,18 +29,9 @@ describe('statuslineCommand', () => {
     const result = statuslineCommand.action(mockContext, '');
 
     expect(result).toEqual({
-      type: 'submit_prompt',
-      content: [
-        {
-          text: expect.stringContaining('statusline-setup'),
-        },
-      ],
+      type: 'dialog',
+      dialog: 'statusline',
     });
-    // Default prompt should mention PS1
-    expect(result).toHaveProperty(
-      'content.0.text',
-      expect.stringContaining('PS1'),
-    );
   });
 
   it('should use user-provided args as the prompt', () => {
@@ -63,16 +54,16 @@ describe('statuslineCommand', () => {
     });
   });
 
-  it('should trim whitespace-only args and use default prompt', () => {
+  it('should open the preset dialog when args are whitespace only', () => {
     if (!statuslineCommand.action) {
       throw new Error('statusline command must have an action');
     }
 
     const result = statuslineCommand.action(mockContext, '   ');
 
-    expect(result).toHaveProperty(
-      'content.0.text',
-      expect.stringContaining('PS1'),
-    );
+    expect(result).toEqual({
+      type: 'dialog',
+      dialog: 'statusline',
+    });
   });
 });

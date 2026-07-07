@@ -4,6 +4,7 @@ import { StatsRow } from './Header';
 import {
   AtAGlance,
   NavToc,
+  type NavTocSection,
   ProjectAreas,
   InteractionStyle,
   ImpressiveWorkflows,
@@ -17,6 +18,48 @@ import './styles.css';
 import type { InsightData } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
+
+// Keep in sync with packages/cli/src/services/insight/generators/DataProcessor.ts.
+function hasMeaningfulValue(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value !== 0;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((item) => hasMeaningfulValue(item));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.values(value).some((item) => hasMeaningfulValue(item));
+  }
+
+  return false;
+}
+
+function hasRecordEntries(
+  value?: Record<string, number> | Array<[string, number]>,
+): boolean {
+  if (Array.isArray(value)) {
+    return value.some(([, count]) => Number.isFinite(count) && count !== 0);
+  }
+
+  return (
+    !!value &&
+    Object.values(value).some((count) => Number.isFinite(count) && count !== 0)
+  );
+}
+
+function hasMeaningfulArray(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => hasMeaningfulValue(item));
+}
 
 // Main App Component
 function InsightApp({ data }: { data: InsightData }) {
@@ -96,6 +139,78 @@ function InsightApp({ data }: { data: InsightData }) {
     dateRangeStr = `${formatDate(minDate)} to ${formatDate(maxDate)}`;
   }
 
+  const showAtAGlance = hasMeaningfulValue(data.qualitative?.atAGlance);
+  const showProjectAreas =
+    !!data.qualitative &&
+    (hasMeaningfulValue(data.qualitative.projectAreas) ||
+      hasRecordEntries(data.topGoals) ||
+      hasRecordEntries(data.topTools));
+  const showInteractionStyle = hasMeaningfulValue(
+    data.qualitative?.interactionStyle,
+  );
+  const showImpressiveWorkflows =
+    !!data.qualitative &&
+    (hasMeaningfulValue(data.qualitative.impressiveWorkflows) ||
+      hasRecordEntries(data.primarySuccess) ||
+      hasRecordEntries(data.outcomes));
+  const showFrictionPoints =
+    !!data.qualitative &&
+    (hasMeaningfulValue(data.qualitative.frictionPoints) ||
+      hasRecordEntries(data.satisfaction) ||
+      hasRecordEntries(data.friction));
+  const showFeatures =
+    !!data.qualitative &&
+    (hasMeaningfulArray(data.qualitative.improvements?.Qwen_md_additions) ||
+      hasMeaningfulArray(data.qualitative.improvements?.features_to_try));
+  const showPatterns =
+    !!data.qualitative &&
+    hasMeaningfulArray(data.qualitative.improvements?.usage_patterns);
+  const showFutureOpportunities = hasMeaningfulValue(
+    data.qualitative?.futureOpportunities,
+  );
+  const showMemorableMoment = hasMeaningfulValue(
+    data.qualitative?.memorableMoment,
+  );
+
+  const navSections: NavTocSection[] = [];
+  if (showProjectAreas) {
+    navSections.push({ href: '#section-work', label: 'What You Work On' });
+  }
+  if (showInteractionStyle) {
+    navSections.push({
+      href: '#section-usage',
+      label: 'How You Use Qwen Code',
+    });
+  }
+  if (showImpressiveWorkflows) {
+    navSections.push({ href: '#section-wins', label: 'Impressive Things' });
+  }
+  if (showFrictionPoints) {
+    navSections.push({
+      href: '#section-friction',
+      label: 'Where Things Go Wrong',
+    });
+  }
+  if (showFeatures) {
+    navSections.push({ href: '#section-features', label: 'Features to Try' });
+  }
+  if (showPatterns) {
+    navSections.push({
+      href: '#section-patterns',
+      label: 'New Usage Patterns',
+    });
+  }
+  if (showFutureOpportunities) {
+    navSections.push({ href: '#section-horizon', label: 'On the Horizon' });
+  }
+
+  const atAGlanceTargetSections = {
+    wins: showImpressiveWorkflows,
+    friction: showFrictionPoints,
+    features: showFeatures,
+    horizon: showFutureOpportunities,
+  };
+
   return (
     <div>
       {/* Elegant Header */}
@@ -115,49 +230,60 @@ function InsightApp({ data }: { data: InsightData }) {
         </div>
       </header>
 
-      {data.qualitative && (
-        <>
-          <AtAGlance qualitative={data.qualitative} />
-          <NavToc />
-        </>
+      {showAtAGlance && data.qualitative && (
+        <AtAGlance
+          qualitative={data.qualitative}
+          targetSections={atAGlanceTargetSections}
+        />
       )}
+
+      {navSections.length > 0 && <NavToc sections={navSections} />}
 
       <StatsRow data={data} />
 
-      {data.qualitative && (
-        <>
-          <ProjectAreas
-            qualitative={data.qualitative}
-            topGoals={data.topGoals}
-            topTools={data.topTools}
-          />
-        </>
+      {showProjectAreas && data.qualitative && (
+        <ProjectAreas
+          qualitative={data.qualitative}
+          topGoals={data.topGoals}
+          topTools={data.topTools}
+        />
       )}
 
-      {data.qualitative && (
-        <>
-          <InteractionStyle qualitative={data.qualitative} insights={data} />
-        </>
+      {showInteractionStyle && data.qualitative && (
+        <InteractionStyle qualitative={data.qualitative} insights={data} />
       )}
 
-      {data.qualitative && (
-        <>
-          <ImpressiveWorkflows
-            qualitative={data.qualitative}
-            primarySuccess={data.primarySuccess!}
-            outcomes={data.outcomes!}
-          />
-          <FrictionPoints
-            qualitative={data.qualitative}
-            satisfaction={data.satisfaction}
-            friction={data.friction}
-          />
-          <Improvements qualitative={data.qualitative} />
-          <FutureOpportunities qualitative={data.qualitative} />
-          <MemorableMoment qualitative={data.qualitative} />
-        </>
+      {showImpressiveWorkflows && (
+        <ImpressiveWorkflows
+          qualitative={data.qualitative}
+          primarySuccess={data.primarySuccess ?? {}}
+          outcomes={data.outcomes ?? {}}
+        />
       )}
 
+      {showFrictionPoints && (
+        <FrictionPoints
+          qualitative={data.qualitative}
+          satisfaction={data.satisfaction ?? {}}
+          friction={data.friction ?? {}}
+        />
+      )}
+
+      {(showFeatures || showPatterns) && data.qualitative && (
+        <Improvements qualitative={data.qualitative} />
+      )}
+
+      {showFutureOpportunities && data.qualitative && (
+        <FutureOpportunities qualitative={data.qualitative} />
+      )}
+
+      {showMemorableMoment && data.qualitative && (
+        <MemorableMoment qualitative={data.qualitative} />
+      )}
+
+      {/*
+        The share card remains available even if qualitative sections are absent.
+      */}
       <ShareCard data={data} theme={cardTheme} />
     </div>
   );

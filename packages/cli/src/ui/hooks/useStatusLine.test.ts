@@ -7,6 +7,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
+import { StreamingState } from '../types.js';
+import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
+
+const debugLogMock = vi.hoisted(() => ({
+  log: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+}));
 
 // --- Mock child_process (auto-mock, then override exec in beforeEach) ---
 vi.mock('child_process');
@@ -15,6 +23,7 @@ vi.mock('child_process');
 
 const mockSettings = {
   merged: {} as Record<string, unknown>,
+  reloadScopeFromDisk: vi.fn(),
 };
 vi.mock('../contexts/SettingsContext.js', () => ({
   useSettings: () => mockSettings,
@@ -32,16 +41,36 @@ const mockUIState = {
   },
   currentModel: 'test-model',
   branchName: 'main' as string | undefined,
+  streamingState: StreamingState.Idle,
+  statusLineSettingsVersion: 0,
+  statusLineConfigOverride: undefined as
+    | {
+        type: 'preset';
+        items: string[];
+        useThemeColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
+    | undefined,
 };
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: () => mockUIState,
 }));
 
+type MockContentGeneratorConfig = {
+  contextWindowSize: number;
+  reasoning?: StatusLinePresetReasoning;
+};
+
+const getMockContentGeneratorConfig = (): MockContentGeneratorConfig => ({
+  contextWindowSize: 131072,
+});
+
 const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
+  getModelDisplayName: vi.fn(() => 'Test Model'),
   getCliVersion: vi.fn(() => '1.0.0'),
-  getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
+  getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => mockConfig,
@@ -52,6 +81,11 @@ const mockVimMode = {
   vimMode: 'INSERT' as string,
 };
 vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: () => mockVimMode,
+  useVimModeActions: () => ({
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
+  }),
   useVimMode: () => mockVimMode,
 }));
 
@@ -60,10 +94,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...original,
-    createDebugLogger: () => ({
-      log: vi.fn(),
-      error: vi.fn(),
-    }),
+    createDebugLogger: () => debugLogMock,
+    // Stub cron-task exports to avoid loading async-mutex under fake timers
+    readCronTasks: vi.fn(async () => []),
+    updateCronTasks: vi.fn(async () => undefined),
+    removeCronTasks: vi.fn(async () => undefined),
+    getCronFilePath: vi.fn(() => '/tmp/cron-tasks.json'),
+    generateCronTaskId: vi.fn(() => 'test-id'),
   };
 });
 
@@ -82,9 +119,25 @@ let stdinErrorHandler: ((err: Error) => void) | undefined;
 let mockKill: ReturnType<typeof vi.fn>;
 
 function setStatusLineConfig(
-  config: { type: string; command: string } | undefined,
+  config:
+    | {
+        type: string;
+        command: string;
+        refreshInterval?: number;
+        respectUserColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
+    | {
+        type: 'preset';
+        items: string[];
+        useThemeColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
+    | null
+    | undefined,
 ) {
-  mockSettings.merged = config ? { ui: { statusLine: config } } : {};
+  mockSettings.merged =
+    config === undefined ? {} : { ui: { statusLine: config } };
 }
 
 describe('useStatusLine', () => {
@@ -98,6 +151,7 @@ describe('useStatusLine', () => {
     stdinWrittenData = '';
     stdinErrorHandler = undefined;
     mockKill = vi.fn();
+    mockSettings.reloadScopeFromDisk.mockImplementation(() => undefined);
 
     // Set up exec mock implementation
     vi.mocked(child_process.exec).mockImplementation(((
@@ -130,11 +184,16 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.lastPromptTokenCount = 100;
     mockUIState.currentModel = 'test-model';
     mockUIState.branchName = 'main';
+    mockUIState.statusLineSettingsVersion = 0;
+    mockUIState.statusLineConfigOverride = undefined;
     mockUIState.sessionStats.metrics.tools.totalCalls = 0;
     mockUIState.sessionStats.metrics.files.totalLinesAdded = 0;
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      contextWindowSize: 131072,
+    });
 
     // Dynamic import to get fresh module after mocks
     const mod = await import('./useStatusLine.js');
@@ -148,31 +207,278 @@ describe('useStatusLine', () => {
   // --- getStatusLineConfig validation (tested through the hook) ---
 
   describe('config validation', () => {
-    it('returns null when no statusLine config is set', () => {
+    it('renders the default preset when no statusLine config is set', () => {
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
+    it('renders no lines when statusLine is explicitly null (opt-out)', () => {
+      setStatusLineConfig(null);
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when statusLine type is not "command"', () => {
       setStatusLineConfig({ type: 'invalid', command: 'echo hi' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when command is empty string', () => {
       setStatusLineConfig({ type: 'command', command: '' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when command is whitespace only', () => {
       setStatusLineConfig({ type: 'command', command: '   ' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
+    });
+
+    it('returns respectUserColors false by default for command type', () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(false);
+    });
+
+    it('returns respectUserColors true when set in config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        respectUserColors: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(true);
+    });
+
+    it('returns respectUserColors false for preset type', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(false);
+    });
+
+    it('returns hideContextIndicator false by default', () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('returns hideContextIndicator true when set in command config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        hideContextIndicator: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('returns hideContextIndicator true when set in preset config', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+        hideContextIndicator: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+  });
+
+  describe('preset status line', () => {
+    it('returns the preset theme color preference', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        useThemeColors: true,
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.useThemeColors).toBe(true);
+      expect(result.current.lines).toEqual(['Test Model']);
+    });
+
+    it('looks up the current branch pull request number with gh', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['pull-request-number'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
+      expect(result.current.lines).toEqual([]);
+
+      await act(async () => {
+        execCallback(null, '4118\n', '');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(result.current.lines).toEqual(['#4118']);
+    });
+
+    it('does not run gh when pull request number is not selected', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['Test Model']);
+    });
+
+    it('renders model-with-reasoning and model-only together', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['Test Model high · Test Model']);
+    });
+
+    it('refreshes when status line settings are saved in the same process', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['Test Model']);
+
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning', 'pull-request-number'],
+      });
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model-with-reasoning', 'pull-request-number'],
+      };
+      mockUIState.statusLineSettingsVersion += 1;
+      rerender();
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
+
+      await act(async () => {
+        execCallback(null, '4118\n', '');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(result.current.lines).toEqual(['Test Model · #4118']);
+    });
+
+    it('reloads status line settings from disk when streaming becomes idle', async () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual(['Test Model']);
+
+      mockSettings.reloadScopeFromDisk.mockImplementationOnce(() => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model-with-reasoning'],
+        });
+      });
+
+      mockUIState.streamingState = StreamingState.Responding;
+      rerender();
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      mockUIState.streamingState = StreamingState.Idle;
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledOnce();
+      expect(result.current.lines).toEqual(['Test Model high']);
+    });
+
+    it('uses command settings when a stale preset override no longer matches the settings type', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo from-settings',
+      });
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model'],
+      };
+
+      renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('echo from-settings');
+    });
+
+    it('ignores a stale preset override when status line is disabled (null)', () => {
+      setStatusLineConfig(null);
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model'],
+      };
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([]);
+      expect(child_process.exec).not.toHaveBeenCalled();
+    });
+
+    it('logs and retries pull request lookup failures after state changes', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['pull-request-number'],
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        execCallback(new Error('gh not authenticated'), '', '');
+      });
+
+      expect(debugLogMock.warn).toHaveBeenCalledWith(
+        'statusline: gh pr view failed:',
+        'gh not authenticated',
+      );
+
+      mockUIState.sessionStats.lastPromptTokenCount = 101;
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
     });
   });
 
@@ -200,7 +506,7 @@ describe('useStatusLine', () => {
       expect(opts.maxBuffer).toBe(1024 * 10);
     });
 
-    it('returns first line of stdout as text', async () => {
+    it('returns single line as array', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -208,10 +514,10 @@ describe('useStatusLine', () => {
         execCallback(null, 'hello world\n', '');
       });
 
-      expect(result.current.text).toBe('hello world');
+      expect(result.current.lines).toEqual(['hello world']);
     });
 
-    it('returns only the first line when stdout has multiple lines', async () => {
+    it('returns all lines when stdout has multiple lines', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo lines' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -219,7 +525,51 @@ describe('useStatusLine', () => {
         execCallback(null, 'first line\nsecond line\n', '');
       });
 
-      expect(result.current.text).toBe('first line');
+      expect(result.current.lines).toEqual(['first line', 'second line']);
+    });
+
+    it('filters empty lines from output', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, '\n\nreal content\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['real content']);
+    });
+
+    it('caps output at 2 lines', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line1\nline2\nline3\nline4\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['line1', 'line2']);
+    });
+
+    it('handles \\r\\n line endings', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line1\r\nline2\r\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['line1', 'line2']);
+    });
+
+    it('returns empty when stdout is only newlines', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, '\n\n', '');
+      });
+
+      expect(result.current.lines).toEqual([]);
     });
 
     it('returns null when command fails', async () => {
@@ -230,7 +580,7 @@ describe('useStatusLine', () => {
         execCallback(new Error('command not found'), '', '');
       });
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
 
     it('returns null when stdout is empty', async () => {
@@ -241,7 +591,7 @@ describe('useStatusLine', () => {
         execCallback(null, '', '');
       });
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
   });
 
@@ -255,7 +605,7 @@ describe('useStatusLine', () => {
       const input = JSON.parse(stdinWrittenData);
       expect(input.session_id).toBe('test-session');
       expect(input.version).toBe('1.0.0');
-      expect(input.model.display_name).toBe('test-model');
+      expect(input.model.display_name).toBe('Test Model');
       expect(input.workspace.current_dir).toBe('/test/dir');
     });
 
@@ -307,6 +657,64 @@ describe('useStatusLine', () => {
       expect(input.context_window.remaining_percentage).toBe(50);
       expect(input.context_window.current_usage).toBe(65536);
     });
+
+    it('includes per-model metrics and aggregated token counts', () => {
+      mockUIState.sessionStats.metrics.models = {
+        'test-model': {
+          api: { totalRequests: 5, totalErrors: 1, totalLatencyMs: 2000 },
+          tokens: {
+            prompt: 1000,
+            candidates: 500,
+            total: 1500,
+            cached: 200,
+            thoughts: 100,
+          },
+        },
+      } as never;
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.metrics.models['test-model'].api.total_requests).toBe(5);
+      expect(input.metrics.models['test-model'].api.total_errors).toBe(1);
+      expect(input.metrics.models['test-model'].tokens.prompt).toBe(1000);
+      expect(input.metrics.models['test-model'].tokens.completion).toBe(500);
+      expect(input.metrics.models['test-model'].tokens.cached).toBe(200);
+      expect(input.metrics.models['test-model'].tokens.thoughts).toBe(100);
+      expect(input.context_window.total_input_tokens).toBe(1000);
+      expect(input.context_window.total_output_tokens).toBe(500);
+    });
+
+    it('falls back to zero when contextWindowSize is unavailable', () => {
+      // Persistent (not Once): the hook reads getContentGeneratorConfig both at
+      // render scope (reasoning-effort trigger key) and inside the data builder,
+      // so simulate "unavailable" for every call rather than just the first.
+      mockConfig.getContentGeneratorConfig.mockReturnValue(null as never);
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.context_window.context_window_size).toBe(0);
+      expect(input.context_window.used_percentage).toBe(0);
+    });
+
+    it('falls back to "unknown" when getCliVersion returns empty', () => {
+      mockConfig.getCliVersion.mockReturnValueOnce('');
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.version).toBe('unknown');
+    });
+
+    it('falls back to model from config when currentModel is empty', () => {
+      mockUIState.currentModel = '';
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.model.display_name).toBe('Test Model');
+    });
   });
 
   // --- Stale generation handling ---
@@ -335,13 +743,13 @@ describe('useStatusLine', () => {
       await act(async () => {
         firstCallback(null, 'stale output\n', '');
       });
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
 
       // Resolve the fresh second callback — should be accepted
       await act(async () => {
         secondCallback(null, 'fresh output\n', '');
       });
-      expect(result.current.text).toBe('fresh output');
+      expect(result.current.lines).toEqual(['fresh output']);
     });
   });
 
@@ -376,23 +784,46 @@ describe('useStatusLine', () => {
     });
   });
 
-  // --- Config removal clears output ---
+  // --- Explicit opt-out via `ui.statusLine: null` ---
 
   describe('config removal', () => {
-    it('clears output when config is removed', async () => {
+    it('clears output when status line is explicitly disabled (null)', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result, rerender } = renderHook(() => useStatusLine());
 
       await act(async () => {
         execCallback(null, 'hello\n', '');
       });
-      expect(result.current.text).toBe('hello');
+      expect(result.current.lines).toEqual(['hello']);
 
-      // Remove config
-      setStatusLineConfig(undefined);
+      // Explicit opt-out
+      setStatusLineConfig(null);
       rerender();
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
+    });
+
+    it('cancels pending debounce and kills child when status line is disabled (null)', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a debounced update (timer is pending)
+      mockUIState.currentModel = 'new-model';
+      rerender();
+
+      // Disable before debounce fires
+      setStatusLineConfig(null);
+      rerender();
+
+      expect(mockKill).toHaveBeenCalled();
+
+      // Advancing past debounce should not trigger another exec
+      const callsBefore = vi.mocked(child_process.exec).mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(callsBefore);
     });
   });
 
@@ -477,6 +908,29 @@ describe('useStatusLine', () => {
       // Should re-execute immediately (not debounced)
       expect(child_process.exec).toHaveBeenCalledTimes(2);
       expect(lastExecCommand).toBe('echo second');
+    });
+
+    it('cancels pending debounce when command changes', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo first' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a debounced update
+      mockUIState.currentModel = 'new-model';
+      rerender();
+
+      // Change command before debounce fires
+      setStatusLineConfig({ type: 'command', command: 'echo second' });
+      rerender();
+
+      // Immediate re-exec from command change (mount + command change = 2)
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+
+      // Debounce fires but should not cause a third exec (was cleared)
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -598,11 +1052,11 @@ describe('useStatusLine', () => {
 
       setStatusLineConfig({ type: 'command', command: 'echo test' });
 
-      let result: { current: { text: string | null } } | undefined;
+      let result: { current: { lines: string[] } } | undefined;
       expect(() => {
         result = renderHook(() => useStatusLine()).result;
       }).not.toThrow();
-      expect(result!.current.text).toBeNull();
+      expect(result!.current.lines).toEqual([]);
     });
 
     it('recovers on subsequent state changes after a sync exec failure', async () => {
@@ -617,7 +1071,7 @@ describe('useStatusLine', () => {
       setStatusLineConfig({ type: 'command', command: 'echo test' });
       const { result, rerender } = renderHook(() => useStatusLine());
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).toHaveBeenCalledTimes(1);
 
       // Trigger a re-execution via state change — should use the default mock.
@@ -631,7 +1085,257 @@ describe('useStatusLine', () => {
       await act(async () => {
         execCallback(null, 'recovered\n', '');
       });
-      expect(result.current.text).toBe('recovered');
+      expect(result.current.lines).toEqual(['recovered']);
+    });
+  });
+
+  // --- Output deduplication (cuts unnecessary Footer re-renders) ---
+
+  describe('output deduplication', () => {
+    it('preserves the same lines array reference when output is unchanged', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo same' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'same output\n', '');
+      });
+      const firstRef = result.current.lines;
+      expect(firstRef).toEqual(['same output']);
+
+      // Trigger another exec with identical output (e.g. via state change).
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        execCallback(null, 'same output\n', '');
+      });
+
+      // Reference preserved → React can skip the Footer re-render.
+      expect(result.current.lines).toBe(firstRef);
+    });
+
+    it('produces a new reference when output changes', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo tick' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'first\n', '');
+      });
+      const firstRef = result.current.lines;
+      expect(firstRef).toEqual(['first']);
+
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        execCallback(null, 'second\n', '');
+      });
+
+      expect(result.current.lines).not.toBe(firstRef);
+      expect(result.current.lines).toEqual(['second']);
+    });
+  });
+
+  // --- refreshInterval (periodic refresh) ---
+
+  describe('refreshInterval', () => {
+    it('re-executes the command every N seconds', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 2,
+      });
+      renderHook(() => useStatusLine());
+
+      // Mount executes once immediately
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        execCallback(null, 'tick 1\n', '');
+      });
+
+      // First interval tick after 2s — previous exec has completed, so
+      // the tick is free to spawn a new one.
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        execCallback(null, 'tick 2\n', '');
+      });
+
+      // Second interval tick after another 2s
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not start an interval when refreshInterval is omitted', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo static' });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      // Still only the mount exec — no periodic refresh
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects refreshInterval < 1 (no interval scheduled)', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 0.5,
+      });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects non-finite refreshInterval (no interval scheduled)', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: Number.POSITIVE_INFINITY,
+      });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the interval when config is removed', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Remove the config — the interval should be torn down.
+      setStatusLineConfig(undefined);
+      rerender();
+
+      const callsAfterRemoval = vi.mocked(child_process.exec).mock.calls.length;
+
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
+        callsAfterRemoval,
+      );
+    });
+
+    it('reschedules when refreshInterval changes', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 5,
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        execCallback(null, 'tick\n', '');
+      });
+
+      // 2s passes — not yet a tick on the 5s schedule.
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Swap to a 1s interval — the old 5s timer must be cleared, not kept.
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      rerender();
+
+      // 1s later — fires on the new schedule.
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the interval on unmount', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      const { unmount } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      unmount();
+
+      const callsAfterUnmount = vi.mocked(child_process.exec).mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
+        callsAfterUnmount,
+      );
+    });
+
+    it('skips periodic ticks while a previous exec is still running', async () => {
+      // Starvation regression (#3383 review): with refreshInterval < command
+      // latency, if every tick called doUpdate() it would kill the in-flight
+      // child, generation++ would stale the eventual callback, and the user
+      // would never see any output. This test asserts BOTH the guard (exec
+      // call count) AND the user-visible result (rendered lines).
+      setStatusLineConfig({
+        type: 'command',
+        command: 'slow-command',
+        refreshInterval: 1,
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      // Mount exec: child is spawned, callback NOT yet resolved — child is
+      // still "running" from the hook's perspective.
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      const pendingCallback = execCallback;
+
+      // Several interval ticks pass while the first exec is in flight.
+      // Each tick must detect the running child and skip doUpdate().
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // First exec finally completes — activeChildRef clears. Without the
+      // guard, generationRef would have bumped 3 times above and the next
+      // line would be ignored as stale, leaving `lines` permanently empty.
+      await act(async () => {
+        pendingCallback(null, 'done\n', '');
+      });
+      expect(result.current.lines).toEqual(['done']);
+
+      // Next tick is now free to spawn a new exec.
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
     });
   });
 });

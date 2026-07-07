@@ -7,7 +7,7 @@
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { interpolateHeaders, interpolateUrl } from './envInterpolator.js';
 import { UrlValidator } from './urlValidator.js';
-import { createCombinedAbortSignal } from './combinedAbortSignal.js';
+import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
 import type {
@@ -199,8 +199,8 @@ export class HttpHookRunner {
       const timeout = hookConfig.timeout
         ? hookConfig.timeout * 1000
         : DEFAULT_HTTP_TIMEOUT;
-      const { signal: combinedSignal, cleanup } = createCombinedAbortSignal(
-        signal,
+      const { signal: combinedSignal, cleanup } = combineAbortSignals(
+        [signal],
         { timeoutMs: timeout },
       );
 

@@ -39,8 +39,15 @@ import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
-import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
-import { isAutoMemPath } from './paths.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  logMemoryDream,
+  logMemoryExtract,
+  MemoryDreamEvent,
+  MemoryExtractEvent,
+} from '../telemetry/index.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -62,10 +69,27 @@ import {
   type ResolveRelevantAutoMemoryPromptOptions,
 } from './recall.js';
 import { getManagedAutoMemoryStatus } from './status.js';
-import { appendManagedAutoMemoryToUserMemory } from './prompt.js';
+import {
+  appendManagedAutoMemoryToUserMemory,
+  type BuildMemoryPromptOptions,
+  type UserAutoMemorySection,
+  type TeamAutoMemorySection,
+} from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
+import {
+  runSkillReviewByAgent,
+  listExistingSkillDirNames,
+} from './skillReviewAgentPlanner.js';
+import {
+  stageSkillDirs,
+  acceptPendingSkill,
+  rejectPendingSkill,
+  type PendingSkill,
+} from './pending-skills.js';
 import type { AutoMemoryMetadata } from './types.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
 
 // ─── Re-export public types consumed by callers ───────────────────────────────
 
@@ -87,11 +111,12 @@ export type MemoryTaskStatus =
   | 'running'
   | 'completed'
   | 'failed'
+  | 'cancelled'
   | 'skipped';
 
 export interface MemoryTaskRecord {
   id: string;
-  taskType: 'extract' | 'dream';
+  taskType: 'extract' | 'dream' | 'skill-review';
   projectRoot: string;
   sessionId?: string;
   status: MemoryTaskStatus;
@@ -110,6 +135,36 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+}
+
+export interface ScheduleSkillReviewParams {
+  projectRoot: string;
+  sessionId: string;
+  history: Content[];
+  toolCallCount: number;
+  skillsModified: boolean;
+  now?: Date;
+  config?: Config;
+  enabled?: boolean;
+  threshold?: number;
+  maxTurns?: number;
+  timeoutMs?: number;
+  /** When true, stage created skills for user confirmation instead of
+   * leaving them live in the skills root. Sourced from
+   * Config.getAutoSkillConfirmEnabled(). */
+  confirmBeforePersist?: boolean;
+}
+
+export interface SkillReviewScheduleResult {
+  status: 'scheduled' | 'skipped';
+  taskId?: string;
+  skippedReason?:
+    | 'below_threshold'
+    | 'skills_modified_in_session'
+    | 'disabled'
+    | 'already_running'
+    | 'memory_pressure';
+  promise?: Promise<MemoryTaskRecord>;
 }
 
 // AutoMemoryExtractResult is re-used as the return type
@@ -136,7 +191,8 @@ export interface DreamScheduleResult {
     | 'min_sessions'
     | 'scan_throttled'
     | 'locked'
-    | 'running';
+    | 'running'
+    | 'memory_pressure';
   promise?: Promise<MemoryTaskRecord>;
 }
 
@@ -157,6 +213,8 @@ export interface DrainOptions {
 
 export const EXTRACT_TASK_TYPE = 'managed-auto-memory-extraction' as const;
 export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
+export const SKILL_REVIEW_TASK_TYPE = 'managed-skill-extractor' as const;
+export const AUTO_SKILL_THRESHOLD = 20;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
@@ -174,7 +232,7 @@ const WRITE_TOOL_NAMES = new Set([
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 function makeTaskRecord(
-  type: 'extract' | 'dream',
+  type: MemoryTaskRecord['taskType'],
   projectRoot: string,
   sessionId?: string,
 ): MemoryTaskRecord {
@@ -190,6 +248,11 @@ function makeTaskRecord(
   };
 }
 
+// INVARIANT: mutates `record` in place. `resolvePendingSkill`'s concurrency
+// safety (concurrent Keep-all/Discard-all each removing only their own entry)
+// relies on this — it re-reads `record.metadata.pendingSkills` after its await
+// and expects to see writes from sibling calls. A refactor to immutable
+// record updates would reintroduce the "all-but-one left behind" race.
 function updateRecord(
   record: MemoryTaskRecord,
   patch: Partial<
@@ -212,7 +275,11 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
     const args = part.functionCall?.args as Record<string, unknown> | undefined;
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
-    if (typeof filePath === 'string' && isAutoMemPath(filePath, projectRoot)) {
+    if (
+      typeof filePath === 'string' &&
+      (isAnyAutoMemPath(filePath, projectRoot) ||
+        isTeamAutoMemPath(filePath, projectRoot))
+    ) {
       return true;
     }
   }
@@ -251,10 +318,10 @@ async function writeDreamMetadata(
   projectRoot: string,
   metadata: AutoMemoryMetadata,
 ): Promise<void> {
-  await fs.writeFile(
+  await atomicWriteFile(
     getAutoMemoryMetadataPath(projectRoot),
     `${JSON.stringify(metadata, null, 2)}\n`,
-    'utf-8',
+    { encoding: 'utf-8' },
   );
 }
 
@@ -346,7 +413,17 @@ export class MemoryManager {
   // ── Task records ────────────────────────────────────────────────────────────
   private readonly tasks = new Map<string, MemoryTaskRecord>();
   // ── Subscribers (useSyncExternalStore / custom listeners) ────────────────
+  // Subscribers without a taskType filter receive every notify; those
+  // with a filter receive only notifies whose changed record matches
+  // (extract OR dream). Filtered subscribers exist so high-frequency
+  // consumers (e.g. the bg-tasks UI hook, which only cares about
+  // dream) can skip the per-extract O(n) work that would otherwise
+  // run on every UserQuery.
   private readonly subscribers = new Set<() => void>();
+  private readonly subscribersByType = new Map<
+    'extract' | 'dream' | 'skill-review',
+    Set<() => void>
+  >();
   // ── In-flight promises (for drain) ──────────────────────────────────────────
   private readonly inFlight = new Map<string, Promise<unknown>>();
 
@@ -358,9 +435,28 @@ export class MemoryManager {
     { taskId: string; params: ScheduleExtractParams }
   >();
 
+  // ── Skill-review in-flight dedup ─────────────────────────────────────────────
+  private readonly skillReviewInFlightByProject = new Map<string, string>();
+
   // ── Dream scheduling state ───────────────────────────────────────────────────
   private readonly dreamInFlightByKey = new Map<string, string>();
   private readonly dreamLastSessionScanAt = new Map<string, number>();
+  // AbortControllers for in-flight dream tasks, keyed by record id.
+  // cancelTask() looks up the controller, aborts it (the abort signal
+  // propagates into runForkedAgent), and marks the record cancelled.
+  // The runDream finally block clears the entry on settle.
+  private readonly dreamAbortControllers = new Map<string, AbortController>();
+  // Set to true when releaseDreamLock() throws (e.g., Windows EPERM,
+  // ENOENT race, disk full). The lock file is then left on disk and
+  // dreamLockExists() sees a fresh-mtime lock owned by a still-alive
+  // PID (us!), suppressing every subsequent scheduleDream() call as
+  // `{status: 'skipped', skippedReason: 'locked'}` — invisible to the
+  // user once the surfacing UI just shows "Lock release failed" without
+  // re-firing. Setting this flag tells the next scheduleDream() to
+  // force-clean the leaked lock file before the existence check, so
+  // scheduling resumes within the same session instead of waiting for
+  // next session start's staleness sweep.
+  private dreamLockReleaseFailed = false;
   private readonly sessionScanner: SessionScannerFn;
 
   constructor(sessionScanner: SessionScannerFn = defaultSessionScanner) {
@@ -372,14 +468,49 @@ export class MemoryManager {
    * Register a listener that is called whenever any task record changes.
    * Compatible with React’s `useSyncExternalStore`.
    * Returns an unsubscribe function.
+   *
+   * Pass `{ taskType: 'dream' }` (or `'extract'`) to receive only
+   * notifies whose changed record matches that type. Filtered
+   * subscribers skip the wakeup entirely for unrelated transitions —
+   * the dream-only UI hook uses this to avoid doing O(n) signature
+   * work on every per-UserQuery extract notify.
    */
-  subscribe(listener: () => void): () => void {
+  subscribe(
+    listener: () => void,
+    opts?: { taskType?: 'extract' | 'dream' | 'skill-review' },
+  ): () => void {
+    if (opts?.taskType) {
+      const type = opts.taskType;
+      let set = this.subscribersByType.get(type);
+      if (!set) {
+        set = new Set();
+        this.subscribersByType.set(type, set);
+      }
+      set.add(listener);
+      return () => {
+        set!.delete(listener);
+        // Drop the Map entry when the per-type bucket is empty so the
+        // long-lived MemoryManager doesn't accumulate empty Sets across
+        // repeated subscribe/unsubscribe cycles (e.g. React mount /
+        // unmount in the bg-tasks UI hook).
+        if (set!.size === 0) this.subscribersByType.delete(type);
+      };
+    }
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
   }
 
-  private notify(): void {
+  /**
+   * Notify subscribers. Pass the changed task's type so type-filtered
+   * subscribers can be reached too; the unfiltered subscriber set
+   * always receives the wakeup either way.
+   */
+  private notify(taskType?: 'extract' | 'dream' | 'skill-review'): void {
     for (const fn of this.subscribers) fn();
+    if (taskType) {
+      const typed = this.subscribersByType.get(taskType);
+      if (typed) for (const fn of typed) fn();
+    }
   }
 
   /** Update a record and notify subscribers. */
@@ -390,7 +521,7 @@ export class MemoryManager {
     >,
   ): void {
     updateRecord(record, patch);
-    this.notify();
+    this.notify(record.taskType);
   }
 
   /**
@@ -399,7 +530,7 @@ export class MemoryManager {
    */
   private store(record: MemoryTaskRecord): void {
     this.tasks.set(record.id, record);
-    this.notify();
+    this.notify(record.taskType);
   }
 
   /**
@@ -414,13 +545,13 @@ export class MemoryManager {
   ): void {
     updateRecord(record, patch);
     this.tasks.set(record.id, record);
-    this.notify();
+    this.notify(record.taskType);
   }
   // ─── Task record query ────────────────────────────────────────────────────────
 
   /** Return task records filtered by type and optionally by projectRoot. */
   listTasksByType(
-    taskType: 'extract' | 'dream',
+    taskType: MemoryTaskRecord['taskType'],
     projectRoot?: string,
   ): MemoryTaskRecord[] {
     return [...this.tasks.values()]
@@ -566,11 +697,26 @@ export class MemoryManager {
     return this.track(record.id, this.runExtract(record.id, params)) as never;
   }
 
+  /**
+   * True when the runtime is under hard or critical memory pressure, as
+   * reported by the shared MemoryPressureMonitor (#5147). The monitor is
+   * cgroup-aware and compares RSS/heap against their actual limits as a
+   * ratio, so this adapts to `--max-old-space-size`, containers, and large
+   * hosts alike — unlike an absolute megabyte threshold. Returns false when
+   * no monitor is wired (e.g. unit tests, headless), so extraction proceeds
+   * normally in those contexts.
+   */
+  private isUnderMemoryPressure(config?: Config): boolean {
+    const level = config?.getMemoryPressureMonitor?.()?.getPressureLevel?.();
+    return level === 'hard' || level === 'critical';
+  }
+
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
   ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
     const record = this.tasks.get(taskId)!;
+
     this.extractCurrentTaskId.set(params.projectRoot, taskId);
     this.extractRunning.add(params.projectRoot);
     this.update(record, {
@@ -581,6 +727,39 @@ export class MemoryManager {
 
     const t0 = Date.now();
     try {
+      // Memory-pressure gate. Checked inside try so the finally block
+      // always runs — extractRunning/extractCurrentTaskId are cleaned up
+      // and startQueuedExtract is called regardless of the gate outcome.
+      if (this.isUnderMemoryPressure(params.config)) {
+        debugLogger.warn('Skipping extract: memory pressure too high.');
+        this.update(record, {
+          status: 'skipped',
+          progressText: 'Skipped: memory pressure too high for extraction.',
+          metadata: { skippedReason: 'memory_pressure' },
+        });
+        if (params.config) {
+          logMemoryExtract(
+            params.config,
+            new MemoryExtractEvent({
+              trigger: 'auto',
+              status: 'skipped',
+              skipped_reason: 'memory_pressure',
+              patches_count: 0,
+              touched_topics: [],
+              duration_ms: 0,
+            }),
+          );
+        }
+        return {
+          touchedTopics: [],
+          skippedReason: 'memory_pressure' as const,
+          cursor: {
+            sessionId: params.sessionId,
+            updatedAt: (params.now ?? new Date()).toISOString(),
+          },
+        };
+      }
+
       const result = await runAutoMemoryExtract(params);
       const durationMs = Date.now() - t0;
       this.update(record, {
@@ -646,6 +825,132 @@ export class MemoryManager {
     );
   }
 
+  // ─── Skill review ─────────────────────────────────────────────────────────────
+
+  scheduleSkillReview(
+    params: ScheduleSkillReviewParams,
+  ): SkillReviewScheduleResult {
+    if (params.enabled === false) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    if (params.skillsModified) {
+      return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
+    }
+
+    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
+    if (params.toolCallCount < threshold) {
+      return { status: 'skipped', skippedReason: 'below_threshold' };
+    }
+
+    if (!params.config) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    const existingTaskId = this.skillReviewInFlightByProject.get(
+      params.projectRoot,
+    );
+    if (existingTaskId) {
+      return {
+        status: 'skipped',
+        skippedReason: 'already_running',
+        taskId: existingTaskId,
+      };
+    }
+
+    const record = makeTaskRecord(
+      'skill-review',
+      params.projectRoot,
+      params.sessionId,
+    );
+    this.storeWith(record, {
+      status: 'running',
+      progressText: 'Running managed skill review.',
+      metadata: {
+        historyLength: params.history.length,
+        toolCallCount: params.toolCallCount,
+        threshold,
+      },
+    });
+
+    const promise = this.track(record.id, this.runSkillReview(record, params));
+    return { status: 'scheduled', taskId: record.id, promise };
+  }
+
+  private async runSkillReview(
+    record: MemoryTaskRecord,
+    params: ScheduleSkillReviewParams,
+  ): Promise<MemoryTaskRecord> {
+    this.skillReviewInFlightByProject.set(params.projectRoot, record.id);
+
+    try {
+      // Memory-pressure gate — inside try so finally always cleans up
+      // the skillReviewInFlightByProject entry.
+      if (this.isUnderMemoryPressure(params.config)) {
+        this.update(record, {
+          status: 'skipped',
+          progressText: 'Skipped: memory pressure too high.',
+          metadata: { skippedReason: 'memory_pressure' },
+        });
+        debugLogger.warn('Skipping skill review: memory pressure too high.');
+        return record;
+      }
+
+      // Snapshot existing skill dirs BEFORE the agent runs so staging can tell
+      // newly-created skills from in-place edits of already-confirmed ones
+      // (only new skills should enter the confirmation flow).
+      const preExistingSkillDirs = params.confirmBeforePersist
+        ? new Set(await listExistingSkillDirNames(params.projectRoot))
+        : undefined;
+
+      const result = await runSkillReviewByAgent({
+        config: params.config!,
+        projectRoot: params.projectRoot,
+        history: params.history,
+        maxTurns: params.maxTurns,
+        timeoutMs: params.timeoutMs,
+      });
+
+      if (params.confirmBeforePersist && result.touchedSkillFiles.length > 0) {
+        const pending = await stageSkillDirs(
+          result.touchedSkillFiles,
+          params.projectRoot,
+          preExistingSkillDirs,
+          record.id,
+        );
+        this.update(record, {
+          status: 'completed',
+          progressText:
+            pending.length > 0
+              ? `${pending.length} skill(s) awaiting review.`
+              : (result.systemMessage ??
+                'Managed skill review completed without durable changes.'),
+          metadata: {
+            touchedSkillFiles: result.touchedSkillFiles,
+            ...(pending.length > 0 ? { pendingSkills: pending } : {}),
+          },
+        });
+      } else {
+        this.update(record, {
+          status: 'completed',
+          progressText:
+            result.systemMessage ??
+            'Managed skill review completed without durable changes.',
+          metadata: { touchedSkillFiles: result.touchedSkillFiles },
+        });
+      }
+    } catch (error) {
+      this.update(record, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    } finally {
+      this.skillReviewInFlightByProject.delete(params.projectRoot);
+    }
+    return record;
+  }
+
   // ─── Dream ────────────────────────────────────────────────────────────────────
 
   /**
@@ -656,8 +961,21 @@ export class MemoryManager {
   async scheduleDream(
     params: ScheduleDreamParams,
   ): Promise<DreamScheduleResult> {
-    if (params.config && !params.config.getManagedAutoDreamEnabled()) {
+    // `params.config` is optional only because some test paths omit it;
+    // production callers always pass it. Without a config the
+    // fork-agent execution can't start (`runManagedAutoMemoryDream`
+    // throws). Skip early so a missing-config call doesn't surface a
+    // failed dream entry in the bg-tasks dialog.
+    if (!params.config || !params.config.getManagedAutoDreamEnabled()) {
       return { status: 'skipped', skippedReason: 'disabled' };
+    }
+
+    // Also skip dream under memory pressure — dream does its own
+    // structuredClone of full history, and shouldn't add extra pressure
+    // when the heap is already under hard/critical load.
+    if (this.isUnderMemoryPressure(params.config)) {
+      debugLogger.warn('Skipping dream: memory pressure too high.');
+      return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
 
     const now = params.now ?? new Date();
@@ -700,6 +1018,22 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'min_sessions' };
     }
 
+    // If the previous dream's release failed (lockReleaseError surfaced
+    // on the dialog), the lock file is still on disk and dreamLockExists()
+    // would silently suppress every subsequent dream until next process
+    // start. Force-clean it here so the same session recovers.
+    if (this.dreamLockReleaseFailed) {
+      await fs
+        .rm(getAutoMemoryConsolidationLockPath(params.projectRoot), {
+          force: true,
+        })
+        .catch(() => {
+          // Best-effort recovery — if even the forced rm fails (truly
+          // unrecoverable filesystem state), fall through and let the
+          // existence check below report 'locked' as before.
+        });
+      this.dreamLockReleaseFailed = false;
+    }
     if (await dreamLockExists(params.projectRoot)) {
       return { status: 'skipped', skippedReason: 'locked' };
     }
@@ -720,18 +1054,153 @@ export class MemoryManager {
       params.projectRoot,
       params.sessionId,
     );
+    // Register the AbortController BEFORE storeWith. storeWith fires
+    // a notify which can synchronously call cancelTask via subscribers
+    // (e.g. a UI listener). If the controller isn't in
+    // `dreamAbortControllers` by then, cancelTask falls into the
+    // missing-controller defensive warn-and-return-false path and the
+    // model gets a phantom failure on a brand-new dream. Registering
+    // first means any reentrant cancel sees a complete state.
+    const abortController = new AbortController();
+    this.dreamAbortControllers.set(record.id, abortController);
+    this.dreamInFlightByKey.set(dedupeKey, record.id);
     this.storeWith(record, {
       status: 'running',
+      // Set the initial progressText so the dialog's Progress section
+      // has something to show during the in-flight window — fork-agent
+      // execution exposes no per-turn callback today, so without this
+      // the section stays empty until completion.
+      progressText: 'Scheduled managed auto-memory dream.',
       metadata: { sessionCount: sessionIds.length },
     });
-    this.dreamInFlightByKey.set(dedupeKey, record.id);
 
     const promise = this.track(
       record.id,
-      this.runDream(record, dedupeKey, params, now),
+      this.runDream(record, dedupeKey, params, now, abortController.signal),
     );
 
     return { status: 'scheduled', taskId: record.id, promise };
+  }
+
+  /**
+   * Look up a single task record by id. Used by `task_stop` and other
+   * cross-cutting consumers that have a task id but no project root.
+   */
+  getTask(taskId: string): MemoryTaskRecord | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /** Promote one staged skill (by dir name) for the given skill-review task. */
+  async acceptPendingSkillFromTask(
+    taskId: string,
+    skillName: string,
+  ): Promise<void> {
+    await this.resolvePendingSkill(taskId, skillName, 'accept');
+  }
+
+  /** Discard one staged skill (by dir name) for the given skill-review task. */
+  async rejectPendingSkillFromTask(
+    taskId: string,
+    skillName: string,
+  ): Promise<void> {
+    await this.resolvePendingSkill(taskId, skillName, 'reject');
+  }
+
+  private async resolvePendingSkill(
+    taskId: string,
+    skillName: string,
+    action: 'accept' | 'reject',
+  ): Promise<void> {
+    const record = this.tasks.get(taskId);
+    if (!record) {
+      debugLogger.warn(`Cannot resolve pending skill: no task ${taskId}.`);
+      return;
+    }
+    const target = (
+      (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? []
+    ).find((p) => p.name === skillName);
+    if (!target) {
+      debugLogger.warn(
+        `Cannot resolve pending skill "${skillName}": not pending on task ${taskId}.`,
+      );
+      return;
+    }
+    try {
+      if (action === 'accept') {
+        await acceptPendingSkill(target);
+      } else {
+        await rejectPendingSkill(target);
+      }
+    } catch (error) {
+      // Leave the skill in pendingSkills so the user can retry, and surface the
+      // failure instead of silently dropping it.
+      debugLogger.warn(
+        `Failed to ${action} pending skill "${skillName}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      throw error;
+    }
+    // Re-read pendingSkills AFTER the await: concurrent Keep-all/Discard-all
+    // calls each remove only their own entry. read+filter+update runs with no
+    // intervening await, so it is atomic under the single-threaded event loop.
+    const remaining = (
+      (record.metadata?.['pendingSkills'] as PendingSkill[]) ?? []
+    ).filter((p) => p.name !== skillName);
+    this.update(record, { metadata: { pendingSkills: remaining } });
+  }
+
+  /**
+   * Cancel a running dream task. Aborts the dream's fork agent (the
+   * abort signal threads through `runForkedAgent`), marks the record
+   * cancelled immediately so the UI reflects user intent, and lets the
+   * existing `runDream` finally block release the consolidation lock
+   * via the natural error propagation path.
+   *
+   * Returns true if a running task was aborted, false if the task is
+   * unknown / already terminal / not a dream. Currently only dream
+   * tasks support cancellation — extract is short-lived and runs
+   * synchronously through the request loop; cancelling it would
+   * interfere with the user's own turn.
+   */
+  cancelTask(taskId: string): boolean {
+    const record = this.tasks.get(taskId);
+    if (!record) return false;
+    if (record.taskType !== 'dream') return false;
+    if (record.status !== 'running') return false;
+
+    // The AbortController is registered synchronously alongside the
+    // status='running' transition in scheduleDream and only cleared in
+    // runDream's finally block (which only runs after a terminal
+    // status transition has already happened). So under normal flow
+    // an entry that is `running` MUST have a controller. Treat the
+    // missing-controller case as a contract violation: don't flip
+    // status (a cancelled record without an aborted fork would leak
+    // the consolidation lock until the agent finishes naturally) and
+    // return false so the caller knows the abort didn't take. Log at
+    // warn level so the inconsistency is observable in debug bundles
+    // — silent failure here would leave a runaway dream burning tokens
+    // with no signal to the user or to telemetry.
+    const ac = this.dreamAbortControllers.get(taskId);
+    if (!ac) {
+      debugLogger.warn(
+        `cancelTask: AbortController missing for running dream task ${taskId}; ` +
+          `not flipping status. This indicates a logic bug — the controller ` +
+          `should have been registered in scheduleDream and only cleared ` +
+          `after a terminal status transition.`,
+      );
+      return false;
+    }
+
+    // Mark cancelled BEFORE aborting so the runDream catch path can
+    // detect the user-cancel intent (signal.aborted + status already
+    // 'cancelled') and avoid overwriting with a generic 'failed'.
+    this.update(record, {
+      status: 'cancelled',
+      progressText: 'Cancelled by user.',
+    });
+    ac.abort();
+    return true;
   }
 
   private async runDream(
@@ -739,7 +1208,9 @@ export class MemoryManager {
     dedupeKey: string,
     params: ScheduleDreamParams,
     now: Date,
+    abortSignal: AbortSignal,
   ): Promise<MemoryTaskRecord> {
+    const dreamStartMs = Date.now();
     try {
       try {
         await acquireDreamLock(params.projectRoot);
@@ -761,13 +1232,26 @@ export class MemoryManager {
           params.projectRoot,
           now,
           params.config,
+          abortSignal,
         );
-        const nextMetadata = await readDreamMetadata(params.projectRoot);
-        nextMetadata.lastDreamAt = now.toISOString();
-        nextMetadata.lastDreamSessionId = params.sessionId;
-        nextMetadata.updatedAt = now.toISOString();
-        await writeDreamMetadata(params.projectRoot, nextMetadata);
+        // Defense-in-depth: runForkedAgent maps cancelled fork-agents
+        // to a resolved `{status: 'cancelled'}` rather than a rejection.
+        // dreamAgentPlanner now rethrows that case so the catch path
+        // below handles it, but if anything in the call chain ever
+        // forgets to propagate, this guard prevents the success path
+        // from clobbering the user-cancelled record with 'completed'
+        // and bumping dream metadata for an aborted run.
+        if (abortSignal.aborted) {
+          return record;
+        }
 
+        // Atomic-from-cancel sequence: flip status='completed' BEFORE
+        // any scheduler-gating metadata write. Once status is no
+        // longer 'running', cancelTask refuses, so the writeFile that
+        // follows can't race a flip-to-cancelled. The cancel-raced-
+        // status-update branch below covers the remaining window
+        // (cancel landed between the pre-update check and the
+        // synchronous update).
         this.update(record, {
           status: 'completed',
           progressText:
@@ -778,16 +1262,120 @@ export class MemoryManager {
             lastDreamAt: now.toISOString(),
           },
         });
+        if (abortSignal.aborted) {
+          // Defense-in-depth: unreachable today (no `await` between
+          // the pre-update check and the synchronous update above,
+          // so JS's single-threaded execution prevents
+          // `signal.aborted` from transitioning between them — a
+          // cancelTask landing inside the storeWith notify would
+          // already have flipped status, and our update would have
+          // raced ahead of it to 'completed'). Kept against a future
+          // refactor that introduces an `await` between the two
+          // checks. Preserves the touched-topic metadata on the
+          // restored cancelled record so the user can still tell
+          // memory files were modified before the abort took.
+          this.update(record, {
+            status: 'cancelled',
+            progressText: 'Cancelled after memory changes.',
+            metadata: {
+              touchedTopics: result.touchedTopics,
+              dedupedEntries: result.dedupedEntries,
+            },
+          });
+          return record;
+        }
+        // Status is now 'completed'; cancelTask will refuse from
+        // here on out. Safe to write scheduler-gating metadata
+        // without a race window.
+        //
+        // Wrap the read/write in a try/catch — pre-PR `bumpMetadata`
+        // in dream.ts swallowed errors as best-effort; without this
+        // wrap a transient ENOENT / EPERM on the metadata file would
+        // propagate to the outer catch and overwrite a
+        // legitimately-completed dream with `'failed'`. The dream
+        // already did its work (touched files are on disk and
+        // visible). Trade-off: the next dream cycle won't see a
+        // bumped lastDreamAt and may re-fire — same trade as the
+        // original best-effort behavior.
+        try {
+          const nextMetadata = await readDreamMetadata(params.projectRoot);
+          nextMetadata.lastDreamAt = now.toISOString();
+          nextMetadata.lastDreamSessionId = params.sessionId;
+          nextMetadata.updatedAt = now.toISOString();
+          nextMetadata.lastDreamTouchedTopics = result.touchedTopics;
+          nextMetadata.lastDreamStatus =
+            result.touchedTopics.length > 0 ? 'updated' : 'noop';
+          // Mirror the manual /dream path's reset so the two write
+          // sites don't drift. The field is currently dead code on
+          // main (only ever written, never read) but keeping the two
+          // paths in sync avoids surprises if a future change starts
+          // reading it.
+          nextMetadata.recentSessionIdsSinceDream = [];
+          await writeDreamMetadata(params.projectRoot, nextMetadata);
+        } catch (metaError) {
+          const message =
+            metaError instanceof Error ? metaError.message : String(metaError);
+          debugLogger.warn(
+            `Failed to persist dream gating metadata for ${record.id}: ${message}`,
+          );
+          this.update(record, {
+            metadata: { metadataWriteError: message },
+          });
+        }
       } finally {
-        await releaseDreamLock(params.projectRoot);
+        // Lock release errors are logged AND surfaced on the record's
+        // metadata so the user can see why subsequent dreams may be
+        // skipped as 'locked'. If releasing throws (e.g., EPERM on
+        // Windows, ENOENT race), letting it propagate to the outer
+        // catch would overwrite a successfully-completed dream with
+        // 'failed'. The on-disk lock will be cleaned up on the next
+        // session start via the staleness sweep, so swallowing the
+        // error here doesn't risk a permanently-stuck lock.
+        try {
+          await releaseDreamLock(params.projectRoot);
+        } catch (lockError) {
+          const message =
+            lockError instanceof Error ? lockError.message : String(lockError);
+          debugLogger.warn(
+            `Failed to release dream lock for task ${record.id}: ${message}. ` +
+              `Next scheduleDream() will force-clean the leaked lock.`,
+          );
+          this.dreamLockReleaseFailed = true;
+          this.update(record, {
+            metadata: { lockReleaseError: message },
+          });
+        }
       }
     } catch (error) {
+      // User-cancel path: cancelTask already aborted the signal AND
+      // marked the record cancelled. The fork agent throws an abort
+      // error which lands here; don't overwrite with 'failed'.
+      if (abortSignal.aborted && record.status === 'cancelled') {
+        if (params.config) {
+          logMemoryDream(
+            params.config,
+            new MemoryDreamEvent({
+              trigger: 'auto',
+              status: 'cancelled',
+              deduped_entries: 0,
+              touched_topics: [],
+              // Real elapsed time the cancelled dream consumed before
+              // the user stopped it — without this, latency histograms
+              // / p95 metrics would silently treat cancelled dreams as
+              // 0ms and skew toward the success path.
+              duration_ms: Date.now() - dreamStartMs,
+            }),
+          );
+        }
+        return record;
+      }
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
       this.dreamInFlightByKey.delete(dedupeKey);
+      this.dreamAbortControllers.delete(record.id);
     }
     return record;
   }
@@ -809,7 +1397,11 @@ export class MemoryManager {
   selectForgetCandidates(
     projectRoot: string,
     query: string,
-    options: { config?: Config; limit?: number } = {},
+    options: {
+      config?: Config;
+      limit?: number;
+      abortSignal?: AbortSignal;
+    } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
     return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
   }
@@ -819,15 +1411,16 @@ export class MemoryManager {
     projectRoot: string,
     matches: AutoMemoryForgetMatch[],
     now?: Date,
+    options: { abortSignal?: AbortSignal } = {},
   ): Promise<AutoMemoryForgetResult> {
-    return forgetManagedAutoMemoryMatches(projectRoot, matches, now);
+    return forgetManagedAutoMemoryMatches(projectRoot, matches, now, options);
   }
 
   /** Convenience: select + remove in a single call. */
   forget(
     projectRoot: string,
     query: string,
-    options: { config?: Config } = {},
+    options: { config?: Config; abortSignal?: AbortSignal } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryEntries(projectRoot, query, options, now);
@@ -842,16 +1435,27 @@ export class MemoryManager {
 
   // ─── Prompt append ────────────────────────────────────────────────────────────
 
-  /** Append the managed auto-memory section to a user memory string. */
+  /**
+   * Append the managed auto-memory section to a user memory string.
+   * When `userSection` is provided, the prompt teaches the model to route
+   * saves between the project dir and the user (cross-project) dir using
+   * the per-type scope guidance.
+   */
   appendToUserMemory(
     userMemory: string,
     memoryDir: string,
     indexContent?: string | null,
+    userSection?: UserAutoMemorySection,
+    teamSection?: TeamAutoMemorySection,
+    options?: BuildMemoryPromptOptions,
   ): string {
     return appendManagedAutoMemoryToUserMemory(
       userMemory,
       memoryDir,
       indexContent,
+      userSection,
+      teamSection,
+      options,
     );
   }
 

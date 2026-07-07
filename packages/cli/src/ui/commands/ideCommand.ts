@@ -37,15 +37,15 @@ function getIdeStatusMessage(ideClient: IdeClient): {
     case IDEConnectionStatus.Connected:
       return {
         messageType: 'info',
-        content: `🟢 Connected to ${ideClient.getDetectedIdeDisplayName()}`,
+        content: `✓ Connected to ${ideClient.getDetectedIdeDisplayName()}`,
       };
     case IDEConnectionStatus.Connecting:
       return {
         messageType: 'info',
-        content: `🟡 Connecting...`,
+        content: `◐ Connecting...`,
       };
     default: {
-      let content = `🔴 Disconnected`;
+      let content = `✗ Disconnected`;
       if (connection?.details) {
         content += `: ${connection.details}`;
       }
@@ -90,7 +90,7 @@ async function getIdeStatusMessageWithFiles(ideClient: IdeClient): Promise<{
   const connection = ideClient.getConnectionStatus();
   switch (connection.status) {
     case IDEConnectionStatus.Connected: {
-      let content = `🟢 Connected to ${ideClient.getDetectedIdeDisplayName()}`;
+      let content = `✓ Connected to ${ideClient.getDetectedIdeDisplayName()}`;
       const context = ideContextStore.get();
       const openFiles = context?.workspaceState?.openFiles;
       if (openFiles && openFiles.length > 0) {
@@ -104,10 +104,10 @@ async function getIdeStatusMessageWithFiles(ideClient: IdeClient): Promise<{
     case IDEConnectionStatus.Connecting:
       return {
         messageType: 'info',
-        content: `🟡 Connecting...`,
+        content: `◐ Connecting...`,
       };
     default: {
-      let content = `🔴 Disconnected`;
+      let content = `✗ Disconnected`;
       if (connection?.details) {
         content += `: ${connection.details}`;
       }
@@ -143,6 +143,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
         return t('manage IDE integration');
       },
       kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive'] as const,
       action: (): SlashCommandActionReturn =>
         ({
           type: 'message',
@@ -160,6 +161,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('manage IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive'] as const,
     subCommands: [],
   };
 
@@ -169,6 +171,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('check status of IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive'] as const,
     action: async (): Promise<SlashCommandActionReturn> => {
       const { messageType, content } =
         await getIdeStatusMessageWithFiles(ideClient);
@@ -189,6 +192,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       });
     },
     kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive'] as const,
     action: async (context) => {
       const installer = getIdeInstaller(currentIDE);
       const isSandBox = !!process.env['SANDBOX'];
@@ -276,6 +280,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('enable IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive'] as const,
     action: async (context: CommandContext) => {
       context.services.settings.setValue(
         SettingScope.User,
@@ -300,6 +305,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('disable IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive'] as const,
     action: async (context: CommandContext) => {
       context.services.settings.setValue(
         SettingScope.User,

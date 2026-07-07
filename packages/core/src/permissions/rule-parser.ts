@@ -8,6 +8,9 @@ import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PERMISSIONS');
 
 /**
  * Normalize a filesystem path to use POSIX-style forward slashes.
@@ -49,6 +52,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Edit: 'edit',
   EditTool: 'edit',
 
+  // Notebook Edit tool — also matched by "Edit" meta-category rules
+  notebook_edit: 'notebook_edit',
+  NotebookEdit: 'notebook_edit',
+  NotebookEditTool: 'notebook_edit',
+
   // Write File tool — also matched by "Edit" meta-category rules
   write_file: 'write_file',
   WriteFile: 'write_file',
@@ -80,8 +88,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // TodoWrite tool
+  // TodoList tool (wire name todo_write; class TodoWriteTool)
   todo_write: 'todo_write',
+  TodoList: 'todo_write',
+  // Legacy display name (renamed from "TodoWrite")
   TodoWrite: 'todo_write',
   TodoWriteTool: 'todo_write',
 
@@ -90,10 +100,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
 
-  // WebSearch tool
-  web_search: 'web_search',
-  WebSearch: 'web_search',
-  WebSearchTool: 'web_search',
+  // ReadMcpResource tool
+  read_mcp_resource: 'read_mcp_resource',
+  ReadMcpResource: 'read_mcp_resource',
+  ReadMcpResourceTool: 'read_mcp_resource',
 
   // Agent (subagent) tool
   agent: 'agent',
@@ -115,19 +125,32 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ExitPlanMode: 'exit_plan_mode',
   ExitPlanModeTool: 'exit_plan_mode',
 
+  // EnterPlanMode tool
+  enter_plan_mode: 'enter_plan_mode',
+  EnterPlanMode: 'enter_plan_mode',
+  EnterPlanModeTool: 'enter_plan_mode',
+
   // LSP tool
   lsp: 'lsp',
   Lsp: 'lsp',
   LspTool: 'lsp',
+
+  // Monitor tool
+  monitor: 'monitor',
+  Monitor: 'monitor',
+  MonitorTool: 'monitor',
 
   // Legacy edit tool name
   replace: 'edit',
 };
 
 /**
- * Shell tool canonical names.
+ * Shell tool canonical names. These use command-style rule specifiers.
  */
-const SHELL_TOOL_NAMES = new Set(['run_shell_command']);
+export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'run_shell_command',
+  'monitor',
+]);
 
 /**
  * File-reading tools — "Read" rules apply to all of these (best-effort).
@@ -147,7 +170,7 @@ const READ_TOOLS = new Set([
  *
  * Per Claude Code docs: "Edit rules apply to all built-in tools that edit files."
  */
-const EDIT_TOOLS = new Set(['edit', 'write_file']);
+const EDIT_TOOLS = new Set(['edit', 'write_file', 'notebook_edit']);
 
 /**
  * WebFetch tools.
@@ -190,6 +213,8 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  *
  * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
  * "Edit" → resolves to "edit", but also covers write_file
+ * "Bash" → resolves to "run_shell_command", but also covers monitor
+ * "Monitor" → resolves to "monitor" only; it does not cover shell
  */
 export function toolMatchesRuleToolName(
   ruleToolName: string,
@@ -204,6 +229,12 @@ export function toolMatchesRuleToolName(
   }
   // "Edit" → covers all EDIT_TOOLS
   if (ruleToolName === 'edit' && EDIT_TOOLS.has(contextToolName)) {
+    return true;
+  }
+  // "Bash" (run_shell_command) → also covers monitor so that existing
+  // `Bash(...)` allow rules are not silently bypassed by switching to
+  // the monitor tool.  Monitor-only rules do NOT cover shell.
+  if (ruleToolName === 'run_shell_command' && contextToolName === 'monitor') {
     return true;
   }
   return false;
@@ -231,34 +262,96 @@ export function toolMatchesRuleToolName(
 export function parseRule(raw: string): PermissionRule {
   const trimmed = raw.trim();
 
-  // Handle legacy `:*` suffix (deprecated, equivalent to ` *`)
-  // e.g. "Bash(git:*)" → "Bash(git *)"
-  const normalized = trimmed.replace(/:(\*)/, ' $1');
-
-  const openParen = normalized.indexOf('(');
+  const openParen = trimmed.indexOf('(');
 
   if (openParen === -1) {
     // Simple tool name rule (no specifier)
-    const canonicalName = resolveToolName(normalized);
+    const canonicalName = resolveToolName(trimmed);
     return {
       raw: trimmed,
       toolName: canonicalName,
     };
   }
 
-  const toolPart = normalized.substring(0, openParen).trim();
-  const specifier = normalized.endsWith(')')
-    ? normalized.substring(openParen + 1, normalized.length - 1)
-    : undefined;
+  const toolPart = trimmed.substring(0, openParen).trim();
 
+  if (!trimmed.endsWith(')')) {
+    // Malformed: unbalanced parentheses — mark as invalid so it never matches.
+    return { raw: trimmed, toolName: resolveToolName(toolPart), invalid: true };
+  }
+
+  let rawSpecifier = trimmed.substring(openParen + 1, trimmed.length - 1);
   const canonicalName = resolveToolName(toolPart);
-  const specifierKind = specifier ? getSpecifierKind(canonicalName) : undefined;
+
+  // Handle legacy `:*` suffix for command specifiers (deprecated, equivalent to ` *`)
+  // e.g. "Bash(git:*)" → specifier becomes "git *"
+  // Only applies to command-type specifiers to avoid interfering with key:value syntax
+  const specifierKind = rawSpecifier
+    ? getSpecifierKind(canonicalName)
+    : undefined;
+  if (specifierKind === 'command') {
+    rawSpecifier = rawSpecifier.replace(/:(\*)/g, ' $1');
+  }
+
+  // For literal specifier kind, extract `key:value` param matchers.
+  // Comma-separated: `Agent(coder,model:opus,type:*)` →
+  //   specifier = "coder", toolParamMatchers = [{model,opus},{type,*}]
+  let specifier: string | undefined = rawSpecifier;
+  let toolParamMatchers:
+    | Array<{ key: string; valuePattern: string }>
+    | undefined;
+
+  if (
+    specifierKind === 'literal' &&
+    !canonicalName.startsWith('mcp__') &&
+    rawSpecifier.includes(':')
+  ) {
+    const parts = rawSpecifier.split(',').map((p) => p.trim());
+    const plainParts: string[] = [];
+    const matchers: Array<{ key: string; valuePattern: string }> = [];
+
+    for (const part of parts) {
+      const colonIdx = part.indexOf(':');
+      if (colonIdx > 0) {
+        const key = part.substring(0, colonIdx).trim();
+        const valuePattern = part.substring(colonIdx + 1).trim();
+        if (key && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          if (valuePattern === '') {
+            debugLogger.warn(
+              `Empty valuePattern in rule "${trimmed}": key="${key}" will only match empty strings. Use "*" to match any value.`,
+            );
+          }
+          matchers.push({ key, valuePattern });
+          continue;
+        } else if (key && !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          debugLogger.warn(
+            `Invalid key "${key}" in rule "${trimmed}": keys must match /^[a-zA-Z_][a-zA-Z0-9_]*$/. Hyphens and dots are not supported.`,
+          );
+        }
+      }
+      plainParts.push(part);
+    }
+
+    if (matchers.length > 0) {
+      toolParamMatchers = matchers;
+      specifier = plainParts.join(',').trim() || undefined;
+    }
+  } else if (
+    specifierKind !== 'literal' &&
+    rawSpecifier.includes(':') &&
+    !rawSpecifier.startsWith('domain:')
+  ) {
+    debugLogger.warn(
+      `key:value syntax is only supported for literal-specifier tools (got ${specifierKind} for "${canonicalName}")`,
+    );
+  }
 
   return {
     raw: trimmed,
     toolName: canonicalName,
     specifier,
     specifierKind,
+    toolParamMatchers,
   };
 }
 
@@ -267,7 +360,17 @@ export function parseRule(raw: string): PermissionRule {
  * silently skipping any empty entries.
  */
 export function parseRules(raws: string[]): PermissionRule[] {
-  return raws.filter((r) => r && r.trim()).map(parseRule);
+  return raws
+    .filter((r) => r && r.trim())
+    .map(parseRule)
+    .map((r) => {
+      if (r.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
+        );
+      }
+      return r;
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -292,19 +395,23 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Edit meta-category
   edit: 'Edit',
   write_file: 'Edit',
+  notebook_edit: 'Edit',
   // Shell
   run_shell_command: 'Bash',
+  // Monitor
+  monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
-  web_search: 'WebSearch',
+  read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
+  enter_plan_mode: 'EnterPlanMode',
 };
 
 /**
@@ -327,7 +434,12 @@ export function getRuleDisplayName(canonicalToolName: string): string {
  * Directory-targeted tools (list_directory, grep_search, glob) already receive
  * a directory path, so they use it as-is.
  */
-const FILE_TARGETED_TOOLS = new Set(['read_file', 'edit', 'write_file']);
+const FILE_TARGETED_TOOLS = new Set([
+  'read_file',
+  'edit',
+  'write_file',
+  'notebook_edit',
+]);
 
 /**
  * Build minimum-scope permission rule strings from a permission check context.
@@ -393,11 +505,38 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
       return [displayName];
 
     case 'literal':
-    default:
-      if (ctx.specifier) {
-        return [`${displayName}(${ctx.specifier})`];
+    default: {
+      // MCP tool names already encode server + tool identity.
+      // Don't add specifiers or params — matchesRule rejects MCP rules
+      // with specifiers, and existing MCP rules in user configs should
+      // remain backward compatible.
+      if (canonicalName.startsWith('mcp__')) {
+        return [displayName];
       }
+
+      const parts: string[] = [];
+      if (ctx.specifier) parts.push(ctx.specifier);
+      // Only serialize stable, identity-bearing params — not volatile content
+      // like `prompt` or `query`, which would make rules invocation-specific
+      // and could leak sensitive data into settings.json.
+      const stableParamKeys = new Set([
+        'model',
+        'subagent_type',
+        'skill',
+      ]);
+      if (ctx.toolParams) {
+        for (const key of stableParamKeys) {
+          const v = ctx.toolParams[key];
+          if (typeof v === 'string' || typeof v === 'number') {
+            // Skip values already represented by ctx.specifier
+            if (ctx.specifier && String(v) === ctx.specifier) continue;
+            parts.push(`${key}:${v}`);
+          }
+        }
+      }
+      if (parts.length > 0) return [`${displayName}(${parts.join(',')})`];
       return [displayName];
+    }
   }
 }
 
@@ -409,14 +548,15 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Read: 'read files',
   Edit: 'edit files',
   Bash: 'run commands',
+  Monitor: 'monitor commands',
   WebFetch: 'fetch from',
-  WebSearch: 'search the web',
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
-  TodoWrite: 'write todos',
+  TodoList: 'write todos',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
+  EnterPlanMode: 'enter plan mode',
 };
 
 /**
@@ -485,9 +625,13 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
         parts.push(`${verb} in ${cleanPath}`);
         break;
       }
-      case 'command':
-        parts.push(`run '${specifier}' commands`);
+      case 'command': {
+        const cmdVerb = DISPLAY_NAME_TO_VERB[displayName] ?? 'run';
+        // Extract just the verb word (e.g. "run commands" → "run", "monitor commands" → "monitor")
+        const verbWord = cmdVerb.split(' ')[0]!;
+        parts.push(`${verbWord} '${specifier}' commands`);
         break;
+      }
       case 'domain':
         parts.push(`${verb} ${specifier}`);
         break;
@@ -509,7 +653,7 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
 
 /**
  * Split a compound shell command into its individual simple commands
@@ -669,6 +813,102 @@ export function matchesCommandPattern(
   } catch {
     return normalizedCommand === pattern;
   }
+}
+
+/**
+ * Match a glob pattern against a value using linear-time greedy matching.
+ * `*` matches any substring (including empty). Case-insensitive to match
+ * the convention used by matchesDomainPattern. No regex involved — avoids
+ * ReDoS risk from catastrophic backtracking on multi-wildcard patterns.
+ */
+function matchesParamValuePattern(pattern: string, value: string): boolean {
+  const normalizedPattern = pattern.toLowerCase();
+  const normalizedValue = value.toLowerCase();
+
+  if (normalizedPattern === '*') {
+    return true;
+  }
+  if (!normalizedPattern.includes('*')) {
+    return normalizedValue === normalizedPattern;
+  }
+
+  const segments = normalizedPattern.split('*');
+  let pos = 0;
+
+  // First segment must match at the start
+  if (segments[0]!.length > 0) {
+    if (!normalizedValue.startsWith(segments[0]!)) {
+      return false;
+    }
+    pos = segments[0]!.length;
+  }
+
+  // Middle segments: find next occurrence greedily
+  for (let i = 1; i < segments.length - 1; i++) {
+    const seg = segments[i]!;
+    if (seg.length === 0) continue;
+    const idx = normalizedValue.indexOf(seg, pos);
+    if (idx === -1) {
+      return false;
+    }
+    pos = idx + seg.length;
+  }
+
+  // Last segment must match at the end
+  const last = segments[segments.length - 1]!;
+  if (last.length > 0) {
+    if (normalizedValue.length - pos < last.length) {
+      return false;
+    }
+    return normalizedValue.endsWith(last);
+  }
+
+  return true;
+}
+
+/**
+ * Evaluate all param matchers against the given toolParams.
+ * Returns true if all matchers pass, false otherwise.
+ * Shared between MCP and standard matching branches.
+ */
+function evaluateParamMatchers(
+  matchers: Array<{ key: string; valuePattern: string }>,
+  toolParams: Record<string, unknown> | undefined,
+  ruleRaw: string,
+): boolean {
+  if (!toolParams) {
+    debugLogger.debug(`Param matcher rule "${ruleRaw}" skipped: no toolParams`);
+    return false;
+  }
+  for (const matcher of matchers) {
+    if (!Object.hasOwn(toolParams, matcher.key)) {
+      debugLogger.debug(
+        `Param matcher failed: rule="${ruleRaw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=missing`,
+      );
+      return false;
+    }
+    const actualValue = toolParams[matcher.key];
+    if (actualValue === undefined || actualValue === null) {
+      debugLogger.debug(
+        `Param matcher failed: rule="${ruleRaw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=null/undefined`,
+      );
+      return false;
+    }
+    if (typeof actualValue !== 'string' && typeof actualValue !== 'number') {
+      debugLogger.debug(
+        `Param matcher skipped: rule="${ruleRaw}" key=${matcher.key} value is ${typeof actualValue}`,
+      );
+      return false;
+    }
+    const actualStr = String(actualValue);
+    if (!matchesParamValuePattern(matcher.valuePattern, actualStr)) {
+      debugLogger.debug(
+        `Param matcher failed: rule="${ruleRaw}" key=${matcher.key} expected="${matcher.valuePattern}" actual="${actualStr}"`,
+      );
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -936,15 +1176,44 @@ export function matchesRule(
   domain?: string,
   pathContext?: PathMatchContext,
   specifier?: string,
+  toolParams?: Record<string, unknown>,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
+
+  // ── Invalid (malformed) rules never match anything ──────────────────
+  if (rule.invalid) {
+    return false;
+  }
 
   // ── MCP tool matching ────────────────────────────────────────────────
   if (
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    return matchesMcpPattern(rule.toolName, canonicalCtxToolName);
+    if (!matchesMcpPattern(rule.toolName, canonicalCtxToolName)) {
+      return false;
+    }
+
+    // MCP rules should not carry an unexpected specifier — the tool name
+    // already encodes server + tool identity. If a specifier was somehow
+    // parsed (e.g. user wrote `mcp__srv__tool(XXX)`), reject the match
+    // rather than silently ignoring the constraint.
+    if (rule.specifier) {
+      debugLogger.debug(
+        `MCP rule "${rule.raw}" has specifier "${rule.specifier}" — MCP tool names already encode server identity; specifier not supported`,
+      );
+      return false;
+    }
+
+    // MCP tools matched by name; now check param matchers if present
+    if (rule.toolParamMatchers?.length) {
+      if (
+        !evaluateParamMatchers(rule.toolParamMatchers, toolParams, rule.raw)
+      ) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // ── Standard tool name matching (with meta-category support) ─────────
@@ -952,53 +1221,70 @@ export function matchesRule(
     return false;
   }
 
-  // ── No specifier → match any invocation of the tool ──────────────────
-  if (!rule.specifier) {
+  // ── No specifier and no param matchers → match any invocation ────────
+  if (!rule.specifier && !rule.toolParamMatchers?.length) {
     return true;
   }
 
   // ── Specifier matching (kind-dependent) ──────────────────────────────
   const kind = rule.specifierKind ?? getSpecifierKind(rule.toolName);
 
-  switch (kind) {
-    case 'command': {
-      if (command === undefined) {
-        return false;
-      }
-      return matchesCommandPattern(rule.specifier, command);
-    }
+  let specifierMatched = true;
 
-    case 'path': {
-      if (filePath === undefined) {
-        return false;
+  if (rule.specifier) {
+    switch (kind) {
+      case 'command': {
+        if (command === undefined) {
+          return false;
+        }
+        specifierMatched = matchesCommandPattern(rule.specifier, command);
+        break;
       }
-      const ctx = pathContext ?? {
-        projectRoot: process.cwd(),
-        cwd: process.cwd(),
-      };
-      return matchesPathPattern(
-        rule.specifier,
-        filePath,
-        ctx.projectRoot,
-        ctx.cwd,
-      );
-    }
 
-    case 'domain': {
-      if (domain === undefined) {
-        return false;
+      case 'path': {
+        if (filePath === undefined) {
+          return false;
+        }
+        const ctx = pathContext ?? {
+          projectRoot: process.cwd(),
+          cwd: process.cwd(),
+        };
+        specifierMatched = matchesPathPattern(
+          rule.specifier,
+          filePath,
+          ctx.projectRoot,
+          ctx.cwd,
+        );
+        break;
       }
-      return matchesDomainPattern(rule.specifier, domain);
-    }
 
-    case 'literal':
-    default: {
-      // Literal/exact matching (for Skill names, Agent subagent types, etc.)
-      const value = command ?? specifier;
-      if (value !== undefined) {
-        return value === rule.specifier;
+      case 'domain': {
+        if (domain === undefined) {
+          return false;
+        }
+        specifierMatched = matchesDomainPattern(rule.specifier, domain);
+        break;
       }
+
+      case 'literal':
+      default: {
+        const value = command ?? specifier;
+        specifierMatched = value !== undefined && value === rule.specifier;
+        break;
+      }
+    }
+  }
+
+  if (!specifierMatched) {
+    return false;
+  }
+
+  // ── Tool param matching (key:value syntax) ───────────────────────────
+  if (rule.toolParamMatchers?.length) {
+    if (!evaluateParamMatchers(rule.toolParamMatchers, toolParams, rule.raw)) {
       return false;
     }
   }
+
+  return true;
 }

@@ -6,35 +6,48 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { Storage, resolveBundleDir } from '@qwen-code/qwen-code-core';
 import {
   type SupportedLanguage,
   SUPPORTED_LANGUAGES,
   getLanguageNameFromLocale,
+  resolveSupportedLanguage,
 } from './languages.js';
+import {
+  getTranslationModuleExport,
+  isTranslationDict,
+  type TranslationDict,
+} from './translationDict.js';
+export { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
 
 export type { SupportedLanguage };
-export { getLanguageNameFromLocale };
+export { SUPPORTED_LANGUAGES, getLanguageNameFromLocale };
 
 // State
 let currentLanguage: SupportedLanguage = 'en';
 let translations: Record<string, string | string[]> = {};
 
-// Cache
-type TranslationValue = string | string[];
-type TranslationDict = Record<string, TranslationValue>;
 const translationCache: Record<string, TranslationDict> = {};
 const loadingPromises: Record<string, Promise<TranslationDict>> = {};
+
+type TranslationLoadResult =
+  | { translations: TranslationDict; error?: undefined }
+  | { translations?: undefined; error: Error };
+
 // Path helpers
-const getBuiltinLocalesDir = (): string => {
-  const __filename = fileURLToPath(import.meta.url);
-  return path.join(path.dirname(__filename), 'locales');
-};
+//
+// Anchor the bundled locales directory at the on-disk sibling of `cli.js`
+// (i.e. `dist/locales/`, populated by `prepare-package.js`). See
+// `resolveBundleDir` for the rationale behind stripping a trailing
+// `chunks/` segment when this module is hoisted into a shared esbuild
+// chunk.
+const getBuiltinLocalesDir = (): string =>
+  path.join(resolveBundleDir(import.meta.url), 'locales');
 
 const getUserLocalesDir = (): string =>
-  path.join(homedir(), '.qwen', 'locales');
+  path.join(Storage.getGlobalQwenDir(), 'locales');
 
 /**
  * Get the path to the user's custom locales directory.
@@ -57,15 +70,17 @@ const getLocalePath = (
 export function detectSystemLanguage(): SupportedLanguage {
   const envLang = process.env['QWEN_CODE_LANG'] || process.env['LANG'];
   if (envLang) {
-    for (const lang of SUPPORTED_LANGUAGES) {
-      if (envLang.startsWith(lang.code)) return lang.code;
+    const resolved = resolveSupportedLanguage(envLang);
+    if (resolved) {
+      return resolved;
     }
   }
 
   try {
     const locale = Intl.DateTimeFormat().resolvedOptions().locale;
-    for (const lang of SUPPORTED_LANGUAGES) {
-      if (locale.startsWith(lang.code)) return lang.code;
+    const resolved = resolveSupportedLanguage(locale);
+    if (resolved) {
+      return resolved;
     }
   } catch {
     // Fallback to default
@@ -75,6 +90,46 @@ export function detectSystemLanguage(): SupportedLanguage {
 }
 
 // Translation loading
+async function tryImportTranslations(
+  moduleSpecifier: string,
+): Promise<TranslationLoadResult> {
+  try {
+    const module = await import(moduleSpecifier);
+    const result = getTranslationModuleExport(module);
+    if (isTranslationDict(result)) {
+      return { translations: result };
+    }
+
+    return {
+      error: new Error('Module loaded but result is empty or invalid'),
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
+async function tryImportBundledTranslations(
+  lang: SupportedLanguage,
+): Promise<TranslationLoadResult> {
+  try {
+    const module = await import(`./locales/${lang}.js`);
+    const result = getTranslationModuleExport(module);
+    if (isTranslationDict(result)) {
+      return { translations: result };
+    }
+
+    return {
+      error: new Error('Module loaded but result is empty or invalid'),
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
 async function loadTranslationsAsync(
   lang: SupportedLanguage,
 ): Promise<TranslationDict> {
@@ -88,74 +143,50 @@ async function loadTranslationsAsync(
   }
 
   const loadPromise = (async () => {
-    // Try user directory first (for custom language packs), then builtin directory
-    const searchDirs = [
-      { dir: getUserLocalesDir(), isUser: true },
-      { dir: getBuiltinLocalesDir(), isUser: false },
-    ];
-
-    for (const { dir, isUser } of searchDirs) {
-      // Ensure directory exists
-      if (!fs.existsSync(dir)) {
-        continue;
+    const userJsPath = getLocalePath(lang, true);
+    if (fs.existsSync(getUserLocalesDir()) && fs.existsSync(userJsPath)) {
+      const userResult = await tryImportTranslations(
+        pathToFileURL(userJsPath).href,
+      );
+      if (userResult.translations) {
+        translationCache[lang] = userResult.translations;
+        return userResult.translations;
       }
 
-      const jsPath = getLocalePath(lang, isUser);
-      if (!fs.existsSync(jsPath)) {
-        continue;
+      writeStderrLine(
+        `Failed to load translations from user directory for ${lang}: ${userResult.error.message}`,
+      );
+    }
+
+    const builtinJsPath = getLocalePath(lang, false);
+    const builtinModuleSpecifiers: string[] = [];
+    if (fs.existsSync(getBuiltinLocalesDir()) && fs.existsSync(builtinJsPath)) {
+      builtinModuleSpecifiers.push(pathToFileURL(builtinJsPath).href);
+    }
+
+    let lastBuiltinError: Error | undefined;
+    for (const moduleSpecifier of builtinModuleSpecifiers) {
+      const builtinResult = await tryImportTranslations(moduleSpecifier);
+      if (builtinResult.translations) {
+        translationCache[lang] = builtinResult.translations;
+        return builtinResult.translations;
       }
 
-      try {
-        // Convert file path to file:// URL for cross-platform compatibility
-        const fileUrl = pathToFileURL(jsPath).href;
-        try {
-          const module = await import(fileUrl);
-          const result = module.default || module;
-          if (
-            result &&
-            typeof result === 'object' &&
-            Object.keys(result).length > 0
-          ) {
-            translationCache[lang] = result;
-            return result;
-          } else {
-            throw new Error('Module loaded but result is empty or invalid');
-          }
-        } catch {
-          // For builtin locales, try alternative import method (relative path)
-          if (!isUser) {
-            try {
-              const module = await import(`./locales/${lang}.js`);
-              const result = module.default || module;
-              if (
-                result &&
-                typeof result === 'object' &&
-                Object.keys(result).length > 0
-              ) {
-                translationCache[lang] = result;
-                return result;
-              }
-            } catch {
-              // Continue to next directory
-            }
-          }
-          // If import failed, continue to next directory
-          continue;
-        }
-      } catch (error) {
-        // Log warning but continue to next directory
-        if (isUser) {
-          writeStderrLine(
-            `Failed to load translations from user directory for ${lang}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        } else {
-          writeStderrLine(
-            `Failed to load JS translations for ${lang}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        // Continue to next directory
-        continue;
-      }
+      lastBuiltinError = builtinResult.error;
+    }
+
+    const bundledBuiltinResult = await tryImportBundledTranslations(lang);
+    if (bundledBuiltinResult.translations) {
+      translationCache[lang] = bundledBuiltinResult.translations;
+      return bundledBuiltinResult.translations;
+    }
+
+    lastBuiltinError = bundledBuiltinResult.error;
+
+    if (lastBuiltinError) {
+      writeStderrLine(
+        `Failed to load JS translations for ${lang}: ${lastBuiltinError.message}`,
+      );
     }
 
     // Return empty object if both directories fail
@@ -193,7 +224,11 @@ function interpolate(
 
 // Language setting helpers
 function resolveLanguage(lang: SupportedLanguage | 'auto'): SupportedLanguage {
-  return lang === 'auto' ? detectSystemLanguage() : lang;
+  if (lang === 'auto') {
+    return detectSystemLanguage();
+  }
+
+  return resolveSupportedLanguage(lang) ?? lang;
 }
 
 // Public API
@@ -238,6 +273,19 @@ export function t(key: string, params?: Record<string, string>): string {
 }
 
 /**
+ * Locale-aware tool display name for chat-stream badges. Looks up the
+ * `toolDisplayName.<English display name>` key so tool labels never collide
+ * with same-spelled generic UI strings (e.g. a standalone "Shell" label that
+ * intentionally stays English). Falls back to the English display name when the
+ * active locale has no entry, so English and untranslated tools are unaffected.
+ */
+export function localizeToolDisplayName(displayName: string): string {
+  const key = `toolDisplayName.${displayName}`;
+  const translated = t(key);
+  return translated === key ? displayName : translated;
+}
+
+/**
  * Get a translation that is an array of strings.
  * @param key The translation key
  * @returns The array of strings, or an empty array if not found or not an array
@@ -254,4 +302,16 @@ export async function initializeI18n(
   lang?: SupportedLanguage | 'auto',
 ): Promise<void> {
   await setLanguageAsync(lang ?? 'auto');
+}
+
+/**
+ * Resolves the language setting from env / settings / auto-detect.
+ * Shared by initializer.ts and extension commands that run before full init.
+ */
+export function resolveLanguageSetting(
+  settingsLanguage?: string,
+): SupportedLanguage | 'auto' {
+  return (
+    process.env['QWEN_CODE_LANG'] || settingsLanguage || 'auto'
+  ) as SupportedLanguage | 'auto';
 }

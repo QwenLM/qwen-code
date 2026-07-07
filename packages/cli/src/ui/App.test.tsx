@@ -14,6 +14,8 @@ import {
   type UIActions,
 } from './contexts/UIActionsContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
+import { SettingsContext } from './contexts/SettingsContext.js';
+import type { LoadedSettings } from '../config/settings.js';
 import { StreamingState } from './types.js';
 
 vi.mock('ink', async (importOriginal) => {
@@ -57,6 +59,7 @@ describe('App', () => {
     streamingState: StreamingState.Idle,
     quittingMessages: null,
     dialogsVisible: false,
+    stickyTodos: null,
     mainControlsRef: { current: null },
     historyManager: {
       addItem: vi.fn(),
@@ -64,8 +67,15 @@ describe('App', () => {
       updateItem: vi.fn(),
       clearItems: vi.fn(),
       loadHistory: vi.fn(),
+      truncateToItem: vi.fn(),
     },
   };
+
+  const mockSettings = {
+    merged: {},
+    corruptedPath: undefined,
+    wasRecovered: false,
+  } as LoadedSettings;
 
   const mockUIActions = {
     refreshStatic: vi.fn(),
@@ -76,7 +86,9 @@ describe('App', () => {
       <UIActionsContext.Provider value={mockUIActions}>
         <AgentViewProvider>
           <UIStateContext.Provider value={uiState}>
-            <App />
+            <SettingsContext.Provider value={mockSettings}>
+              <App />
+            </SettingsContext.Provider>
           </UIStateContext.Provider>
         </AgentViewProvider>
       </UIActionsContext.Provider>,

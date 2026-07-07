@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_PROMPT');
+
 const MAX_MANAGED_AUTO_MEMORY_INDEX_LINES = 200;
 const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
+
+// Spell out the tier count so a future 4th tier never silently reads "two".
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
 
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
@@ -22,14 +29,16 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```',
 ];
 
+/** Verbose memory-type guidance. See also: {@link CONDENSED_TYPES_SECTION} for the condensed version used in the empty-index prompt path. */
 export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '## Types of memory',
   '',
-  'There are several discrete types of memory that you can store in your memory system:',
+  'There are several discrete types of memory that you can store in your memory system. Each type carries a `<scope>` that decides which memory directory it belongs to when both a user (cross-project) and a project (this-project-only) directory are available:',
   '',
   '<types>',
   '<type>',
   '    <name>user</name>',
+  '    <scope>always user (cross-project)</scope>',
   "    <description>Contain information about the user's role, goals, responsibilities, and knowledge. Great user memories help you tailor your future behavior to the user's preferences and perspective. Your goal in reading and writing these memories is to build up an understanding of who the user is and how you can be most helpful to them specifically. For example, you should collaborate with a senior software engineer differently than a student who is coding for the very first time. Keep in mind, that the aim here is to be helpful to the user. Avoid writing memories about the user that could be viewed as a negative judgement or that are not relevant to the work you're trying to accomplish together.</description>",
   "    <when_to_save>When you learn any details about the user's role, preferences, responsibilities, or knowledge</when_to_save>",
   "    <how_to_use>When your work should be informed by the user's profile or perspective. For example, if the user is asking you to explain a part of the code, you should answer that question in a way that is tailored to the specific details that they will find most valuable or that helps them build their mental model in relation to domain knowledge they already have.</how_to_use>",
@@ -43,6 +52,7 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '</type>',
   '<type>',
   '    <name>feedback</name>',
+  '    <scope>default user; save under project ONLY when the guidance is clearly a project-wide convention every contributor must follow (e.g., a testing policy, a build invariant), not a personal style preference.</scope>',
   '    <description>Guidance the user has given you about how to approach work — both what to avoid and what to keep doing. These are a very important type of memory to read and write as they allow you to remain coherent and responsive to the way you should approach work in the project. Record from failure AND success: if you only save corrections, you will avoid past mistakes but drift away from approaches the user has already validated, and may grow overly cautious.</description>',
   '    <when_to_save>Any time the user corrects your approach ("no not that", "don\'t", "stop doing X") OR confirms a non-obvious approach worked ("yes exactly", "perfect, keep doing that", accepting an unusual choice without pushback). Corrections are easy to notice; confirmations are quieter — watch for them. In both cases, save what is applicable to future conversations, especially if surprising or not obvious from the code. Include *why* so you can judge edge cases later.</when_to_save>',
   '    <how_to_use>Let these memories guide your behavior so that the user does not need to offer the same guidance twice.</how_to_use>',
@@ -60,6 +70,7 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '</type>',
   '<type>',
   '    <name>project</name>',
+  '    <scope>always project (this-project-only)</scope>',
   '    <description>Information that you learn about ongoing work, goals, initiatives, bugs, or incidents within the project that is not otherwise derivable from the code or git history. Project memories help you understand the broader context and motivation behind the work the user is doing within this working directory.</description>',
   '    <when_to_save>When you learn who is doing what, why, or by when. These states change relatively quickly so try to keep your understanding of this up to date. Always convert relative dates in user messages to absolute dates when saving (e.g., "Thursday" → "2026-03-05"), so the memory remains interpretable after time passes.</when_to_save>',
   "    <how_to_use>Use these memories to more fully understand the details and nuance behind the user's request and make better informed suggestions.</how_to_use>",
@@ -74,6 +85,7 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '</type>',
   '<type>',
   '    <name>reference</name>',
+  "    <scope>default project (this project's Linear, Slack channel, Grafana board, etc.); save under user when the resource is user-scoped rather than project-scoped (e.g., the company-wide wiki the user always consults).</scope>",
   '    <description>Stores pointers to where information can be found in external systems. These memories allow you to remember where to look to find up-to-date information outside of the project directory.</description>',
   '    <when_to_save>When you learn about resources in external systems and their purpose. For example, that bugs are tracked in a specific project in Linear or that feedback can be found in a specific Slack channel.</when_to_save>',
   '    <how_to_use>When the user references an external system or information that may be in an external system.</how_to_use>',
@@ -89,12 +101,14 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '',
 ];
 
+/** Verbose exclusion rules (source of truth). See also: {@link CONDENSED_DO_NOT_SAVE_SECTION} for the condensed version. */
 export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
   '## What NOT to save in memory',
   '',
   '- Code patterns, conventions, architecture, file paths, or project structure — these can be derived by reading the current project state.',
   '- Git history, recent changes, or who-changed-what — `git log` / `git blame` are authoritative.',
   '- Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.',
+  '- MCP tool names, parameter schemas, field mappings, guessed tool-call formats, or raw failed tool-call transcripts — live tool definitions are authoritative and may change. Save a tool-related note only when it captures a confirmed durable workaround, warning, owner, or escalation path.',
   '- Anything already documented in QWEN.md or AGENTS.md files.',
   '- Ephemeral task details: in-progress work, temporary state, current conversation context.',
   '',
@@ -104,12 +118,62 @@ export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
 export const MEMORY_DRIFT_CAVEAT =
   '- Memory records can become stale over time. Use memory as context for what was true at a given point in time. Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.';
 
+/** Verbose access-timing rules. See also: {@link CONDENSED_WHEN_TO_ACCESS_SECTION} for the condensed version. */
 export const WHEN_TO_ACCESS_SECTION: readonly string[] = [
   '## When to access memories',
   '- When memories seem relevant, or the user references prior-conversation work.',
   '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
   '- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.',
   MEMORY_DRIFT_CAVEAT,
+];
+
+/**
+ * Condensed version of {@link WHEN_TO_ACCESS_SECTION}.
+ * Includes the same key behavioral directives in a shorter form
+ * suitable for the empty-index prompt path.
+ */
+export const CONDENSED_WHEN_TO_ACCESS_SECTION: readonly string[] = [
+  '## Accessing memories',
+  '',
+  '- Access memory when relevant or when user references prior-conversation work.',
+  '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
+  '- If the user says to ignore memory, proceed as if empty.',
+  '- Memory records can become stale. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.',
+  '- Before recommending a memory that names a file, function, or flag, verify it still exists in the current code.',
+];
+
+/**
+ * Condensed version of {@link WHAT_NOT_TO_SAVE_SECTION}.
+ * Source of truth for exclusion rules is WHAT_NOT_TO_SAVE_SECTION;
+ * this constant provides the same guidance in shorter form for the
+ * empty-index (condensed) prompt path.
+ */
+export const CONDENSED_DO_NOT_SAVE_SECTION: readonly string[] = [
+  '## Do not save',
+  '',
+  '- Code patterns, conventions, architecture, file paths, or project structure (read the project instead)',
+  '- Git history, recent changes, or who-changed-what',
+  '- Debugging solutions or fix recipes (the fix is in the code; the commit message has context)',
+  '- MCP tool names, schemas, field mappings, guessed tool-call formats, or failed call transcripts (save only confirmed durable workarounds, warnings, owner, or escalation path)',
+  '- Ephemeral task state or current conversation context',
+  '- Content already in QWEN.md or AGENTS.md',
+  '',
+  'These exclusions apply even when the user explicitly asks you to save.',
+  'If the user asks you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.',
+];
+
+/**
+ * Condensed version of {@link TYPES_SECTION_INDIVIDUAL}.
+ * Enumerates the same four types with scope-to-directory mapping
+ * and key behavioral notes, in shorter form for the empty-index prompt path.
+ */
+export const CONDENSED_TYPES_SECTION: readonly string[] = [
+  '## Memory types',
+  '',
+  "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped). Avoid writing memories that could be viewed as a negative judgement.",
+  '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches. Record from both failure and success — if you only save corrections, you drift from validated approaches (default user; project only for project-wide conventions).',
+  '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped). Always convert relative dates to absolute dates when saving. Include *why* — project memories decay fast, so the why helps assess staleness.',
+  '- **reference** — pointers to where information lives in external systems (default project; user when the resource is personal).',
 ];
 
 export const TRUSTING_RECALL_SECTION: readonly string[] = [
@@ -143,7 +207,10 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     : trimmed;
 
   if (truncated.length > MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES) {
-    const cutAt = truncated.lastIndexOf('\n', MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES);
+    const cutAt = truncated.lastIndexOf(
+      '\n',
+      MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
+    );
     truncated = truncated.slice(
       0,
       cutAt > 0 ? cutAt : MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
@@ -160,39 +227,302 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line under ~200 chars; move detail into topic files.`;
 }
 
+/**
+ * Optional user-level (cross-project) memory dir + index. When provided to
+ * {@link buildManagedAutoMemoryPrompt}, the prompt teaches the assistant
+ * to route saves between this dir and the project dir using the per-type
+ * `<scope>` guidance in TYPES_SECTION_INDIVIDUAL.
+ */
+export interface UserAutoMemorySection {
+  memoryDir: string;
+  indexContent?: string | null;
+}
+
+/**
+ * Optional team-level (in-repo, git-tracked) memory dir + index. When provided
+ * to {@link buildManagedAutoMemoryPrompt}, the prompt adds a third shared tier
+ * and teaches the assistant when to route saves there instead of the private
+ * dirs. Enabled via the `memory.enableTeamMemory` setting (see
+ * `Config.getTeamMemoryEnabled`).
+ */
+export interface TeamAutoMemorySection {
+  memoryDir: string;
+  indexContent?: string | null;
+}
+
+/**
+ * Condensed version of the team-scope guidance from {@link buildTeamScopeSection}.
+ * Used in the empty-index (condensed) prompt path for multi-tier setups
+ * that include a team directory.
+ */
+export const CONDENSED_TEAM_GUIDANCE: readonly string[] = [
+  'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials; it is visible to everyone who can read the repository. `user` memories are always private — never save them to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team `MEMORY.md`.',
+];
+
+/**
+ * Guidance appended when a shared team directory is available. It refines the
+ * per-type `<scope>` routing (which only knows user vs project) so the model
+ * knows when a memory belongs in the shared tier — and never to put secrets
+ * there.
+ */
+function buildTeamScopeSection(): string[] {
+  return [
+    '## Saving to team memory',
+    '',
+    'TEAM memory is shared with every collaborator through the repository, so it refines the `<scope>` guidance above:',
+    '',
+    '- A `feedback` memory that is a project-wide convention every contributor must follow (a testing policy, a build invariant) → save to TEAM instead of the project directory.',
+    '- A `reference` pointer the whole team relies on (issue tracker, dashboard, channel) → save to TEAM instead of the project directory.',
+    '- `user` memories are always private — never save them to TEAM.',
+    '- `project` memories stay private to you by default. Save to TEAM only for durable shared facts every contributor needs — not time-bound state like freezes or in-flight task status, which stays private and decays.',
+    '- You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials. It is visible to everyone who can read the repository, and such writes are rejected automatically.',
+    '- For TEAM memory you only write the memory file (Step 1). Its `MEMORY.md` index is generated automatically from the saved files — do NOT hand-edit the team index (that two-step rule applies only to the private directories).',
+    '',
+  ];
+}
+
+function renderIndexBlock(
+  memoryDir: string,
+  indexContent: string | null | undefined,
+): string[] {
+  const trimmed = indexContent?.trim();
+  return [
+    `## ${memoryDir}/MEMORY.md`,
+    '',
+    trimmed
+      ? truncateManagedAutoMemoryIndex(trimmed)
+      : 'Your MEMORY.md is currently empty. When you save new memories, they will appear here.',
+  ];
+}
+
+function buildIndexSections(
+  memoryDir: string,
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): string[] {
+  const sections: string[] = [];
+  if (userSection !== undefined) {
+    sections.push(
+      ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
+      '',
+    );
+  }
+  sections.push(...renderIndexBlock(memoryDir, indexContent));
+  if (teamSection !== undefined) {
+    sections.push(
+      '',
+      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
+    );
+  }
+  return sections;
+}
+
+export interface BuildMemoryPromptOptions {
+  forceFullProtocol?: boolean;
+}
+
+function allIndexesEmpty(
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): boolean {
+  const isEmpty = (s: string | null | undefined) =>
+    s === null || s === undefined || s.trim() === '';
+  return (
+    isEmpty(indexContent) &&
+    (userSection === undefined || isEmpty(userSection.indexContent)) &&
+    (teamSection === undefined || isEmpty(teamSection.indexContent))
+  );
+}
+
 export function buildManagedAutoMemoryPrompt(
   memoryDir: string,
   indexContent?: string | null,
+  userSection?: UserAutoMemorySection,
+  teamSection?: TeamAutoMemorySection,
+  options?: BuildMemoryPromptOptions,
 ): string {
-  const trimmed = indexContent?.trim();
+  const tierLines: string[] = [];
+  if (userSection !== undefined) {
+    tierLines.push(
+      `- USER memory (cross-project, durable knowledge about who the user is): \`${userSection.memoryDir}\``,
+    );
+  }
+  tierLines.push(
+    `- PROJECT memory (this project only, private to you): \`${memoryDir}\``,
+  );
+  if (teamSection !== undefined) {
+    tierLines.push(
+      `- TEAM memory (this project, shared with every collaborator through the repository — just save the file; the repo's normal git workflow carries it to teammates, so don't run git yourself): \`${teamSection.memoryDir}\``,
+    );
+  }
+  const multiTier = tierLines.length > 1;
+
+  if (
+    allIndexesEmpty(indexContent, userSection, teamSection) &&
+    !options?.forceFullProtocol
+  ) {
+    debugLogger.debug(
+      'memory prompt: using condensed path (all indexes empty, forceFullProtocol=false)',
+    );
+    const condensedIntro = multiTier
+      ? [
+          `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
+          '',
+          ...tierLines,
+        ]
+      : [
+          `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
+        ];
+
+    const condensedTypes = CONDENSED_TYPES_SECTION;
+
+    const condensedMaintenanceBullets = [
+      '',
+      '- Keep the name, description, and type fields in memory files up-to-date with the content.',
+      '- Organize memories semantically by topic, not chronologically.',
+      '- Update or remove memories that turn out to be wrong or outdated.',
+      `- Every \`MEMORY.md\` index is always loaded into your conversation context \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
+    ];
+
+    const condensedSave = multiTier
+      ? [
+          '## How to save memories',
+          '',
+          'Two-step process:',
+          '',
+          `**Step 1** — write the memory to its own file (e.g., \`user/role.md\`, \`feedback/testing.md\`) inside the directory chosen by its type scope, using this frontmatter format:`,
+          '',
+          ...MEMORY_FRONTMATTER_EXAMPLE,
+          '',
+          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file.',
+          '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
+          ...condensedMaintenanceBullets,
+          ...(teamSection !== undefined
+            ? ['', ...CONDENSED_TEAM_GUIDANCE]
+            : []),
+        ]
+      : [
+          '## How to save memories',
+          '',
+          'Two-step process:',
+          '',
+          `**Step 1** — write the memory to its own file (e.g., \`user/role.md\`, \`feedback/testing.md\`) using this frontmatter format:`,
+          '',
+          ...MEMORY_FRONTMATTER_EXAMPLE,
+          '',
+          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\`. Each entry: one line, under ~150 chars: \`- [Title](file.md) — one-line hook\`.`,
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
+          ...condensedMaintenanceBullets,
+        ];
+
+    const indexSections = buildIndexSections(
+      memoryDir,
+      indexContent,
+      userSection,
+      teamSection,
+    );
+
+    const condensedLines = [
+      '# auto memory',
+      '',
+      ...condensedIntro,
+      '',
+      'Your memory is currently empty. When you learn something worth remembering across conversations, save it using the process below.',
+      'If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.',
+      '',
+      ...condensedTypes,
+      '',
+      ...CONDENSED_DO_NOT_SAVE_SECTION,
+      '',
+      ...CONDENSED_WHEN_TO_ACCESS_SECTION,
+      '',
+      ...condensedSave,
+      '',
+      '- Use plans and tasks for in-conversation work; reserve memory for durable cross-conversation knowledge.',
+      '',
+      ...indexSections,
+    ];
+
+    return condensedLines.join('\n');
+  }
+
+  const forceReason = options?.forceFullProtocol
+    ? 'forceFullProtocol=true'
+    : 'at least one index has content';
+  debugLogger.debug(`memory prompt: using full path (${forceReason})`);
+
+  const intro = multiTier
+    ? [
+        `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
+        '',
+        ...tierLines,
+        '',
+        'For every memory you save, decide which directory it belongs in using the per-type `<scope>` guidance below.',
+      ]
+    : [
+        `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
+      ];
+
+  const howToSave = multiTier
+    ? [
+        '## How to save memories',
+        '',
+        'Saving a memory is a two-step process:',
+        '',
+        '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        '',
+        ...MEMORY_FRONTMATTER_EXAMPLE,
+        '',
+        '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.',
+        '',
+        `- Every \`MEMORY.md\` index is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
+        '- Keep the name, description, and type fields in memory files up-to-date with the content',
+        '- Organize memory semantically by topic, not chronologically.',
+        '- Update or remove memories that turn out to be wrong or outdated.',
+        '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
+      ]
+    : [
+        '## How to save memories',
+        '',
+        'Saving a memory is a two-step process:',
+        '',
+        '**Step 1** — write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        '',
+        ...MEMORY_FRONTMATTER_EXAMPLE,
+        '',
+        `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
+        '',
+        `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
+        '- Keep the name, description, and type fields in memory files up-to-date with the content',
+        '- Organize memory semantically by topic, not chronologically.',
+        '- Update or remove memories that turn out to be wrong or outdated.',
+        '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
+      ];
+
+  const indexSections = buildIndexSections(
+    memoryDir,
+    indexContent,
+    userSection,
+    teamSection,
+  );
 
   const lines = [
     '# auto memory',
     '',
-    `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
+    ...intro,
     '',
     "You should build up this memory system over time so that future conversations can have a complete picture of who the user is, how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.",
     '',
     'If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.',
     '',
     ...TYPES_SECTION_INDIVIDUAL,
+    ...(teamSection !== undefined ? buildTeamScopeSection() : []),
     ...WHAT_NOT_TO_SAVE_SECTION,
     '',
-    '## How to save memories',
-    '',
-    'Saving a memory is a two-step process:',
-    '',
-    '**Step 1** — write the memory to its own file (e.g., `user_role.md`, `feedback_testing.md`) using this frontmatter format:',
-    '',
-    ...MEMORY_FRONTMATTER_EXAMPLE,
-    '',
-    `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
-    '',
-    `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
-    '- Keep the name, description, and type fields in memory files up-to-date with the content',
-    '- Organize memory semantically by topic, not chronologically.',
-    '- Update or remove memories that turn out to be wrong or outdated.',
-    '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
+    ...howToSave,
     '',
     ...WHEN_TO_ACCESS_SECTION,
     '',
@@ -203,11 +533,7 @@ export function buildManagedAutoMemoryPrompt(
     '- When to use or update a plan instead of memory: If you are about to start a non-trivial implementation task and would like to reach alignment with the user on your approach you should use a Plan rather than saving this information to memory. Similarly, if you already have a plan within the conversation and you have changed your approach persist that change by updating the plan rather than saving a memory.',
     '- When to use or update tasks instead of memory: When you need to break your work in current conversation into discrete steps or keep track of your progress use tasks instead of saving to memory. Tasks are great for persisting information about the work that needs to be done in the current conversation, but memory should be reserved for information that will be useful in future conversations.',
     '',
-    `## ${memoryDir}/MEMORY.md`,
-    '',
-    trimmed
-      ? truncateManagedAutoMemoryIndex(trimmed)
-      : 'Your MEMORY.md is currently empty. When you save new memories, they will appear here.',
+    ...indexSections,
   ];
 
   return lines.join('\n');
@@ -217,8 +543,17 @@ export function appendManagedAutoMemoryToUserMemory(
   userMemory: string,
   memoryDir: string,
   indexContent?: string | null,
+  userSection?: UserAutoMemorySection,
+  teamSection?: TeamAutoMemorySection,
+  options?: BuildMemoryPromptOptions,
 ): string {
-  const managedPrompt = buildManagedAutoMemoryPrompt(memoryDir, indexContent);
+  const managedPrompt = buildManagedAutoMemoryPrompt(
+    memoryDir,
+    indexContent,
+    userSection,
+    teamSection,
+    options,
+  );
   const trimmedUserMemory = userMemory.trim();
 
   if (!managedPrompt) {
@@ -231,6 +566,4 @@ export function appendManagedAutoMemoryToUserMemory(
   return `${trimmedUserMemory}\n\n---\n\n${managedPrompt}`;
 }
 
-export {
-  MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
-};
+export { MAX_MANAGED_AUTO_MEMORY_INDEX_LINES };

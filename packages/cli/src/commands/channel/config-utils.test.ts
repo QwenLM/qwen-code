@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { resolveEnvVars, parseChannelConfig } from './config-utils.js';
 
 // Mock the channel-registry so we don't pull in real plugins
@@ -67,6 +69,29 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('requires "token"');
   });
 
+  it('throws a clear error when token is not a string', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'telegram', token: 123 }),
+    ).rejects.toThrow('Channel "bot" field "token" must be a string.');
+  });
+
+  it('throws a clear error when dingtalk credentials are not strings', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 123,
+        clientSecret: 'secret',
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientId" must be a string.');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: false,
+      }),
+    ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
+  });
+
   it('parses minimal valid config with defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
@@ -80,6 +105,8 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
     expect(result.groups).toEqual({});
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
   });
 
   it('resolves env vars in token, clientId, clientSecret', async () => {
@@ -113,6 +140,8 @@ describe('parseChannelConfig', () => {
       cwd: '/custom',
       approvalMode: 'auto',
       instructions: 'Be helpful',
+      identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
       model: 'qwen-coder',
       groupPolicy: 'open',
       groups: { g1: { mentionKeywords: ['@bot'] } },
@@ -125,9 +154,65 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe('/custom');
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
+    expect(result.identity).toEqual({
+      id: 'ops-agent',
+      displayName: 'Ops Agent',
+    });
+    expect(result.memoryScope).toEqual({
+      namespace: 'qwen-tag:ops',
+      mode: 'metadata-only',
+    });
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('drops empty identity and memory scope objects', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: '', displayName: null, description: undefined },
+      memoryScope: { namespace: '', mode: undefined },
+    });
+
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
+  });
+
+  it('rejects a non-object identity', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: 'ops' }),
+    ).rejects.toThrow('Channel "bot" field "identity" must be an object.');
+  });
+
+  it('rejects a non-string identity field', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: { id: 123 } }),
+    ).rejects.toThrow('Channel "bot" field "identity.id" must be a string.');
+  });
+
+  it('rejects a non-object memoryScope', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', memoryScope: ['ops'] }),
+    ).rejects.toThrow('Channel "bot" field "memoryScope" must be an object.');
+  });
+
+  it('rejects an unknown memoryScope.mode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        memoryScope: { mode: 'full' },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "memoryScope.mode" must be "metadata-only".',
+    );
+  });
+
+  it('drops empty identity fields instead of failing', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: 'ops-agent', displayName: '', description: null },
+    });
+    expect(result.identity).toEqual({ id: 'ops-agent' });
   });
 
   it('spreads extra fields from raw config', async () => {
@@ -136,5 +221,38 @@ describe('parseChannelConfig', () => {
       customField: 42,
     });
     expect((result as Record<string, unknown>)['customField']).toBe(42);
+  });
+
+  it('expands tilde in cwd (~/x → $HOME/x)', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~/xomo',
+    });
+    expect(result.cwd).toBe(path.join(os.homedir(), 'xomo'));
+  });
+
+  it('expands bare tilde (~) in cwd to home directory', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~',
+    });
+    expect(result.cwd).toBe(path.normalize(os.homedir()));
+  });
+
+  it('resolves relative cwd against process.cwd', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: 'relative/dir',
+    });
+    expect(result.cwd).toBe(path.resolve('relative/dir'));
+  });
+
+  it('leaves absolute cwd unchanged', async () => {
+    const abs = path.resolve('/custom');
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: abs,
+    });
+    expect(result.cwd).toBe(abs);
   });
 });

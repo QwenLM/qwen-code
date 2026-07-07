@@ -1,0 +1,148 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as vscode from 'vscode';
+import { SessionService, type Config } from '@qwen-code/qwen-code-core';
+import {
+  collectSessionData,
+  generateExportFilename,
+  normalizeSessionData,
+  toHtml,
+  toJson,
+  toJsonl,
+  toMarkdown,
+} from '@qwen-code/qwen-code/export';
+import {
+  EXPORT_SESSION_FORMATS,
+  getExportSubcommandRequiredMessage,
+  isSessionExportFormat,
+  type SessionExportFormat,
+} from '../utils/exportSlashCommand.js';
+import { stripZeroWidthSpaces } from '@qwen-code/webui';
+
+export { EXPORT_SESSION_FORMATS as SESSION_EXPORT_FORMATS };
+export type { SessionExportFormat } from '../utils/exportSlashCommand.js';
+
+export interface SessionExportResult {
+  filename: string;
+  uri: vscode.Uri;
+}
+
+const EXPORT_CONFIG = {
+  getChannel: () => 'vscode-companion',
+  getToolRegistry: () => undefined,
+} as unknown as Config;
+
+export function parseExportSlashCommand(
+  text: string,
+): SessionExportFormat | null {
+  const trimmed = stripZeroWidthSpaces(text).trim();
+  if (!trimmed.startsWith('/')) {
+    return null;
+  }
+
+  const parts = trimmed.split(/\s+/).filter(Boolean);
+  const [command, format, ...rest] = parts;
+  if (command !== '/export') {
+    return null;
+  }
+
+  if (!format) {
+    throw new Error(getExportSubcommandRequiredMessage());
+  }
+
+  const normalizedFormat = format.toLowerCase();
+  if (rest.length === 0 && isSessionExportFormat(normalizedFormat)) {
+    return normalizedFormat;
+  }
+
+  throw new Error(
+    'Unsupported /export format. Use /export html, /export md, /export json, or /export jsonl.',
+  );
+}
+
+function renderExportContent(
+  format: SessionExportFormat,
+  normalizedData: Awaited<ReturnType<typeof normalizeSessionData>>,
+): string {
+  switch (format) {
+    case 'html':
+      return toHtml(normalizedData);
+    case 'md':
+      return toMarkdown(normalizedData);
+    case 'json':
+      return toJson(normalizedData);
+    case 'jsonl':
+      return toJsonl(normalizedData);
+    default: {
+      const unreachableFormat: never = format;
+      throw new Error(`Unsupported export format: ${unreachableFormat}`);
+    }
+  }
+}
+
+/**
+ * Export session to file via a native Save dialog.
+ * Returns null if the user cancels the dialog.
+ *
+ * @param options.sessionId - The session to export
+ * @param options.cwd - Working directory used as default save location
+ * @param options.format - Target format (html, md, json, jsonl)
+ * @returns Export result with filename and URI, or null if cancelled
+ */
+export async function exportSessionToFile(options: {
+  sessionId: string;
+  cwd: string;
+  format: SessionExportFormat;
+}): Promise<SessionExportResult | null> {
+  const { cwd, format, sessionId } = options;
+  const sessionService = new SessionService(cwd);
+  const sessionData = await sessionService.loadSession(sessionId);
+
+  if (!sessionData) {
+    throw new Error('No active session found to export.');
+  }
+
+  const exportData = await collectSessionData(
+    sessionData.conversation,
+    EXPORT_CONFIG,
+  );
+  const normalizedData = normalizeSessionData(
+    exportData,
+    sessionData.conversation.messages,
+    EXPORT_CONFIG,
+  );
+  const content = renderExportContent(format, normalizedData);
+  const defaultFilename = generateExportFilename(format);
+
+  // Show native Save dialog so users can choose destination and filename
+  const filterMap: Record<SessionExportFormat, Record<string, string[]>> = {
+    html: { HTML: ['html'] },
+    md: { Markdown: ['md'] },
+    json: { JSON: ['json'] },
+    jsonl: { 'JSON Lines': ['jsonl'] },
+  };
+
+  const saveUri = await vscode.window.showSaveDialog({
+    defaultUri: vscode.Uri.file(path.join(cwd, defaultFilename)),
+    filters: filterMap[format],
+    title: `Export Session as ${format.toUpperCase()}`,
+  });
+
+  if (!saveUri) {
+    // User cancelled the save dialog
+    return null;
+  }
+
+  await fs.writeFile(saveUri.fsPath, content, 'utf-8');
+
+  return {
+    filename: path.basename(saveUri.fsPath),
+    uri: saveUri,
+  };
+}

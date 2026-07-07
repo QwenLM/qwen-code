@@ -7,7 +7,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, runSideQuery } from '@qwen-code/qwen-code-core';
 import type { TurnContent, MessageRewriteConfig } from './types.js';
 
 const debugLogger = createDebugLogger('MESSAGE_REWRITER');
@@ -112,60 +112,45 @@ export class LlmRewriter {
     );
 
     try {
-      const contentGenerator = this.config.getContentGenerator();
-      if (!contentGenerator) {
-        debugLogger.warn('No content generator available for rewriting');
-        return null;
-      }
-
       const model = this.rewriteModel || this.config.getModel();
 
-      const result = await contentGenerator.generateContent(
-        {
-          model,
-          config: {
-            systemInstruction: this.prompt,
-            abortSignal: signal,
-            temperature: 0.3,
-            maxOutputTokens: 1024,
-            // Disable thinking to avoid thinking leaking into output
-            thinkingConfig: { includeThoughts: false },
-          },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: inputText }],
-            },
-          ],
+      const result = await runSideQuery(this.config, {
+        purpose: 'acp-rewrite',
+        model,
+        // Best-effort: failure path returns null gracefully, so don't burn
+        // 7 retries on transient outages the user will never see.
+        maxAttempts: 1,
+        systemInstruction: this.prompt,
+        config: {
+          temperature: 0.3,
+          maxOutputTokens: 1024,
         },
-        `rewrite-turn`,
-      );
+        abortSignal: signal ?? new AbortController().signal,
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: inputText }],
+          },
+        ],
+      });
 
-      // Extract only non-thought text parts
-      const rewritten =
-        result.candidates?.[0]?.content?.parts
-          ?.filter((p) => !p.thought)
-          .map((p) => p.text)
-          .filter(Boolean)
-          .join('') ?? '';
+      const rewritten = result.text;
 
       // If LLM returns empty or very short, skip
-      if (!rewritten.trim() || rewritten.trim().length < 5) {
+      if (!rewritten || rewritten.length < 5) {
         debugLogger.info(`[REWRITE OUTPUT] empty or too short, skipping`);
         return null;
       }
 
-      const trimmed = rewritten.trim();
-
       debugLogger.info(
-        `[REWRITE OUTPUT] len=${trimmed.length}\n` +
-          `--- OUTPUT ---\n${trimmed}\n---`,
+        `[REWRITE OUTPUT] len=${rewritten.length}\n` +
+          `--- OUTPUT ---\n${rewritten}\n---`,
       );
 
       // Update context for next turn
-      this.outputHistory.push(trimmed);
+      this.outputHistory.push(rewritten);
 
-      return trimmed;
+      return rewritten;
     } catch (error) {
       debugLogger.warn(
         `LLM rewrite failed, skipping: ${error instanceof Error ? error.message : String(error)}`,

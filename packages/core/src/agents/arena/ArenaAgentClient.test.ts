@@ -40,8 +40,8 @@ const createMockMetrics = (
         total: overrides.totalTokens ?? 0,
         cached: 0,
         thoughts: 0,
-        tool: 0,
       },
+      bySource: {},
     },
   },
   tools: {
@@ -460,8 +460,8 @@ describe('ArenaAgentClient', () => {
               total: 150,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
+            bySource: {},
           },
           'model-b': {
             api: {
@@ -475,8 +475,8 @@ describe('ArenaAgentClient', () => {
               total: 300,
               cached: 0,
               thoughts: 0,
-              tool: 0,
             },
+            bySource: {},
           },
         },
         tools: {

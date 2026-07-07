@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import { Storage } from '@qwen-code/qwen-code-core';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { readServiceInfo } from './pidfile.js';
@@ -36,14 +36,22 @@ export const statusCommand: CommandModule = {
       process.exit(0);
     }
 
-    writeStdoutLine(`Channel service: running (PID ${info.pid})`);
+    if (info.owner === 'serve') {
+      writeStdoutLine(
+        `Channel service: managed by qwen serve (PID ${info.pid})`,
+      );
+      if (info.workerPid !== undefined) {
+        writeStdoutLine(`Worker PID:      ${info.workerPid}`);
+      }
+    } else {
+      writeStdoutLine(`Channel service: running (PID ${info.pid})`);
+    }
     writeStdoutLine(`Uptime:          ${formatUptime(info.startedAt)}`);
     writeStdoutLine('');
 
     // Read session data for per-channel counts
     const sessionsPath = path.join(
-      os.homedir(),
-      '.qwen',
+      Storage.getGlobalQwenDir(),
       'channels',
       'sessions.json',
     );
