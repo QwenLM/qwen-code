@@ -15,6 +15,9 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let sessionsState: any[];
+// Stable across renders (assigned once per test) so SplitView's reload effects,
+// which depend on `reload`'s identity, don't re-fire on every render.
+let reloadMock: ReturnType<typeof vi.fn>;
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
@@ -23,7 +26,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     </div>
   ),
   useConnection: () => connectionState,
-  useSessions: () => ({ sessions: sessionsState }),
+  useSessions: () => ({ sessions: sessionsState, reload: reloadMock }),
 }));
 
 vi.mock('./ChatPane', () => ({
@@ -60,6 +63,7 @@ beforeEach(() => {
     { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
     { sessionId: 's4', workspaceCwd: '/w', displayName: 'Four' },
   ];
+  reloadMock = vi.fn(async () => sessionsState);
 });
 
 afterEach(() => {
@@ -242,5 +246,61 @@ describe('SplitView', () => {
     expect(container!.textContent).toContain('This session pane hit an error');
     expect(panes()).toHaveLength(1);
     expect(titles()).toEqual(['Two']);
+  });
+
+  it('reloads the session list when the picker opens (never a stale list)', () => {
+    render({ initialSessionIds: ['s1'] });
+    // `useSessions` only fetches on mount; nothing reloads until the user acts.
+    expect(reloadMock).not.toHaveBeenCalled();
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reloads the picker list when the parent bumps the reload token', () => {
+    render({ initialSessionIds: ['s1'], sessionListReloadToken: 0 });
+    // The initial token is not a change, so it does not trigger a reload.
+    expect(reloadMock).not.toHaveBeenCalled();
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            onExit={() => {}}
+            initialSessionIds={['s1']}
+            sessionListReloadToken={1}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('mirrors the live pane set up to the parent as panes change', () => {
+    const onPanesChange = vi.fn();
+    render({ initialSessionIds: ['s1'], onPanesChange });
+    // Reported on mount so the parent's seed reflects the actual panes…
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+    // …and after every add (so switching away and back restores it).
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 's2']);
+    // …and after every remove.
+    const close = container!.querySelector('[data-testid="pane-close"]');
+    act(() =>
+      close!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s2']);
   });
 });
