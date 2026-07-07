@@ -92,6 +92,7 @@ export interface ChannelLoopPromptOptions {
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
 type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
+type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
   cancelled: boolean;
   cancelPending?: boolean;
@@ -192,10 +193,8 @@ export abstract class ChannelBase {
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
   /** Per-session message buffer for collect mode. */
-  private collectBuffers: Map<
-    string,
-    Array<{ text: string; envelope: Envelope }>
-  > = new Map();
+  private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
+  private readonly preflightedEnvelopes = new WeakSet<Envelope>();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
   };
@@ -742,6 +741,11 @@ export abstract class ChannelBase {
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          this.notifyPromptBufferDrained(
+            lastEnvelope.chatId,
+            sessionId,
+            buffer,
+          );
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
@@ -751,7 +755,8 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
-          this.handleInbound(syntheticEnvelope).catch((err) => {
+          this.markPreflighted(syntheticEnvelope);
+          this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
@@ -886,10 +891,47 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.stopActiveStreaming(active, sessionId, reason);
-        this.collectBuffers.delete(sessionId);
+        this.dropCollectBuffer(sessionId);
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  private dropCollectBuffer(sessionId: string): void {
+    const buffer = this.collectBuffers.get(sessionId);
+    if (!buffer) return;
+    this.collectBuffers.delete(sessionId);
+    const chatId = buffer[0]?.envelope.chatId ?? '';
+    const messageIds = this.collectBufferMessageIds(buffer);
+    try {
+      this.onPromptBufferDropped(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDropped threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private notifyPromptBufferDrained(
+    chatId: string,
+    sessionId: string,
+    buffer: CollectBufferEntry[],
+  ): void {
+    const messageIds = this.collectBufferMessageIds(buffer);
+    if (messageIds.length === 0) return;
+    try {
+      this.onPromptBufferDrained(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDrained threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private collectBufferMessageIds(buffer: CollectBufferEntry[]): string[] {
+    return buffer
+      .map((entry) => entry.envelope.messageId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
   private logCancelSessionFailure(sessionId: string, err: unknown): void {
@@ -945,6 +987,24 @@ export abstract class ChannelBase {
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
+  ): void {}
+
+  protected onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  protected onPromptBufferDrained(
+    _chatId: string,
+    _sessionId: string,
+    _messageIds: string[],
+  ): void {}
+
+  protected onPromptBufferDropped(
+    _chatId: string,
+    _sessionId: string,
+    _messageIds: string[],
   ): void {}
 
   /**
@@ -1071,7 +1131,7 @@ export abstract class ChannelBase {
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
           const active = this.activePrompts.get(id);
-          this.collectBuffers.delete(id);
+          this.dropCollectBuffer(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
             const settled = await this.cancelAndAwaitActive(active, id);
@@ -2331,23 +2391,60 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
-  async handleInbound(envelope: Envelope): Promise<void> {
-    // 1. Group gate: policy + allowlist + mention gating
+  protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
       if (groupResult.reason === 'mention_required') {
         this.recordPendingGroupHistory(envelope);
       }
-      return; // silently drop — no pairing, no reply
+      return false;
     }
 
-    // 2. Sender gate: allowlist / pairing / open
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
-        await this.onPairingRequired(envelope.chatId, result.pairingCode);
+        return this.onPairingRequired(envelope.chatId, result.pairingCode)
+          .then(() => false)
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[Channel:${this.name}] pairing notification failed: ${sanitizeLogText(
+                err instanceof Error ? err.message : String(err),
+                200,
+              )}\n`,
+            );
+            return false;
+          });
       }
-      return;
+      return false;
+    }
+
+    this.markPreflighted(envelope);
+    return true;
+  }
+
+  async handleInbound(envelope: Envelope): Promise<void> {
+    const preflight = this.preflightInbound(envelope);
+    if (!(isPromiseLike(preflight) ? await preflight : preflight)) return;
+
+    await this.processInbound(envelope);
+  }
+
+  protected markPreflighted(envelope: Envelope): void {
+    this.preflightedEnvelopes.add(envelope);
+  }
+
+  /**
+   * Process an inbound message after preflight gates have passed.
+   *
+   * This method does not run group gating, sender allowlisting, or pairing
+   * checks. Callers must run preflightInbound() first unless the envelope was
+   * already preflighted, such as during collect-buffer drain.
+   */
+  protected async processInbound(envelope: Envelope): Promise<void> {
+    if (!this.preflightedEnvelopes.delete(envelope)) {
+      throw new Error(
+        'processInbound called without a successful preflightInbound check.',
+      );
     }
 
     // 3. Slash command handling — before session/agent routing
@@ -2555,6 +2652,17 @@ export abstract class ChannelBase {
             this.collectBuffers.set(sessionId, buffer);
           }
           buffer.push({ text: promptText, envelope });
+          try {
+            this.onPromptBuffered(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            );
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+          }
           return;
         }
         case 'steer': {
@@ -2931,6 +3039,11 @@ export abstract class ChannelBase {
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          this.notifyPromptBufferDrained(
+            lastEnvelope.chatId,
+            sessionId,
+            buffer,
+          );
           // Re-enter handleInbound with the coalesced message
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
@@ -2943,9 +3056,10 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
+          this.markPreflighted(syntheticEnvelope);
           // Queue the coalesced prompt (don't await to avoid deadlock on the queue).
           // Surface a drain failure instead of silently losing buffered turns.
-          this.handleInbound(syntheticEnvelope).catch((err) => {
+          this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
@@ -2982,6 +3096,14 @@ export abstract class ChannelBase {
 
 function truncateGroupHistoryField(value: string): string {
   return value.slice(0, GROUP_HISTORY_ENTRY_METADATA_LIMIT);
+}
+
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 function truncateLoopLabel(prompt: string): string {

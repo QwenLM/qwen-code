@@ -168,6 +168,8 @@ async function startSingle(
     config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
+      process.cwd(),
+      { resolveEnvVars: 'available' },
     );
   } catch (err) {
     writeStderrLine(

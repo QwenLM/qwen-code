@@ -33,6 +33,17 @@ class TestChannel extends ChannelBase {
   }> = [];
   promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
     [];
+  promptBuffers: Array<{
+    chatId: string;
+    sessionId: string;
+    messageId?: string;
+    bufferSize: number;
+  }> = [];
+  promptBufferDrops: Array<{
+    chatId: string;
+    sessionId: string;
+    messageIds: string[];
+  }> = [];
   responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
@@ -101,6 +112,32 @@ class TestChannel extends ChannelBase {
     }
   }
 
+  protected override onPromptBufferDropped(
+    chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    this.promptBufferDrops.push({ chatId, sessionId, messageIds });
+  }
+
+  protected override onPromptBuffered(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    const buffers = (
+      this as unknown as {
+        collectBuffers: Map<string, unknown[]>;
+      }
+    ).collectBuffers;
+    this.promptBuffers.push({
+      chatId,
+      sessionId,
+      messageId,
+      bufferSize: buffers.get(sessionId)?.length ?? 0,
+    });
+  }
+
   protected override onResponseChunk(
     chatId: string,
     chunk: string,
@@ -116,6 +153,12 @@ class TestChannel extends ChannelBase {
   ): Promise<void> {
     await this.responseCompleteGate;
     await super.onResponseComplete(chatId, fullText, sessionId);
+  }
+}
+
+class UnsafeProcessChannel extends TestChannel {
+  processWithoutPreflight(envelope: Envelope): Promise<void> {
+    return this.processInbound(envelope);
   }
 }
 
@@ -207,6 +250,31 @@ describe('ChannelBase', () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('rejects direct processing without preflight', async () => {
+      const ch = new UnsafeProcessChannel('test-chan', defaultConfig(), bridge);
+
+      await expect(ch.processWithoutPreflight(envelope())).rejects.toThrow(
+        'processInbound called without a successful preflightInbound check.',
+      );
+    });
+
+    it('waits for thenable preflight results', async () => {
+      class ThenablePreflightChannel extends TestChannel {
+        protected override preflightInbound(): PromiseLike<boolean> {
+          return { then: (resolve) => resolve(false) };
+        }
+      }
+      const ch = new ThenablePreflightChannel(
+        'test-chan',
+        defaultConfig(),
+        bridge,
+      );
+
+      await ch.handleInbound(envelope());
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('rejects sender with allowlist policy', async () => {
@@ -6011,12 +6079,18 @@ describe('ChannelBase', () => {
         collectBuffers: Map<string, unknown>;
       };
       maps.collectBuffers.set(sessionId, [
-        { text: 'buffered', envelope: envelope({ text: 'buffered' }) },
+        {
+          text: 'buffered',
+          envelope: envelope({ text: 'buffered', messageId: 'm-buffered' }),
+        },
       ]);
 
       await expect(ch.cancelPromptForTest(sessionId)).resolves.toBe(true);
 
       expect(maps.collectBuffers.has(sessionId)).toBe(false);
+      expect(ch.promptBufferDrops).toEqual([
+        { chatId: 'chat1', sessionId, messageIds: ['m-buffered'] },
+      ]);
       resolvePrompt('late');
       await prompt;
     });
@@ -6553,6 +6627,35 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('pairing code');
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
+
+    it('treats pairing notification failures as preflight rejection', async () => {
+      class PairingFailureChannel extends TestChannel {
+        override async sendMessage(): Promise<void> {
+          throw new Error('send failed');
+        }
+      }
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new PairingFailureChannel(
+        'test',
+        defaultConfig({
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        }),
+        bridge,
+      );
+
+      await expect(
+        ch.handleInbound(envelope({ senderId: 'stranger' })),
+      ).resolves.toBeUndefined();
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('pairing notification failed'),
+      );
+      stderr.mockRestore();
+    });
   });
 
   describe('setBridge', () => {
@@ -6642,8 +6745,12 @@ describe('ChannelBase', () => {
       await new Promise((r) => setTimeout(r, 10));
 
       // Send two more messages while first is busy — these should buffer
-      const p2 = ch.handleInbound(envelope({ text: 'second' }));
-      const p3 = ch.handleInbound(envelope({ text: 'third' }));
+      const p2 = ch.handleInbound(
+        envelope({ text: 'second', messageId: 'msg-2' }),
+      );
+      const p3 = ch.handleInbound(
+        envelope({ text: 'third', messageId: 'msg-3' }),
+      );
 
       // p2 and p3 should resolve immediately (buffered, not queued)
       await p2;
@@ -6651,6 +6758,18 @@ describe('ChannelBase', () => {
 
       // First prompt is still running, bridge.prompt called only once
       expect(callCount).toBe(1);
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-3',
+          bufferSize: 2,
+        }),
+      ]);
 
       // Resolve the first prompt
       resolveFirst('first response');
@@ -6675,6 +6794,48 @@ describe('ChannelBase', () => {
           expect.objectContaining({ text: 'coalesced response' }),
         ]),
       );
+    });
+
+    it('collect: does not preflight the coalesced followup again', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ text: 'first' }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: 'third' }));
+
+      resolveFirst('first response');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      expect(ch.preflightTexts).toEqual(['first', 'second', 'third']);
     });
 
     it('collect: no followup if no messages buffered', async () => {
@@ -8233,7 +8394,7 @@ describe('ChannelBase', () => {
       expect(ch.promptEnds).toHaveLength(0);
     });
 
-    it('does not call hooks for buffered messages in collect mode', async () => {
+    it('does not call start or end hooks for buffered messages in collect mode', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
         resolveFirst = r;
@@ -8258,6 +8419,13 @@ describe('ChannelBase', () => {
       // Only one prompt start so far (for the first message)
       expect(ch.promptStarts).toHaveLength(1);
       expect(ch.promptStarts[0]!.messageId).toBe('msg-1');
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+      ]);
 
       resolveFirst('done');
       await p1;
@@ -9991,6 +10159,68 @@ describe('ChannelBase', () => {
         'while loop runs',
         expect.any(Object),
       );
+    });
+
+    it('does not preflight collected messages again after a loop prompt completes', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveLoop: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveLoop = resolve;
+            }),
+        )
+        .mockResolvedValueOnce('follow-up response');
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      await ch.handleInbound(envelope({ text: 'while loop runs' }));
+      resolveLoop('loop response');
+      await loopRun;
+
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      });
+      expect(ch.preflightTexts).toEqual(['while loop runs']);
     });
   });
 });

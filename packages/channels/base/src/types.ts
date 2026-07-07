@@ -227,6 +227,9 @@ export interface ChannelPlugin {
    */
   requiredConfigFields?: string[];
 
+  /** Optional config fields whose string values may reference environment vars. */
+  envResolvableConfigFields?: string[];
+
   /** Create a channel adapter instance. */
   createChannel(
     name: string,
