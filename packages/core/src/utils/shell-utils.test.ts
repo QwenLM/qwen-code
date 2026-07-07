@@ -669,6 +669,10 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill -9 $(command pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(sudo pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(LC_ALL=C pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(FOO2=bar pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(timeout 5 pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(nice pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(nohup pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 `command pgrep node`')).toBe(true);
   });
 
@@ -716,6 +720,8 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill -9 $(pgrep -f "n.de")')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(pgrep -f "n(o)de")')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(pgrep -f "[q]wen")')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep "[n]ode")')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f nod)')).toBe(true);
   });
 
   it('detects pidof with single-shot flag targeting self processes', () => {
@@ -730,6 +736,15 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('pgrep node | sort | xargs kill')).toBe(true);
     expect(
       detectSelfKillCommand('pgrep node | grep -v grep | xargs kill'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'pgrep node | while read pid; do kill -9 $pid; done',
+      ),
+    ).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | parallel kill')).toBe(true);
+    expect(
+      detectSelfKillCommand(`pgrep node | xargs sh -c 'kill -9 "$@"' --`),
     ).toBe(true);
   });
 
@@ -777,12 +792,23 @@ describe('detectSelfKillCommand', () => {
 
   it('handles xargs with additional options like -L, -d, -a', () => {
     expect(detectSelfKillCommand('pgrep node | xargs -L1 kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs -l kill')).toBe(true);
     expect(detectSelfKillCommand("pgrep node | xargs -d '\\n' kill")).toBe(
       true,
     );
     expect(detectSelfKillCommand('pgrep node | xargs -a /dev/stdin kill')).toBe(
       true,
     );
+    expect(detectSelfKillCommand('pgrep node | xargs --Max-Lines 1 kill')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | xargs -rI {} kill -9 {}')).toBe(
+      true,
+    );
+  });
+
+  it('does not false-positive on exact pgrep substring misses', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep -x nod)')).toBe(false);
   });
 
   it('does not false-positive on pgrep -d (delimiter) with non-self target', () => {

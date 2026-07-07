@@ -480,7 +480,6 @@ const XARGS_OPTIONS_WITH_VALUES = new Set([
   '-E',
   '-d',
   '-L',
-  '-l',
   '-a',
   '-J',
   '-R',
@@ -489,6 +488,21 @@ const XARGS_OPTIONS_WITH_VALUES = new Set([
   '--max-lines',
   '--replace',
 ]);
+
+function xargsOptionConsumesNext(token: string): boolean {
+  const normalized = optionKey(token);
+  if (normalized.startsWith('--')) {
+    return (
+      XARGS_OPTIONS_WITH_VALUES.has(normalized) && !optionHasInlineValue(token)
+    );
+  }
+  for (const option of XARGS_OPTIONS_WITH_VALUES) {
+    if (!option.startsWith('--') && token.includes(option[1]!)) {
+      return token.endsWith(option[1]!);
+    }
+  }
+  return false;
+}
 
 export const SHELL_SELF_KILL_REJECTION =
   'Blocked: this command may terminate the running qwen-code process because it targets all node/qwen-code processes. Use task_stop for managed background shells, or kill a specific PID instead.';
@@ -767,7 +781,7 @@ function pkillTargetsSelf(tokens: string[]): boolean {
 }
 
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+)*(?:[A-Z_]+=\S+\s+)*(?:[\w./-]+\/)?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Z_]+=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+)*(?:[A-Z_]+=\S+\s+)*(?:[\w./-]+\/)?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
+  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
 
 const BARE_SELF_PROCESS_PATTERN = new RegExp(`^(${SELF_PROCESS_NAMES})$`, 'i');
 
@@ -817,6 +831,7 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
         ? PGREP_OPTIONS_WITH_VALUES
         : PKILL_OPTIONS_WITH_VALUES;
   let usesFullCommandLine = false;
+  let usesExactMatch = false;
   const args: string[] = [];
   for (let index = 1; index < tokens.length; index++) {
     const token = tokens[index]!;
@@ -836,6 +851,13 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
     }
 
     if (isOptionToken(token)) {
+      if (
+        normalized === '-x' ||
+        normalized === '--exact' ||
+        shortOptionBundleHasFlag(token, '-x')
+      ) {
+        usesExactMatch = true;
+      }
       if (optionsWithValues.has(normalized) && !optionHasInlineValue(token)) {
         index++;
       }
@@ -850,11 +872,16 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
       (arg) =>
         matchesQwenProcessPattern(arg) ||
         isBroadNodeFullPattern(arg) ||
-        argMatchesSelfAsRegex(arg),
+        argMatchesSelfAsRegex(arg) ||
+        isSubstringSelfTarget(arg),
     );
   }
 
-  return args.some((arg) => isSubstringSelfTarget(arg));
+  return args.some((arg) =>
+    usesExactMatch
+      ? isBareSelfProcessName(arg) || argMatchesSelfAsRegex(arg)
+      : isSubstringSelfTarget(arg) || argMatchesSelfAsRegex(arg),
+  );
 }
 
 function xargsInvokesKill(segment: string | undefined): boolean {
@@ -869,14 +896,38 @@ function xargsInvokesKill(segment: string | undefined): boolean {
       return normalizeExecutableName(tokens[i + 1] ?? '') === 'kill';
     }
     if (isOptionToken(token)) {
-      if (XARGS_OPTIONS_WITH_VALUES.has(token) && i + 1 < tokens.length) {
+      if (xargsOptionConsumesNext(token) && i + 1 < tokens.length) {
         i++;
       }
       continue;
     }
-    return normalizeExecutableName(token) === 'kill';
+    const command = normalizeExecutableName(token);
+    if (command === 'kill') return true;
+    if (
+      ['sh', 'bash', 'zsh'].includes(command) &&
+      tokens.slice(i + 1).some((arg) => /\bkill\b/i.test(arg))
+    ) {
+      return true;
+    }
+    return false;
   }
   return false;
+}
+
+function downstreamSegmentContainsKill(segment: string | undefined): boolean {
+  if (!segment) return false;
+  const parsed = parseShellSegment(segment);
+  const tokens = parsed ? unwrapExecutionPrefixes(parsed) : [];
+  const root = normalizeExecutableName(tokens[0] ?? '');
+  if (root === 'parallel') {
+    return tokens
+      .slice(1)
+      .some((token) => normalizeExecutableName(token) === 'kill');
+  }
+  return (
+    /\bwhile\b[\s\S]*\bread\b[\s\S]*;\s*do\b[\s\S]*\bkill\b/i.test(segment) ||
+    /^\s*do\s+kill\b/i.test(segment)
+  );
 }
 
 function killCommandTargetsSelf(segment: string): boolean {
@@ -947,6 +998,7 @@ export function detectSelfKillCommand(command: string): boolean {
     ) {
       for (let j = index + 1; j < segments.length; j++) {
         if (xargsInvokesKill(segments[j])) return true;
+        if (downstreamSegmentContainsKill(segments[j])) return true;
       }
     }
     if (root === 'kill' && killCommandTargetsSelf(segment)) {
