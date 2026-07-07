@@ -18,10 +18,10 @@ export interface WorkspaceRuntimeEnvMetadata {
   readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
   readonly envFilePaths?: readonly string[];
   readonly envFileReadFailed?: boolean;
-  readonly envFileReadFailures?: readonly {
+  readonly envFileReadFailures?: ReadonlyArray<{
     readonly path: string;
     readonly error: string;
-  }[];
+  }>;
   readonly fallbackReason?: string;
 }
 

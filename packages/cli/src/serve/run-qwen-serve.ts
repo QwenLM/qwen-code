@@ -2052,10 +2052,10 @@ export async function runQwenServe(
       workspace: string,
       snapshot: {
         readonly envFileReadFailed: boolean;
-        readonly envFileReadFailures?: readonly {
+        readonly envFileReadFailures?: ReadonlyArray<{
           readonly path: string;
           readonly error: string;
-        }[];
+        }>;
       },
     ): void => {
       if (!snapshot.envFileReadFailed) return;
@@ -2083,7 +2083,7 @@ export async function runQwenServe(
       envFilePaths: string[];
       effectiveEnv: NodeJS.ProcessEnv;
       envFileReadFailed: boolean;
-      envFileReadFailures: { path: string; error: string }[];
+      envFileReadFailures: Array<{ path: string; error: string }>;
       fallbackReason?: string;
     } = {
       mode: 'runtime-overlay' as const,
