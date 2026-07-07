@@ -40,7 +40,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import { normalizeToolNameList } from './normalizeDisabledTools.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
@@ -1736,9 +1736,13 @@ export async function loadCliConfig(
   // original casing; shared helper since the MCP restart refresh path
   // must agree byte-for-byte with this.
   const disabledTools =
-    bareMode || safeMode ? [] : normalizeToolNameList(settings.tools?.disabled);
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.disabled);
   const visibleTools =
-    bareMode || safeMode ? [] : normalizeToolNameList(settings.tools?.visible);
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.visible);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)

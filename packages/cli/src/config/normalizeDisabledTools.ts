@@ -54,12 +54,3 @@ export function normalizeDisabledToolList(raw: unknown): string[] {
   }
   return out;
 }
-
-/**
- * Equivalent to {@link normalizeDisabledToolList}, but named generically
- * for use with any tool-name list (e.g. `tools.visible`) whose normalisation
- * contract matches `tools.disabled`.
- */
-export function normalizeToolNameList(raw: unknown): string[] {
-  return normalizeDisabledToolList(raw);
-}

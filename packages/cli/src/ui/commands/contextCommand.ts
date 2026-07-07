@@ -143,12 +143,7 @@ export async function collectContextData(
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
-    if (
-      tool.shouldDefer &&
-      !tool.alwaysLoad &&
-      !toolRegistry?.isDeferredToolRevealed(tool.name) &&
-      !config.getVisibleTools().has(tool.name)
-    ) {
+    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);

@@ -698,8 +698,7 @@ export class ToolRegistry {
           includeDeferred ||
           !tool.shouldDefer ||
           tool.alwaysLoad ||
-          this.config.getVisibleTools().has(tool.name) ||
-          this.revealedDeferred.has(tool.name),
+          !this.isDeferredAndHidden(tool.name),
       )
       .sort(ToolRegistry.compareToolsByDeclarationName)
       .map((tool) => tool.schema);
@@ -730,6 +729,25 @@ export class ToolRegistry {
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
   isDeferredToolRevealed(name: string): boolean {
     return this.revealedDeferred.has(name);
+  }
+
+  /**
+   * Whether a deferred tool is currently hidden from the model's
+   * function-declaration list. Returns `true` when the tool:
+   * - is deferred (`shouldDefer=true`),
+   * - is not always-loaded,
+   * - has not been revealed this session, AND
+   * - is not in the visibleTools config list.
+   */
+  isDeferredAndHidden(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    return (
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !this.revealedDeferred.has(name) &&
+      !this.config.getVisibleTools().has(name)
+    );
   }
 
   /**

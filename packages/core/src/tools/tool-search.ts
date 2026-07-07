@@ -248,13 +248,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const registry = this.config.getToolRegistry();
     return registry
       .getAllTools()
-      .filter(
-        (t) =>
-          t.shouldDefer &&
-          !t.alwaysLoad &&
-          !registry.isDeferredToolRevealed(t.name) &&
-          !this.config.getVisibleTools().has(t.name),
-      );
+      .filter((t) => registry.isDeferredAndHidden(t.name));
   }
 
   private async loadAndReturnSchemas(
@@ -333,10 +327,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // list) and pulling them through setTools() would risk a spurious
       // "GeminiClient not initialised" failure for what is just a
       // schema-inspection call.
-      const isLoadable =
-        tool.shouldDefer &&
-        !tool.alwaysLoad &&
-        !this.config.getVisibleTools().has(tool.name);
+      const isLoadable = registry.isDeferredAndHidden(canonical);
       if (isLoadable) {
         const wasRevealed = registry.isDeferredToolRevealed(canonical);
         registry.revealDeferredTool(canonical);
