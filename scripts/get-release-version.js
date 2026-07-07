@@ -168,7 +168,7 @@ function getAndVerifyTags(npmDistTag, _gitTagPattern) {
   const baselineVersion = rollbackInfo.baseline;
 
   if (!baselineVersion) {
-    throw new Error(`Unable to determine baseline version for ${npmDistTag}`);
+    return null;
   }
 
   if (rollbackInfo.isRollback) {
@@ -188,8 +188,8 @@ function getAndVerifyTags(npmDistTag, _gitTagPattern) {
 
 function getLatestStableReleaseTag() {
   try {
-    const { latestTag } = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
-    return latestTag;
+    const result = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
+    return result ? result.latestTag : '';
   } catch (error) {
     console.error(
       `Failed to determine latest stable release tag: ${error.message}`,
@@ -199,8 +199,13 @@ function getLatestStableReleaseTag() {
 }
 
 function promoteNightlyVersion() {
-  const { latestVersion } = getAndVerifyTags('nightly', 'v*-nightly*');
-  const baseVersion = latestVersion.split('-')[0];
+  const result = getAndVerifyTags('nightly', 'v*-nightly*');
+  if (!result) {
+    throw new Error(
+      'Unable to determine baseline version for nightly (required for promote-nightly)',
+    );
+  }
+  const baseVersion = result.latestVersion.split('-')[0];
   const versionParts = baseVersion.split('.');
   const major = versionParts[0];
   const minor = versionParts[1] ? parseInt(versionParts[1]) : 0;
@@ -226,17 +231,17 @@ function getNightlyVersion() {
 }
 
 function getStableVersion(args) {
-  const { latestVersion: latestPreviewVersion } = getAndVerifyTags(
-    'preview',
-    'v*-preview*',
-  );
+  const tagResult = getAndVerifyTags('preview', 'v*-preview*');
   let releaseVersion;
   if (args.stable_version_override) {
     const overrideVersion = args.stable_version_override.replace(/^v/, '');
     validateVersion(overrideVersion, 'X.Y.Z', 'stable_version_override');
     releaseVersion = overrideVersion;
+  } else if (tagResult) {
+    releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
   } else {
-    releaseVersion = latestPreviewVersion.replace(/-preview.*/, '');
+    const packageJson = readJson('package.json');
+    releaseVersion = packageJson.version.split('-')[0];
   }
 
   return {
@@ -246,10 +251,7 @@ function getStableVersion(args) {
 }
 
 function getPreviewVersion(args) {
-  const { latestVersion: latestNightlyVersion } = getAndVerifyTags(
-    'nightly',
-    'v*-nightly*',
-  );
+  const tagResult = getAndVerifyTags('nightly', 'v*-nightly*');
   let releaseVersion;
   if (args.preview_version_override) {
     const overrideVersion = args.preview_version_override.replace(/^v/, '');
@@ -259,9 +261,12 @@ function getPreviewVersion(args) {
       'preview_version_override',
     );
     releaseVersion = overrideVersion;
-  } else {
+  } else if (tagResult) {
     releaseVersion =
-      latestNightlyVersion.replace(/-nightly.*/, '') + '-preview.0';
+      tagResult.latestVersion.replace(/-nightly.*/, '') + '-preview.0';
+  } else {
+    const packageJson = readJson('package.json');
+    releaseVersion = packageJson.version.split('-')[0] + '-preview.0';
   }
 
   return {
@@ -278,7 +283,13 @@ function getPatchVersion(patchFrom) {
   }
   const distTag = patchFrom === 'stable' ? 'latest' : 'preview';
   const pattern = distTag === 'latest' ? 'v[0-9].[0-9].[0-9]' : 'v*-preview*';
-  const { latestVersion } = getAndVerifyTags(distTag, pattern);
+  const tagResult = getAndVerifyTags(distTag, pattern);
+  if (!tagResult) {
+    throw new Error(
+      `Unable to determine baseline version for ${distTag} (required for patch)`,
+    );
+  }
+  const { latestVersion } = tagResult;
 
   if (patchFrom === 'stable') {
     // For stable versions, increment the patch number: 0.5.4 -> 0.5.5

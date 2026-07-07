@@ -182,5 +182,47 @@ describe('getVersion', () => {
       // Should have skipped preview.0 and landed on preview.1
       expect(result.releaseVersion).toBe('0.8.0-preview.1');
     });
+
+    it('should fall back to package.json when no nightly dist-tag exists (preview)', () => {
+      const mockWithNoNightly = (command) => {
+        // No nightly dist-tag exists
+        if (command.includes('npm view') && command.includes('--tag=nightly')) {
+          throw new Error('npm error code E404');
+        }
+        // Empty versions list (no nightlies published yet)
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.6.0', '0.6.1']);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoNightly);
+
+      const result = getVersion({ type: 'preview' });
+      // Should fall back to package.json version (0.8.0) + -preview.0
+      expect(result.releaseVersion).toBe('0.8.0-preview.0');
+      expect(result.npmTag).toBe('preview');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should fall back to package.json when no preview dist-tag exists (stable)', () => {
+      const mockWithNoPreview = (command) => {
+        // No preview dist-tag exists
+        if (command.includes('npm view') && command.includes('--tag=preview')) {
+          throw new Error('npm error code E404');
+        }
+        // Empty versions list (no previews published yet)
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.6.0', '0.6.1']);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoPreview);
+
+      const result = getVersion({ type: 'stable' });
+      // Should fall back to package.json version (0.8.0)
+      expect(result.releaseVersion).toBe('0.8.0');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
   });
 });
