@@ -265,11 +265,15 @@ const EN: Messages = {
   },
   'markdownTable.copyTsv': 'Copy TSV',
   'markdownTable.copyVisible': 'Quick copy',
+  'markdownTable.freezeFirstColumn': 'Freeze first column',
+  'markdownTable.unfreezeFirstColumn': 'Unfreeze first column',
   'markdownTable.hideColumn': 'Hide column',
   'markdownTable.showHiddenColumns': (v) => {
     const count = Number(v?.count ?? 0);
     return `Show ${count} hidden column${count === 1 ? '' : 's'}`;
   },
+  'markdownTable.moveColumn': (v) => `Move ${v?.column ?? ''}`,
+  'markdownTable.resizeColumn': (v) => `Resize ${v?.column ?? ''}`,
   'markdownTable.rowDetails': 'Details',
   'markdownTable.rowDetailsAria': (v) =>
     `View details for row ${v?.index ?? ''}`,
@@ -827,6 +831,8 @@ const EN: Messages = {
   'bug.submitted': 'Bug report opened in a new tab.',
   'clear.blocked': 'Cannot clear while streaming — cancel first (Esc).',
   'error.unknown': 'Unknown error',
+  'error.modelStreamInterrupted':
+    'Model response stream was interrupted. Please retry.',
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
@@ -1550,6 +1556,7 @@ const EN: Messages = {
     `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
     }`,
+  'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
@@ -1641,7 +1648,7 @@ const ZH: Messages = {
   'toolName.todo_write': '任务清单',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': 'Agent',
-  'toolName.skill': '技能',
+  'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
   'toolName.web_fetch': '网络搜索',
@@ -1907,8 +1914,12 @@ const ZH: Messages = {
   'markdownTable.cellsSelected': (v) => `${v?.count ?? 0} 个单元格已选中`,
   'markdownTable.copyTsv': '复制 TSV',
   'markdownTable.copyVisible': '快捷复制',
+  'markdownTable.freezeFirstColumn': '冻结首列',
+  'markdownTable.unfreezeFirstColumn': '取消冻结首列',
   'markdownTable.hideColumn': '隐藏列',
   'markdownTable.showHiddenColumns': (v) => `显示 ${v?.count ?? 0} 个隐藏列`,
+  'markdownTable.moveColumn': (v) => `移动 ${v?.column ?? ''}`,
+  'markdownTable.resizeColumn': (v) => `调整 ${v?.column ?? ''} 列宽`,
   'markdownTable.rowDetails': '详情',
   'markdownTable.rowDetailsAria': (v) => `查看第 ${v?.index ?? ''} 行详情`,
   'markdownTable.closeRowDetailsAria': (v) => `收起第 ${v?.index ?? ''} 行详情`,
@@ -2439,6 +2450,7 @@ const ZH: Messages = {
   'bug.submitted': 'Bug 报告已在新标签页中打开。',
   'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
   'error.unknown': '未知错误',
+  'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
@@ -3115,6 +3127,7 @@ const ZH: Messages = {
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
     }`,
+  'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
