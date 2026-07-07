@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
+  appendCronRun,
   generateCronTaskId,
   getCronFilePath,
+  MAX_TASK_RUNS,
   readCronTasks,
   removeCronTasks,
   updateCronTasks,
@@ -166,6 +168,90 @@ describe('cronTasksFile', () => {
         JSON.stringify([{ ...makeTask(), enabled: 'yes' }]),
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('round-trips the optional runs history', async () => {
+      const task = makeTask({
+        lastFiredAt: 1718000300000,
+        runs: [
+          { at: 1718000240000, kind: 'scheduled' },
+          { at: 1718000300000, kind: 'catch-up' },
+        ],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('accepts a run entry with no kind (defaults on read)', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runs: [{ at: 1718000240000 }] }]),
+      );
+      const result = await readCronTasks(tmpDir);
+      expect(result[0]!.runs).toEqual([{ at: 1718000240000 }]);
+    });
+
+    it('rejects a task whose runs is not an array', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runs: 'nope' }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a run entry with a non-finite/absent timestamp', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), runs: [{ kind: 'scheduled' }] }]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      // -Infinity (from -1e999) is typeof number but not finite — must reject.
+      await seedTasksFile(
+        tmpDir,
+        `[{"id":"t1","cron":"* * * * *","prompt":"p","recurring":true,` +
+          `"createdAt":1718000000000,"lastFiredAt":null,"runs":[{"at":-1e999}]}]`,
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
+    it('rejects a run entry whose kind is not a string', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runs: [{ at: 1718000240000, kind: 7 }] },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+  });
+
+  describe('appendCronRun', () => {
+    it('appends newest-last, treating absent history as empty', () => {
+      const once = appendCronRun(undefined, { at: 1, kind: 'scheduled' });
+      expect(once).toEqual([{ at: 1, kind: 'scheduled' }]);
+      const twice = appendCronRun(once, { at: 2, kind: 'catch-up' });
+      expect(twice).toEqual([
+        { at: 1, kind: 'scheduled' },
+        { at: 2, kind: 'catch-up' },
+      ]);
+    });
+
+    it('is pure — does not mutate the input array', () => {
+      const input = [{ at: 1, kind: 'scheduled' as const }];
+      const result = appendCronRun(input, { at: 2 });
+      expect(input).toEqual([{ at: 1, kind: 'scheduled' }]);
+      expect(result).toHaveLength(2);
+    });
+
+    it('caps at MAX_TASK_RUNS, dropping the oldest', () => {
+      let runs: ReturnType<typeof appendCronRun> = [];
+      for (let i = 0; i < MAX_TASK_RUNS + 5; i++) {
+        runs = appendCronRun(runs, { at: i });
+      }
+      expect(runs).toHaveLength(MAX_TASK_RUNS);
+      // Oldest five dropped: the window is the last MAX_TASK_RUNS entries.
+      expect(runs[0]!.at).toBe(5);
+      expect(runs[runs.length - 1]!.at).toBe(MAX_TASK_RUNS + 4);
     });
   });
 

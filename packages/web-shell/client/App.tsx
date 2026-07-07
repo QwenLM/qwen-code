@@ -233,6 +233,10 @@ function TodoContextsProvider({
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_TOASTS = 4;
+// Cap on how long a manual "run now" waits for its bound session to become
+// active before giving up, so the scheduled-tasks UI can't stay stuck disabled
+// if the switch never completes.
+const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
@@ -282,6 +286,7 @@ interface SendPromptOptionsWithRetry {
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
+  onAdmitted?: () => void;
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -651,7 +656,6 @@ function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
 function isEditToolPermission(request: PermissionRequest): boolean {
   return request.toolKind === 'edit';
 }
-
 
 function parseRenameArgument(
   raw: string,
@@ -1205,9 +1209,9 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<
-    'chat' | 'scheduledTasks' | 'split'
-  >('chat');
+  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks' | 'split'>(
+    'chat',
+  );
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
@@ -1226,13 +1230,10 @@ export function App({
   // one closes the other. Without this, opening Scheduled Tasks then Daemon
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
-  const openPanel = useCallback(
-    (panel: 'settings' | 'status' | 'sessions') => {
-      setMainView('chat');
-      setActivePanel(panel);
-    },
-    [],
-  );
+  const openPanel = useCallback((panel: 'settings' | 'status' | 'sessions') => {
+    setMainView('chat');
+    setActivePanel(panel);
+  }, []);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -1248,10 +1249,7 @@ export function App({
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
   // to the Session Overview — the hub the split is launched from.
-  const handleSplitExit = useCallback(
-    () => openPanel('sessions'),
-    [openPanel],
-  );
+  const handleSplitExit = useCallback(() => openPanel('sessions'), [openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -1552,6 +1550,7 @@ export function App({
         retry?: boolean;
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        onAdmitted?: () => void;
       },
     ) => {
       const isUserPrompt = !text.trimStart().startsWith('/');
@@ -1608,6 +1607,7 @@ export function App({
         images,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
       };
       if (opts?.commitComposerAccepted) {
         opts.commitComposerAccepted();
@@ -2537,6 +2537,149 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     sidebarSwitchingSessionId,
+  ]);
+
+  // Manual "run now" from the scheduled-tasks page. A bound task runs in its
+  // own session (so manual and scheduled runs share one transcript); an unbound
+  // task runs in the current session. Switching sessions is async, so a latch
+  // holds the prompt until the target session is fully active before sending.
+  //
+  // Returns a promise that resolves once the prompt is actually ENQUEUED and
+  // rejects if the bound session can't be opened (archived/deleted), supersedes,
+  // or times out — so the caller only records the run after it truly happened,
+  // never on a failed session switch. Only one bound run waits at a time.
+  const pendingBoundRunRef = useRef<{
+    sessionId: string;
+    prompt: string;
+    resolve: () => void;
+    reject: (err: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  const clearPendingBoundRun = useCallback((sessionId: string) => {
+    const cur = pendingBoundRunRef.current;
+    if (cur && cur.sessionId === sessionId) {
+      clearTimeout(cur.timer);
+      pendingBoundRunRef.current = null;
+    }
+  }, []);
+  // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
+  // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
+  // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
+  // permission-blocked run, or a closed tab, would execute in the session but
+  // never get recorded. `onAdmitted` fires at submitPrompt acceptance.
+  //
+  // Deliberately NO pre-admission timeout here. `sendPrompt` isn't abortable, so
+  // a timer that rejected while the send was still in flight could let a LATE
+  // admission execute the prompt in the session AFTER the caller had already
+  // handled the rejection and skipped recording — an unrecorded run the user
+  // could retry into a duplicate. Staying tied to admission guarantees any
+  // accepted prompt is recorded, and the run controls stay busy (not free to
+  // re-fire) until the send admits or settles. The earlier "session never becomes
+  // active" phase is still bounded by the switch timeout in runTaskManually. If
+  // the send settles WITHOUT admitting (onSubmitBefore cancel) or throws before
+  // admission, reject so the caller skips recording a run that never reached the
+  // session.
+  const enqueueManualRun = useCallback(
+    (prompt: string): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        let admitted = false;
+        const admit = () => {
+          if (admitted) return;
+          admitted = true;
+          resolve();
+        };
+        sendPrompt(prompt, undefined, { onAdmitted: admit }).then(
+          () => {
+            if (!admitted) {
+              reject(new Error('Run was cancelled before it started'));
+            }
+          },
+          (error: unknown) => {
+            if (!admitted) reject(error);
+          },
+        );
+      }),
+    [sendPrompt],
+  );
+  // Enqueue the pending bound run once its session is the current, fully-loaded
+  // one — driven both by the effect below (when the session switch changes a
+  // dep) AND directly after loadSidebarSession resolves (when the session was
+  // ALREADY active, so no dep changes and the effect never re-runs — otherwise
+  // the run would hang until the switch timeout and falsely report a failure).
+  // Whoever fires first nulls the latch, so it runs exactly once.
+  const tryFireBoundRun = useCallback(() => {
+    const pending = pendingBoundRunRef.current;
+    const conn = connectionRef.current;
+    if (
+      !pending ||
+      conn.sessionId !== pending.sessionId ||
+      conn.loadingTranscript ||
+      conn.catchingUp
+    ) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    pendingBoundRunRef.current = null;
+    // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
+    // cleared above, so a long turn can't trip it. Recording happens in the
+    // dialog once this resolves.
+    enqueueManualRun(pending.prompt).then(
+      () => pending.resolve(),
+      (error: unknown) => pending.reject(error),
+    );
+  }, [enqueueManualRun]);
+  const runTaskManually = useCallback(
+    (prompt: string, sessionId: string | null): Promise<void> => {
+      setMainView('chat');
+      if (!sessionId) {
+        // Unbound: runs in the current session — resolves at admission.
+        return enqueueManualRun(prompt);
+      }
+      // A newer bound run supersedes an older one still waiting on the latch;
+      // reject the old promise so its caller doesn't record a dropped run.
+      const prev = pendingBoundRunRef.current;
+      if (prev) {
+        clearTimeout(prev.timer);
+        pendingBoundRunRef.current = null;
+        prev.reject(new Error('superseded by another run'));
+      }
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          clearPendingBoundRun(sessionId);
+          reject(new Error('Timed out switching to the task session'));
+        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
+        pendingBoundRunRef.current = {
+          sessionId,
+          prompt,
+          resolve,
+          reject,
+          timer,
+        };
+        loadSidebarSession(sessionId)
+          // Fire immediately when the session was already active (no dep change
+          // to trigger the effect); a no-op if the load is still settling, in
+          // which case the effect picks it up.
+          .then(() => tryFireBoundRun())
+          .catch((error: unknown) => {
+            clearPendingBoundRun(sessionId);
+            reject(error);
+          });
+      });
+    },
+    [
+      enqueueManualRun,
+      loadSidebarSession,
+      clearPendingBoundRun,
+      tryFireBoundRun,
+    ],
+  );
+  useEffect(() => {
+    tryFireBoundRun();
+  }, [
+    connection.sessionId,
+    connection.loadingTranscript,
+    connection.catchingUp,
+    tryFireBoundRun,
   ]);
 
   const openTasksPanel = useCallback(() => {
@@ -4520,28 +4663,40 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
-                      onRunPrompt={(taskPrompt) => {
-                        // Manual trigger reuses the normal prompt path: return
-                        // to the chat view and send the task's prompt into the
-                        // current session so the run streams in the chat.
+                      onRunPrompt={runTaskManually}
+                      onCreateViaChat={() => {
+                        // Start a FRESH session and jump to it so the task-
+                        // creation chat doesn't pile onto the current
+                        // conversation, then prime the composer so the user can
+                        // describe the task in natural language; the agent
+                        // creates it via its cron_create tool. Focus is deferred
+                        // so the new session's composer is mounted/visible first.
                         setMainView('chat');
-                        sendPrompt(taskPrompt).catch((error: unknown) => {
-                          reportError(error, 'Failed to run scheduled task');
+                        void createNewSession().then((created) => {
+                          // If the new session couldn't be started,
+                          // createNewSession already surfaced the error — do NOT
+                          // prime the (still-current) session with the task
+                          // starter, which would land in the wrong conversation.
+                          if (!created) return;
+                          onSessionIdChange?.(undefined);
+                          window.setTimeout(() => {
+                            editorRef.current?.insertText(
+                              t('scheduledTasks.chatStarter'),
+                              { mode: 'replace' },
+                            );
+                            editorRef.current?.focus();
+                          }, 0);
                         });
                       }}
-                      onCreateViaChat={() => {
-                        // Return to chat and prime the composer so the user can
-                        // describe the task in natural language; the agent
-                        // creates it via its cron_create tool. Deferred so the
-                        // composer is mounted/visible before we focus it.
+                      onOpenSession={(sessionId) => {
+                        // The task's bound session IS its run history — switch
+                        // to the chat view and load that session's transcript.
                         setMainView('chat');
-                        window.setTimeout(() => {
-                          editorRef.current?.insertText(
-                            t('scheduledTasks.chatStarter'),
-                            { mode: 'replace' },
-                          );
-                          editorRef.current?.focus();
-                        }, 0);
+                        loadSidebarSession(sessionId).catch(
+                          (error: unknown) => {
+                            reportError(error, 'Failed to open session');
+                          },
+                        );
                       }}
                       onError={reportError}
                     />
@@ -4561,10 +4716,7 @@ export function App({
                       data-testid="split-approval-notice"
                     >
                       <span>{t('splitView.outerApprovalPending')}</span>
-                      <button
-                        type="button"
-                        onClick={() => setMainView('chat')}
-                      >
+                      <button type="button" onClick={() => setMainView('chat')}>
                         {t('splitView.goToApproval')}
                       </button>
                     </div>
@@ -4597,7 +4749,9 @@ export function App({
                 // layout and the tab order, and aria-hidden keeps AT out — so no
                 // keyboard/AT can reach the outer composer/toolbar behind the
                 // split. State is preserved (the node stays mounted).
-                aria-hidden={activePanel || mainView !== 'chat' ? true : undefined}
+                aria-hidden={
+                  activePanel || mainView !== 'chat' ? true : undefined
+                }
               >
                 {showMissingSessionState && (
                   <div className={styles.missingSessionState}>
