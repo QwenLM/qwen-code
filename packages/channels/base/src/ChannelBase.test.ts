@@ -797,6 +797,34 @@ describe('ChannelBase', () => {
       });
     });
 
+    it('does not infer approve-always scope from noncanonical option ids', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        {
+          optionId: 'sandbox_bypass_project',
+          kind: 'allow_always',
+          name: 'Always allow sandbox bypass',
+        },
+        {
+          optionId: 'proceed_always_user',
+          kind: 'allow_always',
+          name: 'Always Allow for user',
+        },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        '/approve-always always allow for this user',
+      );
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_always_user' },
+      });
+    });
+
     it('allows approve-always without a request id when one request is pending', async () => {
       const ch = createChannel();
       const sessionId = await startSession(ch);

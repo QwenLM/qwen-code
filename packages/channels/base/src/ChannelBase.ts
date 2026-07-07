@@ -1389,23 +1389,15 @@ export abstract class ChannelBase {
     scope: 'project' | 'user',
   ): PermissionOption | undefined {
     return options.find(
-      (option) =>
-        option.optionId === `proceed_always_${scope}` ||
-        option.optionId.endsWith(`_${scope}`),
+      (option) => option.optionId === `proceed_always_${scope}`,
     );
   }
 
   private approvalAlwaysLabel(option: PermissionOption): string {
-    if (
-      option.optionId === 'proceed_always_project' ||
-      option.optionId.endsWith('_project')
-    ) {
+    if (option.optionId === 'proceed_always_project') {
       return 'always allow for this project';
     }
-    if (
-      option.optionId === 'proceed_always_user' ||
-      option.optionId.endsWith('_user')
-    ) {
+    if (option.optionId === 'proceed_always_user') {
       return 'always allow for this user';
     }
     return 'always allow';
