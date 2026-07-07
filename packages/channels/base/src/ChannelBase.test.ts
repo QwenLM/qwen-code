@@ -8580,6 +8580,78 @@ describe('ChannelBase', () => {
         ]);
       });
 
+      it('prepends first-session webhook context once, including memory, instructions, and boundary metadata', async () => {
+        const channelMemory = {
+          readChannelMemory: vi
+            .fn()
+            .mockResolvedValue('Use staging by default.\n'),
+          appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+          clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        };
+        (bridge.prompt as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce('first response')
+          .mockResolvedValueOnce('second response');
+        const ch = createChannel(
+          {
+            approvalMode: 'yolo',
+            webhooks,
+            allowedUsers: ['webhook:github-ci'],
+            instructions: 'Use repo conventions.',
+            identity: {
+              id: 'ops-agent',
+              displayName: 'Ops Agent',
+            },
+            memoryScope: {
+              namespace: 'qwen-tag:ops',
+              mode: 'metadata-only',
+            },
+          },
+          { channelMemory },
+        );
+        ch.proactiveSupported = true;
+        const target = resolveChannelWebhookTarget(
+          'test-chan',
+          webhooks,
+          'github-ci',
+          'default',
+        );
+        const secondTask = { ...webhookTask, title: 'CI failed again' };
+
+        await ch.runWebhookTask(webhookTask);
+        await ch.runWebhookTask(secondTask);
+
+        expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(1);
+
+        const firstPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![1] as string;
+        expect(firstPrompt).toContain(
+          'Channel memory for this chat:\nUse staging by default.',
+        );
+        expect(firstPrompt).toContain('Use repo conventions.');
+        expect(firstPrompt).toContain('Channel identity:');
+        expect(firstPrompt).toContain('- id: ops-agent');
+        expect(firstPrompt).toContain('- namespace: qwen-tag:ops');
+        expect(firstPrompt).toContain(
+          buildChannelWebhookPrompt(webhookTask, target),
+        );
+        expect(
+          firstPrompt.indexOf('Channel memory for this chat:'),
+        ).toBeLessThan(firstPrompt.indexOf('Use repo conventions.'));
+        expect(firstPrompt.indexOf('Use repo conventions.')).toBeLessThan(
+          firstPrompt.indexOf('Channel identity:'),
+        );
+        expect(firstPrompt.indexOf('Channel identity:')).toBeLessThan(
+          firstPrompt.indexOf('[External event "ci_failed" from github-ci]'),
+        );
+
+        const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[1]![1] as string;
+        expect(secondPrompt).toBe(buildChannelWebhookPrompt(secondTask, target));
+        expect(secondPrompt).not.toContain('Channel memory for this chat');
+        expect(secondPrompt).not.toContain('Use repo conventions.');
+        expect(secondPrompt).not.toContain('Channel identity:');
+      });
+
       it('rejects channels without proactive send support', async () => {
         const ch = createChannel({ webhooks });
 
@@ -8661,6 +8733,38 @@ describe('ChannelBase', () => {
         } finally {
           vi.useRealTimers();
         }
+      });
+
+      it('emits lifecycle events and response chunks for webhook bridge chunks', async () => {
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          (sid: string) => {
+            (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+            return Promise.resolve('webhook response');
+          },
+        );
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
+        ch.proactiveSupported = true;
+
+        await ch.runWebhookTask(webhookTask);
+
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({
+            type: 'started',
+            messageId: 'webhook:github-ci:ci_failed',
+          }),
+          expect.objectContaining({
+            type: 'text_chunk',
+            chunk: 'part',
+            messageId: 'webhook:github-ci:ci_failed',
+          }),
+          expect.objectContaining({
+            type: 'completed',
+            messageId: 'webhook:github-ci:ci_failed',
+          }),
+        ]);
+        expect(ch.responseChunks).toEqual([
+          { chatId: 'group-1', chunk: 'part', sessionId: 's-1' },
+        ]);
       });
 
       it('runs a later same-session webhook task after a rejected one', async () => {

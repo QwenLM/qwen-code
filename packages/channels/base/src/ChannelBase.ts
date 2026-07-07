@@ -456,6 +456,61 @@ export abstract class ChannelBase {
     await this.sendMessage(target.chatId, text);
   }
 
+  private async prependUnattendedSessionContext(
+    sessionId: string,
+    target: SessionTarget,
+    promptText: string,
+    taskLabel: string,
+  ): Promise<{
+    promptText: string;
+    shouldClaimSessionContext: boolean;
+  }> {
+    const context: string[] = [];
+    let sessionContextReady = true;
+    if (
+      this.channelMemory &&
+      this.isSenderAuthorizedForChannelMemory(target.senderId) &&
+      (!this.isSharedSessionTarget(target) ||
+        this.config.senderPolicy === 'allowlist')
+    ) {
+      try {
+        const memoryText = (
+          await this.channelMemory.readChannelMemory({
+            channelName: this.name,
+            chatId: target.chatId,
+            threadId: target.threadId,
+          })
+        ).trim();
+        if (memoryText) {
+          context.push(
+            `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
+          );
+        }
+      } catch (error) {
+        process.stderr.write(
+          `[${this.name}] channel memory read failed for ${taskLabel} chat ${sanitizeLogText(target.chatId, 64)}: ${sanitizeLogText(this.channelMemoryErrorMessage(error), 200)}\n`,
+        );
+        this.instructedSessions.delete(sessionId);
+        sessionContextReady = false;
+      }
+    }
+    if (this.config.instructions) {
+      context.push(this.config.instructions);
+    }
+    // Boundary block goes last: recency bias means later instructions win,
+    // and the isolation boundary must not be overridable by operator text.
+    if (this.shouldPrependChannelBoundaryPrompt()) {
+      context.push(this.channelBoundaryPrompt());
+    }
+    return {
+      promptText:
+        context.length > 0
+          ? `${context.join('\n\n')}\n\n${promptText}`
+          : promptText,
+      shouldClaimSessionContext: sessionContextReady,
+    };
+  }
+
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
     if (this.registerBridgeEvents) {
@@ -531,50 +586,17 @@ export abstract class ChannelBase {
         );
       }
       let shouldClaimSessionContext = false;
+      let promptToSend = promptText;
       if (shouldPrependSessionContext) {
-        const context: string[] = [];
-        let sessionContextReady = true;
-        if (
-          this.channelMemory &&
-          this.isSenderAuthorizedForChannelMemory(job.target.senderId) &&
-          (!this.isSharedSessionTarget(job.target) ||
-            this.config.senderPolicy === 'allowlist')
-        ) {
-          try {
-            const memoryText = (
-              await this.channelMemory.readChannelMemory({
-                channelName: this.name,
-                chatId: job.target.chatId,
-                threadId: job.target.threadId,
-              })
-            ).trim();
-            if (memoryText) {
-              context.push(
-                `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
-              );
-            }
-          } catch (error) {
-            process.stderr.write(
-              `[${this.name}] channel memory read failed for loop ${job.id} chat ${sanitizeLogText(job.target.chatId, 64)}: ${sanitizeLogText(this.channelMemoryErrorMessage(error), 200)}\n`,
-            );
-            this.instructedSessions.delete(sessionId);
-            sessionContextReady = false;
-          }
-        }
-        if (this.config.instructions) {
-          context.push(this.config.instructions);
-        }
-        // Boundary block goes last: recency bias means later instructions win,
-        // and the isolation boundary must not be overridable by operator text.
-        if (this.shouldPrependChannelBoundaryPrompt()) {
-          context.push(this.channelBoundaryPrompt());
-        }
-        if (context.length > 0) {
-          promptText = `${context.join('\n\n')}\n\n${promptText}`;
-        }
-        if (sessionContextReady) {
-          shouldClaimSessionContext = true;
-        }
+        const sessionContext = await this.prependUnattendedSessionContext(
+          sessionId,
+          job.target,
+          promptText,
+          `loop ${job.id}`,
+        );
+        promptToSend = sessionContext.promptText;
+        shouldClaimSessionContext =
+          sessionContext.shouldClaimSessionContext;
       }
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
@@ -649,7 +671,7 @@ export abstract class ChannelBase {
         const response = await this.runLoopBridgePrompt(
           promptBridge,
           sessionId,
-          promptText,
+          promptToSend,
           promptState,
           job.id,
           options.timeoutMs,
@@ -821,9 +843,26 @@ export abstract class ChannelBase {
     );
     const promptText = buildChannelWebhookPrompt(task, target);
     const taskId = `webhook:${task.source}:${task.eventType}`;
+    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
 
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
     const current = prev.then(async (): Promise<string | undefined> => {
+      let promptToSend = promptText;
+      let shouldClaimSessionContext = false;
+      if (shouldPrependSessionContext) {
+        const sessionContext = await this.prependUnattendedSessionContext(
+          sessionId,
+          target,
+          promptText,
+          `webhook task ${taskId}`,
+        );
+        promptToSend = sessionContext.promptText;
+        shouldClaimSessionContext =
+          sessionContext.shouldClaimSessionContext;
+      }
+      if (shouldClaimSessionContext) {
+        this.instructedSessions.add(sessionId);
+      }
       let doneResolve: () => void = () => {};
       const done = new Promise<void>((resolve) => {
         doneResolve = resolve;
@@ -842,12 +881,34 @@ export abstract class ChannelBase {
         ...this.lifecycleBase(target.chatId, sessionId, taskId),
         type: 'started',
       });
+      const heldChunks: string[] = [];
+      const releaseHeldChunks = () => {
+        for (const held of heldChunks.splice(0)) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(target.chatId, sessionId, taskId),
+            type: 'text_chunk',
+            chunk: held,
+          });
+          this.onResponseChunk(target.chatId, held, sessionId);
+        }
+      };
+      const onChunk = (sid: string, chunk: string) => {
+        if (sid !== sessionId || promptState.cancelled) {
+          return;
+        }
+        heldChunks.push(chunk);
+        if (!promptState.cancelPending) {
+          releaseHeldChunks();
+        }
+      };
+      const promptBridge = this.bridge;
+      promptBridge.on('textChunk', onChunk);
 
       try {
         const response = await this.runLoopBridgePrompt(
-          this.bridge,
+          promptBridge,
           sessionId,
-          promptText,
+          promptToSend,
           promptState,
           taskId,
           options.timeoutMs,
@@ -859,6 +920,7 @@ export abstract class ChannelBase {
             'cancel_command',
           );
         }
+        releaseHeldChunks();
         if (response) {
           promptState.deliveryStarted = true;
           await this.pushProactive(target, response);
@@ -883,16 +945,39 @@ export abstract class ChannelBase {
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
         }
-        if (!promptState.cancellationEmitted) {
+        if (
+          err instanceof ChannelLoopSkippedError &&
+          !promptState.cancelled
+        ) {
+          this.emitTaskCancellation(promptState, sessionId, err.reason);
+          promptState.cancelled = true;
+        }
+        if (
+          !promptState.cancelled &&
+          !(err instanceof ChannelLoopSkippedError)
+        ) {
+          releaseHeldChunks();
           this.emitTaskLifecycle({
             ...this.lifecycleBase(target.chatId, sessionId, taskId),
             type: 'failed',
             error: this.lifecycleError(err),
             phase: promptState.deliveryStarted ? 'delivery' : 'agent',
           });
+        } else if (
+          promptState.cancelled &&
+          !(err instanceof ChannelLoopSkippedError) &&
+          !(err instanceof Error && err.message === LOOP_TIMED_OUT_MESSAGE)
+        ) {
+          const channel = sanitizeLogText(this.name, 64);
+          const safeTaskId = sanitizeLogText(taskId, 64);
+          const safeSessionId = sanitizeLogText(sessionId, 64);
+          process.stderr.write(
+            `[${channel}] webhook ${safeTaskId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+          );
         }
         throw err;
       } finally {
+        promptBridge.off('textChunk', onChunk);
         if (this.activePrompts.get(sessionId) === promptState) {
           this.activePrompts.delete(sessionId);
         }

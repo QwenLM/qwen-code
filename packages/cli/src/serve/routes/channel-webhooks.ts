@@ -82,10 +82,11 @@ export function registerChannelWebhookRoutes(
 
     try {
       await deps.enqueueWebhookTask(task);
-    } catch {
-      res.status(500).json({
+    } catch (error) {
+      const enqueueError = classifyChannelWebhookEnqueueError(error);
+      res.status(enqueueError.status).json({
         error: 'Failed to enqueue channel webhook task',
-        code: 'channel_webhook_enqueue_failed',
+        code: enqueueError.code,
       });
       return;
     }
@@ -133,4 +134,18 @@ function readPayload(body: Record<string, unknown>): Record<string, unknown> {
     !Array.isArray(payload)
     ? (payload as Record<string, unknown>)
     : {};
+}
+
+function classifyChannelWebhookEnqueueError(error: unknown): {
+  status: number;
+  code: string;
+} {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === 'Channel worker is not running.') {
+    return { status: 503, code: 'channel_worker_unavailable' };
+  }
+  if (message === 'Channel webhook task IPC timed out.') {
+    return { status: 504, code: 'channel_webhook_enqueue_timeout' };
+  }
+  return { status: 500, code: 'channel_webhook_enqueue_failed' };
 }

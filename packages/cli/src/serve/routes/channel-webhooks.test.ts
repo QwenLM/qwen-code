@@ -210,4 +210,48 @@ describe('channel webhook routes', () => {
       code: 'channel_webhook_enqueue_failed',
     });
   });
+
+  it('returns 503 when the channel worker is not running', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new Error('Channel worker is not running.');
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_worker_unavailable',
+    });
+  });
+
+  it('returns 504 when enqueueing the webhook task times out', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new Error('Channel webhook task IPC timed out.');
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(504);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_enqueue_timeout',
+    });
+  });
 });
