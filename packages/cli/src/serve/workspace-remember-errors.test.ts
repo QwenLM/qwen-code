@@ -39,6 +39,19 @@ describe('extractRememberErrorCode', () => {
       'forget_failed',
     );
   });
+
+  it('limits cause traversal depth', () => {
+    const root: Record<string, unknown> = {};
+    let current = root;
+    for (let index = 0; index < 60; index += 1) {
+      const next: Record<string, unknown> = {};
+      current['cause'] = next;
+      current = next;
+    }
+    current['code'] = 'too_deep';
+
+    expect(extractRememberErrorCode(root)).toBe('remember_failed');
+  });
 });
 
 describe('extractRememberErrorDetails', () => {
@@ -130,6 +143,15 @@ describe('extractRememberErrorDetails', () => {
     expect(details).toBe('OpenAI key sk-<redacted>');
     expect(details).not.toContain('AAAAAAAAAA');
     expect(details).not.toContain('BBBBBBBBBBBBBBB');
+  });
+
+  it('redacts bare bearer tokens separated by invisible characters', () => {
+    const details = extractRememberErrorDetails(
+      new Error('Bearer\u200BeyJhbGciOiABCDEFGHIJKLMN'),
+    );
+
+    expect(details).toBe('Bearer <redacted>');
+    expect(details).not.toContain('eyJhbGciOiABCDEFGHIJKLMN');
   });
 
   it('normalizes line separators before redacting credentials', () => {

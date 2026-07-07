@@ -170,6 +170,7 @@ import {
 import {
   extractRememberErrorCode,
   extractRememberErrorDetails,
+  extractRememberErrorStack,
 } from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
@@ -274,27 +275,38 @@ const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
-function workspaceMemoryErrorData(
-  code: string,
-  err: unknown,
-): { errorKind: string; details?: string } {
+function workspaceMemoryFailureDiagnostics(err: unknown): {
+  details?: string;
+  debugDetails: string;
+  stack?: string;
+} {
+  let details: string | undefined;
+  let stack: string | undefined;
   try {
-    const details = extractRememberErrorDetails(err);
-    return {
-      errorKind: code,
-      ...(details ? { details } : {}),
-    };
+    details = extractRememberErrorDetails(err);
   } catch {
-    return { errorKind: code };
+    details = undefined;
   }
+  try {
+    stack = extractRememberErrorStack(err);
+  } catch {
+    stack = undefined;
+  }
+  return {
+    ...(details ? { details } : {}),
+    debugDetails: details ?? '<details unavailable>',
+    ...(stack ? { stack } : {}),
+  };
 }
 
-function workspaceMemoryDebugDetails(err: unknown): string {
-  try {
-    return extractRememberErrorDetails(err) ?? '<details unavailable>';
-  } catch {
-    return '<details unavailable>';
-  }
+function workspaceMemoryErrorData(
+  code: string,
+  diagnostics: { details?: string },
+): { errorKind: string; details?: string } {
+  return {
+    errorKind: code,
+    ...(diagnostics.details ? { details: diagnostics.details } : {}),
+  };
 }
 
 function parseAcpLocalReadRootsEnv(
@@ -5847,11 +5859,12 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          const details = workspaceMemoryDebugDetails(err);
+          const diagnostics = workspaceMemoryFailureDiagnostics(err);
           if (childSignal.aborted) {
             debugLogger.error('Workspace memory remember timed out:', {
               code: 'remember_timeout',
-              details,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
             });
             throw new RequestError(
               -32099,
@@ -5862,7 +5875,8 @@ class QwenAgent implements Agent {
           const code = extractRememberErrorCode(err);
           debugLogger.error('Workspace memory remember failed:', {
             code,
-            details,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
           });
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
@@ -5874,7 +5888,7 @@ class QwenAgent implements Agent {
           throw new RequestError(
             -32099,
             'Workspace memory remember failed',
-            workspaceMemoryErrorData(code, err),
+            workspaceMemoryErrorData(code, diagnostics),
           );
         }
       }
@@ -5926,11 +5940,12 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          const details = workspaceMemoryDebugDetails(err);
+          const diagnostics = workspaceMemoryFailureDiagnostics(err);
           if (childSignal.aborted) {
             debugLogger.error('Workspace memory forget timed out:', {
               code: 'forget_timeout',
-              details,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
             });
             throw new RequestError(
               -32099,
@@ -5943,7 +5958,8 @@ class QwenAgent implements Agent {
           const code = extractRememberErrorCode(err, 'forget_failed');
           debugLogger.error('Workspace memory forget failed:', {
             code,
-            details,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
           });
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
@@ -5955,7 +5971,7 @@ class QwenAgent implements Agent {
           throw new RequestError(
             -32099,
             'Workspace memory forget failed',
-            workspaceMemoryErrorData(code, err),
+            workspaceMemoryErrorData(code, diagnostics),
           );
         }
       }
@@ -5992,11 +6008,12 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          const details = workspaceMemoryDebugDetails(err);
+          const diagnostics = workspaceMemoryFailureDiagnostics(err);
           if (childSignal.aborted) {
             debugLogger.error('Workspace memory dream timed out:', {
               code: 'dream_timeout',
-              details,
+              details: diagnostics.debugDetails,
+              ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
             });
             throw new RequestError(-32099, 'Workspace memory dream timed out', {
               errorKind: 'dream_timeout',
@@ -6005,7 +6022,8 @@ class QwenAgent implements Agent {
           const code = extractRememberErrorCode(err, 'dream_failed');
           debugLogger.error('Workspace memory dream failed:', {
             code,
-            details,
+            details: diagnostics.debugDetails,
+            ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
           });
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
@@ -6017,7 +6035,7 @@ class QwenAgent implements Agent {
           throw new RequestError(
             -32099,
             'Workspace memory dream failed',
-            workspaceMemoryErrorData(code, err),
+            workspaceMemoryErrorData(code, diagnostics),
           );
         }
       }

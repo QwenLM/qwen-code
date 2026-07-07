@@ -10,6 +10,8 @@ const MAX_REMEMBER_ERROR_DETAILS_CHARS = 1000;
 const MAX_REMEMBER_ERROR_CAUSE_DEPTH = 50;
 const REMEMBER_ERROR_INVISIBLE_RE =
   /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+const REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE =
+  /\b(Bearer|QQBot)(?:[\p{Cf}\u2028\u2029]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
 // eslint-disable-next-line no-control-regex
 const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
 
@@ -101,6 +103,7 @@ function rawRememberErrorDetails(
 
 function replaceControlChars(details: string): string {
   return details
+    .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
     .replace(REMEMBER_ERROR_INVISIBLE_RE, '')
     .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
