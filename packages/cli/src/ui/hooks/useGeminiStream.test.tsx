@@ -4615,6 +4615,57 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('commits each completed table when a single table fills the budget (no stall-then-dump)', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, cap?: number) =>
+          cap === undefined ? s.length : Math.min(cap, s.length),
+      );
+
+      // Three COMPLETE tables (each terminated by a blank line), each tall
+      // enough on its own to exceed the fallback commit budget (terminalHeight
+      // 24 → budget 7). fitPendingSlice charges the whole table and returns
+      // kept = its trailing blank line, so the safe boundary sits exactly at
+      // keptLines. The commit loop must still find it and commit each table as
+      // it completes — a regression here stalls after the first table and dumps
+      // every later table at once only when the stream finalizes.
+      const table = (t: number) =>
+        [
+          '| A | B |',
+          '| --- | --- |',
+          ...Array.from({ length: 8 }, (_, r) => `| t${t}r${r} | v${t}r${r} |`),
+        ].join('\n');
+      const content = [table(1), table(2), table(3), 'tail'].join('\n\n');
+
+      const { result } = renderTestHook();
+      const releaseStream = await streamContent(result, content);
+
+      // The completed tables committed incrementally rather than stalling.
+      const committed = geminiContentItems();
+      expect(committed.length).toBeGreaterThanOrEqual(2);
+      // Nothing orphaned: any committed chunk with table rows carries its
+      // separator (a whole table, not a headerless tail).
+      for (const item of committed) {
+        const hasTableRow = item.text
+          .split('\n')
+          .some((l) => /^\s*\|.*\|\s*$/.test(l));
+        if (hasTableRow) {
+          expect(item.text).toMatch(/\|\s*:?-+/);
+        }
+      }
+      // The pending tail is bounded — the whole ~34-line message did not sit
+      // pending waiting for finalize.
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      const pendingLines =
+        pendingText.length === 0 ? 0 : pendingText.split('\n').length;
+      expect(pendingLines).toBeLessThanOrEqual(12);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('does not render leading blank thought chunks as an empty thought item', async () => {
       vi.useFakeTimers();
 
