@@ -45,6 +45,7 @@ import {
   createContentGeneratorConfig,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
@@ -3475,14 +3476,17 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const warningThresholdTokens = Math.floor(DEFAULT_TOKEN_LIMIT * 0.15);
     const config = new Config({
       ...baseParams,
       model: 'unknown-model-for-context-warning-test',
-      userMemory: 'a'.repeat(100_000),
+      userMemory: 'a'.repeat((warningThresholdTokens + 1) * 4),
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining("model's 131,072 token context window"),
+      expect.stringContaining(
+        `model's ${DEFAULT_TOKEN_LIMIT.toLocaleString()} token context window`,
+      ),
     );
   });
 

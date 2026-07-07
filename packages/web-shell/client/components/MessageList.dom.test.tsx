@@ -4,6 +4,7 @@ import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
 import { I18nProvider } from '../i18n';
+import styles from './MessageList.module.css';
 
 // Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
@@ -41,6 +42,31 @@ vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
 }));
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({
+    count,
+    enabled,
+    getItemKey,
+  }: {
+    count: number;
+    enabled: boolean;
+    getItemKey: (index: number) => string | number;
+  }) => {
+    const virtualItems = enabled
+      ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
+          key: getItemKey(index),
+          index,
+          start: index * 80,
+        }))
+      : [];
+    return {
+      getVirtualItems: () => virtualItems,
+      getTotalSize: () => (enabled ? count * 80 : 0),
+      measureElement: () => {},
+      scrollToIndex: () => {},
+    };
+  },
+}));
 
 const { MessageList } = await import('./MessageList');
 type MessageListHandle = import('./MessageList').MessageListHandle;
@@ -148,7 +174,6 @@ function mount(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
-          shellOutputMaxLines={50}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -179,7 +204,6 @@ function renderInto(
           loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
-          shellOutputMaxLines={50}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -310,6 +334,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
     click(toggle(c, 'u1'));
     expect(isCollapsed(c, 'g1')).toBe(true);
+  });
+
+  it('renders virtual scroll rows with sizer and row width classes', () => {
+    const c = mount(simpleTurns(110));
+
+    expect(c.querySelector(`.${styles.virtualSizer}`)).not.toBeNull();
+    expect(c.querySelectorAll(`.${styles.virtualRow}`).length).toBeGreaterThan(
+      0,
+    );
   });
 
   it('renders the session timeline in the left gutter without expanding turns', async () => {

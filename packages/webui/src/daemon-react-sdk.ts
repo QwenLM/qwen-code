@@ -105,6 +105,11 @@ export { useDaemonStatusReport as useStatusReport } from './daemon/index.js';
 /** Options for `useStatusReport` (detail level + resource load flags). */
 export type { DaemonStatusReportOptions as StatusReportOptions } from './daemon/index.js';
 
+/** Aggregate token-usage dashboard (`GET /usage/dashboard`). */
+export { useDaemonUsageDashboard as useUsageDashboard } from './daemon/index.js';
+/** Options for `useUsageDashboard` (heatmap window + resource load flags). */
+export type { DaemonUsageDashboardOptions as UsageDashboardOptions } from './daemon/index.js';
+
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
 
@@ -158,6 +163,9 @@ export {
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
 export { DAEMON_APPROVAL_MODES } from './daemon/index.js';
+
+/** HTTP statuses that mean the requested daemon session no longer exists. */
+export { isMissingSessionHttpStatus } from './daemon/index.js';
 
 /** Canonical Agent (sub-agent) tool name + predicate for permission UIs. */
 export { AGENT_TOOL_NAME, isAgentTool } from './constants/toolNames.js';
@@ -301,6 +309,20 @@ export type {
   DaemonStatusReportSession,
   /** One time-bucketed sample in the Daemon Status metrics series (charts). */
   DaemonMetricsSeriesBucket,
+  /** Usage-dashboard summary window: `today` | `week` (7D) | `month` (30D). */
+  DaemonUsageRange,
+  /** Aggregate token-usage dashboard payload (`GET /usage/dashboard`). */
+  DaemonUsageDashboard,
+  /** Flattened summary totals in the usage dashboard. */
+  DaemonUsageDashboardTotals,
+  /** One model's token share of the range. */
+  DaemonUsageModelShare,
+  /** One skill's invocation count over the range. */
+  DaemonUsageSkillCall,
+  /** One day's tokens + sessions for the daily charts. */
+  DaemonUsageDailyPoint,
+  /** One heatmap cell: tokens (intensity) + cache-read rate. */
+  DaemonUsageHeatmapDay,
   /** Full agent detail including system prompt, tools, and run config. */
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */

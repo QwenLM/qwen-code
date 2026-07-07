@@ -65,6 +65,7 @@ export type MarkdownTableMode = 'basic' | 'advanced';
 
 export type ToolHeaderKind =
   | 'agent'
+  | 'ask'
   | 'edit'
   | 'fetch'
   | 'read'

@@ -27,7 +27,7 @@
   padding-right: env(safe-area-inset-right);
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   overflow: hidden;
@@ -400,6 +400,58 @@
   overflow: visible;
 }
 
+.missingSessionState {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+.missingSessionMessage {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.missingSessionButton {
+  min-width: 120px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.missingSessionButton:hover,
+.missingSessionButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 24%, var(--border));
+  opacity: 0.9;
+}
+
+.missingSessionButton:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--foreground) 12%, transparent);
+  outline: none;
+}
+
+.missingSessionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* In-place panel that replaces the chat view (message list + composer) when
    Settings or Daemon Status is opened. Fills the chat pane and owns its own
    scroll container, mirroring what the DialogShell body used to provide. */
@@ -478,6 +530,14 @@
   display: none;
 }
 
+.chatSubtree {
+  display: contents;
+}
+
+.chatSubtreeHidden {
+  display: none;
+}
+
 /* Empty (new-chat) state centers the welcome header + composer vertically via
    `.appChatEmpty .chatPane { justify-content: center }`. For that to take effect
    the wrapper must shrink to its content instead of filling the pane — the same
@@ -519,6 +579,11 @@
   left: 20px;
   z-index: 6;
   pointer-events: auto;
+}
+
+.approvalOverlay:focus,
+.approvalOverlay:focus-visible {
+  outline: none;
 }
 
 .scrollToBottomLayer {
