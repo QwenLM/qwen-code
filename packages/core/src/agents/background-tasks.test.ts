@@ -593,6 +593,23 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-2')?.status).toBe('running');
     });
 
+    it('drains queued waiters after notify:false cancellation frees a slot', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+
+      registry.cancel('bg-1', { notify: false });
+      const reservation = await reservationPromise;
+
+      expect(registry.getQueuedCount()).toBe(0);
+      expect(reservation).toBeDefined();
+    });
+
     it('reserves a drained slot until registration consumes it', async () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,

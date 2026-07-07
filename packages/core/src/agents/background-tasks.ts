@@ -699,6 +699,7 @@ export class BackgroundTaskRegistry {
       // Session reset paths intentionally suppress the old task's terminal
       // notification so it cannot leak into a new conversation.
       entry.notified = true;
+      this.drainWaitQueue();
       return;
     }
 
