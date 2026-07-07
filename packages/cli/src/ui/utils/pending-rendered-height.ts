@@ -23,8 +23,10 @@ import { getCachedStringWidth } from './textUtils.js';
  *  rows). */
 export const TABLE_CHROME_ROWS = 5;
 
-/** Mirrors TableRenderer's MAX_ROW_LINES: when any cell wraps past this many
- *  lines, TableRenderer falls back to the (much taller) vertical layout. */
+/** The wrap-height threshold: when any cell wraps past this many lines,
+ *  TableRenderer falls back to the (much taller) vertical layout. This is the
+ *  single source of truth — TableRenderer imports it as MAX_ROW_LINES — so the
+ *  renderer and this estimator can never disagree on the format decision. */
 export const TABLE_MAX_ROW_LINES = 4;
 
 /** A markdown table row: `| ... |`. Group 1 captures the inner cells. */
@@ -223,10 +225,13 @@ export function fitPendingSlice(
       // minHorizontalTableWidth = max(24, colCount*3 + borderOverhead + 4).
       const minHorizontalWidth = Math.max(24, 6 * colCount + 5);
       // Per-row WRAPPED line counts, mirroring TableRenderer's per-cell wrap.
-      // TableRenderer shrinks columns proportionally to fit `contentWidth`;
-      // approximate that with an equal share of the content area — a safe upper
-      // bound, since it never gives a cell more room (so never fewer wrapped
-      // lines) than TableRenderer would. MIN_COLUMN_WIDTH mirrors its floor of 3.
+      // TableRenderer shrinks columns PROPORTIONALLY to their content; we
+      // approximate that with an equal share of the content area. That is exact
+      // for uniform columns but can under-count a heterogeneous table — a narrow
+      // column the renderer shrinks below the equal share wraps taller than
+      // estimated here — in which case the MainContent maxHeight backstop is the
+      // hard cap that still prevents the overflow/lock. MIN_COLUMN_WIDTH mirrors
+      // its floor of 3.
       const perColWidth = Math.max(
         3,
         Math.floor((contentWidth - (1 + 3 * colCount) - 4) / colCount),
@@ -282,7 +287,11 @@ export function fitPendingSlice(
       const rows = usesVertical
         ? verticalRows + Math.max(0, dataRows - 1) + 2
         : contentRows + Math.max(0, dataRows - 1) + TABLE_CHROME_ROWS;
-      const cost = Math.min(rows, tableClampRows);
+      // TableRenderer clamps only the inner <Text> to `tableClampRows`, but
+      // wraps it in <Box marginY={1}>, so a clamped table actually renders
+      // tableClampRows + 2 rows. Charge that so the two margin lines are never
+      // dropped when the clamp engages.
+      const cost = Math.min(rows, tableClampRows + 2);
       if (rendered + cost > budget && i > 0) {
         kept = i;
         break;

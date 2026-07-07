@@ -298,6 +298,25 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(1);
   });
 
+  it('charges wrapped HORIZONTAL rows when cells wrap within MAX_ROW_LINES', () => {
+    // 2 cols at width 40 → minHorizontalWidth 24, so horizontal. perColWidth =
+    // floor((40-7-4)/2)=14; a 15-char cell wraps to ceil(15/14)=2 lines, so the
+    // data row is 2 rows tall (not 1). horizontal = header(1)+row(2) + chrome(5)
+    // = 8. intro(1)+8 = 9 > budget 8 → cut before it. The old flat 2*dataRows+5
+    // = 7 charge would give 1+7 = 8 ≤ 8 and wrongly keep it — this guards the
+    // per-row wrapped `contentRows` sum against a regression to the flat count.
+    const cell = 'c'.repeat(15);
+    const lines = [
+      'intro',
+      '| A | B |',
+      '| --- | --- |',
+      `| ${cell} | ${cell} |`,
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 40, 8, CLAMP);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1);
+  });
+
   it('still uses the shorter horizontal height when wide cells stay within MAX_ROW_LINES', () => {
     // Same wide terminal and shape, but short cells (1 line each) → maxRowLines 1,
     // no vertical fallback → horizontal 4*1 + header + chrome = 13. intro(1)+13 =

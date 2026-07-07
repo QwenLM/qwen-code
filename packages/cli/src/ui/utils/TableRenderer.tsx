@@ -9,6 +9,7 @@ import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
+import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.js';
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
@@ -27,8 +28,9 @@ import {
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
 
-/** Maximum number of lines per row before switching to vertical format */
-const MAX_ROW_LINES = 4;
+// MAX_ROW_LINES (the wrap-height threshold that switches a row to the vertical
+// layout) is imported from pending-rendered-height so the renderer and the
+// pending-height estimator can never disagree on the format decision.
 
 /**
  * Below this width the column-aware budget (see `minHorizontalTableWidth`
