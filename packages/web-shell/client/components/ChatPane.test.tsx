@@ -21,6 +21,7 @@ let latestOnSubmit:
   | undefined;
 let sendPromptResolve: (() => void) | undefined;
 let sendPromptReject: ((e: unknown) => void) | undefined;
+let sendPromptAdmit: (() => void) | undefined;
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
@@ -55,7 +56,9 @@ vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
     <div
       data-testid="pane-streaming"
-      data-started-at={props.startedAt === undefined ? 'none' : String(props.startedAt)}
+      data-started-at={
+        props.startedAt === undefined ? 'none' : String(props.startedAt)
+      }
       data-show-phrase={String(props.showPhrase)}
     />
   ),
@@ -121,10 +124,13 @@ beforeEach(() => {
   latestOnSubmit = undefined;
   sendPrompt.mockReset();
   // Each sendPrompt returns a promise the test controls, so we can assert the
-  // draft is committed only after the prompt is accepted.
+  // draft is committed on admission (onAdmitted) rather than on turn completion
+  // (promise resolution). `sendPromptAdmit` captures the options.onAdmitted hook.
+  sendPromptAdmit = undefined;
   sendPrompt.mockImplementation(
-    () =>
+    (_text?: string, options?: { onAdmitted?: () => void }) =>
       new Promise<unknown>((resolve, reject) => {
+        sendPromptAdmit = options?.onAdmitted;
         sendPromptResolve = () => resolve({});
         sendPromptReject = (e) => reject(e);
       }),
@@ -182,16 +188,26 @@ describe('ChatPane', () => {
     expect((sendPrompt.mock.calls[0] as unknown[])[0]).toBe('hello there');
   });
 
-  it('commits the draft only after the prompt is accepted', async () => {
+  it('commits the draft on admission, without waiting for the turn to finish', async () => {
     render();
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
       returned = latestOnSubmit!('hi', undefined, commit);
     });
-    // Returns false (keep the draft) and does NOT commit before acceptance.
+    // Returns false (keep the draft) and does NOT commit before admission.
     expect(returned).toBe(false);
     expect(commit).not.toHaveBeenCalled();
+    // The daemon admits the prompt (onAdmitted). The draft clears now, even
+    // though the turn promise is still pending — a long response must not strand
+    // the sent text in the composer until the turn ends.
+    await act(async () => {
+      sendPromptAdmit!();
+      await Promise.resolve();
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+    // The turn finishing later must NOT commit again — guards against regressing
+    // to committing on promise resolution (turn end) instead of admission.
     await act(async () => {
       sendPromptResolve!();
       await Promise.resolve();
@@ -237,7 +253,11 @@ describe('ChatPane', () => {
         new MouseEvent('click', { bubbles: true }),
       ),
     );
-    expect(submitPermission).toHaveBeenCalledWith('perm-1', 'proceed', undefined);
+    expect(submitPermission).toHaveBeenCalledWith(
+      'perm-1',
+      'proceed',
+      undefined,
+    );
   });
 
   it('routes an AskUserQuestion permission to the AskUserQuestion overlay', () => {

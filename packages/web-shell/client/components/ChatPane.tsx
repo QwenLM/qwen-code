@@ -90,13 +90,19 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      // Keep the draft (return false) until the prompt is actually accepted:
-      // sendPrompt can reject (transcript still loading, session disconnected,
-      // or a turn already active), and committing first would silently drop the
-      // user's text. Commit only once it resolves.
+      // Keep the draft (return false) and clear it only once the daemon ADMITS
+      // the prompt. `onAdmitted` fires at acceptance; the sendPrompt promise
+      // itself resolves only when the whole (possibly long) turn finishes, so
+      // committing on resolution would strand the sent text in the composer for
+      // the entire response. If the prompt is rejected before admission
+      // (transcript still loading, session disconnected, or a turn already
+      // active) onAdmitted never fires, so the draft is preserved and the error
+      // is surfaced.
       actions
-        .sendPrompt(trimmed, images && images.length ? { images } : undefined)
-        .then(() => commitAccepted?.())
+        .sendPrompt(trimmed, {
+          ...(images && images.length ? { images } : {}),
+          onAdmitted: () => commitAccepted?.(),
+        })
         .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
       return false;
     },
