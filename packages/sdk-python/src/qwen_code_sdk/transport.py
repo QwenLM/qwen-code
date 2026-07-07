@@ -218,6 +218,9 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     if options.max_session_turns is not None:
         args.extend(["--max-session-turns", str(options.max_session_turns)])
 
+    if options.max_subagent_depth is not None:
+        args.extend(["--max-subagent-depth", str(options.max_subagent_depth)])
+
     if options.core_tools:
         args.extend(["--core-tools", ",".join(options.core_tools)])
 

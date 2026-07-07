@@ -182,5 +182,6 @@ export const QueryOptionsSchema = z
     resume: z.string().optional(),
     sessionId: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
+    maxSubagentDepth: z.number().int().min(1).max(100).optional(),
   })
   .strict();

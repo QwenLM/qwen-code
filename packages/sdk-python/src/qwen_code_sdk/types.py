@@ -25,6 +25,29 @@ AuthType: TypeAlias = Literal[
 ]
 
 
+class RunConfig(TypedDict, total=False):
+    """Run configuration for a sub-agent."""
+
+    max_time_minutes: int
+    max_turns: int
+
+
+class SubagentConfig(TypedDict, total=False):
+    """Configuration for a sub-agent.
+
+    Required fields: name, description, systemPrompt.
+    Field names match the CLI wire format (camelCase).
+    """
+
+    name: str
+    description: str
+    systemPrompt: str
+    tools: list[str]
+    model: str
+    runConfig: RunConfig
+    color: str
+
+
 class PermissionSuggestion(TypedDict):
     type: Literal["allow", "deny", "modify"]
     label: str
@@ -114,6 +137,8 @@ class QueryOptionsDict(TypedDict, total=False):
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
     stderr: Callable[[str], None]
+    agents: list[dict[str, Any]]
+    max_subagent_depth: int
 
 
 @dataclass
@@ -139,6 +164,8 @@ class QueryOptions:
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
     stderr: Callable[[str], None] | None = None
+    agents: list[dict[str, Any]] | None = None
+    max_subagent_depth: int | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> QueryOptions:
@@ -183,6 +210,8 @@ class QueryOptions:
                 Callable[[str], None] | None,
                 _as_optional_callable(data, "stderr"),
             ),
+            agents=_as_optional_list_of_dicts(data, "agents"),
+            max_subagent_depth=_as_optional_int(data, "max_subagent_depth"),
         )
 
 
@@ -320,4 +349,20 @@ def _as_optional_nested_dict(
         if not isinstance(k, str) or not isinstance(v, Mapping):
             raise TypeError(f"{key} must be a mapping of string to mapping")
         parsed[k] = dict(v)
+    return parsed
+
+
+def _as_optional_list_of_dicts(
+    data: Mapping[str, Any], key: str
+) -> list[dict[str, Any]] | None:
+    raw = data.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise TypeError(f"{key} must be a list of mappings")
+    parsed: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"{key} must be a list of mappings")
+        parsed.append(dict(item))
     return parsed

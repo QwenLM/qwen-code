@@ -70,6 +70,28 @@ def validate_query_options(options: QueryOptions) -> None:
             "Remove the mcp_servers option or use the TypeScript SDK."
         )
 
+    if options.max_subagent_depth is not None:
+        if not isinstance(options.max_subagent_depth, int) or isinstance(
+            options.max_subagent_depth, bool
+        ):
+            raise ValidationError("max_subagent_depth must be an integer")
+        if options.max_subagent_depth < 1 or options.max_subagent_depth > 100:
+            raise ValidationError(
+                "max_subagent_depth must be between 1 and 100"
+            )
+
+    if options.agents:
+        for i, agent in enumerate(options.agents):
+            if not isinstance(agent, dict):
+                raise ValidationError(
+                    f"agents[{i}] must be a mapping"
+                )
+            for required_field in ("name", "description", "systemPrompt"):
+                if not agent.get(required_field):
+                    raise ValidationError(
+                        f"agents[{i}] must have a non-empty '{required_field}'"
+                    )
+
 
 def _validate_optional_callable(
     value: object,

@@ -46,6 +46,12 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * Maximum sub-agent nesting depth (1-based).
+   * 1 keeps sub-agents available but disables nesting; capped at 100.
+   * @default 5 (CLI default)
+   */
+  maxSubagentDepth?: number;
 };
 
 export interface QuerySystemPromptPreset {
@@ -503,4 +509,12 @@ export interface QueryOptions {
      */
     streamClose?: number;
   };
+
+  /**
+   * Maximum sub-agent nesting depth (1-based).
+   * 1 keeps sub-agents available but disables nesting; capped at 100.
+   * Equivalent to CLI's `--max-subagent-depth` flag.
+   * @default 5 (CLI default)
+   */
+  maxSubagentDepth?: number;
 }
