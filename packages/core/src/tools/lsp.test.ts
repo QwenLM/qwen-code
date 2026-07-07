@@ -247,7 +247,16 @@ describe('LspTool', () => {
           filePath: 'src/app.ts',
           limit: 0,
         } as LspToolParams);
-        expect(result).toBe('limit must be a positive number.');
+        expect(result).toBe('limit must be a positive integer.');
+      });
+
+      it('rejects fractional limit', () => {
+        const result = tool.validateToolParams({
+          operation: 'documentSymbol',
+          filePath: 'src/app.ts',
+          limit: 1.5,
+        } as LspToolParams);
+        expect(result).toBe('params/limit must be integer');
       });
     });
 
@@ -1050,6 +1059,16 @@ describe('LspTool', () => {
       };
       expect(schema.properties?.line?.type).toBe('number');
       expect(schema.properties?.character?.type).toBe('number');
+    });
+
+    it('limit extension property has integer type', () => {
+      const tool = createTool();
+      const schema = tool.schema.parametersJsonSchema as {
+        properties?: {
+          limit?: { type?: string };
+        };
+      };
+      expect(schema.properties?.limit?.type).toBe('integer');
     });
 
     it('includeDeclaration property has correct type', () => {

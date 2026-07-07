@@ -1081,7 +1081,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
             description: 'Optional LSP server name to target.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
             description: 'Optional maximum number of results to return.',
           },
           diagnostics: {
@@ -1212,8 +1212,11 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     if (params.endCharacter !== undefined && params.endCharacter < 1) {
       return 'endCharacter must be a positive number.';
     }
-    if (params.limit !== undefined && params.limit <= 0) {
-      return 'limit must be a positive number.';
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer.';
     }
 
     return null;
