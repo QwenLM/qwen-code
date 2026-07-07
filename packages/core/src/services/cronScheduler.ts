@@ -16,6 +16,7 @@ import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
   CRON_TASKS_DISPLAY_PATH,
+  appendCronRun,
   generateCronTaskId,
   getCronFilePath,
   readCronTasks,
@@ -79,6 +80,13 @@ export interface CronJob {
   jitterMs: number;
   /** Persisted under ~/.qwen (per-project) — survives restarts. */
   durable?: boolean;
+  /**
+   * Id of the session this durable task is bound to. When set, the task fires
+   * ONLY in that session (independent of the per-project durable lock), so its
+   * transcript is the task's run history; the lock owner never fires it. When
+   * absent, the task uses the shared model: only the lock owner fires it.
+   */
+  boundSessionId?: string;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
 }
@@ -249,6 +257,44 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
+  // (on-time) OR a catch-up delivery. A reload racing that async write reads the
+  // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
+  // populated once a fire has actually been stamped/delivered, so a catch-up that
+  // was merely buffered and then dropped never enters it and still re-detects.
+  //
+  // REF-COUNTED per id (not a plain Set): the same task can have two persists in
+  // flight at once (it fired again before the first write landed). Clearing on
+  // the FIRST settle would drop the guard while the second write is still
+  // pending; the count keeps it until the LAST in-flight persist for that id
+  // settles.
+  //
+  // LIMITATION: this guard is INSTANCE-scoped in-memory state. It protects
+  // against a reload racing a persist WITHIN one scheduler. It does NOT survive
+  // a new scheduler instance (daemon restart, keepalive revive, session reload):
+  // a fresh instance starts with an empty map, so if the previous instance died
+  // with a persist still in flight, the new one reads the stale on-disk stamp
+  // and can re-fire that slot once. Fully closing that narrow cross-instance
+  // window would need a durable stamp (in the tasks file or a lock file); it's
+  // accepted here as a sub-second restart-timing edge.
+  private firePersistPending = new Map<string, number>();
+
+  private markFirePersistPending(ids: Iterable<string>): void {
+    for (const id of ids) {
+      this.firePersistPending.set(
+        id,
+        (this.firePersistPending.get(id) ?? 0) + 1,
+      );
+    }
+  }
+
+  private clearFirePersistPending(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const next = (this.firePersistPending.get(id) ?? 0) - 1;
+      if (next > 0) this.firePersistPending.set(id, next);
+      else this.firePersistPending.delete(id);
+    }
+  }
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -672,11 +718,30 @@ export class CronScheduler {
     const missedOneShots: DurableCronTask[] = [];
     const catchUpIds: string[] = [];
     const finalTasks: DurableCronTask[] = [];
-    if (handleMissed) {
+    // Detect missed / catch-up work for the tasks THIS session is responsible
+    // for — a scoped pass that now runs regardless of lock ownership. A task
+    // bound to this session is caught up here even when another session holds
+    // the lock; an unbound task is caught up only when this session IS the lock
+    // owner (`handleMissed`); a task bound to another session is that session's
+    // responsibility and skipped.
+    {
       for (const t of tasks) {
         // A task whose on-disk removal is already in flight (deleted via
         // cron_delete, or a just-delivered fire) is gone, not missed.
         if (this.pendingRemoval.has(t.id)) continue;
+        const responsibleForMissed =
+          typeof t.sessionId === 'string' && t.sessionId.length > 0
+            ? t.sessionId === this.sessionId
+            : handleMissed;
+        if (!responsibleForMissed) continue;
+        // A task that already fired this session — on-time via the tick OR as a
+        // catch-up — but whose lastFiredAt persist hasn't landed yet must not be
+        // re-detected: any reload racing that async write (e.g. a foreign write
+        // — another task's manual run, a rename, an unarchive — tripping the
+        // watcher) would otherwise read the stale disk lastFiredAt and fire the
+        // same slot a second time. (A catch-up merely buffered then dropped is
+        // NOT in this set, so it still re-detects from disk — intended recovery.)
+        if (this.firePersistPending.has(t.id)) continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
@@ -927,16 +992,40 @@ export class CronScheduler {
       if (fired !== undefined) stamps.set(id, fired);
     }
     if (stamps.size === 0) return;
+    // Guard the just-delivered ids against re-detection by any reload that
+    // races this async write (which still reads the stale disk lastFiredAt).
+    // Cleared once the write lands, after which the disk anchor is current.
+    const guarded = [...stamps.keys()];
+    this.markFirePersistPending(guarded);
     this.trackPersist(
       updateCronTasks(this.projectRoot, (tasks) => {
         let changed = false;
         const next = tasks.map((t) => {
           const stamp = stamps.get(t.id);
-          if (stamp === undefined || t.lastFiredAt === stamp) return t;
+          // Never regress lastFiredAt (`>=`, not just `===`): a NEWER stamp may
+          // have landed after this catch-up was delivered — mainly a manual
+          // POST /run in the daemon process writing lastFiredAt=now while this
+          // bound session's async catch-up persist is still in flight (a
+          // cross-process race firePersistPending can't see). Overwriting it with
+          // the older catch-up minute would re-open the manually-covered slots.
+          // Mirrors the tick persist's guard.
+          if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) return t;
           changed = true;
-          return { ...t, lastFiredAt: stamp };
+          // Late fire (overdue while no session owned the schedule) — record it
+          // as 'catch-up' so the history distinguishes it from an on-time fire.
+          return {
+            ...t,
+            lastFiredAt: stamp,
+            runs: appendCronRun(t.runs, {
+              at: stamp,
+              kind: 'catch-up',
+              ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+            }),
+          };
         });
         return changed ? next : tasks;
+      }).finally(() => {
+        this.clearFirePersistPending(guarded);
       }),
     );
   }
@@ -1137,6 +1226,21 @@ export class CronScheduler {
   }
 
   /**
+   * Whether THIS session should fire a given durable job:
+   *  - A session-bound task (`boundSessionId` set) fires only in its own
+   *    session, independent of the per-project lock — so each task's fires
+   *    land in its dedicated transcript and no two sessions race it.
+   *  - An unbound task fires only in the lock owner (the legacy shared model).
+   * A task bound to a *different* session is never fired here.
+   */
+  #shouldFireDurable(job: CronJob): boolean {
+    if (job.boundSessionId !== undefined) {
+      return job.boundSessionId === this.sessionId;
+    }
+    return this.isOwner;
+  }
+
+  /**
    * Manual tick — checks all jobs against the current time and fires those
    * that are due. Exported for testing.
    */
@@ -1150,10 +1254,11 @@ export class CronScheduler {
     const removedIds: string[] = []; // durable one-shot fires / expiries
 
     for (const job of this.jobs.values()) {
-      // Durable jobs fire only while this session holds the lock — never
-      // in non-owner sessions, where a persisted job would otherwise fire
-      // uncoordinated alongside the real owner's copy.
-      if (job.durable && !this.isOwner) continue;
+      // Durable jobs fire under one of two models (see #shouldFireDurable):
+      // a session-bound task fires only in its own session; an unbound task
+      // fires only in the per-project lock owner. Anything else is skipped so
+      // a persisted job never fires uncoordinated in the wrong session.
+      if (job.durable && !this.#shouldFireDurable(job)) continue;
       // A durable job this consumer can't run (e.g. a loop.md sentinel in a
       // headless run) is skipped BEFORE processJob stamps lastFiredAt — firing
       // it here would persist the stamp while the work is skipped downstream,
@@ -1180,14 +1285,43 @@ export class CronScheduler {
     if (this.projectRoot && (firedAt.size > 0 || removedIds.length > 0)) {
       for (const id of removedIds) this.pendingRemoval.add(id);
       const removed = new Set(removedIds);
+      // Guard the just-fired recurring ids against re-detection by a reload that
+      // races this async write (removed one-shots are already covered by
+      // pendingRemoval). Cleared when the write lands. Symmetric to the
+      // catch-up persist — see firePersistPending.
+      const guarded = [...firedAt.keys()];
+      this.markFirePersistPending(guarded);
       this.trackPersist(
         updateCronTasks(this.projectRoot, (tasks) =>
           tasks
             .filter((t) => !removed.has(t.id))
-            .map((t) =>
-              firedAt.has(t.id) ? { ...t, lastFiredAt: firedAt.get(t.id)! } : t,
-            ),
-        ),
+            // A recurring fire also appends a bounded run record. One-shots
+            // were routed to removedIds above and filtered out here, so they
+            // never accrue history — they're deleted the moment they fire.
+            .map((t) => {
+              const stamp = firedAt.get(t.id);
+              // Never regress lastFiredAt: a concurrent writer (a manual
+              // POST /run, or a catch-up persist) may have stamped a NEWER value
+              // between this tick's read and write; overwriting it with the older
+              // tick slot could re-open an already-covered slot. Mirrors the
+              // catch-up persist's equality guard.
+              if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
+                return t;
+              return {
+                ...t,
+                lastFiredAt: stamp,
+                runs: appendCronRun(t.runs, {
+                  at: stamp,
+                  kind: 'scheduled',
+                  // The owner session that ran this fire — links the run back
+                  // to its transcript. Set whenever a durable fire persists.
+                  ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+                }),
+              };
+            }),
+        ).finally(() => {
+          this.clearFirePersistPending(guarded);
+        }),
       );
     }
 
@@ -1369,6 +1503,7 @@ function durableTaskToJob(
     lastFiredAt: task.lastFiredAt ?? undefined,
     jitterMs,
     durable: true,
+    ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
   };
 }
 
@@ -1399,4 +1534,47 @@ function computeNextFireMs(
   } catch {
     return null;
   }
+}
+
+/**
+ * The effective next fire time (epoch ms) the tick will ACTUALLY produce for a
+ * durable task — the same authority the scheduler's catch-up detection uses —
+ * so a UI countdown lines up with the real fire instead of the bare cron
+ * boundary. The tick fires a boundary slot at `slot + jitterMs` (see
+ * {@link processJob}); bare `nextFireTime` omits that jitter and would read up
+ * to the jitter window (≤15 min for recurring) early. Anchored on the last fire
+ * (recurring) / creation (one-shot), not on `now`, so a slot pending only its
+ * jitter isn't skipped to the following period. Returns null when the cron
+ * can't be projected. Callers should treat a disabled task as "no next fire".
+ */
+// Memoize the (expensive, up to three minute-stepping cron scans) computation:
+// deterministic per (id, cron, recurring, anchor), and the route recomputes it
+// per task on every GET/POST/PATCH/run response. A sparse cron (yearly, leap-day)
+// costs hundreds of ms per scan, so an un-memoized 50-task list could stall the
+// event loop for seconds. A task re-keys only when its anchor advances (a fire)
+// or its schedule is edited, so steady-state GETs are all cache hits.
+const nextDurableFireCache = new Map<string, number | null>();
+const NEXT_DURABLE_FIRE_CACHE_MAX = 512;
+
+export function nextDurableFireMs(
+  task: Pick<
+    DurableCronTask,
+    'id' | 'cron' | 'recurring' | 'lastFiredAt' | 'createdAt'
+  >,
+): number | null {
+  const anchor = task.recurring
+    ? (task.lastFiredAt ?? task.createdAt)
+    : task.createdAt;
+  const key = `${task.id}\x00${task.cron}\x00${task.recurring ? 1 : 0}\x00${anchor}`;
+  const cached = nextDurableFireCache.get(key);
+  if (cached !== undefined) return cached;
+  const jitter = computeJitter(task.id, task.cron, task.recurring);
+  const result = computeNextFireMs(task.cron, anchor, jitter);
+  // Clear wholesale on overflow (re-warms on the next request) rather than track
+  // LRU — the working set is the current task list, well under the cap.
+  if (nextDurableFireCache.size >= NEXT_DURABLE_FIRE_CACHE_MAX) {
+    nextDurableFireCache.clear();
+  }
+  nextDurableFireCache.set(key, result);
+  return result;
 }

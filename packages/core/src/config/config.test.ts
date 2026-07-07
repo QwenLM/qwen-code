@@ -502,6 +502,28 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('shell execution config', () => {
+    it('allows explicitly clearing the configured pager', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ pager: undefined });
+      expect(config.getShellExecutionConfig().pager).toBeUndefined();
+    });
+
+    it('preserves the existing pager when an update omits the pager key', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ terminalWidth: 120 });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
@@ -564,6 +586,40 @@ describe('Server Config (config.ts)', () => {
           maxSubagentDepth: 5000,
         }).getMaxSubagentDepth(),
       ).toBe(100);
+    });
+  });
+
+  describe('agents.maxParallelAgents', () => {
+    it('configures the background task registry concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgents: 1,
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('maximum concurrent background agents (1) reached');
     });
   });
 
@@ -6003,6 +6059,52 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
     });
     config.setDisabledTools(new Set());
     expect(config.getDisabledTools()).toEqual(new Set());
+  });
+});
+
+describe('visibleTools', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `visibleTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['Foo', 'Bar'],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `visibleTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getVisibleTools()).toEqual(new Set());
+  });
+
+  it('filters out non-string entries', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: [
+        'tool_a',
+        42 as unknown as string,
+        null as unknown as string,
+        'tool_b',
+      ],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['tool_a', 'tool_b']));
+  });
+
+  it('is readonly — returned set preserves config state', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['web_fetch'],
+    });
+    const set = config.getVisibleTools();
+    expect(set.has('web_fetch')).toBe(true);
+    // always returns the same reference
+    expect(config.getVisibleTools()).toBe(set);
   });
 });
 

@@ -522,6 +522,27 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
+    async runScheduledTask(id) {
+      requireClient(getClient, 'Run scheduled task failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/scheduled-tasks/${encodeURIComponent(id)}/run`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+        }),
+        'Run scheduled task timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `POST /scheduled-tasks/${id}/run`),
+        );
+      }
+      return (await res.json()) as DaemonScheduledTask;
+    },
+
     async deleteScheduledTask(id) {
       requireClient(getClient, 'Delete scheduled task failed');
       const url = createDaemonRequestUrl(
