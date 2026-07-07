@@ -7,7 +7,8 @@
 import { act } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -54,11 +55,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
-  const spawnSyncMock = vi.fn(() => ({ status: 0 }));
+  const { EventEmitter } = await import('node:events');
+  const spawnMock = vi.fn(() => {
+    const child = new EventEmitter() as EventEmitter & {
+      unref: ReturnType<typeof vi.fn>;
+    };
+    child.unref = vi.fn();
+    queueMicrotask(() => child.emit('spawn'));
+    return child;
+  });
   return {
     ...actual,
-    spawnSync: spawnSyncMock,
-    default: { ...actual, spawnSync: spawnSyncMock },
+    spawn: spawnMock,
+    default: { ...actual, spawn: spawnMock },
   };
 });
 
@@ -66,8 +75,22 @@ const mockedUseConfig = vi.mocked(useConfig);
 const mockedUseSettings = vi.mocked(useSettings);
 const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 const mockedUseKeypress = vi.mocked(useKeypress);
-const mockedSpawnSync = vi.mocked(spawnSync);
+const mockedSpawn = vi.mocked(spawn);
 const originalPlatform = process.platform;
+
+type MockSpawnChild = EventEmitter & { unref: ReturnType<typeof vi.fn> };
+
+function createMockSpawnChild(
+  event: 'spawn' | 'error' = 'spawn',
+  error?: Error,
+): MockSpawnChild {
+  const child = new EventEmitter() as MockSpawnChild;
+  child.unref = vi.fn();
+  queueMicrotask(() => {
+    child.emit(event, error);
+  });
+  return child;
+}
 
 function stubPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', {
@@ -146,11 +169,14 @@ describe('MemoryDialog', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSpawnSync).toHaveBeenCalledWith(
+    expect(mockedSpawn).toHaveBeenCalledWith(
       expect.any(String),
       [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
-      expect.objectContaining({ stdio: 'inherit' }),
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
     );
+    expect(
+      (mockedSpawn.mock.results[0]?.value as MockSpawnChild).unref,
+    ).toHaveBeenCalled();
     expect(launchEditor).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });
@@ -175,10 +201,10 @@ describe('MemoryDialog', () => {
         await Promise.resolve();
       });
 
-      expect(mockedSpawnSync).toHaveBeenCalledWith(
+      expect(mockedSpawn).toHaveBeenCalledWith(
         expect.any(String),
         [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
-        expect.objectContaining({ stdio: 'inherit' }),
+        expect.objectContaining({ detached: true, stdio: 'ignore' }),
       );
       expect(launchEditor).not.toHaveBeenCalled();
       expect(onClose).toHaveBeenCalled();
@@ -205,10 +231,10 @@ describe('MemoryDialog', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSpawnSync).toHaveBeenCalledWith(
+    expect(mockedSpawn).toHaveBeenCalledWith(
       expect.any(String),
       [getAutoMemoryRoot('/tmp/project')],
-      expect.objectContaining({ stdio: 'inherit' }),
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
     );
     expect(launchEditor).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
@@ -225,10 +251,10 @@ describe('MemoryDialog', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSpawnSync).toHaveBeenCalledWith(
+    expect(mockedSpawn).toHaveBeenCalledWith(
       expect.any(String),
       [getAutoMemoryRoot('/tmp/project')],
-      expect.objectContaining({ stdio: 'inherit' }),
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
     );
     expect(onClose).toHaveBeenCalled();
   });
@@ -251,7 +277,7 @@ describe('MemoryDialog', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSpawnSync).not.toHaveBeenCalled();
+    expect(mockedSpawn).not.toHaveBeenCalled();
     expect(launchEditor).toHaveBeenCalledWith(
       path.join(
         os.homedir(),
@@ -265,9 +291,9 @@ describe('MemoryDialog', () => {
 
   it('shows an error when opening a managed memory folder fails', async () => {
     const onClose = vi.fn();
-    mockedSpawnSync.mockReturnValueOnce({
-      error: new Error('ENOENT'),
-    } as never);
+    mockedSpawn.mockImplementationOnce(
+      () => createMockSpawnChild('error', new Error('ENOENT')) as never,
+    );
     const { lastFrame } = render(<MemoryDialog onClose={onClose} />);
 
     const keypressHandler = mockedUseKeypress.mock.calls[0][0];
@@ -456,7 +482,7 @@ describe('MemoryDialog', () => {
     expect(launchEditor).toHaveBeenCalledWith(
       expect.stringMatching(/\/\.qwen\/QWEN\.md$/),
     );
-    expect(mockedSpawnSync).not.toHaveBeenCalled();
+    expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
   it('reflects the persisted value when the dialog is reopened (remounted)', () => {

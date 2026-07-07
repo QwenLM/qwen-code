@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   getAllGeminiMdFilenames,
   Storage,
@@ -60,7 +60,7 @@ async function resolvePreferredMemoryFile(
   return path.join(dir, fallbackFilename);
 }
 
-function openFolderPath(folderPath: string): void {
+async function openFolderPath(folderPath: string): Promise<void> {
   let command = 'xdg-open';
 
   switch (process.platform) {
@@ -79,17 +79,18 @@ function openFolderPath(folderPath: string): void {
     process.platform === 'win32' &&
     (command.endsWith('.cmd') || command.endsWith('.bat'));
 
-  const result = spawnSync(command, [folderPath], {
-    stdio: 'inherit',
+  const child = spawn(command, [folderPath], {
+    detached: true,
+    stdio: 'ignore',
     shell: needsShell,
   });
 
-  if (result.error) {
-    throw result.error;
-  }
-  if (typeof result.status === 'number' && result.status !== 0) {
-    throw new Error(`Folder opener exited with status ${result.status}`);
-  }
+  child.unref();
+
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('spawn', () => resolve());
+  });
 }
 
 function shouldOpenFolderPath(): boolean {
@@ -298,7 +299,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         if (item.action === 'folder') {
           await fs.mkdir(targetPath, { recursive: true });
           if (shouldOpenFolderPath()) {
-            openFolderPath(targetPath);
+            await openFolderPath(targetPath);
           } else {
             const indexPath = path.join(targetPath, AUTO_MEMORY_INDEX_FILENAME);
             await ensureFileExists(indexPath);
