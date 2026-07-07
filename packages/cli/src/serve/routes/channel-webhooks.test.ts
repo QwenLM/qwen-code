@@ -211,10 +211,14 @@ describe('channel webhook routes', () => {
     });
   });
 
-  it('returns 503 when the channel worker is not running', async () => {
+  it.each([
+    'Channel worker is not running.',
+    'Channel worker exited.',
+    'Channel worker stopped.',
+  ])('returns 503 when the worker is unavailable: %s', async (message) => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
-        throw new Error('Channel worker is not running.');
+        throw new Error(message);
       }),
     });
     const res = await request(h.app)

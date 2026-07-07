@@ -141,7 +141,11 @@ function classifyChannelWebhookEnqueueError(error: unknown): {
   code: string;
 } {
   const message = error instanceof Error ? error.message : String(error);
-  if (message === 'Channel worker is not running.') {
+  if (
+    message === 'Channel worker is not running.' ||
+    message === 'Channel worker exited.' ||
+    message === 'Channel worker stopped.'
+  ) {
     return { status: 503, code: 'channel_worker_unavailable' };
   }
   if (message === 'Channel webhook task IPC timed out.') {
