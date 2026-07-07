@@ -29,11 +29,14 @@ import {
   processSingleFileContent,
   detectBOM,
   decodeBufferWithEncodingInfo,
+  readFileWithLineAndLimit,
   readFileWithEncoding,
   readFileWithEncodingInfo,
   detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
+import { iconvEncode } from './iconvHelper.js';
+import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { ToolErrorType } from '../tools/tool-error.js';
@@ -1993,6 +1996,149 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([1, 2]);
     });
 
+    it('should preserve default full file-system reads for large text files', async () => {
+      const content = `head\n${'x'.repeat(11 * 1024 * 1024)}`;
+      actualNodeFs.writeFileSync(testTextFilePath, content);
+
+      const result = await fsService.readTextFile({ path: testTextFilePath });
+
+      expect(result.content).toBe(content);
+      expect(result._meta?.originalLineCount).toBe(2);
+      expect(result._meta?.originalLineCountExact).toBe(true);
+      expect(result._meta?.truncatedByBytes).not.toBe(true);
+    });
+
+    it('should stream explicit offset reads for large text files', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        `skip\n${'line\n'.repeat(3 * 1024 * 1024)}`,
+      );
+
+      const result = await fsService.readTextFile({
+        path: testTextFilePath,
+        line: 1,
+      });
+
+      expect(result.content.startsWith('line\n')).toBe(true);
+      expect(result.content.startsWith('skip\n')).toBe(false);
+      expect(result._meta?.originalLineCountExact).toBe(false);
+      expect(result._meta?.truncatedByBytes).toBe(true);
+    });
+
+    it('should preserve unbounded explicit line-zero reads below the large-file threshold', async () => {
+      const content = `head\n${'body\n'.repeat(6_000)}tail\n`;
+      actualNodeFs.writeFileSync(testTextFilePath, content);
+
+      const result = await fsService.readTextFile({
+        path: testTextFilePath,
+        line: 0,
+      });
+
+      expect(result.content).toBe(content);
+      expect(result._meta?.truncatedByBytes).not.toBe(true);
+    });
+
+    it('should enforce maxOutputBytes for default file-system reads below the large-file threshold', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(100));
+
+      const result = await fsService.readTextFile({
+        path: testTextFilePath,
+        maxOutputBytes: 10,
+      });
+
+      expect(result.content).toBe('x'.repeat(10));
+      expect(result._meta?.originalLineCount).toBe(1);
+      expect(result._meta?.originalLineCountExact).toBe(true);
+      expect(result._meta?.truncatedByBytes).toBe(true);
+    });
+
+    it('should propagate large non-UTF-8 errors through bounded reads', async () => {
+      const gbkLine = iconvEncode('中文日志行\n', 'gbk');
+      const gbkChunk = Buffer.concat(
+        Array.from({ length: 1024 }, () => gbkLine),
+      );
+      const repeatCount = Math.ceil((11 * 1024 * 1024) / gbkChunk.length);
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        Buffer.concat(Array.from({ length: repeatCount }, () => gbkChunk)),
+      );
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: 10,
+          maxOutputBytes: 10_000,
+        }),
+      ).rejects.toThrow(LargeNonUtf8TextError);
+    });
+
+    it('should propagate aborts from unbounded full reads', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: Number.POSITIVE_INFINITY,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
+    it('should propagate aborts before large unbounded full reads', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: Number.POSITIVE_INFINITY,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
+    it('should use provided stats when reading with line and byte limits', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
+      const stats = actualNodeFs.statSync(testTextFilePath);
+      const statSpy = vi
+        .spyOn(fs.promises, 'stat')
+        .mockRejectedValueOnce(new Error('unexpected stat'));
+
+      try {
+        const result = await readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: 1,
+          maxOutputBytes: 100,
+          stats,
+        });
+
+        expect(result.content).toBe('hello');
+        expect(statSpy).not.toHaveBeenCalled();
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should not byte-truncate multibyte text before the character limit', async () => {
+      const content = '你'.repeat(1000);
+      actualNodeFs.writeFileSync(testTextFilePath, content, 'utf-8');
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+      );
+
+      expect(result.llmContent).toBe(content);
+      expect(result.returnDisplay).toBe('');
+      expect(result.isTruncated).toBe(false);
+    });
+
     it('should truncate long lines in text files', async () => {
       const longLine = 'a'.repeat(2500);
       actualNodeFs.writeFileSync(
@@ -2073,31 +2219,152 @@ describe('fileUtils', () => {
       );
     });
 
-    it('should return an error if the file size exceeds 10MB', async () => {
-      // Create a small test file
-      actualNodeFs.writeFileSync(testTextFilePath, 'test content');
+    it('should read large text files through bounded truncation instead of the 10MB gate', async () => {
+      const lines = Array.from(
+        { length: 65_000 },
+        (_, index) => `Line ${index + 1} ${'x'.repeat(180)}`,
+      );
+      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
 
-      // Spy on fs.promises.stat to return a large file size
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 11 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+      );
 
-      try {
-        const result = await processSingleFileContent(
-          testTextFilePath,
-          mockConfig,
-        );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Line 1');
+      expect(result.returnDisplay).toContain('Read lines 1-');
+      expect(result.isTruncated).toBe(true);
+      expect(result.originalLineCount).toBeGreaterThanOrEqual(
+        result.linesShown?.[1] ?? 1,
+      );
+      expect(result.originalLineCount).toBeLessThan(65_000);
+      expect(result.originalLineCountExact).toBe(false);
+      expect(result.linesShown?.[0]).toBe(1);
+    });
 
-        expect(result.error).toContain('File size exceeds the 10MB limit');
-        expect(result.returnDisplay).toContain(
-          'File size exceeds the 10MB limit',
-        );
-        expect(result.llmContent).toContain('File size exceeds the 10MB limit');
-      } finally {
-        statSpy.mockRestore();
-      }
+    it('should stream large text files when line truncation is disabled', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+      const noLineLimitConfig = {
+        ...mockConfig,
+        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        noLineLimitConfig,
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('... [truncated]');
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from test.txt (truncated)',
+      );
+      expect(result.isTruncated).toBe(true);
+      expect(result.originalLineCountExact).toBe(false);
+    });
+
+    it('should mark byte truncation metadata without character truncation', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'visible');
+      const byteTruncatedConfig = {
+        ...mockConfig,
+        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+        getFileSystemService: () => ({
+          readTextFile: vi.fn().mockResolvedValue({
+            content: 'visible',
+            _meta: {
+              originalLineCount: 1,
+              originalLineCountExact: false,
+              truncatedByBytes: true,
+            },
+          }),
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        byteTruncatedConfig,
+      );
+
+      expect(typeof result.llmContent).toBe('string');
+      const llmContent = result.llmContent as string;
+      expect(llmContent).toBe('visible\n... [truncated]');
+      expect(llmContent.match(/\.\.\. \[truncated\]/g)).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from test.txt (truncated)',
+      );
+      expect(result.isTruncated).toBe(true);
+    });
+
+    it('should use selected range as a lower bound when large file metadata is missing', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
+      const missingMetadataConfig = {
+        ...mockConfig,
+        getFileSystemService: () => ({
+          readTextFile: vi.fn().mockResolvedValue({
+            content: 'visible\nnext',
+          }),
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        missingMetadataConfig,
+        { offset: 9, limit: 2 },
+      );
+
+      expect(result.originalLineCount).toBe(11);
+      expect(result.originalLineCountExact).toBe(false);
+      expect(result.returnDisplay).toBe(
+        'Read lines 10-11 of at least 11 from test.txt',
+      );
+    });
+
+    it('should preserve disabled output truncation for large text files', async () => {
+      const byteLength = 11 * 1024 * 1024;
+      actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(byteLength));
+      const noCharacterLimitConfig = {
+        ...mockConfig,
+        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        noCharacterLimitConfig,
+      );
+
+      expect(typeof result.llmContent).toBe('string');
+      const llmContent = result.llmContent as string;
+      expect(llmContent).toHaveLength(byteLength);
+      expect(llmContent).not.toContain('... [truncated]');
+      expect(result.returnDisplay).toBe('');
+      expect(result.isTruncated).toBe(false);
+    });
+
+    it('should still return an error if an inline media file exceeds 10MB', async () => {
+      mockMimeGetType.mockReturnValue('image/png');
+      actualNodeFs.writeFileSync(
+        testImageFilePath,
+        Buffer.alloc(11 * 1024 * 1024),
+      );
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfig,
+      );
+
+      expect(result.error).toContain('File size exceeds the 10MB limit');
+      expect(result.returnDisplay).toContain(
+        'File size exceeds the 10MB limit',
+      );
+      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
     });
 
     it('should allow explicit page ranges above the full-PDF text-extraction size cap', async () => {
