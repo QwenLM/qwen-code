@@ -405,6 +405,7 @@ export const handleSlashCommand = async (
   if (stackedResult.skills.length >= 2) {
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
+    const onCompleteCallbacks: Array<() => Promise<void>> = [];
 
     for (const skill of stackedResult.skills) {
       if (!skill.action) continue;
@@ -422,6 +423,9 @@ export const handleSlashCommand = async (
       if (skillResult?.type === 'submit_prompt') {
         combinedContent.push(skillResult.content);
         firstModelOverride ??= skillResult.modelOverride;
+        if (skillResult.onComplete) {
+          onCompleteCallbacks.push(skillResult.onComplete);
+        }
       }
 
       recordSkillInvocation(config, {
@@ -451,6 +455,13 @@ export const handleSlashCommand = async (
       type: 'submit_prompt',
       content: hookResult.content,
       ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+      ...(onCompleteCallbacks.length
+        ? {
+            onComplete: async () => {
+              for (const cb of onCompleteCallbacks) await cb();
+            },
+          }
+        : {}),
     };
   }
 
