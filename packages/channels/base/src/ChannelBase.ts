@@ -287,6 +287,15 @@ export abstract class ChannelBase {
   ): Promise<void> {
     const target = this.permissionTargetForEvent(event);
     if (!target) {
+      try {
+        await this.bridge.respondToPermission?.(event.requestId, {
+          outcome: { outcome: 'cancelled' },
+        });
+      } catch (respondErr) {
+        process.stderr.write(
+          `[${this.name}] permission cancellation failed for request ${sanitizeLogText(event.requestId, 128)}: ${this.lifecycleError(respondErr)}\n`,
+        );
+      }
       return;
     }
     this.removePendingPermission(event.requestId);
@@ -562,6 +571,7 @@ export abstract class ChannelBase {
     if (this.registerBridgeEvents) {
       this.detachBridgeEvents(this.bridge);
     }
+    this.clearPendingPermissions();
     this.router.setBridge(bridge);
     this.bridge = bridge;
     if (this.loopController) {
@@ -1263,6 +1273,11 @@ export abstract class ChannelBase {
     for (const requestId of requestIds) {
       this.removePendingPermission(requestId);
     }
+  }
+
+  private clearPendingPermissions(): void {
+    this.pendingPermissions.clear();
+    this.pendingPermissionsByChat.clear();
   }
 
   private pendingPermissionForEnvelope(

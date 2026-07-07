@@ -554,10 +554,12 @@ describe('AcpBridge', () => {
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     });
+    const permissionRequest = vi.fn();
     const permissionResolved = vi.fn();
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
+    bridge.on('permissionRequest', permissionRequest);
     bridge.on('permissionResolved', permissionResolved);
 
     await bridge.start();
@@ -574,6 +576,7 @@ describe('AcpBridge', () => {
         options: [{ optionId: 'cancel', name: 'Deny' }],
       });
       await Promise.resolve();
+      const event = permissionRequest.mock.calls[0]![0];
 
       await vi.advanceTimersByTimeAsync(ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
 
@@ -581,11 +584,11 @@ describe('AcpBridge', () => {
         outcome: { outcome: 'cancelled' },
       });
       expect(permissionResolved).toHaveBeenCalledWith({
-        requestId: 'acp-permission-1',
+        requestId: event.requestId,
         outcome: { outcome: 'cancelled' },
       });
       expect(stderr.mock.calls.join('')).toContain(
-        `[AcpBridge] permission request acp-permission-1 timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=session-1)`,
+        `[AcpBridge] permission request ${event.requestId} timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=session-1)`,
       );
     } finally {
       stderr.mockRestore();
@@ -598,7 +601,9 @@ describe('AcpBridge', () => {
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     });
+    const permissionRequest = vi.fn();
     const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
     bridge.on('permissionResolved', permissionResolved);
 
     await bridge.start();
@@ -612,6 +617,7 @@ describe('AcpBridge', () => {
       options: [{ optionId: 'cancel', name: 'Deny' }],
     });
     await Promise.resolve();
+    const event = permissionRequest.mock.calls[0]![0];
 
     child.instances[0]!.emit('exit', 1, null);
 
@@ -619,7 +625,7 @@ describe('AcpBridge', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(permissionResolved).toHaveBeenCalledWith({
-      requestId: 'acp-permission-1',
+      requestId: event.requestId,
       outcome: { outcome: 'cancelled' },
     });
   });

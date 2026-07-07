@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import {
@@ -78,7 +79,6 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
-  private permissionCounter = 0;
   private readonly pendingPermissions = new Map<
     string,
     {
@@ -348,7 +348,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private requestPermission(
     request: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    const requestId = `acp-permission-${++this.permissionCounter}`;
+    const requestId = `acp-permission-${randomUUID()}`;
     const sessionId =
       typeof request.sessionId === 'string' && request.sessionId.length > 0
         ? request.sessionId

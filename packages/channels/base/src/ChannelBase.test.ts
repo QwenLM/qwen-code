@@ -374,6 +374,35 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
     });
 
+    it('cancels bridge permissions when the target no longer belongs to the channel', async () => {
+      const router = {
+        getTarget: vi.fn(() => ({
+          channelName: 'other-channel',
+          chatId: 'chat1',
+        })),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
+
+      await ch.dispatchPermissionRequest({
+        requestId: 'req-stale',
+        sessionId: 'session-1',
+        request: {
+          toolCall: {
+            toolCallId: 'tool-req-stale',
+            kind: 'shell',
+            title: 'Run req-stale',
+          },
+          options: [],
+        },
+      });
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-stale', {
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(ch.sent).toEqual([]);
+    });
+
     it('requires an explicit request id when multiple permissions are pending', async () => {
       const ch = createChannel();
       const sessionId = await startSession(ch);
@@ -815,6 +844,29 @@ describe('ChannelBase', () => {
       expect(ch.sent.at(-1)?.text).toBe(
         'No pending permission request with that id for this chat.',
       );
+    });
+
+    it('clears pending permission requests when the bridge is replaced', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      const oldRespondToPermission = respondToPermissionMock();
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(oldRespondToPermission).not.toHaveBeenCalled();
+      expect(
+        (
+          newBridge as unknown as {
+            respondToPermission: ReturnType<typeof vi.fn>;
+          }
+        ).respondToPermission,
+      ).not.toHaveBeenCalled();
     });
   });
 
