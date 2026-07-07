@@ -377,6 +377,59 @@ This mode starts one channel worker process owned by `qwen serve`. The worker co
 
 When channels are serve-managed, `qwen channel status` shows the owner as `qwen serve`, and `qwen channel stop` tells you to stop the daemon instead of signaling the worker directly. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
 
+### Webhook-triggered tasks
+
+Daemon-managed channels can also accept authenticated webhook events. Qwen receives the event as context, summarizes and decides what matters, and then delivers the final response to the configured chat target. This is not a raw notification relay.
+
+Example channel config:
+
+```json
+{
+  "channels": {
+    "dingtalk-main": {
+      "type": "dingtalk",
+      "token": "$DINGTALK_TOKEN",
+      "cwd": "/repo",
+      "senderPolicy": "allowlist",
+      "allowedUsers": ["12345"],
+      "sessionScope": "user",
+      "webhooks": {
+        "sources": {
+          "github-ci": {
+            "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET"
+          }
+        }
+      },
+      "targets": {
+        "default": {
+          "chatId": "67890",
+          "senderId": "webhook:github-ci",
+          "isGroup": true
+        }
+      }
+    }
+  }
+}
+```
+
+Example request:
+
+```bash
+curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
+  -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
+  -H "x-qwen-webhook-secret: $QWEN_CHANNEL_GITHUB_CI_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventType": "push",
+    "targetRef": "refs/heads/main",
+    "title": "CI pipeline finished",
+    "payload": {
+      "repository": "qwen-code",
+      "status": "success"
+    }
+  }'
+```
+
 ### Multi-Channel Mode
 
 When you run `qwen channel start` without a name, all channels defined in `settings.json` start together sharing a single agent process. Each channel maintains its own sessions — a Telegram user and a WeChat user get separate conversations, even though they share the same agent.
