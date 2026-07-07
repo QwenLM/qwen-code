@@ -46,6 +46,7 @@ class TestChannel extends ChannelBase {
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
+  proactiveError?: Error;
 
   async connect() {
     this.connected = true;
@@ -79,6 +80,9 @@ class TestChannel extends ChannelBase {
     target: { chatId: string },
     text: string,
   ): Promise<void> {
+    if (this.proactiveError) {
+      throw this.proactiveError;
+    }
     this.proactive.push({ chatId: target.chatId, text });
   }
 
@@ -8539,7 +8543,7 @@ describe('ChannelBase', () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
           'CI failed because lint broke.',
         );
-        const ch = createChannel({ webhooks });
+        const ch = createChannel({ approvalMode: 'auto', webhooks });
         ch.proactiveSupported = true;
 
         await expect(ch.runWebhookTask(webhookTask)).resolves.toBe(
@@ -8582,6 +8586,90 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).not.toHaveBeenCalled();
       });
 
+      it.each([undefined, 'default', 'auto-edit'] as const)(
+        'rejects %s approval mode before prompting',
+        async (approvalMode) => {
+          const ch = createChannel({ approvalMode, webhooks });
+          ch.proactiveSupported = true;
+
+          await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+            'Webhook tasks require unattended approval mode.',
+          );
+          expect(bridge.prompt).not.toHaveBeenCalled();
+        },
+      );
+
+      it('marks proactive send failures as delivery failures', async () => {
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+          'CI failed because lint broke.',
+        );
+        const ch = createChannel({ approvalMode: 'auto', webhooks });
+        ch.proactiveSupported = true;
+        ch.proactiveError = new Error('delivery failed');
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'delivery failed',
+        );
+
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started' }),
+          expect.objectContaining({
+            type: 'failed',
+            phase: 'delivery',
+            error: 'delivery failed',
+          }),
+        ]);
+      });
+
+      it('emits only cancelled when a webhook task times out', async () => {
+        vi.useFakeTimers();
+        try {
+          (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+            new Promise<string>(() => {}),
+          );
+          const ch = createChannel({ approvalMode: 'auto', webhooks });
+          ch.proactiveSupported = true;
+
+          const run = ch.runWebhookTask(webhookTask, { timeoutMs: 1000 });
+          run.catch(() => undefined);
+          await vi.waitFor(() => {
+            expect(bridge.prompt).toHaveBeenCalledTimes(1);
+          });
+
+          await vi.advanceTimersByTimeAsync(1000);
+          await expect(run).rejects.toThrow('loop timed out');
+
+          const terminalEvents = ch.taskEvents.filter((event) =>
+            ['cancelled', 'completed', 'failed'].includes(event.type),
+          );
+          expect(terminalEvents).toEqual([
+            expect.objectContaining({ type: 'cancelled', reason: 'timeout' }),
+          ]);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('runs a later same-session webhook task after a rejected one', async () => {
+        (bridge.prompt as ReturnType<typeof vi.fn>)
+          .mockRejectedValueOnce(new Error('agent failed'))
+          .mockResolvedValueOnce('second response');
+        const ch = createChannel({ approvalMode: 'auto', webhooks });
+        ch.proactiveSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'agent failed',
+        );
+        await expect(
+          ch.runWebhookTask({ ...webhookTask, title: 'CI failed again' }),
+        ).resolves.toBe('second response');
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(ch.proactive).toEqual([
+          { chatId: 'group-1', text: 'second response' },
+        ]);
+      });
+
       it('serializes webhook tasks for the same target session', async () => {
         let resolveFirstPrompt: (value: string) => void = () => {};
         (bridge.prompt as ReturnType<typeof vi.fn>)
@@ -8592,7 +8680,7 @@ describe('ChannelBase', () => {
               }),
           )
           .mockResolvedValueOnce('second response');
-        const ch = createChannel({ webhooks });
+        const ch = createChannel({ approvalMode: 'auto', webhooks });
         ch.proactiveSupported = true;
 
         const firstRun = ch.runWebhookTask(webhookTask);

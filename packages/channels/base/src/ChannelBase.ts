@@ -170,6 +170,10 @@ function parseLoopAddArgs(
   return cron && prompt ? { cron, prompt } : null;
 }
 
+function isUnattendedWebhookApprovalMode(mode: string | undefined): boolean {
+  return mode === 'auto' || mode === 'yolo';
+}
+
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: ChannelAgentBridge;
@@ -788,7 +792,7 @@ export abstract class ChannelBase {
         `Webhook task belongs to ${task.channelName}, not ${this.name}.`,
       );
     }
-    if (this.config.approvalMode === 'prompt') {
+    if (!isUnattendedWebhookApprovalMode(this.config.approvalMode)) {
       throw new Error('Webhook tasks require unattended approval mode.');
     }
     if (!this.config.webhooks) {
@@ -848,22 +852,45 @@ export abstract class ChannelBase {
           taskId,
           options.timeoutMs,
         );
+        await this.settleCancelRequested(promptState);
+        if (promptState.cancelled) {
+          throw new ChannelLoopSkippedError(
+            'webhook task cancelled before delivery',
+            'cancel_command',
+          );
+        }
         if (response) {
           promptState.deliveryStarted = true;
           await this.pushProactive(target, response);
         }
-        this.emitTaskLifecycle({
-          ...this.lifecycleBase(target.chatId, sessionId, taskId),
-          type: 'completed',
-        });
+        if (!promptState.deliveryStarted) {
+          await this.settleCancelRequested(promptState);
+          if (promptState.cancelled) {
+            throw new ChannelLoopSkippedError(
+              'webhook task cancelled before delivery',
+              'cancel_command',
+            );
+          }
+        }
+        if (!promptState.cancellationEmitted) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(target.chatId, sessionId, taskId),
+            type: 'completed',
+          });
+        }
         return response;
       } catch (err) {
-        this.emitTaskLifecycle({
-          ...this.lifecycleBase(target.chatId, sessionId, taskId),
-          type: 'failed',
-          error: this.lifecycleError(err),
-          phase: 'agent',
-        });
+        if (!promptState.deliveryStarted) {
+          await this.settleCancelRequested(promptState);
+        }
+        if (!promptState.cancellationEmitted) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(target.chatId, sessionId, taskId),
+            type: 'failed',
+            error: this.lifecycleError(err),
+            phase: promptState.deliveryStarted ? 'delivery' : 'agent',
+          });
+        }
         throw err;
       } finally {
         if (this.activePrompts.get(sessionId) === promptState) {
