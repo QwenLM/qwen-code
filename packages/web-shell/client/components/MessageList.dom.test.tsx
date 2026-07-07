@@ -421,9 +421,11 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
-  it('marks scheduled task turns in the session timeline', async () => {
+  it('renders scheduled task marker when source is present', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount([
+      // Source propagation is owned by the metadata adapter PR; this test covers
+      // the timeline rendering contract once that source is present.
       { ...userMsg('u1'), source: 'cron', content: 'scheduled tracking task' },
       asstMsg('a1'),
       userMsg('u2'),

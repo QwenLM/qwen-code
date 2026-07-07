@@ -31,7 +31,7 @@ interface MessageItemProps {
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
-  shellOutputMaxLines: number;
+  shellOutputMaxLines?: number;
 }
 
 export const MessageItem = memo(function MessageItem({

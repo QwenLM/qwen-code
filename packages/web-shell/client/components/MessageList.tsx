@@ -2728,7 +2728,6 @@ export const MessageList = memo(
                 displayItem,
                 flashTarget,
               )}
-              shellOutputMaxLines={shellOutputMaxLines}
             />
           );
         };
