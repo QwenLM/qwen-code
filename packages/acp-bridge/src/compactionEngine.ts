@@ -6,6 +6,7 @@
 
 import {
   EVENT_SCHEMA_VERSION,
+  serializedBridgeEventByteLength,
   type BridgeEvent,
   type CompactionEngine,
   type SessionReplaySnapshot,
@@ -27,6 +28,7 @@ interface SessionUpdateData {
 
 const TURN_BOUNDARY_TYPES = new Set(['turn_complete', 'turn_error']);
 const TRANSIENT_TYPES = new Set([
+  'history_truncated',
   'slow_client_warning',
   'client_evicted',
   'replay_complete',
@@ -50,6 +52,36 @@ type CompactedSlot =
   | { kind: 'misc'; event: BridgeEvent }
   | { kind: 'latestWins'; key: string; event: BridgeEvent };
 
+interface ReplaySegment {
+  events: BridgeEvent[];
+  bytes: number;
+  turnCount: number;
+}
+
+export interface TurnBoundaryCompactionEngineOptions {
+  maxReplayBytes?: number;
+}
+
+export const DEFAULT_COMPACTED_REPLAY_MAX_BYTES = 4 * 1024 * 1024;
+export const MAX_COMPACTED_REPLAY_MAX_BYTES = 256 * 1024 * 1024;
+
+export function normalizeCompactedReplayMaxBytes(
+  value: number | undefined,
+): number {
+  if (value === undefined) return DEFAULT_COMPACTED_REPLAY_MAX_BYTES;
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_COMPACTED_REPLAY_MAX_BYTES
+  ) {
+    throw new TypeError(
+      `Invalid compactedReplayMaxBytes: ${value}. ` +
+        `Must be a positive safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`,
+    );
+  }
+  return value;
+}
+
 /**
  * Compaction engine that merges events at turn boundaries.
  *
@@ -62,14 +94,22 @@ type CompactedSlot =
  * O(streaming_tokens). Typical compression: 25-30x for chatty sessions.
  */
 export class TurnBoundaryCompactionEngine implements CompactionEngine {
-  private compactedTurns: BridgeEvent[] = [];
+  private readonly maxReplayBytes: number;
+  private replaySegments: ReplaySegment[] = [];
+  private replayBytes = 0;
   private liveJournal: BridgeEvent[] = [];
   private lastEventId = 0;
   private closed = false;
+  private truncatedEvents = 0;
+  private truncatedTurns = 0;
 
   private slots: CompactedSlot[] = [];
   private toolSlotIndex: Map<string, number> = new Map();
   private textSlotIndex: Map<string, number> = new Map();
+
+  constructor(opts: TurnBoundaryCompactionEngineOptions = {}) {
+    this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
+  }
 
   ingest(event: BridgeEvent): void {
     if (this.closed) return;
@@ -95,8 +135,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   }
 
   snapshot(): SessionReplaySnapshot {
+    const compactedTurns = this.flattenReplaySegments();
+    if (this.truncatedEvents > 0) {
+      compactedTurns.unshift(
+        this.makeHistoryTruncatedEvent(compactedTurns.length),
+      );
+    }
     return {
-      compactedTurns: this.compactedTurns.slice(),
+      compactedTurns,
       liveJournal: this.liveJournal.slice(),
       lastEventId: this.lastEventId,
     };
@@ -104,8 +150,25 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   seed(snapshot: { compactedTurns: BridgeEvent[]; lastEventId: number }): void {
     if (this.closed) return;
-    this.compactedTurns = snapshot.compactedTurns.slice();
+    this.resetReplayWindow();
     this.lastEventId = snapshot.lastEventId;
+    for (const event of snapshot.compactedTurns) {
+      if (TRANSIENT_TYPES.has(event.type)) continue;
+      this.addReplaySegment([event], 0);
+    }
+    this.liveJournal = [];
+    this.slots = [];
+    this.toolSlotIndex.clear();
+    this.textSlotIndex.clear();
+  }
+
+  seedReplayEvents(events: BridgeEvent[]): void {
+    if (this.closed) return;
+    for (const event of events) {
+      this.recordLastEventId(event);
+      if (TRANSIENT_TYPES.has(event.type)) continue;
+      this.addReplaySegment([event], 0);
+    }
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
@@ -115,7 +178,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.compactedTurns = [];
+    this.resetReplayWindow();
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
@@ -290,11 +353,68 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     }
 
     compacted.push(boundaryEvent);
-    this.compactedTurns.push(...compacted);
+    this.addReplaySegment(compacted, 1);
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
     this.textSlotIndex.clear();
+  }
+
+  private recordLastEventId(event: BridgeEvent): void {
+    if (event.id !== undefined) {
+      this.lastEventId = event.id;
+    }
+  }
+
+  private addReplaySegment(events: BridgeEvent[], turnCount: number): void {
+    if (events.length === 0) return;
+    const bytes = events.reduce(
+      (sum, event) => sum + serializedBridgeEventByteLength(event),
+      0,
+    );
+    this.replaySegments.push({ events: events.slice(), bytes, turnCount });
+    this.replayBytes += bytes;
+    this.enforceReplayWindow();
+  }
+
+  private enforceReplayWindow(): void {
+    while (
+      this.replayBytes > this.maxReplayBytes &&
+      this.replaySegments.length > 1
+    ) {
+      const dropped = this.replaySegments.shift()!;
+      this.replayBytes -= dropped.bytes;
+      this.truncatedEvents += dropped.events.length;
+      this.truncatedTurns += dropped.turnCount;
+    }
+  }
+
+  private flattenReplaySegments(): BridgeEvent[] {
+    return this.replaySegments.flatMap((segment) => segment.events);
+  }
+
+  private makeHistoryTruncatedEvent(retainedEvents: number): BridgeEvent {
+    return {
+      v: EVENT_SCHEMA_VERSION,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: this.truncatedEvents,
+        retainedEvents,
+        maxBytes: this.maxReplayBytes,
+        ...(this.truncatedTurns > 0
+          ? { truncatedTurns: this.truncatedTurns }
+          : {}),
+        fullTranscriptAvailable: false,
+      },
+    };
+  }
+
+  private resetReplayWindow(): void {
+    this.replaySegments = [];
+    this.replayBytes = 0;
+    this.truncatedEvents = 0;
+    this.truncatedTurns = 0;
   }
 }
 

@@ -148,9 +148,11 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
+const MAX_COMPACTED_REPLAY_MAX_BYTES = 256 * 1024 * 1024;
 const DEFAULT_MAX_SESSIONS = 20;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
+const DEFAULT_COMPACTED_REPLAY_MAX_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
@@ -1143,6 +1145,8 @@ function createBootstrapServeApp(input: {
         ),
         listenerMaxConnections: listenerMaxConnections(opts.maxConnections),
         eventRingSize: opts.eventRingSize ?? DEFAULT_EVENT_RING_SIZE,
+        compactedReplayMaxBytes:
+          opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
         promptDeadlineMs: positiveFiniteOrNull(opts.promptDeadlineMs),
         writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
@@ -1789,6 +1793,18 @@ export async function runQwenServe(
       );
     }
   }
+  if (opts.compactedReplayMaxBytes !== undefined) {
+    if (
+      !Number.isSafeInteger(opts.compactedReplayMaxBytes) ||
+      opts.compactedReplayMaxBytes < 1 ||
+      opts.compactedReplayMaxBytes > MAX_COMPACTED_REPLAY_MAX_BYTES
+    ) {
+      throw new TypeError(
+        `Invalid compactedReplayMaxBytes: ${opts.compactedReplayMaxBytes}. ` +
+          `Must be a positive safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`,
+      );
+    }
+  }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
       throw new TypeError(
@@ -2313,6 +2329,9 @@ export async function runQwenServe(
           : {}),
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
+          : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }

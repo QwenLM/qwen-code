@@ -143,6 +143,7 @@ interface DaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
   eventRingSize: number;
+  compactedReplayMaxBytes: number;
   promptDeadlineMs: number | null;
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
@@ -339,6 +340,7 @@ export async function buildDaemonStatusResponse(
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
+      compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,

@@ -47,6 +47,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8000,
+    compactedReplayMaxBytes: 4 * 1024 * 1024,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -968,6 +969,13 @@ describe('runQwenServe pre-listen bridge option validation', () => {
     ['eventRingSize', 0, /eventRingSize/],
     ['eventRingSize', 1.5, /eventRingSize/],
     ['eventRingSize', Number.POSITIVE_INFINITY, /eventRingSize/],
+    ['compactedReplayMaxBytes', 0, /compactedReplayMaxBytes/],
+    ['compactedReplayMaxBytes', 1.5, /compactedReplayMaxBytes/],
+    [
+      'compactedReplayMaxBytes',
+      Number.POSITIVE_INFINITY,
+      /compactedReplayMaxBytes/,
+    ],
   ] as const)(
     'rejects invalid %s=%s before printing the listening line',
     async (optionName, value, message) => {
@@ -2730,6 +2738,7 @@ describe('runQwenServe runtime startup failures', () => {
           maxPendingPromptsPerSession: 5,
           listenerMaxConnections: 256,
           eventRingSize: 8000,
+          compactedReplayMaxBytes: 4 * 1024 * 1024,
           promptDeadlineMs: null,
           writerIdleTimeoutMs: null,
           channelIdleTimeoutMs: 0,

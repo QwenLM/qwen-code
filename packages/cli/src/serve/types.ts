@@ -87,6 +87,12 @@ export interface ServeOptions {
    */
   eventRingSize?: number;
   /**
+   * Per-session in-memory compacted replay snapshot byte cap. Threaded into
+   * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
+  /**
    * Absolute workspace path this daemon binds to. The daemon is
    * **1 daemon = 1 workspace × N sessions**: one bound
    * workspace at boot, sessions multiplexed on the single

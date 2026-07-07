@@ -38,6 +38,7 @@ const NUMBER_OPTIONS = new Map<
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
   ['eventRingSize', 'event-ring-size'],
+  ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],
   ['mcp-client-budget', 'mcp-client-budget'],
   ['promptDeadlineMs', 'prompt-deadline-ms'],
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
