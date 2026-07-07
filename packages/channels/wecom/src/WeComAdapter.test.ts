@@ -458,6 +458,21 @@ describe('WeComChannel', () => {
     expect(stderr).not.toHaveBeenCalledWith(
       expect.stringContaining('https://example.invalid/file'),
     );
+
+    client.emit('error', {
+      config: {
+        headers: { authorization: 'Bearer nested-token' },
+        data: { secret: 'nested-secret' },
+      },
+      response: { status: 401 },
+    });
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[REDACTED]'));
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('nested-token'),
+    );
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('nested-secret'),
+    );
     stderr.mockRestore();
   });
 
@@ -845,6 +860,9 @@ describe('WeComChannel', () => {
       .mockImplementation(() => true);
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
+    const inspectable = channel as unknown as {
+      kickReconnectRetryCycles: number;
+    };
     const oldClient = lastClient();
     mocks.state.connectErrorsRemaining = 9;
 
@@ -863,11 +881,12 @@ describe('WeComChannel', () => {
     }
 
     expect(stderr).toHaveBeenCalledWith(
-      '[WeCom:bot] reconnect after server kick exhausted 3 retry cycles; manual intervention required; retrying later.\n',
+      '[WeCom:bot] reconnect after server kick exhausted 3 retry cycles; next attempt in 15 minutes.\n',
     );
     await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(mocks.instances).toHaveLength(11));
+    expect(inspectable.kickReconnectRetryCycles).toBe(0);
 
     channel.disconnect();
     stderr.mockRestore();
@@ -955,6 +974,43 @@ describe('WeComChannel', () => {
     ).toBe(false);
   });
 
+  it('does not replay a pending kick after a successful reconnect', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+    (
+      channel as unknown as {
+        pendingKickReconnect: boolean;
+      }
+    ).pendingKickReconnect = true;
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(
+        (
+          channel as unknown as {
+            reconnectingAfterKick: boolean;
+          }
+        ).reconnectingAfterKick,
+      ).toBe(false),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.instances).toHaveLength(2);
+    expect(
+      (
+        channel as unknown as {
+          pendingKickReconnect: boolean;
+        }
+      ).pendingKickReconnect,
+    ).toBe(false);
+
+    channel.disconnect();
+  });
+
   it('does not schedule reconnect reset after disconnect races with connect success', async () => {
     vi.useFakeTimers();
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
@@ -978,7 +1034,7 @@ describe('WeComChannel', () => {
     ).toBeUndefined();
   });
 
-  it('retries when a new client is kicked during reconnect', async () => {
+  it('does not tear down a recovered client for a pending kick', async () => {
     vi.useFakeTimers();
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
@@ -998,7 +1054,7 @@ describe('WeComChannel', () => {
     );
 
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(mocks.instances).toHaveLength(3));
+    expect(mocks.instances).toHaveLength(2);
 
     channel.disconnect();
   });
@@ -1867,6 +1923,35 @@ describe('WeComChannel', () => {
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks media URLs with embedded credentials before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-userinfo-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://token:secret@example.com/file.png',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.lookup).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('URL contains embedded credentials'),
     );
     stderr.mockRestore();
   });

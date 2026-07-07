@@ -876,13 +876,14 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectRetryCycles += 1;
       if (this.kickReconnectRetryCycles >= KICK_RECONNECT_MAX_RETRY_CYCLES) {
         process.stderr.write(
-          `[WeCom:${this.name}] reconnect after ${reconnectReason} exhausted ${this.kickReconnectRetryCycles} retry cycles; manual intervention required; retrying later.\n`,
+          `[WeCom:${this.name}] reconnect after ${reconnectReason} exhausted ${this.kickReconnectRetryCycles} retry cycles; next attempt in ${KICK_RECONNECT_LONG_RETRY_MS / 60_000} minutes.\n`,
         );
         this.scheduleKickReconnectRetry(
           reason,
           disconnectGeneration,
           KICK_RECONNECT_LONG_RETRY_MS,
           reconnectReason,
+          true,
         );
         return;
       }
@@ -901,7 +902,7 @@ export class WeComChannel extends ChannelBase {
         this.pendingKickReconnect &&
         this.disconnectGeneration === disconnectGeneration;
       this.pendingKickReconnect = false;
-      if (shouldRetryPendingKick) {
+      if (shouldRetryPendingKick && !this.client) {
         this.kickReconnectAttempts = 0;
         this.startKickReconnect(reason, reconnectReason);
       }
@@ -927,6 +928,7 @@ export class WeComChannel extends ChannelBase {
     disconnectGeneration: number,
     delayMs = KICK_RECONNECT_RETRY_MS,
     reconnectReason = 'server kick',
+    resetRetryCycles = false,
   ): void {
     this.kickReconnectRetry = setTimeout(() => {
       this.kickReconnectRetry = undefined;
@@ -937,6 +939,7 @@ export class WeComChannel extends ChannelBase {
         return;
       }
       this.kickReconnectAttempts = 0;
+      if (resetRetryCycles) this.kickReconnectRetryCycles = 0;
       this.startKickReconnect(reason, reconnectReason);
     }, delayMs);
     this.kickReconnectRetry.unref?.();
@@ -1107,12 +1110,9 @@ function formatSdkError(err: unknown): string {
         .join(' ');
     }
     try {
-      const redacted = Object.fromEntries(
-        Object.entries(record).map(([key, value]) =>
-          SENSITIVE_ERROR_FIELDS.has(key) ? [key, '[REDACTED]'] : [key, value],
-        ),
+      return JSON.stringify(record, (key, value) =>
+        SENSITIVE_ERROR_FIELDS.has(key.toLowerCase()) ? '[REDACTED]' : value,
       );
-      return JSON.stringify(redacted);
     } catch {
       // Fall through to String below.
     }
@@ -1528,6 +1528,9 @@ async function isSafeInboundMediaUrl(
   }
   if (url.protocol !== 'https:') {
     return { safe: false, reason: 'non-HTTPS protocol' };
+  }
+  if (url.username || url.password) {
+    return { safe: false, reason: 'URL contains embedded credentials' };
   }
 
   const host = url.hostname
