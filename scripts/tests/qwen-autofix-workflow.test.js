@@ -912,6 +912,15 @@ describe('qwen-autofix workflow', () => {
       'Could not address the latest review feedback automatically',
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
+    expect(reviewAddressReportStep).toContain(
+      'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${bot_actor}',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '::warning::Failed to post handoff comment on PR #${PR}',
+    );
     expect(reviewAddressReportStep).toContain('human should take over');
     expect(reviewAddressReportStep).toContain("sed 's/<!--[^>]*-->//g'");
   });
@@ -931,7 +940,7 @@ describe('qwen-autofix workflow', () => {
         'turn_tool_call_cap',
       );
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
-        'turn_tool_call_cap',
+        'Qwen hit the tool-call loop guard',
       );
       expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
         'human should take over',
@@ -961,7 +970,7 @@ describe('qwen-autofix workflow', () => {
 
       expect(result.status).not.toBe(0);
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
-        'turn_tool_call_cap',
+        'Qwen hit the tool-call loop guard',
       );
       expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
         'human should take over',
@@ -1015,6 +1024,7 @@ describe('qwen-autofix workflow', () => {
 
     expect(runner).toContain('const QWEN_TIMEOUT_MS = 50 * 60 * 1000');
     expect(runner).toContain('setTimeout(() =>');
+    expect(runner).toContain("child.kill('SIGKILL')");
     expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
   });
 

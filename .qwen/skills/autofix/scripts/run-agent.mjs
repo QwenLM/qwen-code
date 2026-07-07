@@ -90,6 +90,7 @@ function runQwen(options, prompt) {
   let settled = false;
   let timedOut = false;
   let timer;
+  let killTimer;
 
   return new Promise((resolve) => {
     const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
@@ -100,6 +101,7 @@ function runQwen(options, prompt) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       const payload = {
         ...result,
         timedOut,
@@ -130,6 +132,9 @@ function runQwen(options, prompt) {
     timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        if (!settled) child.kill('SIGKILL');
+      }, 10_000);
     }, QWEN_TIMEOUT_MS);
   });
 }
@@ -204,7 +209,7 @@ if (result.error || result.signal || result.status !== 0) {
     if (result.loopDetected) {
       writeFailure(
         options.workdir,
-        `Qwen hit the tool-call loop guard during ${options.mode}: turn_tool_call_cap. A human should take over this feedback batch.`,
+        `Qwen hit the tool-call loop guard during ${options.mode}. A human should take over this feedback batch.`,
       );
       writeHandoff(
         options.workdir,

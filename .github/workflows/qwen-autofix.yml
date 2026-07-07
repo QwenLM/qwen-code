@@ -1401,6 +1401,19 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
           if [[ "${DRY_RUN}" != "true" && "${OUTCOME:-unknown}" == "failed" && -n "${NEWEST:-}" && -n "${GITHUB_TOKEN:-}" && -s "${WORKDIR}/handoff.md" ]]; then
+            api_error_file="$(mktemp)"
+            if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+              api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+              rm -f "${api_error_file}"
+              echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+              exit 1
+            fi
+            rm -f "${api_error_file}"
+            echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+            if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+              echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+              exit 1
+            fi
             {
               echo "🤖 Could not address the latest review feedback automatically."
               echo
@@ -1414,5 +1427,5 @@ jobs:
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"
             } > "${WORKDIR}/report.md"
-            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || true
+            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
