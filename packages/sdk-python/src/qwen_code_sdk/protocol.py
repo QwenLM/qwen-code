@@ -218,6 +218,7 @@ class CLIControlInitializeRequest(TypedDict):
     subtype: Literal["initialize"]
     hooks: NotRequired[Any]
     mcpServers: NotRequired[dict[str, dict[str, Any]]]
+    effort: NotRequired[str]
 
 
 class CLIControlSetPermissionModeRequest(TypedDict):
@@ -228,6 +229,11 @@ class CLIControlSetPermissionModeRequest(TypedDict):
 class CLIControlSetModelRequest(TypedDict):
     subtype: Literal["set_model"]
     model: str
+
+
+class CLIControlSetEffortRequest(TypedDict):
+    subtype: Literal["set_effort"]
+    effort: str
 
 
 class CLIControlMcpStatusRequest(TypedDict):
@@ -244,6 +250,7 @@ ControlRequestPayload: TypeAlias = (
     | CLIControlInitializeRequest
     | CLIControlSetPermissionModeRequest
     | CLIControlSetModelRequest
+    | CLIControlSetEffortRequest
     | CLIControlMcpStatusRequest
     | CLIControlSupportedCommandsRequest
     | dict[str, Any]

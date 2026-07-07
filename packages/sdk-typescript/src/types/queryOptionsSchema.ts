@@ -182,5 +182,6 @@ export const QueryOptionsSchema = z
     resume: z.string().optional(),
     sessionId: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
   })
   .strict();

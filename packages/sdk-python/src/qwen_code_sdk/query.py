@@ -110,6 +110,8 @@ class Query:
     async def _initialize(self) -> None:
         try:
             payload: dict[str, Any] = {"hooks": None}
+            if self._options.effort:
+                payload["effort"] = self._options.effort
             await self._send_control_request("initialize", payload)
         except Exception as exc:
             await self._finish_with_error(exc)
@@ -473,6 +475,10 @@ class Query:
     async def set_model(self, model: str) -> None:
         await self._ensure_started()
         await self._send_control_request("set_model", {"model": model})
+
+    async def set_effort(self, effort: str) -> None:
+        await self._ensure_started()
+        await self._send_control_request("set_effort", {"effort": effort})
 
     async def supported_commands(self) -> dict[str, Any] | None:
         await self._ensure_started()

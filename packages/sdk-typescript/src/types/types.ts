@@ -46,6 +46,16 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * Reasoning effort level for the model.
+   * Controls how much reasoning/thinking the model does before responding.
+   * - 'low': Minimal reasoning, faster responses
+   * - 'medium': Balanced reasoning (default)
+   * - 'high': More thorough reasoning
+   * - 'xhigh': Extended reasoning
+   * - 'max': Maximum reasoning, slowest but most thorough
+   */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 };
 
 export interface QuerySystemPromptPreset {
@@ -503,4 +513,17 @@ export interface QueryOptions {
      */
     streamClose?: number;
   };
+
+  /**
+   * Reasoning effort level for the model.
+   * Controls how much reasoning/thinking the model does before responding.
+   * Sent to CLI via the initialize control request.
+   * Can be changed at runtime via `query.setEffort()`.
+   * - 'low': Minimal reasoning, faster responses
+   * - 'medium': Balanced reasoning (default)
+   * - 'high': More thorough reasoning
+   * - 'xhigh': Extended reasoning
+   * - 'max': Maximum reasoning, slowest but most thorough
+   */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }

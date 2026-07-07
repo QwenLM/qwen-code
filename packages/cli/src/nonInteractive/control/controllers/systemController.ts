@@ -18,6 +18,7 @@ import type {
   ControlRequestPayload,
   CLIControlInitializeRequest,
   CLIControlSetModelRequest,
+  CLIControlSetEffortRequest,
   CLIMcpServerConfig,
   CLIControlGetContextUsageRequest,
 } from '../../types.js';
@@ -67,6 +68,12 @@ export class SystemController extends BaseController {
       case 'set_model':
         return this.handleSetModel(
           payload as CLIControlSetModelRequest,
+          signal,
+        );
+
+      case 'set_effort':
+        return this.handleSetEffort(
+          payload as CLIControlSetEffortRequest,
           signal,
         );
 
@@ -253,6 +260,23 @@ export class SystemController extends BaseController {
       }
     }
 
+    // Apply initial effort if provided
+    if (payload.effort) {
+      try {
+        this.context.config.setReasoningEffort(
+          payload.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+        );
+        debugLogger.info(
+          `[SystemController] Initial effort set to: ${payload.effort}`,
+        );
+      } catch (error) {
+        debugLogger.error(
+          `[SystemController] Failed to set initial effort ${payload.effort}:`,
+          error,
+        );
+      }
+    }
+
     // Build capabilities for response
     const capabilities = this.buildControlCapabilities();
 
@@ -281,6 +305,8 @@ export class SystemController extends BaseController {
       can_set_permission_mode:
         typeof this.context.config.setApprovalMode === 'function',
       can_set_model: typeof this.context.config.setModel === 'function',
+      can_set_effort:
+        typeof this.context.config.setReasoningEffort === 'function',
       can_get_context_usage: true,
       // SDK MCP servers are supported - messages routed through control plane
       can_handle_mcp_message: true,
@@ -451,6 +477,36 @@ export class SystemController extends BaseController {
         error,
       );
 
+      throw new Error(errorMessage);
+    }
+  }
+
+  private async handleSetEffort(
+    payload: CLIControlSetEffortRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    const effort = payload.effort;
+    if (typeof effort !== 'string' || effort.trim() === '') {
+      throw new Error('Invalid effort specified for set_effort request');
+    }
+
+    try {
+      this.context.config.setReasoningEffort(
+        effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+      );
+      debugLogger.info(`[SystemController] Effort set to: ${effort}`);
+      return { subtype: 'set_effort', effort };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to set effort';
+      debugLogger.error(
+        `[SystemController] Failed to set effort ${effort}:`,
+        error,
+      );
       throw new Error(errorMessage);
     }
   }

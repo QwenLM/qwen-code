@@ -357,6 +357,7 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, MCPServerConfig>;
   agents?: SubagentConfig[];
+  effort?: string;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -387,6 +388,11 @@ export interface CLIControlSetModelRequest {
   model: string;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
 export interface CLIControlMcpStatusRequest {
   subtype: 'mcp_server_status';
 }
@@ -409,6 +415,7 @@ export type ControlRequestPayload =
   | CLIHookCallbackRequest
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
+  | CLIControlSetEffortRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
   | CLIControlGetContextUsageRequest;
@@ -604,6 +611,7 @@ export enum ControlRequestType {
   INTERRUPT = 'interrupt',
   CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
+  SET_EFFORT = 'set_effort',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',
 

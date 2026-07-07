@@ -306,6 +306,7 @@ export class Query implements AsyncIterable<SDKMessage> {
             ? mcpServersForCli
             : undefined,
         agents: this.options.agents,
+        effort: this.options.effort,
       });
       logger.info('Query initialized successfully');
     } catch (error) {
@@ -966,6 +967,18 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   async setModel(model: string): Promise<void> {
     await this.sendControlRequest(ControlRequestType.SET_MODEL, { model });
+  }
+
+  /**
+   * Change the reasoning effort level at runtime.
+   *
+   * @param effort - One of: 'low', 'medium', 'high', 'xhigh', 'max'
+   * @throws Error if query is closed or effort is invalid
+   */
+  async setEffort(
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+  ): Promise<void> {
+    await this.sendControlRequest(ControlRequestType.SET_EFFORT, { effort });
   }
 
   /**
