@@ -702,6 +702,13 @@ export class QQChannel extends ChannelBase {
     this.seenMessages.clear();
     this.crossEventDedup.clear();
     this.coldStart = true;
+    if (this._inCronFlow > 0) {
+      process.stderr.write(
+        '[qqbot] resetRoutingState: orphaned cron flow (depth=' +
+          this._inCronFlow +
+          ') during disconnect',
+      );
+    }
     this._inCronFlow = 0;
     for (const [, state] of this.streamState) {
       if (state.timer) clearTimeout(state.timer);
@@ -1110,7 +1117,8 @@ export class QQChannel extends ChannelBase {
                   return (
                     typeof o['msgId'] === 'string' &&
                     (o['msgId'] as string).length <= 128 &&
-                    typeof o['timestamp'] === 'number'
+                    typeof o['timestamp'] === 'number' &&
+                    Number.isFinite(o['timestamp'])
                   );
                 })
                 .map(([k, v]) => [

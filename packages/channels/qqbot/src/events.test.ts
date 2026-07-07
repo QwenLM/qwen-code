@@ -242,7 +242,7 @@ describe('handleC2C', () => {
     pvt['handleC2C'](makeC2CEvent());
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
-    ] as Map<string, string>;
+    ] as Map<string, { msgId: string; timestamp: number }>;
     const entry = replyMsgId.get('user-openid-1');
     expect(entry?.msgId).toBe('msg-c2c-001');
   });
@@ -343,7 +343,7 @@ describe('handleGroup', () => {
     );
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
-    ] as Map<string, string>;
+    ] as Map<string, { msgId: string; timestamp: number }>;
     const entry = replyMsgId.get('group-openid-1');
     expect(entry?.msgId).toBe('msg-group-001');
   });
@@ -451,8 +451,8 @@ describe('handleGroup', () => {
     const pvt = ch as unknown as QQChannelRaw;
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
-    ] as Map<string, string>;
-    replyMsgId.set('group-openid-1', 'old-msg');
+    ] as Map<string, { msgId: string; timestamp: number }>;
+    replyMsgId.set('group-openid-1', { msgId: 'old-msg', timestamp: 0 });
 
     pvt['handleGroup'](
       makeGroupEvent({
@@ -604,7 +604,7 @@ describe('handleGroupAll', () => {
     );
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
-    ] as Map<string, string>;
+    ] as Map<string, { msgId: string; timestamp: number }>;
     const entry = replyMsgId.get('group-openid-1');
     expect(entry?.msgId).toBe('msg-groupall-001');
   });
