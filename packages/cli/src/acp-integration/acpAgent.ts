@@ -167,7 +167,10 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
-import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import {
+  extractRememberErrorCode,
+  extractRememberErrorDetails,
+} from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
@@ -270,6 +273,17 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function workspaceMemoryErrorData(
+  code: string,
+  err: unknown,
+): { errorKind: string; details?: string } {
+  const details = extractRememberErrorDetails(err);
+  return {
+    errorKind: code,
+    ...(details ? { details } : {}),
+  };
+}
 
 function parseAcpLocalReadRootsEnv(
   raw = process.env[QWEN_ACP_LOCAL_READ_ROOTS_ENV],
@@ -5833,17 +5847,13 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
-              { errorKind: 'managed_memory_unavailable' },
+              workspaceMemoryErrorData('managed_memory_unavailable', err),
             );
           }
           throw new RequestError(
             -32099,
-            err instanceof Error && err.message
-              ? err.message
-              : 'Workspace memory remember failed',
-            {
-              errorKind: code,
-            },
+            'Workspace memory remember failed',
+            workspaceMemoryErrorData(code, err),
           );
         }
       }
@@ -5909,11 +5919,11 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
-              { errorKind: 'managed_memory_unavailable' },
+              workspaceMemoryErrorData('managed_memory_unavailable', err),
             );
           }
           throw new RequestError(-32099, 'Workspace memory forget failed', {
-            errorKind: code,
+            ...workspaceMemoryErrorData(code, err),
           });
         }
       }
@@ -5960,11 +5970,11 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
-              { errorKind: 'managed_memory_unavailable' },
+              workspaceMemoryErrorData('managed_memory_unavailable', err),
             );
           }
           throw new RequestError(-32099, 'Workspace memory dream failed', {
-            errorKind: code,
+            ...workspaceMemoryErrorData(code, err),
           });
         }
       }

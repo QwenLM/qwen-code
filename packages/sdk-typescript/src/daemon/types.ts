@@ -1065,6 +1065,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
   error?: {
     code: string;
     message: string;
+    details?: string;
   };
 }
 
@@ -1094,6 +1095,7 @@ export interface DaemonWorkspaceMemoryForgetTask {
   error?: {
     code: string;
     message: string;
+    details?: string;
   };
 }
 
@@ -1116,6 +1118,7 @@ export interface DaemonWorkspaceMemoryDreamTask {
   error?: {
     code: string;
     message: string;
+    details?: string;
   };
 }
 

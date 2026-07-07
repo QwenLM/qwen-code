@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { extractRememberErrorCode } from './workspace-remember-errors.js';
+import {
+  extractRememberErrorCode,
+  extractRememberErrorDetails,
+} from './workspace-remember-errors.js';
 
 describe('extractRememberErrorCode', () => {
   it('extracts remember error codes from common error shapes', () => {
@@ -29,5 +32,42 @@ describe('extractRememberErrorCode', () => {
     expect(extractRememberErrorCode(new Error('boom'), 'forget_failed')).toBe(
       'forget_failed',
     );
+  });
+});
+
+describe('extractRememberErrorDetails', () => {
+  it('extracts details from common error shapes', () => {
+    expect(extractRememberErrorDetails(new Error('boom'))).toBe('boom');
+    expect(
+      extractRememberErrorDetails({
+        data: { details: 'agent stopped because max turns exceeded' },
+      }),
+    ).toBe('agent stopped because max turns exceeded');
+    expect(
+      extractRememberErrorDetails({
+        data: { message: 'provider rejected the request' },
+      }),
+    ).toBe('provider rejected the request');
+    expect(
+      extractRememberErrorDetails({
+        cause: new Error('nested failure reason'),
+      }),
+    ).toBe('nested failure reason');
+  });
+
+  it('redacts credentials before exposing details', () => {
+    const details = extractRememberErrorDetails(
+      new Error('Authorization: Bearer secret-token-value'),
+    );
+
+    expect(details).toBe('Authorization: <redacted>');
+    expect(details).not.toContain('secret-token-value');
+  });
+
+  it('caps long details', () => {
+    const details = extractRememberErrorDetails(new Error('x'.repeat(1100)));
+
+    expect(details).toMatch(/^x+\.{3} \[truncated\]$/);
+    expect(details).toHaveLength(1000);
   });
 });

@@ -858,7 +858,11 @@ describe('workspace memory remember routes', () => {
     const bridge = buildBridgeStub({
       rememberImpl: vi
         .fn()
-        .mockRejectedValueOnce({ code: 'remember_path_escape' })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('agent wrote /tmp/outside'), {
+            code: 'remember_path_escape',
+          }),
+        )
         .mockRejectedValueOnce({
           data: { errorKind: 'managed_memory_unavailable' },
         })
@@ -881,6 +885,7 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'remember_path_escape',
           message: 'Remember agent touched a path outside managed memory.',
+          details: 'agent wrote /tmp/outside',
         });
       });
 
@@ -937,6 +942,7 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'forget_failed',
           message: 'Workspace memory forget failed.',
+          details: 'forget failed',
         });
       });
 
@@ -953,6 +959,7 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'dream_failed',
           message: 'Workspace memory dream failed.',
+          details: 'dream failed',
         });
       });
   });

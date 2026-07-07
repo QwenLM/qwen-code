@@ -3430,6 +3430,44 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('includes details for workspace memory remember failures', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue(
+      new Error('remember agent stopped early'),
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      }),
+    ).rejects.toMatchObject({
+      code: -32099,
+      message: 'Workspace memory remember failed',
+      data: {
+        errorKind: 'remember_failed',
+        details: 'remember agent stopped early',
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('runs workspace memory forget without requiring a session', async () => {
     const forget = vi.fn().mockResolvedValue({
       systemMessage: 'Forgot 1 entry.',
@@ -3553,7 +3591,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toMatchObject({
       code: -32099,
       message: 'Workspace memory forget failed',
-      data: { errorKind: 'forget_failed' },
+      data: { errorKind: 'forget_failed', details: 'boom' },
     });
 
     mockConnectionState.resolve();
@@ -3687,7 +3725,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toMatchObject({
       code: -32099,
       message: 'Workspace memory dream failed',
-      data: { errorKind: 'dream_failed' },
+      data: { errorKind: 'dream_failed', details: 'boom' },
     });
 
     mockConnectionState.resolve();

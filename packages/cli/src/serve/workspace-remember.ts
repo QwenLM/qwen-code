@@ -15,7 +15,10 @@ import type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
-import { extractRememberErrorCode } from './workspace-remember-errors.js';
+import {
+  extractRememberErrorCode,
+  extractRememberErrorDetails,
+} from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 import {
   formatWorkspaceMemoryDreamSummary,
@@ -43,6 +46,7 @@ interface WorkspaceMemoryTaskBaseSnapshot {
   error?: {
     code: string;
     message: string;
+    details?: string;
   };
 }
 
@@ -176,6 +180,19 @@ export function publicErrorStatus(code: string): number {
   if (code === 'remember_queue_full') return 429;
   if (code === 'managed_memory_unavailable') return 409;
   return 500;
+}
+
+function createTaskError(
+  code: string,
+  kind: WorkspaceMemoryTaskKind,
+  err: unknown,
+): WorkspaceMemoryTaskBaseSnapshot['error'] {
+  const details = extractRememberErrorDetails(err);
+  return {
+    code,
+    message: publicErrorMessage(code, kind),
+    ...(details ? { details } : {}),
+  };
 }
 
 export class WorkspaceRememberTaskLane {
@@ -337,10 +354,7 @@ export class WorkspaceRememberTaskLane {
           err,
         );
         task.status = 'failed';
-        task.error = {
-          code,
-          message: publicErrorMessage(code, task.kind),
-        };
+        task.error = createTaskError(code, task.kind, err);
         task.updatedAt = nowIso();
       }
       try {
@@ -402,10 +416,7 @@ export class WorkspaceRememberTaskLane {
           err,
         );
         task.status = 'failed';
-        task.error = {
-          code,
-          message: publicErrorMessage(code, task.kind),
-        };
+        task.error = createTaskError(code, task.kind, err);
         task.updatedAt = nowIso();
       }
       try {
@@ -464,10 +475,7 @@ export class WorkspaceRememberTaskLane {
           err,
         );
         task.status = 'failed';
-        task.error = {
-          code,
-          message: publicErrorMessage(code, task.kind),
-        };
+        task.error = createTaskError(code, task.kind, err);
         task.updatedAt = nowIso();
       }
       try {
