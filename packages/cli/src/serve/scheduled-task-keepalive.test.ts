@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   Storage,
+  readCronTasks,
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -44,6 +45,9 @@ describe('scheduled-task keepalive', () => {
     },
     spawnOrAttach: async () => {
       throw new Error('spawnOrAttach not mocked');
+    },
+    closeSession: async () => {
+      throw new Error('closeSession not mocked');
     },
     updateSessionMetadata: () => {
       throw new Error('updateSessionMetadata not mocked');
@@ -113,6 +117,7 @@ describe('scheduled-task keepalive', () => {
       spawnOrAttach: async () => {
         throw new Error('not mocked');
       },
+      closeSession: async () => {},
       updateSessionMetadata: () => {
         throw new Error('not mocked');
       },
@@ -155,6 +160,7 @@ describe('scheduled-task keepalive', () => {
       spawnOrAttach: async () => {
         throw new Error('not mocked');
       },
+      closeSession: async () => {},
       updateSessionMetadata: () => {
         throw new Error('not mocked');
       },
@@ -189,6 +195,7 @@ describe('scheduled-task keepalive', () => {
       spawnOrAttach: async () => {
         throw new Error('not mocked');
       },
+      closeSession: async () => {},
       updateSessionMetadata: () => {
         throw new Error('not mocked');
       },
@@ -219,6 +226,7 @@ describe('scheduled-task keepalive', () => {
       spawnOrAttach: async () => {
         throw new Error('not mocked');
       },
+      closeSession: async () => {},
       updateSessionMetadata: () => {
         throw new Error('not mocked');
       },
@@ -253,6 +261,7 @@ describe('scheduled-task keepalive', () => {
       spawnOrAttach: async () => {
         throw new Error('not mocked');
       },
+      closeSession: async () => {},
       updateSessionMetadata: () => {
         throw new Error('not mocked');
       },
@@ -386,5 +395,92 @@ describe('scheduled-task keepalive', () => {
     expect(res.failed).toHaveLength(12); // every session recorded failed...
     expect(res.loaded).toHaveLength(0);
     expect(started).toBe(12); // ...and every queued session was still attempted
+  });
+
+  it('binds an unbound task to a dedicated session and writes sessionId to disk', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'unbound-1', prompt: 'check build' }),
+    ]);
+    const spawns: unknown[] = [];
+    const names: Array<[string, { displayName?: string }]> = [];
+    const binding = {
+      ...bridge,
+      spawnOrAttach: async (req: unknown) => {
+        spawns.push(req);
+        return { sessionId: 'new-sess-1' };
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: binding,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(spawns).toHaveLength(1);
+    expect(names).toHaveLength(1);
+    expect(names[0]![0]).toBe('new-sess-1');
+    expect(names[0]![1].displayName).toContain('⏰');
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBe('new-sess-1');
+  });
+
+  it('renames a bound session without ⏰ prefix exactly once', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
+    ]);
+    const names: Array<[string, { displayName?: string }]> = [];
+    const naming = {
+      ...bridge,
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    await ka.tick();
+    ka.stop();
+    expect(names).toHaveLength(1);
+    expect(names[0]![0]).toBe('existing-sess');
+    expect(names[0]![1].displayName).toContain('⏰');
+  });
+
+  it('rolls back the spawned session when the task vanishes before write', async () => {
+    // Seed an unbound task, then replace it with a different task between the
+    // keepalive's read and the updateCronTasks callback — simulating a
+    // concurrent delete. The spawned session must be closed.
+    const closed: string[] = [];
+    const rollbackBridge = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        // Simulate concurrent deletion: remove the task from disk right after
+        // spawn returns (before updateCronTasks's read-modify-write).
+        await updateCronTasks(workspace, () => []);
+        return { sessionId: 'orphan-sess' };
+      },
+      closeSession: async (id: string) => {
+        closed.push(id);
+      },
+      updateSessionMetadata: () => {},
+    };
+    await updateCronTasks(workspace, () => [
+      task({ id: 'will-vanish', prompt: 'doomed' }),
+    ]);
+    const ka = startScheduledTaskKeepalive({
+      bridge: rollbackBridge,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(closed).toContain('orphan-sess');
   });
 });

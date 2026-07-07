@@ -35,6 +35,7 @@ import {
   updateCronTasks,
   getCronFilePath,
   createDebugLogger,
+  SessionService,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
@@ -82,6 +83,7 @@ export interface KeepaliveBridge {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
   }): Promise<{ sessionId: string }>;
+  closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
@@ -121,11 +123,13 @@ async function bindAndNameSessions(
   );
 
   for (const task of unbound) {
+    let spawnedSessionId: string | undefined;
     try {
       const { sessionId } = await bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread',
       });
+      spawnedSessionId = sessionId;
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
@@ -134,9 +138,18 @@ async function bindAndNameSessions(
       } catch {
         // naming is non-critical — the session still fires correctly
       }
-      await updateCronTasks(boundWorkspace, (list) =>
-        list.map((t) => (t.id === task.id ? { ...t, sessionId } : t)),
-      );
+      let matched = false;
+      await updateCronTasks(boundWorkspace, (list) => {
+        const result = list.map((t) =>
+          t.id === task.id ? { ...t, sessionId } : t,
+        );
+        matched = result.some((t) => t.sessionId === sessionId);
+        return result;
+      });
+      if (!matched) {
+        // Task was deleted between read and write — roll back the orphan.
+        throw new Error(`task ${task.id} no longer on disk`);
+      }
       log.debug(
         'keepalive: bound task',
         task.id,
@@ -145,6 +158,12 @@ async function bindAndNameSessions(
       );
     } catch (err) {
       log.debug('keepalive: failed to bind task', task.id, err);
+      if (spawnedSessionId !== undefined) {
+        await bridge.closeSession(spawnedSessionId).catch(() => {});
+        await new SessionService(boundWorkspace)
+          .removeSession(spawnedSessionId)
+          .catch(() => {});
+      }
     }
   }
 
