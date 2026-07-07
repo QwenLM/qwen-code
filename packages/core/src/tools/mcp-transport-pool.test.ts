@@ -473,8 +473,9 @@ describe('McpTransportPool', () => {
       // synchronously when localStatus flips to DISCONNECTED on an
       // active entry (gated by !restartInProgress so intentional
       // restart-mid-disconnect doesn't trip it).
-      const { updateMCPServerStatus, MCPServerStatus } =
-        await import('./mcp-client.js');
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
       mockMcpSuccess({ toolNames: ['t1'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
@@ -546,8 +547,9 @@ describe('McpTransportPool', () => {
       // snapshot — same zombie-attach failure, shifted into drain.
       // Post-W131 the gate extends to ('active' || 'draining') and
       // cancels the drain timer in the same step.
-      const { updateMCPServerStatus, MCPServerStatus } =
-        await import('./mcp-client.js');
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
       mockMcpSuccess({ toolNames: ['t1'] });
       const pool = new McpTransportPool(
         cliConfig,
@@ -895,8 +897,9 @@ describe('McpTransportPool', () => {
       // `getLastTransportError()` returns undefined → caller falls back
       // to the synthetic-only string. This test pins the behavior
       // existing W120/W131 tests relied on pre-fix.
-      const { updateMCPServerStatus, MCPServerStatus } =
-        await import('./mcp-client.js');
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
       mockMcpSuccess({ toolNames: ['t1'] });
       const pool = new McpTransportPool(cliConfig, mkPoolOptions());
       const cfg = new MCPServerConfig('node');
@@ -1013,8 +1016,9 @@ describe('McpTransportPool', () => {
       // silent-drop chain compares descendantsSignaled vs
       // descendantsFound and emits the same outer warn even though
       // sweepAndDisconnect itself didn't throw.
-      const { listDescendantPids, sigtermPids } =
-        await import('./pid-descendants.js');
+      const { listDescendantPids, sigtermPids } = await import(
+        './pid-descendants.js'
+      );
       const { createDebugLogger } = await import('../utils/debugLogger.js');
       const debugMock = createDebugLogger('McpPool:Entry');
       // The stub is a singleton across tests; clear prior call history

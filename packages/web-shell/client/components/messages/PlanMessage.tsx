@@ -3,11 +3,13 @@ import type { TodoItem } from '../../adapters/types';
 import { TodoTimelineContext } from '../../App';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
+import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './PlanMessage.module.css';
 
 interface PlanMessageProps {
   id: string;
   todos: TodoItem[];
+  isLocateFlashing?: boolean;
 }
 
 // Isolating the context read here (mirroring ToolGroup's TodoToolBody) keeps the
@@ -22,6 +24,7 @@ function PlanEventSummary({ id, todos }: PlanMessageProps) {
 export const PlanMessage = memo(function PlanMessage({
   id,
   todos,
+  isLocateFlashing = false,
 }: PlanMessageProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
@@ -31,7 +34,11 @@ export const PlanMessage = memo(function PlanMessage({
   const completed = todos.filter((td) => td.status === 'completed').length;
 
   return (
-    <div className={styles.message}>
+    <div
+      className={`${styles.message}${
+        isLocateFlashing ? ` ${flashStyles.flash}` : ''
+      }`}
+    >
       <button
         type="button"
         className={styles.header}

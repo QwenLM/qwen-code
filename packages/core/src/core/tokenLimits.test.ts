@@ -94,6 +94,10 @@ describe('normalize', () => {
 });
 
 describe('tokenLimit', () => {
+  it('uses 200K as the global default context window', () => {
+    expect(DEFAULT_TOKEN_LIMIT).toBe(200_000);
+  });
+
   describe('Google Gemini', () => {
     it('should return 1M for Gemini 3.x (latest)', () => {
       expect(tokenLimit('gemini-3-pro-preview')).toBe(1000000);

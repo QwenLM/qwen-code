@@ -30,6 +30,7 @@ export {
   selectDaemonStreamingState,
   selectDaemonTodoLists,
   selectDaemonTranscriptStreamingState,
+  isMissingSessionHttpStatus,
   toDaemonPromptContent,
 } from './session/index.js';
 export type {
@@ -76,6 +77,7 @@ export {
   useDaemonSessions,
   useDaemonSkills,
   useDaemonStatusReport,
+  useDaemonUsageDashboard,
   useDaemonTools,
   useDaemonSettings,
 } from './workspace/index.js';
@@ -90,6 +92,7 @@ export type {
   DaemonUpdateScheduledTaskRequest,
   DaemonResourceOptions,
   DaemonStatusReportOptions,
+  DaemonUsageDashboardOptions,
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -136,6 +139,13 @@ export type {
   DaemonSessionStatsStatus,
   DaemonSessionStatsToolByName,
   DaemonSessionSummary,
+  DaemonUsageRange,
+  DaemonUsageDashboard,
+  DaemonUsageDashboardTotals,
+  DaemonUsageModelShare,
+  DaemonUsageSkillCall,
+  DaemonUsageDailyPoint,
+  DaemonUsageHeatmapDay,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonStatusReportIssue,
