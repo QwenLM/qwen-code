@@ -160,10 +160,6 @@ For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead
 
 If the issue evidence shows an upstream service or provider returned malformed data outside the client contract, client-side parser or sanitizer changes are not treated as a valid root-cause fix unless a maintainer explicitly requested a defensive workaround. A test that replays malformed upstream output proves only that the workaround handles that shape; it does not prove the workaround is architecturally appropriate.
 
-## Core Infrastructure Gate
-
-For external PRs touching core infrastructure, `/review` applies the repository gate before normal review (right after the PR is fetched, before dependency install). Maintainer authorship is decided from the PR's `authorAssociation` (`OWNER`/`MEMBER`/`COLLABORATOR` are exempt). Large core changes (500+ additions plus deletions **within core-infrastructure paths**) are reported as a hard block unless maintainer-authored — a low-risk sweep that touches many files but changes a line or two each is escalated rather than auto-rejected on line count. Smaller core changes require 100% confidence and downstream-consumer awareness; otherwise `/review` escalates to a maintainer (submitted as a Comment, never an Approve).
-
 Example `.qwen/review-rules.md`:
 
 ```markdown
