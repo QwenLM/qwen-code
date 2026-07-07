@@ -1187,6 +1187,36 @@ describe('applyTurnCollapse', () => {
     });
   });
 
+  it('keeps a turn error expanded even when a final answer is present', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'u1-content-0',
+      'a1',
+      'u1-content-1',
+    ]);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1', 's1']);
+    expect(collapseOf(out, 0)).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+      toolCallCount: 2,
+    });
+  });
+
   it('folds thinking separately from the final answer', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
