@@ -8,13 +8,21 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isSubpath } from '../utils/paths.js';
+import {
+  makeRelative,
+  shortenPath,
+  unescapePath,
+  isSubpaths,
+  isSubpath,
+} from '../utils/paths.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { Storage } from '../config/storage.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -35,7 +43,7 @@ export interface LSToolParams {
   ignore?: string[];
 
   /**
-   * Whether to respect .gitignore and .qwenignore patterns (optional, defaults to true)
+   * Whether to respect .gitignore and Qwen/agent ignore patterns (optional, defaults to true)
    */
   file_filtering_options?: {
     respect_git_ignore?: boolean;
@@ -115,6 +123,27 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       this.config.getTargetDir(),
     );
     return shortenPath(relativePath);
+  }
+
+  /**
+   * Returns 'ask' for paths outside the workspace/userSkills directories,
+   * so that external directory listings require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const dirPath = path.resolve(this.params.path);
+    const workspaceContext = this.config.getWorkspaceContext();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
+
+    if (
+      workspaceContext.isPathWithinWorkspace(dirPath) ||
+      isSubpaths(userSkillsDirs, dirPath) ||
+      isSubpath(userExtensionsDir, dirPath) ||
+      isSubpath(getMemoryBaseDir(), dirPath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
   }
 
   // Helper for consistent error formatting
@@ -301,7 +330,7 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
           },
           file_filtering_options: {
             description:
-              'Optional: Whether to respect ignore patterns from .gitignore or .qwenignore',
+              'Optional: Whether to respect ignore patterns from .gitignore, .qwenignore, and configured custom Qwen ignore files',
             type: 'object',
             properties: {
               respect_git_ignore: {
@@ -311,7 +340,7 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
               },
               respect_qwen_ignore: {
                 description:
-                  'Optional: Whether to respect .qwenignore patterns when listing files. Defaults to true.',
+                  'Optional: Whether to respect .qwenignore and configured custom Qwen ignore file patterns when listing files. Defaults to true.',
                 type: 'boolean',
               },
             },
@@ -331,23 +360,12 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
+    params.path = unescapePath(params.path.trim());
+
     if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;
     }
 
-    const userSkillsBase = this.config.storage.getUserSkillsDir();
-    const isUnderUserSkills = isSubpath(userSkillsBase, params.path);
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (
-      !workspaceContext.isPathWithinWorkspace(params.path) &&
-      !isUnderUserSkills
-    ) {
-      const directories = workspaceContext.getDirectories();
-      return `Path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
-    }
     return null;
   }
 

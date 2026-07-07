@@ -1,41 +1,66 @@
-## TLDR
+<!--
+Maintainers prioritize PRs with a clear reviewer test plan — without it, review may be delayed.
 
-<!-- Add a brief description of what this pull request changes and why and any important things for reviewers to look at -->
+Don't hard-wrap paragraphs: GitHub renders single newlines as <br>, so wrapped text shows as a narrow column. Write each paragraph or list item as one long line.
+-->
 
-## Dive Deeper
+## What this PR does
 
-<!-- more thoughts and in-depth discussion here -->
+<!-- What this PR does. Describe the change in prose, not by file or function names. -->
+
+## Why it's needed
+
+<!-- Why it's needed: the motivation, the problem being solved, or the user-facing benefit. -->
 
 ## Reviewer Test Plan
 
-<!-- when a person reviews your code they should ideally be pulling and running that code. How would they validate your change works and if relevant what are some good classes of example prompts and ways they can exercise your changes -->
+<!--
+How a reviewer can confirm this PR: reproduction steps, expected vs observed behavior, and evidence. CI runs on macOS, Windows, and Linux — Tested on is what you verified locally.
 
-## Testing Matrix
+User-visible / TUI: Before/After with tmux-real-user-testing skill, screenshots, or a short recording.
+Non–user-visible (refactor, types, docs): commands and output below; write N/A under Before/After.
+-->
 
-<!-- Before submitting please validate your changes on as many of these options as possible -->
+### How to verify
 
-|          | 🍏  | 🪟  | 🐧  |
-| -------- | --- | --- | --- |
-| npm run  | ❓  | ❓  | ❓  |
-| npx      | ❓  | ❓  | ❓  |
-| Docker   | ❓  | ❓  | ❓  |
-| Podman   | ❓  | -   | -   |
-| Seatbelt | ❓  | -   | -   |
+<!-- How you reproduced it and what a reviewer should confirm — steps if needed, expected vs observed behavior. Focus on outcomes; paste logs or test output when helpful. -->
 
-## Linked issues / bugs
+### Evidence (Before & After)
+
+<!-- User-visible / TUI changes: paste before-and-after screenshots, tmux logs, or video side by side. Non-UI changes (docs, refactor, types): N/A -->
+
+### Tested on
+
+|     OS     | Status |
+| :--------: | :----: |
+|  🍏 macOS  |        |
+| 🪟 Windows |        |
+|  🐧 Linux  |        |
+
+<!-- ✅ tested · ⚠️ not tested · N/A -->
+
+### Environment (optional)
+
+<!-- Local runtime: e.g. npm run dev, Docker/Podman sandbox, seatbelt. N/A if only unit tests. -->
+
+## Risk & Scope
+
+- Main risk or tradeoff:
+- Not validated / out of scope:
+- Breaking changes / migration notes:
+
+## Linked Issues
 
 <!--
-Link to any related issues or bugs.
-
-**If this PR fully resolves the issue, use one of the following keywords to automatically close the issue when this PR is merged:**
-
-- Closes #<issue_number>
-- Fixes #<issue_number>
-- Resolves #<issue_number>
-
-*Example: `Resolves #123`*
-
-**If this PR is only related to an issue or is a partial fix, simply reference the issue number without a keyword:**
-
-*Example: `This PR makes progress on #456` or `Related to #789`*
+Closes #N / Fixes #N / Resolves #N to auto-close.
+Otherwise reference without a closing keyword.
 -->
+
+<details>
+<summary>中文说明</summary>
+
+<!--
+完整翻译上面的英文正文，逐段对应，不要省略或缩写。PR 标题保持英文。
+-->
+
+</details>

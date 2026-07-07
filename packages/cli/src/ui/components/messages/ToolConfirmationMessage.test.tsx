@@ -68,6 +68,116 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  // Regression coverage for issue #4093: exec confirmations carry a
+  // user-facing warning for command substitution. Previously such
+  // commands were hard-denied at L4 with an opaque "denied by
+  // permission rules" message; we now ask for confirmation and surface
+  // the substitution clearly.
+  it('renders warnings on exec confirmations when provided', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'python3 -c "print($(echo hello))"',
+      rootCommand: 'python3',
+      warnings: [
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      ],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('command substitution');
+  });
+
+  it('omits the warning region when no warnings are provided on exec confirmations', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').not.toContain('command substitution');
+  });
+
+  // Regression coverage for the round-1 review on PR #4386 (PR #4386 round-2
+  // self-review SR-1): the warnings block sits outside the MaxSizedBox
+  // cap, so its footprint has to be reserved from `bodyContentHeight`
+  // up-front; otherwise the options list can be pushed off-screen on
+  // small terminals. The original round-1 test used a single-line
+  // command, which made the `MaxSizedBox` clamp `min(content_lines,
+  // maxHeight)` reduce to `min(1, X) = 1` regardless of the
+  // reservation — i.e. the test was vacuous. Replaced here with a
+  // multi-line command so the clamp is actually exercised, and the
+  // assertion checks for the `... N lines hidden ...` truncation
+  // footer that MaxSizedBox emits ONLY when its cap is active. Without
+  // the warnings reservation, the cap is loose enough that the whole
+  // command fits and the footer never appears.
+  it('clamps the multi-line command body to make room for the warning on a tight compactMode layout', () => {
+    // Four-line command: forces MaxSizedBox to clamp once the warnings
+    // footprint is reserved. With the reservation: cap is tight enough
+    // that the body is truncated and shows a "... N lines hidden ..."
+    // footer. Without it: the whole 4-line command renders and the
+    // footer is absent.
+    const command = [
+      'cmd-line-1',
+      'cmd-line-2',
+      'cmd-line-3',
+      'cmd-line-4',
+    ].join('\n');
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command,
+      rootCommand: 'cmd-line-1',
+      warnings: [
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      ],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={10}
+        contentWidth={80}
+        compactMode={true}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // MaxSizedBox emits this footer when it clamps; its presence proves
+    // the reservation actually narrowed the body cap below the command
+    // height. Without `bodyContentHeight -= warningsHeight`, the cap is
+    // loose and the footer doesn't appear.
+    expect(frame).toMatch(/lines hidden/);
+    // Warning + all three compactMode options must still be on-screen.
+    expect(frame).toContain('command substitution');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Allow always');
+    expect(frame).toContain('No');
+  });
+
   it('should render plan confirmation with markdown plan content', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'plan',
@@ -138,17 +248,17 @@ describe('ToolConfirmationMessage', () => {
       {
         description: 'for exec confirmations',
         details: execConfirmationDetails,
-        alwaysAllowText: 'Yes, allow always',
+        alwaysAllowText: 'Always allow in this project',
       },
       {
         description: 'for info confirmations',
         details: infoConfirmationDetails,
-        alwaysAllowText: 'Yes, allow always',
+        alwaysAllowText: 'Always allow in this project',
       },
       {
         description: 'for mcp confirmations',
         details: mcpConfirmationDetails,
-        alwaysAllowText: 'always allow',
+        alwaysAllowText: 'Always allow in this project',
       },
     ])('$description', ({ details, alwaysAllowText }) => {
       it('should show "allow always" when folder is trusted', () => {
@@ -245,6 +355,156 @@ describe('ToolConfirmationMessage', () => {
       );
 
       expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT show "Modify with external editor" when hideModify is true', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{ ...editConfirmationDetails, hideModify: true }}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        {
+          settings: {
+            merged: { general: { preferredEditor: 'vscode' } },
+          } as unknown as LoadedSettings,
+        },
+      );
+
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+  });
+
+  describe('compactMode', () => {
+    it('renders the command and exec-specific question for exec confirmations', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'rm -f /tmp/foo.txt',
+        rootCommand: 'rm',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('rm -f /tmp/foo.txt');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('Allow always');
+      expect(frame).toContain('No');
+      // Compact mode swaps the type-specific exec question for the
+      // generic prompt (the body already shows the command) and trims
+      // project/user-scope variants.
+      expect(frame).not.toContain('Allow execution of:');
+      expect(frame).not.toContain('Always allow in this project');
+      expect(frame).not.toContain('Always allow for this user');
+    });
+
+    it('honors hideAlwaysAllow', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'rm -f /tmp/foo.txt',
+        rootCommand: 'rm',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).not.toContain('Allow always');
+      expect(frame).toContain('No');
+    });
+
+    it('renders MCP server and tool name for mcp confirmations', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'mcp',
+        title: 'Confirm MCP Tool',
+        serverName: 'my-server',
+        toolName: 'my-tool',
+        toolDisplayName: 'My Tool',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MCP Server: my-server');
+      expect(frame).toContain('Tool: my-tool');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('Allow always');
+      expect(frame).toContain('No');
+      // Compact mode swaps the type-specific mcp question for the
+      // generic prompt (the body already shows server + tool) and trims
+      // project/user-scope variants.
+      expect(frame).not.toContain('Allow execution of MCP tool');
+      expect(frame).not.toContain('Always allow in this project');
+      expect(frame).not.toContain('Always allow for this user');
+    });
+
+    it('caps multi-line exec body at 5 lines with overflow indicator', () => {
+      const lines = Array.from({ length: 12 }, (_, i) => `Line ${i + 1}`);
+      const command = `cat <<'EOF'\n${lines.join('\n')}\nEOF`;
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command,
+        rootCommand: 'cat',
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={50}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // Head of the command is preserved (so the user sees what's being
+      // run); the heredoc tail elides behind the overflow indicator.
+      expect(frame).toContain("cat <<'EOF'");
+      expect(frame).toContain('Line 1');
+      expect(frame).not.toContain('Line 8');
+      expect(frame).not.toContain('Line 12');
+      expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
     });
   });
 });

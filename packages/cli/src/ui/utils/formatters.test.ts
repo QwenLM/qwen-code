@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatMemoryUsage,
   formatRelativeTime,
+  formatTokenCount,
 } from './formatters.js';
 
 describe('formatters', () => {
@@ -152,6 +153,63 @@ describe('formatters', () => {
 
     it('should handle negative durations', () => {
       expect(formatDuration(-100)).toBe('0s');
+    });
+
+    it('should roll a sub-minute value up to "1m" when it rounds to 60s', () => {
+      // 59.95s and up round to "60.0" at one decimal, which is not a valid
+      // sub-minute reading; it should render as the minute it rounds to,
+      // matching formatDuration(60000) === '1m'.
+      expect(formatDuration(59949)).toBe('59.9s');
+      expect(formatDuration(59950)).toBe('1m');
+      expect(formatDuration(59999)).toBe('1m');
+      expect(formatDuration(59950, { hideTrailingZeros: true })).toBe('1m');
+    });
+
+    describe('with hideTrailingZeros', () => {
+      it('drops .0 suffix for whole seconds under a minute', () => {
+        expect(formatDuration(5000, { hideTrailingZeros: true })).toBe('5s');
+        expect(formatDuration(10000, { hideTrailingZeros: true })).toBe('10s');
+        expect(formatDuration(30000, { hideTrailingZeros: true })).toBe('30s');
+      });
+
+      it('keeps fractional seconds under a minute', () => {
+        expect(formatDuration(5500, { hideTrailingZeros: true })).toBe('5.5s');
+        expect(formatDuration(12345, { hideTrailingZeros: true })).toBe(
+          '12.3s',
+        );
+      });
+
+      it('does not affect ms-range output', () => {
+        expect(formatDuration(500, { hideTrailingZeros: true })).toBe('500ms');
+      });
+
+      it('does not affect multi-unit output', () => {
+        expect(formatDuration(123000, { hideTrailingZeros: true })).toBe(
+          '2m 3s',
+        );
+        expect(formatDuration(3600000, { hideTrailingZeros: true })).toBe('1h');
+      });
+    });
+  });
+
+  describe('formatTokenCount', () => {
+    it('should display exact number for counts less than 1000', () => {
+      expect(formatTokenCount(0)).toBe('0');
+      expect(formatTokenCount(100)).toBe('100');
+      expect(formatTokenCount(847)).toBe('847');
+      expect(formatTokenCount(999)).toBe('999');
+    });
+
+    it('should display with k suffix and one decimal for counts 1000-9999', () => {
+      expect(formatTokenCount(1000)).toBe('1.0k');
+      expect(formatTokenCount(5400)).toBe('5.4k');
+      expect(formatTokenCount(9999)).toBe('10.0k');
+    });
+
+    it('should display with k suffix without decimal for counts 10000 and above', () => {
+      expect(formatTokenCount(10000)).toBe('10k');
+      expect(formatTokenCount(15000)).toBe('15k');
+      expect(formatTokenCount(100000)).toBe('100k');
     });
   });
 });

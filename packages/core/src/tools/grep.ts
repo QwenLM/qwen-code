@@ -6,22 +6,30 @@
 
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
 import { globStream } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  resolveAndValidatePath,
+  resolvePath,
+  isSubpath,
+  unescapePath,
+} from '../utils/paths.js';
 
-const debugLogger = createDebugLogger('GREP');
-import { resolveAndValidatePath } from '../utils/paths.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
+import { recordGrepResultFileReads } from './grepReadTracking.js';
+
+const debugLogger = createDebugLogger('GREP');
 
 // --- Interfaces ---
 
@@ -55,6 +63,7 @@ export interface GrepToolParams {
  */
 interface GrepMatch {
   filePath: string;
+  absoluteFilePath: string;
   lineNumber: number;
   line: string;
 }
@@ -73,27 +82,88 @@ class GrepToolInvocation extends BaseToolInvocation<
     this.fileExclusions = config.getFileExclusions();
   }
 
+  /**
+   * Returns 'ask' for paths outside the workspace, so that external grep
+   * searches require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (!this.params.path) {
+      return 'allow'; // Default workspace directory
+    }
+    const workspaceContext = this.config.getWorkspaceContext();
+    const resolvedPath = resolvePath(
+      this.config.getTargetDir(),
+      this.params.path,
+    );
+    if (
+      workspaceContext.isPathWithinWorkspace(resolvedPath) ||
+      isSubpath(getMemoryBaseDir(), resolvedPath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Default to target directory if no path is provided
-      const searchDirAbs = resolveAndValidatePath(
-        this.config,
-        this.params.path,
-      );
-      const searchDirDisplay = this.params.path || '.';
+      // Determine which directories to search
+      const searchDirs: string[] = [];
+      let searchLocationDescription: string;
 
-      // Perform grep search
-      const rawMatches = await this.performGrepSearch({
-        pattern: this.params.pattern,
-        path: searchDirAbs,
-        glob: this.params.glob,
-        signal,
-      });
+      if (this.params.path) {
+        // User specified a path — search only that directory
+        const searchDirAbs = resolveAndValidatePath(
+          this.config,
+          this.params.path,
+          { allowExternalPaths: true },
+        );
+        searchDirs.push(searchDirAbs);
+        searchLocationDescription = `in path "${this.params.path}"`;
+      } else {
+        // No path specified — search all workspace directories
+        const workspaceDirs = this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        searchDirs.push(...workspaceDirs);
+        searchLocationDescription =
+          workspaceDirs.length > 1
+            ? `across ${workspaceDirs.length} workspace directories`
+            : `in the workspace directory`;
+      }
 
-      // Build search description
-      const searchLocationDescription = this.params.path
-        ? `in path "${searchDirDisplay}"`
-        : `in the workspace directory`;
+      // Perform grep search across all directories
+      let rawMatches: GrepMatch[] = [];
+      for (const searchDir of searchDirs) {
+        const matches = await this.performGrepSearch({
+          pattern: this.params.pattern,
+          path: searchDir,
+          glob: this.params.glob,
+          signal,
+        });
+        // When searching multiple directories, convert relative file paths
+        // to absolute paths so results from different directories are
+        // unambiguous.
+        if (searchDirs.length > 1) {
+          for (const match of matches) {
+            if (!path.isAbsolute(match.filePath)) {
+              match.filePath = path.resolve(searchDir, match.filePath);
+            }
+          }
+        }
+        rawMatches.push(...matches);
+      }
+
+      // Deduplicate matches that might appear from overlapping workspace
+      // directories (e.g. parent + child both in workspace dirs).
+      if (searchDirs.length > 1) {
+        const seen = new Set<string>();
+        rawMatches = rawMatches.filter((match) => {
+          const key = `${match.filePath}:${match.lineNumber}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
 
       const filterDescription = this.params.glob
         ? ` (filter: "${this.params.glob}")`
@@ -141,20 +211,38 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build grep output
       let grepOutput = '';
-      for (const filePath in matchesByFile) {
-        grepOutput += `File: ${filePath}\n`;
-        matchesByFile[filePath].forEach((match) => {
-          const trimmedLine = match.line.trim();
-          grepOutput += `L${match.lineNumber}: ${trimmedLine}\n`;
-        });
-        grepOutput += '---\n';
-      }
-
-      // Apply character limit as safety net
+      const visibleMatches: GrepMatch[] = [];
       let truncatedByCharLimit = false;
-      if (Number.isFinite(charLimit) && grepOutput.length > charLimit) {
-        grepOutput = grepOutput.slice(0, charLimit) + '...';
-        truncatedByCharLimit = true;
+      const appendChunk = (chunk: string, match?: GrepMatch): boolean => {
+        if (
+          Number.isFinite(charLimit) &&
+          grepOutput.length + chunk.length > charLimit
+        ) {
+          grepOutput += chunk.slice(
+            0,
+            Math.max(charLimit - grepOutput.length, 0),
+          );
+          grepOutput += '...';
+          if (match) visibleMatches.push(match);
+          truncatedByCharLimit = true;
+          return false;
+        }
+        grepOutput += chunk;
+        if (match) visibleMatches.push(match);
+        return true;
+      };
+
+      for (const filePath in matchesByFile) {
+        if (!appendChunk(`File: ${filePath}\n`)) break;
+        let stopRendering = false;
+        for (const match of matchesByFile[filePath]) {
+          const trimmedLine = match.line.trim();
+          if (!appendChunk(`L${match.lineNumber}: ${trimmedLine}\n`, match)) {
+            stopRendering = true;
+            break;
+          }
+        }
+        if (stopRendering || !appendChunk('---\n')) break;
       }
 
       // Count how many lines we actually included after character truncation
@@ -181,9 +269,19 @@ class GrepToolInvocation extends BaseToolInvocation<
         displayMessage += ` (truncated)`;
       }
 
+      const resultFilePaths = Array.from(
+        new Set(
+          visibleMatches
+            .map((match) => match.absoluteFilePath)
+            .filter((filePath) => filePath !== ''),
+        ),
+      );
+      await recordGrepResultFileReads(this.config, resultFilePaths);
+
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
+        resultFilePaths,
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);
@@ -201,8 +299,11 @@ class GrepToolInvocation extends BaseToolInvocation<
 
   /**
    * Parses the standard output of grep-like commands (git grep, system grep).
-   * Expects format: filePath:lineNumber:lineContent
-   * Handles colons within file paths and line content correctly.
+   * Primary formats are null-delimited:
+   * - git grep -z -n: filePath\0lineNumber\0lineContent\n
+   * - grep --null -n: filePath\0lineNumber:lineContent\n
+   * Also accepts legacy colon-delimited output as a fallback.
+   * Handles colons within file paths and line content correctly for null-delimited output.
    * @param {string} output The raw stdout string.
    * @param {string} basePath The absolute directory the search was run from, for relative paths.
    * @returns {GrepMatch[]} Array of match objects.
@@ -211,27 +312,11 @@ class GrepToolInvocation extends BaseToolInvocation<
     const results: GrepMatch[] = [];
     if (!output) return results;
 
-    const lines = output.split(EOL); // Use OS-specific end-of-line
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-
-      // Find the index of the first colon.
-      const firstColonIndex = line.indexOf(':');
-      if (firstColonIndex === -1) continue; // Malformed
-
-      // Find the index of the second colon, searching *after* the first one.
-      const secondColonIndex = line.indexOf(':', firstColonIndex + 1);
-      if (secondColonIndex === -1) continue; // Malformed
-
-      // Extract parts based on the found colon indices
-      const filePathRaw = line.substring(0, firstColonIndex);
-      const lineNumberStr = line.substring(
-        firstColonIndex + 1,
-        secondColonIndex,
-      );
-      const lineContent = line.substring(secondColonIndex + 1);
-
+    const pushMatch = (
+      filePathRaw: string,
+      lineNumberStr: string,
+      lineContent: string,
+    ) => {
       const lineNumber = parseInt(lineNumberStr, 10);
 
       if (!isNaN(lineNumber)) {
@@ -240,10 +325,79 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         results.push({
           filePath: relativeFilePath || path.basename(absoluteFilePath),
+          absoluteFilePath,
           lineNumber,
-          line: lineContent,
+          line: lineContent.replace(/\r$/, ''),
         });
       }
+    };
+
+    if (output.includes('\0')) {
+      let index = 0;
+      while (index < output.length) {
+        const pathEnd = output.indexOf('\0', index);
+        if (pathEnd === -1) break;
+
+        const nextNewline = output.indexOf('\n', index);
+        if (nextNewline !== -1 && nextNewline < pathEnd) {
+          debugLogger.debug(
+            `Skipping unframed grep output line: ${output.substring(
+              index,
+              nextNewline,
+            )}`,
+          );
+          index = nextNewline + 1;
+          continue;
+        }
+
+        const filePathRaw = output.substring(index, pathEnd);
+        const afterPath = pathEnd + 1;
+        const nextNull = output.indexOf('\0', afterPath);
+        let lineEnd = output.indexOf('\n', afterPath);
+        if (lineEnd === -1) lineEnd = output.length;
+
+        if (nextNull !== -1 && nextNull < lineEnd) {
+          // git grep -z -n emits: path\0lineNumber\0lineContent\n
+          const lineNumberStr = output.substring(afterPath, nextNull);
+          let contentEnd = output.indexOf('\n', nextNull + 1);
+          if (contentEnd === -1) contentEnd = output.length;
+          const lineContent = output.substring(nextNull + 1, contentEnd);
+          pushMatch(filePathRaw, lineNumberStr, lineContent);
+          index = contentEnd + 1;
+          continue;
+        }
+
+        // grep --null -n emits: path\0lineNumber:lineContent\n
+        const rest = output.substring(afterPath, lineEnd);
+        const separator = rest.indexOf(':');
+        if (separator !== -1) {
+          pushMatch(
+            filePathRaw,
+            rest.substring(0, separator),
+            rest.substring(separator + 1),
+          );
+        } else {
+          debugLogger.debug(
+            `Skipping malformed grep --null record for ${filePathRaw}`,
+          );
+        }
+        index = lineEnd + 1;
+      }
+      return results;
+    }
+
+    // Legacy/non-current callers may still pass colon-delimited grep output.
+    const lines = output.split('\n');
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      const normalizedLine = line.replace(/\r$/, '');
+      const match = normalizedLine.match(/^(.+?):(\d+):(.*)$/);
+      if (!match) continue; // Malformed
+
+      const [, filePathRaw, lineNumberStr, lineContent] = match;
+      pushMatch(filePathRaw, lineNumberStr, lineContent);
     }
     return results;
   }
@@ -286,6 +440,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           'grep',
           '--untracked',
           '-n',
+          '-z',
           '-E',
           '--ignore-case',
           pattern,
@@ -334,7 +489,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const { available: grepAvailable } = isCommandAvailable('grep');
       if (grepAvailable) {
         strategyUsed = 'system grep';
-        const grepArgs = ['-r', '-n', '-H', '-E'];
+        const grepArgs = ['-r', '-n', '-H', '-E', '--null'];
         // Extract directory names from exclusion patterns for grep --exclude-dir
         const globExcludes = this.fileExclusions.getGlobExcludes();
         const commonExcludes = globExcludes
@@ -463,6 +618,7 @@ class GrepToolInvocation extends BaseToolInvocation<
                 filePath:
                   path.relative(absolutePath, fileAbsolutePath) ||
                   path.basename(fileAbsolutePath),
+                absoluteFilePath: fileAbsolutePath,
                 lineNumber: index + 1,
                 line,
               });
@@ -500,11 +656,15 @@ class GrepToolInvocation extends BaseToolInvocation<
 export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   static readonly Name = ToolNames.GREP;
 
+  override get maxOutputChars(): number {
+    return 20_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       GrepTool.Name,
       ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Task tool for open-ended searches requiring multiple rounds\n',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
       Kind.Search,
       {
         properties: {
@@ -524,9 +684,10 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
               'File or directory to search in. Defaults to current working directory.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
             description:
-              'Limit output to first N matching lines. Optional - shows all matches if not specified.',
+              'Limit output to first N matching lines. Must be a positive integer. Optional - shows all matches if not specified.',
           },
         },
         required: ['pattern'],
@@ -543,6 +704,13 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: GrepToolParams,
   ): string | null {
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer';
+    }
+
     // Validate pattern is a valid regex
     try {
       new RegExp(params.pattern);
@@ -552,8 +720,11 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
-        resolveAndValidatePath(this.config, params.path);
+        resolveAndValidatePath(this.config, params.path, {
+          allowExternalPaths: true,
+        });
       } catch (error) {
         return getErrorMessage(error);
       }

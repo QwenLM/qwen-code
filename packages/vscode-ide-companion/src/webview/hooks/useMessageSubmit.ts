@@ -7,14 +7,20 @@
 import { useCallback } from 'react';
 import type { VSCodeAPI } from './useVSCode.js';
 import { getRandomLoadingMessage } from '../../constants/loadingMessages.js';
+import type { ImageAttachment } from './useImage.js';
+import { ZERO_WIDTH_SPACE, stripZeroWidthSpaces } from '@qwen-code/webui';
 
 interface UseMessageSubmitProps {
   vscode: VSCodeAPI;
   inputText: string;
   setInputText: (text: string) => void;
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  attachedImages?: ImageAttachment[];
+  clearImages?: () => void;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   isStreaming: boolean;
   isWaitingForResponse: boolean;
+  editTargetTurnIndex?: number | null;
+  onSubmitted?: () => void;
   // When true, do NOT auto-attach the active editor file/selection to context
   skipAutoActiveContext?: boolean;
 
@@ -31,6 +37,26 @@ interface UseMessageSubmitProps {
   };
 }
 
+export const shouldSendMessage = ({
+  inputText,
+  attachedImages,
+  isStreaming,
+  isWaitingForResponse,
+}: {
+  inputText: string;
+  attachedImages?: ImageAttachment[];
+  isStreaming: boolean;
+  isWaitingForResponse: boolean;
+}): boolean => {
+  if (isStreaming || isWaitingForResponse) {
+    return false;
+  }
+
+  const hasText = stripZeroWidthSpaces(inputText).trim().length > 0;
+  const hasAttachments = (attachedImages?.length ?? 0) > 0;
+  return hasText || hasAttachments;
+};
+
 /**
  * Message submit Hook
  * Handles message submission logic and context parsing
@@ -39,37 +65,62 @@ export const useMessageSubmit = ({
   vscode,
   inputText,
   setInputText,
+  attachedImages = [],
+  clearImages,
   inputFieldRef,
   isStreaming,
   isWaitingForResponse,
+  editTargetTurnIndex = null,
+  onSubmitted,
   skipAutoActiveContext = false,
   fileContext,
   messageHandling,
 }: UseMessageSubmitProps) => {
   const handleSubmit = useCallback(
-    (e: React.FormEvent) => {
+    (e: React.FormEvent | React.KeyboardEvent, explicitText?: string) => {
       e.preventDefault();
 
-      if (!inputText.trim() || isStreaming || isWaitingForResponse) {
+      // Use explicit text if provided (e.g., from prompt suggestion Enter accept)
+      const textToSend = explicitText ?? inputText;
+
+      if (
+        !shouldSendMessage({
+          inputText: textToSend,
+          attachedImages,
+          isStreaming,
+          isWaitingForResponse,
+        })
+      ) {
         return;
       }
 
-      // Handle /login command - show inline loading while extension authenticates
-      if (inputText.trim() === '/login') {
+      // Handle /account command - show account info dialog
+      if (textToSend.trim() === '/account') {
         setInputText('');
         if (inputFieldRef.current) {
-          // Use a zero-width space to maintain the height of the contentEditable element
-          inputFieldRef.current.textContent = '\u200B';
-          // Set the data-empty attribute to show the placeholder
+          inputFieldRef.current.textContent = ZERO_WIDTH_SPACE;
+          inputFieldRef.current.setAttribute('data-empty', 'true');
+        }
+        vscode.postMessage({ type: 'getAccountInfo', data: {} });
+        return;
+      }
+
+      // Handle /auth (and its legacy alias /login) — trigger interactive
+      // auth flow directly in the extension instead of sending the command
+      // to the agent.
+      const trimmedInput = textToSend.trim();
+      if (trimmedInput === '/auth' || trimmedInput === '/login') {
+        setInputText('');
+        if (inputFieldRef.current) {
+          inputFieldRef.current.textContent = ZERO_WIDTH_SPACE;
           inputFieldRef.current.setAttribute('data-empty', 'true');
         }
         vscode.postMessage({
-          type: 'login',
+          type: 'auth',
           data: {},
         });
-        // Show a friendly loading message in the chat while logging in
         try {
-          messageHandling.setWaitingForResponse('Logging in to Qwen Code...');
+          messageHandling.setWaitingForResponse('Authenticating Qwen Code...');
         } catch (_err) {
           // Best-effort UI hint; ignore if hook not available
         }
@@ -89,7 +140,7 @@ export const useMessageSubmit = ({
       const fileRefPattern = /@([^\s]+)/g;
       let match;
 
-      while ((match = fileRefPattern.exec(inputText)) !== null) {
+      while ((match = fileRefPattern.exec(textToSend)) !== null) {
         const fileName = match[1];
         const filePath = fileContext.getFileReference(fileName);
 
@@ -137,25 +188,36 @@ export const useMessageSubmit = ({
       }
 
       vscode.postMessage({
-        type: 'sendMessage',
+        type:
+          typeof editTargetTurnIndex === 'number'
+            ? 'editMessage'
+            : 'sendMessage',
         data: {
-          text: inputText,
+          text: textToSend,
           context: context.length > 0 ? context : undefined,
           fileContext: fileContextForMessage,
+          attachments: attachedImages.length > 0 ? attachedImages : undefined,
+          ...(typeof editTargetTurnIndex === 'number'
+            ? { targetTurnIndex: editTargetTurnIndex }
+            : {}),
         },
       });
 
       setInputText('');
       if (inputFieldRef.current) {
-        // Use a zero-width space to maintain the height of the contentEditable element
-        inputFieldRef.current.textContent = '\u200B';
-        // Set the data-empty attribute to show the placeholder
+        inputFieldRef.current.textContent = ZERO_WIDTH_SPACE;
         inputFieldRef.current.setAttribute('data-empty', 'true');
       }
       fileContext.clearFileReferences();
+      if (clearImages) {
+        clearImages();
+      }
+      onSubmitted?.();
     },
     [
       inputText,
+      attachedImages,
+      clearImages,
       isStreaming,
       setInputText,
       inputFieldRef,
@@ -164,6 +226,8 @@ export const useMessageSubmit = ({
       skipAutoActiveContext,
       isWaitingForResponse,
       messageHandling,
+      editTargetTurnIndex,
+      onSubmitted,
     ],
   );
 

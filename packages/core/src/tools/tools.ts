@@ -6,11 +6,11 @@
 
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
-import type { DiffUpdateResult } from '../ide/ide-client.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
+import type { PermissionDecision } from '../permissions/types.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -39,12 +39,29 @@ export interface ToolInvocation<
   toolLocations(): ToolLocation[];
 
   /**
-   * Determines if the tool should prompt for confirmation before execution.
-   * @returns Confirmation details or false if no confirmation is needed.
+   * Returns the tool's intrinsic permission for this invocation, based solely
+   * on its own parameters (without consulting PermissionManager).
+   *
+   * - `'allow'` — inherently safe (e.g., read-only commands, `cat`, `ls`).
+   * - `'ask'`   — may have side effects, needs user or PM confirmation.
+   * - `'deny'`  — security violation (e.g., command substitution in shell).
+   *
+   * The coreToolScheduler uses this as the *default* permission which may be
+   * overridden by PermissionManager rules at L4.
    */
-  shouldConfirmExecute(
+  getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Constructs the confirmation dialog details for this invocation.
+   * Only called when the final permission decision is `'ask'` and the user
+   * needs to be prompted interactively.
+   *
+   * @param abortSignal Signal to cancel the operation.
+   * @returns The confirmation details for the UI to display.
+   */
+  getConfirmationDetails(
     abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false>;
+  ): Promise<ToolCallConfirmationDetails>;
 
   /**
    * Executes the tool with the validated parameters.
@@ -75,10 +92,37 @@ export abstract class BaseToolInvocation<
     return [];
   }
 
-  shouldConfirmExecute(
+  /**
+   * Default: read-only tools return 'allow'. Override in subclasses for
+   * tools with side effects.
+   */
+  getDefaultPermission(): Promise<PermissionDecision> {
+    return Promise.resolve('allow');
+  }
+
+  /**
+   * Default fallback: returns a generic 'info' confirmation dialog using the
+   * tool's getDescription(). This ensures that even tools whose
+   * getDefaultPermission() returns 'allow' can still be prompted when PM
+   * rules override the decision to 'ask' at L4.
+   *
+   * Tools with richer confirmation UIs (Shell, Edit, MCP, etc.) override this.
+   */
+  getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    return Promise.resolve(false);
+  ): Promise<ToolCallConfirmationDetails> {
+    const details: ToolInfoConfirmationDetails = {
+      type: 'info',
+      title: `Confirm ${this.constructor.name.replace(/Invocation$/, '')}`,
+      prompt: this.getDescription(),
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
+      },
+    };
+    return Promise.resolve(details);
   }
 
   abstract execute(
@@ -160,6 +204,25 @@ export abstract class DeclarativeTool<
     readonly parameterSchema: unknown,
     readonly isOutputMarkdown: boolean = true,
     readonly canUpdateOutput: boolean = false,
+    /**
+     * When true, this tool is hidden from the initial function-declaration list
+     * sent to the model to save tokens. The model discovers it on-demand via the
+     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
+     * subsequent API requests. Mirrors the `shouldDefer` field described in
+     * Claude Code's tool framework.
+     */
+    readonly shouldDefer: boolean = false,
+    /**
+     * When true, this tool is always included in the function-declaration list
+     * even in contexts where deferral is the default. Used for meta tools like
+     * ToolSearch itself.
+     */
+    readonly alwaysLoad: boolean = false,
+    /**
+     * Optional space-separated keywords used by ToolSearch's keyword-match
+     * scoring. Complements the tool's name and description.
+     */
+    readonly searchHint?: string,
   ) {}
 
   get schema(): FunctionDeclaration {
@@ -168,6 +231,55 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Max model-facing characters for this tool's output before the scheduler
+   * spills it to disk (mirrors Claude Code's per-tool `maxResultSizeChars`).
+   *   - `undefined` → use the global truncation threshold.
+   *   - `Infinity`  → self-managed (the tool does its own size control, e.g.
+   *     ReadFile's line-based paging), exempt from scheduler char truncation.
+   * Override in subclasses to opt into a per-tool budget.
+   */
+  get maxOutputChars(): number | undefined {
+    return undefined;
+  }
+
+  /**
+   * Direction kept when this tool's oversized output is truncated: `'head'`
+   * (beginning, e.g. shell), `'tail'` (end, e.g. background agents), or
+   * `'both'` (first + last, the default).
+   */
+  get truncateKeep(): 'head' | 'tail' | 'both' {
+    return 'both';
+  }
+
+  /**
+   * Projects tool params for the AUTO approval mode classifier.
+   *
+   * Tools with security-relevant parameters (file paths, shell commands,
+   * URLs) should override this to redact voluminous or sensitive fields
+   * (full content, secrets) while exposing enough for the classifier to
+   * judge safety.
+   *
+   * Returns:
+   *   - object: projected params to send to the classifier
+   *   - empty string: signals "no security relevance" — the classifier
+   *     transcript will record only the tool name
+   *   - undefined: fall back to raw params (only safe when the tool is
+   *     known to have no sensitive params)
+   *
+   * Default is the empty-string sentinel — fail-closed: a third-party
+   * MCP tool (or any tool that has not opted in) does not leak its raw
+   * parameters (potentially containing API keys, tokens, file contents)
+   * into the classifier LLM prompt. Tools that want their args inspected
+   * by the classifier for safety judgement should override this and
+   * return an object with only the security-relevant fields.
+   */
+  toAutoClassifierInput(
+    _params: TParams,
+  ): Record<string, unknown> | string | undefined {
+    return '';
   }
 
   /**
@@ -328,6 +440,36 @@ export function isTool(obj: unknown): obj is AnyDeclarativeTool {
   );
 }
 
+export type ToolArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type ToolArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export interface ToolArtifact {
+  kind?: ToolArtifactKind;
+  storage?: ToolArtifactStorage;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -345,12 +487,32 @@ export interface ToolResult {
   returnDisplay: ToolResultDisplay;
 
   /**
+   * Concrete filesystem paths discovered or touched during successful execution.
+   * Scheduler-side path activation consumes these in addition to input fields.
+   */
+  resultFilePaths?: string[];
+
+  /**
+   * Structured artifacts produced by this tool call. Daemon/session surfaces
+   * consume this as metadata only; the producer remains responsible for the
+   * underlying file, URL, or managed resource lifecycle.
+   */
+  artifacts?: ToolArtifact[];
+
+  /**
    * If this property is present, the tool call is considered a failure.
    */
   error?: {
     message: string; // raw error message
     type?: ToolErrorType; // An optional machine-readable error type (e.g., 'FILE_NOT_FOUND').
   };
+
+  /**
+   * Optional model override propagated from skill execution.
+   * When present, the client should use this model for subsequent
+   * turns within the same agentic loop.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -438,16 +600,18 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export interface TaskResultDisplay {
+export interface AgentResultDisplay {
   type: 'task_execution';
   subagentName: string;
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
+  /** Real-time output-token count during execution, accumulated across subagent rounds. */
+  tokenCount?: number;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -468,6 +632,9 @@ export interface TaskResultDisplay {
 
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
+  totalLines?: number;
+  totalBytes?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -489,9 +656,28 @@ export type ToolResultDisplay =
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
-  | TaskResultDisplay
+  | AgentResultDisplay
+  | TeamResultDisplay
+  | TaskListResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData;
+
+export interface TeamResultDisplay {
+  type: 'team_result';
+  teamName: string;
+  action: 'created' | 'deleted';
+  memberCount?: number;
+}
+
+export interface TaskListResultDisplay {
+  type: 'task_list';
+  tasks: Array<{
+    id: string;
+    subject: string;
+    status: string;
+    owner?: string;
+  }>;
+}
 
 export interface FileDiff {
   fileDiff: string;
@@ -499,6 +685,13 @@ export interface FileDiff {
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
+  truncatedForSession?: boolean;
+  fileDiffLength?: number;
+  originalContentLength?: number;
+  newContentLength?: number;
+  fileDiffTruncated?: boolean;
+  originalContentTruncated?: boolean;
+  newContentTruncated?: boolean;
 }
 
 export interface DiffStat {
@@ -535,13 +728,20 @@ export interface ToolEditConfirmationDetails {
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
   ) => Promise<void>;
+  /**
+   * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
+   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
+   * any 'allow' rule the user might add.
+   */
+  hideAlwaysAllow?: boolean;
   fileName: string;
   filePath: string;
   fileDiff: string;
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
-  ideConfirmation?: Promise<DiffUpdateResult>;
+  /** Hide UI affordances that let the user edit the proposed content. */
+  hideModify?: boolean;
 }
 
 export interface ToolConfirmationPayload {
@@ -550,8 +750,21 @@ export interface ToolConfirmationPayload {
   newContent?: string;
   // used to provide custom cancellation message when outcome is Cancel
   cancelMessage?: string;
+  // Permission rules to persist when user selects ProceedAlwaysProject/User.
+  // Populated by the tool's getConfirmationDetails() and read by
+  // coreToolScheduler.handleConfirmationResponse() for persistence.
+  permissionRules?: string[];
   // used to pass user answers from ask_user_question tool
   answers?: Record<string, string>;
+  // Replacement tool args from the host's permission policy
+  // (Anthropic stream-json `can_use_tool` returns this as
+  // `updatedInput` when sanitising a tool call before allowing
+  // it). When present and the outcome is allow, the scheduler
+  // overrides the tool's args with this object before scheduling.
+  // Cross-process callers (teammates) rely on this because they
+  // can't reach into the leader's local WaitingToolCall to mutate
+  // args directly the way the leader's same-process path does.
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -561,13 +774,27 @@ export interface ToolExecuteConfirmationDetails {
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
   ) => Promise<void>;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
+  permissionRules?: string[];
+  /**
+   * Optional informational warnings to surface in the confirmation dialog,
+   * one short string per warning. Currently used to flag commands that
+   * contain shell command substitution (`$(...)`, backticks, `<(...)`,
+   * `>(...)`) so the user can review them before approving. Renderers
+   * should display these alongside the command, not as errors.
+   */
+  warnings?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {
   type: 'mcp';
   title: string;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   serverName: string;
   toolName: string;
   toolDisplayName: string;
@@ -575,14 +802,23 @@ export interface ToolMcpConfirmationDetails {
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
   ) => Promise<void>;
+  /** Permission rule for this MCP tool, e.g. 'mcp__server__tool'. */
+  permissionRules?: string[];
 }
 
 export interface ToolInfoConfirmationDetails {
   type: 'info';
   title: string;
-  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   prompt: string;
   urls?: string[];
+  /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
+  permissionRules?: string[];
 }
 
 export type ToolCallConfirmationDetails =
@@ -596,8 +832,15 @@ export type ToolCallConfirmationDetails =
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
   title: string;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   plan: string;
-  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+  /** The approval mode that was active before entering plan mode (for display in the UI). */
+  prePlanMode?: string;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
 }
 
 export interface ToolAskUserQuestionConfirmationDetails {
@@ -610,7 +853,7 @@ export interface ToolAskUserQuestionConfirmationDetails {
       label: string;
       description: string;
     }>;
-    multiSelect: boolean;
+    multiSelect?: boolean;
   }>;
   metadata?: {
     source?: string;
@@ -629,9 +872,17 @@ export interface ToolAskUserQuestionConfirmationDetails {
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
   ProceedAlways = 'proceed_always',
+  /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',
+  /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysTool = 'proceed_always_tool',
+  /** Persist the permission rule to the project settings (workspace scope). */
+  ProceedAlwaysProject = 'proceed_always_project',
+  /** Persist the permission rule to the user settings (user scope). */
+  ProceedAlwaysUser = 'proceed_always_user',
   ModifyWithEditor = 'modify_with_editor',
+  /** Restore the approval mode that was active before entering plan mode. */
+  RestorePrevious = 'restore_previous',
   Cancel = 'cancel',
 }
 
@@ -644,6 +895,7 @@ export enum Kind {
   Execute = 'execute',
   Think = 'think',
   Fetch = 'fetch',
+  Agent = 'agent',
   Other = 'other',
 }
 
@@ -654,6 +906,17 @@ export const MUTATOR_KINDS: Kind[] = [
   Kind.Move,
   Kind.Execute,
 ] as const;
+
+/**
+ * Tool kinds that are safe to execute concurrently (pure reads, no writes).
+ * Kind.Think is excluded because some Think tools write to disk
+ * (e.g., save_memory, todo_write).
+ */
+export const CONCURRENCY_SAFE_KINDS: ReadonlySet<Kind> = new Set([
+  Kind.Read,
+  Kind.Search,
+  Kind.Fetch,
+]);
 
 export interface ToolLocation {
   // Absolute path to the file

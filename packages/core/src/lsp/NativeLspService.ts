@@ -27,22 +27,56 @@ import type {
   LspWorkspaceEdit,
 } from './types.js';
 import type { EventEmitter } from 'events';
+import {
+  DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS,
+  DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS,
+  DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
+} from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
-import { LspLanguageDetector } from './LspLanguageDetector.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './LspServerManager.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
+  LspServerConfig,
+  LspServiceReinitializeResult,
+  LspSkippedServer,
   LspServerStatus,
+  LspStatusSnapshot,
   NativeLspServiceOptions,
 } from './types.js';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
+
+/**
+ * Mapping from LSP language identifiers to file extensions, only for cases
+ * where the language ID does NOT match the file extension directly.
+ * Languages whose ID is already a valid extension (e.g. "cpp", "java", "go")
+ * are handled by the fallback in getWorkspaceSymbolExtensions().
+ */
+const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
+  typescript: ['ts', 'tsx'],
+  typescriptreact: ['tsx'],
+  javascript: ['js', 'jsx'],
+  javascriptreact: ['jsx'],
+  python: ['py'],
+  csharp: ['cs'],
+  ruby: ['rb'],
+};
+
+const DEFAULT_EXCLUDE_PATTERNS = [
+  '**/node_modules/**',
+  '**/.git/**',
+  '**/dist/**',
+  '**/build/**',
+];
 
 export class NativeLspService {
   private config: CoreConfig;
@@ -52,8 +86,12 @@ export class NativeLspService {
   private workspaceRoot: string;
   private configLoader: LspConfigLoader;
   private serverManager: LspServerManager;
-  private languageDetector: LspLanguageDetector;
   private normalizer: LspResponseNormalizer;
+  private openedDocuments = new Map<string, Set<string>>();
+  private lastConnections = new Map<string, LspConnectionInterface>();
+  private reinitializeQueue: Promise<unknown> = Promise.resolve();
+  private reinitializeAbortController: AbortController | undefined;
+  private stopping = false;
 
   constructor(
     config: CoreConfig,
@@ -71,10 +109,6 @@ export class NativeLspService {
       options.workspaceRoot ??
       (config as { getProjectRoot: () => string }).getProjectRoot();
     this.configLoader = new LspConfigLoader(this.workspaceRoot);
-    this.languageDetector = new LspLanguageDetector(
-      this.workspaceContext,
-      this.fileDiscoveryService,
-    );
     this.normalizer = new LspResponseNormalizer();
     this.serverManager = new LspServerManager(
       this.config,
@@ -102,26 +136,215 @@ export class NativeLspService {
       return;
     }
 
-    // Detect languages in workspace
+    // Load LSP configs
     const userConfigs = await this.configLoader.loadUserConfigs();
     const extensionConfigs = await this.configLoader.loadExtensionConfigs(
       this.getActiveExtensions(),
     );
-    const extensionOverrides =
-      this.configLoader.collectExtensionToLanguageOverrides([
-        ...extensionConfigs,
-        ...userConfigs,
-      ]);
-    const detectedLanguages =
-      await this.languageDetector.detectLanguages(extensionOverrides);
-
-    // Merge configs: built-in presets + extension LSP configs + user .lsp.json
+    // Merge configs: extension LSP configs + user .lsp.json
     const serverConfigs = this.configLoader.mergeConfigs(
-      detectedLanguages,
+      [],
       extensionConfigs,
       userConfigs,
     );
-    this.serverManager.setServerConfigs(serverConfigs);
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    debugLogger.info(
+      `Discovered ${admitted.length} LSP server config(s): ${formatServerNames(
+        admitted.map((config) => config.name),
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    this.serverManager.setServerConfigs(admitted);
+  }
+
+  async reinitialize(): Promise<LspServiceReinitializeResult> {
+    if (this.stopping) {
+      throw new Error('LSP reinitialize cancelled');
+    }
+    const controller = new AbortController();
+    const run = async () => {
+      this.throwIfReinitializeAborted(controller.signal);
+      this.reinitializeAbortController = controller;
+      try {
+        return await this.doReinitialize(controller.signal);
+      } finally {
+        if (this.reinitializeAbortController === controller) {
+          this.reinitializeAbortController = undefined;
+        }
+      }
+    };
+    const next = this.reinitializeQueue.then(run, run);
+    this.reinitializeQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private throwIfReinitializeAborted(signal: AbortSignal): void {
+    if (this.stopping || signal.aborted) {
+      throw new Error('LSP reinitialize cancelled');
+    }
+  }
+
+  private async doReinitialize(
+    signal: AbortSignal,
+  ): Promise<LspServiceReinitializeResult> {
+    this.throwIfReinitializeAborted(signal);
+    const workspaceTrusted = this.config.isTrustedFolder();
+    debugLogger.info(
+      `Reinitializing LSP servers: workspaceRoot=${this.workspaceRoot}, trusted=${workspaceTrusted}`,
+    );
+    if (this.requireTrustedWorkspace && !workspaceTrusted) {
+      this.throwIfReinitializeAborted(signal);
+      const removed = Array.from(this.serverManager.getHandles().keys());
+      await this.serverManager.stopAll();
+      this.throwIfReinitializeAborted(signal);
+      this.clearDocumentTrackingForServers(removed);
+      const result = {
+        reconcile: {
+          added: [],
+          removed,
+          restarted: [],
+          unchanged: [],
+          failed: [],
+        },
+        skipped: [],
+      };
+      debugLogger.info(
+        `LSP reinitialize result: added=<none>, removed=${formatServerNames(
+          removed,
+        )}, restarted=<none>, unchanged=<none>, failed=<none>, skipped=<none>`,
+      );
+      return result;
+    }
+
+    this.throwIfReinitializeAborted(signal);
+    const userConfigs = await this.configLoader.loadUserConfigsStrict();
+    this.throwIfReinitializeAborted(signal);
+    if (!userConfigs.ok) {
+      throw userConfigs.error;
+    }
+
+    const extensionConfigs = await this.configLoader.loadExtensionConfigs(
+      this.getActiveExtensions(),
+    );
+    this.throwIfReinitializeAborted(signal);
+    const serverConfigs = this.configLoader.mergeConfigs(
+      [],
+      extensionConfigs,
+      userConfigs.configs,
+    );
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    this.throwIfReinitializeAborted(signal);
+    const reconcile = await this.serverManager.reconcileServerConfigs(admitted);
+    this.throwIfReinitializeAborted(signal);
+    const restartedOpenDocuments = this.snapshotOpenDocuments(
+      reconcile.restarted,
+    );
+    this.clearDocumentTrackingForServers([
+      ...reconcile.removed,
+      ...reconcile.restarted,
+    ]);
+    await this.replayOpenDocuments(
+      reconcile.restarted,
+      restartedOpenDocuments,
+      signal,
+    );
+    this.throwIfReinitializeAborted(signal);
+    debugLogger.info(
+      `LSP reinitialize result: added=${formatServerNames(
+        reconcile.added,
+      )}, removed=${formatServerNames(
+        reconcile.removed,
+      )}, restarted=${formatServerNames(
+        reconcile.restarted,
+      )}, unchanged=${formatServerNames(
+        reconcile.unchanged,
+      )}, failed=${formatServerNames(
+        reconcile.failed,
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    return { reconcile, skipped };
+  }
+
+  private filterServerConfigs(
+    configs: LspServerConfig[],
+    workspaceTrusted: boolean,
+  ): { admitted: LspServerConfig[]; skipped: LspSkippedServer[] } {
+    const admitted: LspServerConfig[] = [];
+    const skipped: LspSkippedServer[] = [];
+    for (const config of configs) {
+      if (!workspaceTrusted && config.trustRequired) {
+        debugLogger.warn(
+          `LSP server ${config.name} requires trusted workspace, skipping`,
+        );
+        skipped.push({ name: config.name, reason: 'server_trust_required' });
+        continue;
+      }
+      admitted.push(config);
+    }
+    return { admitted, skipped };
+  }
+
+  private clearDocumentTrackingForServers(serverNames: string[]): void {
+    for (const name of serverNames) {
+      this.openedDocuments.delete(name);
+      this.lastConnections.delete(name);
+    }
+  }
+
+  private snapshotOpenDocuments(
+    serverNames: string[],
+  ): Map<string, Set<string>> {
+    const snapshots = new Map<string, Set<string>>();
+    for (const name of serverNames) {
+      const documents = this.openedDocuments.get(name);
+      if (documents) {
+        snapshots.set(name, new Set(documents));
+      }
+    }
+    return snapshots;
+  }
+
+  private async replayOpenDocuments(
+    serverNames: string[],
+    snapshots: Map<string, Set<string>>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.throwIfReinitializeAborted(signal);
+    if (
+      serverNames.length === 0 ||
+      !serverNames.some((name) => snapshots.has(name))
+    ) {
+      return;
+    }
+    const readyHandles = new Map(this.getReadyHandles());
+    for (const name of serverNames) {
+      this.throwIfReinitializeAborted(signal);
+      const handle = readyHandles.get(name);
+      const documents = snapshots.get(name);
+      if (!handle || !documents) {
+        continue;
+      }
+      let openedAny = false;
+      for (const uri of documents) {
+        this.throwIfReinitializeAborted(signal);
+        try {
+          openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to replay document ${uri} for LSP server ${name}:`,
+            error,
+          );
+        }
+      }
+      if (openedAny) {
+        await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS, signal);
+      }
+    }
   }
 
   private getActiveExtensions(): Extension[] {
@@ -144,7 +367,11 @@ export class NativeLspService {
    * Stop all LSP servers
    */
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.reinitializeAbortController?.abort();
     await this.serverManager.stopAll();
+    this.openedDocuments.clear();
+    this.lastConnections.clear();
   }
 
   /**
@@ -152,6 +379,75 @@ export class NativeLspService {
    */
   getStatus(): Map<string, LspServerStatus> {
     return this.serverManager.getStatus();
+  }
+
+  /**
+   * Get all server handles for status reporting.
+   */
+  getServerHandles(): ReadonlyMap<string, LspServerHandle> {
+    return this.serverManager.getHandles();
+  }
+
+  /**
+   * Get detailed LSP server status for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    const servers = Array.from(this.serverManager.getHandles().entries()).map(
+      ([name, handle]) => {
+        const error =
+          handle.error instanceof Error
+            ? handle.error.message
+            : handle.error
+              ? String(handle.error)
+              : undefined;
+
+        return {
+          name,
+          status: handle.status,
+          languages: handle.config.languages,
+          transport: handle.config.transport,
+          ...(handle.config.command ? { command: handle.config.command } : {}),
+          ...(handle.config.args ? { args: handle.config.args } : {}),
+          ...(handle.config.rootUri ? { rootUri: handle.config.rootUri } : {}),
+          ...(handle.config.workspaceFolder
+            ? { workspaceFolder: handle.config.workspaceFolder }
+            : {}),
+          ...(handle.process?.pid ? { pid: handle.process.pid } : {}),
+          ...(handle.warmedUp !== undefined
+            ? { warmedUp: handle.warmedUp }
+            : {}),
+          ...(handle.restartAttempts !== undefined
+            ? { restartAttempts: handle.restartAttempts }
+            : {}),
+          ...(handle.processDiagnostics?.stderrTail
+            ? { stderrTail: handle.processDiagnostics.stderrTail }
+            : {}),
+          ...(handle.processDiagnostics?.exitCode !== undefined
+            ? { exitCode: handle.processDiagnostics.exitCode }
+            : {}),
+          ...(handle.processDiagnostics?.exitSignal !== undefined
+            ? { exitSignal: handle.processDiagnostics.exitSignal }
+            : {}),
+          ...(error ? { error } : {}),
+        };
+      },
+    );
+
+    return {
+      enabled: true,
+      configuredServers: servers.length,
+      readyServers: servers.filter((server) => server.status === 'READY')
+        .length,
+      failedServers: servers.filter((server) => server.status === 'FAILED')
+        .length,
+      inProgressServers: servers.filter(
+        (server) => server.status === 'IN_PROGRESS',
+      ).length,
+      notStartedServers: servers.filter(
+        (server) => server.status === 'NOT_STARTED',
+      ).length,
+      servers,
+    };
   }
 
   /**
@@ -178,6 +474,293 @@ export class NativeLspService {
   }
 
   /**
+   * Ensure a document is open on the given LSP server. Sends textDocument/didOpen
+   * if not already tracked, then waits for the server to process the file before
+   * returning. This delay prevents empty results when the server hasn't analyzed
+   * the file yet.
+   *
+   * @param serverName - The name of the LSP server
+   * @param handle - The server handle with an active connection
+   * @param uri - The document URI to open
+   * @returns true if a new didOpen was sent; false if already open or failed
+   */
+  private async ensureDocumentOpen(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): Promise<boolean> {
+    const lastConnection = this.lastConnections.get(serverName);
+    if (lastConnection && lastConnection !== handle.connection) {
+      this.openedDocuments.delete(serverName);
+    }
+
+    if (!this.sendDocumentOpen(serverName, handle, uri)) {
+      return false;
+    }
+
+    // Wait for the LSP server to process the newly opened document.
+    // Without this delay, requests sent immediately after didOpen may return
+    // empty results because the server hasn't finished analyzing the file.
+    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+
+    return true;
+  }
+
+  private sendDocumentOpen(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): boolean {
+    if (!uri.startsWith('file://')) {
+      return false;
+    }
+
+    const openedForServer = this.openedDocuments.get(serverName);
+    if (openedForServer?.has(uri)) {
+      return false;
+    }
+
+    let filePath: string;
+    try {
+      filePath = fileURLToPath(uri);
+    } catch (error) {
+      debugLogger.warn(`Failed to resolve file path for ${uri}:`, error);
+      return false;
+    }
+
+    let text: string;
+    try {
+      text = fs.readFileSync(filePath, 'utf-8');
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to read file for LSP didOpen: ${filePath}`,
+        error,
+      );
+      return false;
+    }
+
+    const languageId = this.resolveLanguageId(filePath, handle) ?? 'plaintext';
+
+    handle.connection.send({
+      jsonrpc: '2.0',
+      method: 'textDocument/didOpen',
+      params: {
+        textDocument: {
+          uri,
+          languageId,
+          version: 1,
+          text,
+        },
+      },
+    });
+
+    this.lastConnections.set(serverName, handle.connection);
+    const nextOpened = openedForServer ?? new Set<string>();
+    nextOpened.add(uri);
+    this.openedDocuments.set(serverName, nextOpened);
+
+    return true;
+  }
+
+  /**
+   * Register a URI that was opened externally (e.g. by warmupTypescriptServer)
+   * so that ensureDocumentOpen does not send a duplicate textDocument/didOpen.
+   *
+   * @param serverName - The name of the LSP server
+   * @param uri - The document URI to track as already opened
+   */
+  private trackExternallyOpenedDocument(serverName: string, uri: string): void {
+    const openedForServer =
+      this.openedDocuments.get(serverName) ?? new Set<string>();
+    openedForServer.add(uri);
+    this.openedDocuments.set(serverName, openedForServer);
+  }
+
+  private resolveLanguageId(
+    filePath: string,
+    handle: LspServerHandle,
+  ): string | undefined {
+    const ext = path.extname(filePath).slice(1).toLowerCase();
+    if (ext && handle.config.extensionToLanguage) {
+      const mapping = handle.config.extensionToLanguage;
+      return mapping[ext] ?? mapping['.' + ext];
+    }
+    if (handle.config.languages && handle.config.languages.length > 0) {
+      return handle.config.languages[0];
+    }
+    return ext || undefined;
+  }
+
+  private async warmupWorkspaceSymbols(
+    serverName: string,
+    handle: LspServerHandle,
+  ): Promise<boolean> {
+    if (!handle.connection) {
+      return false;
+    }
+    const openedForServer = this.openedDocuments.get(serverName);
+    if (openedForServer && openedForServer.size > 0) {
+      return true;
+    }
+
+    const filePath = this.findWorkspaceFileForServer(handle);
+    if (!filePath) {
+      return false;
+    }
+
+    const uri = pathToFileURL(filePath).toString();
+    const didOpen = await this.ensureDocumentOpen(
+      serverName,
+      handle as LspServerHandle & { connection: LspConnectionInterface },
+      uri,
+    );
+    if (!didOpen) {
+      return false;
+    }
+    await this.delay(DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
+    return true;
+  }
+
+  /**
+   * Find the first source file in the workspace that matches the server's
+   * language extensions. Used to open a file for workspace symbol warmup.
+   *
+   * @param handle - The LSP server handle to determine target extensions
+   * @returns Absolute path of the first matching file, or undefined
+   */
+  private findWorkspaceFileForServer(
+    handle: LspServerHandle,
+  ): string | undefined {
+    const extensions = this.getWorkspaceSymbolExtensions(handle);
+    if (extensions.length === 0) {
+      return undefined;
+    }
+    // Brace expansion requires at least 2 items; use plain glob for a single ext
+    const extGlob =
+      extensions.length === 1 ? extensions[0]! : `{${extensions.join(',')}}`;
+    const pattern = `**/*.${extGlob}`;
+    const roots = this.workspaceContext.getDirectories();
+
+    for (const root of roots) {
+      try {
+        // Use maxDepth to avoid scanning deeply nested directories;
+        // we only need one file to trigger server indexing.
+        const matches = globSync(pattern, {
+          cwd: root,
+          ignore: DEFAULT_EXCLUDE_PATTERNS,
+          absolute: true,
+          nodir: true,
+          maxDepth: 5,
+        });
+        for (const match of matches) {
+          if (this.fileDiscoveryService.shouldIgnoreFile(match)) {
+            continue;
+          }
+          return match;
+        }
+      } catch (_error) {
+        // ignore glob errors
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Determine file extensions this server can handle, used to find a workspace
+   * file to open for warmup. Resolution order:
+   *   1. Keys from config.extensionToLanguage (explicit user/extension mapping)
+   *   2. Derived from config.languages via LANGUAGE_ID_TO_EXTENSIONS, falling
+   *      back to treating the language ID itself as a file extension
+   */
+  private getWorkspaceSymbolExtensions(handle: LspServerHandle): string[] {
+    const extensions = new Set<string>();
+
+    // Prefer explicit extension-to-language mapping from server config
+    const extMapping = handle.config.extensionToLanguage;
+    if (extMapping) {
+      for (const key of Object.keys(extMapping)) {
+        const normalized = key.startsWith('.') ? key.slice(1) : key;
+        if (normalized) {
+          extensions.add(normalized.toLowerCase());
+        }
+      }
+    }
+
+    // Fall back to deriving extensions from language identifiers
+    if (extensions.size === 0) {
+      for (const language of handle.config.languages) {
+        const mapped = LANGUAGE_ID_TO_EXTENSIONS[language];
+        if (mapped) {
+          for (const ext of mapped) {
+            extensions.add(ext);
+          }
+        } else {
+          // For languages like "cpp", "java", "go", "rust" etc.,
+          // the language ID itself is a valid file extension
+          extensions.add(language.toLowerCase());
+        }
+      }
+    }
+
+    return Array.from(extensions);
+  }
+
+  /**
+   * Run TypeScript server warmup and track the opened URI to prevent
+   * duplicate didOpen notifications.
+   *
+   * @param serverName - The name of the LSP server
+   * @param handle - The server handle
+   * @param force - Force re-warmup even if already warmed up
+   */
+  private async warmupAndTrack(
+    serverName: string,
+    handle: LspServerHandle,
+    force = false,
+  ): Promise<void> {
+    const warmupUri = await this.serverManager.warmupTypescriptServer(
+      handle,
+      force,
+    );
+    if (warmupUri) {
+      this.trackExternallyOpenedDocument(serverName, warmupUri);
+    }
+  }
+
+  /**
+   * Whether we should retry a document-level operation that returned empty
+   * results. We retry when a textDocument/didOpen was just sent (the server
+   * may still be indexing) AND the server is not a fast TypeScript server.
+   */
+  private shouldRetryAfterOpen(
+    justOpened: boolean,
+    handle: LspServerHandle,
+  ): boolean {
+    return justOpened && !this.serverManager.isTypescriptServer(handle);
+  }
+
+  private async delay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    this.throwIfReinitializeAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('LSP reinitialize cancelled'));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  /**
    * Workspace symbol search across all ready LSP servers.
    */
   async workspaceSymbols(
@@ -193,15 +776,29 @@ export class NativeLspService {
         continue;
       }
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.warmupAndTrack(serverName, handle);
+        const warmedUp = this.serverManager.isTypescriptServer(handle)
+          ? false
+          : await this.warmupWorkspaceSymbols(serverName, handle);
         let response = await handle.connection.request('workspace/symbol', {
           query,
         });
         if (
+          !this.serverManager.isTypescriptServer(handle) &&
+          Array.isArray(response) &&
+          response.length === 0 &&
+          warmedUp
+        ) {
+          await this.delay(DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
+          response = await handle.connection.request('workspace/symbol', {
+            query,
+          });
+        }
+        if (
           this.serverManager.isTypescriptServer(handle) &&
           this.isNoProjectErrorResponse(response)
         ) {
-          await this.serverManager.warmupTypescriptServer(handle, true);
+          await this.warmupAndTrack(serverName, handle, true);
           response = await handle.connection.request('workspace/symbol', {
             query,
           });
@@ -241,17 +838,36 @@ export class NativeLspService {
     limit = 50,
   ): Promise<LspDefinition[]> {
     const handles = this.getReadyHandles(serverName);
+    const requestParams = {
+      textDocument: { uri: location.uri },
+      position: location.range.start,
+    };
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
-        const response = await handle.connection.request(
-          'textDocument/definition',
-          {
-            textDocument: { uri: location.uri },
-            position: location.range.start,
-          },
+        const justOpened = await this.ensureDocumentOpen(
+          name,
+          handle,
+          location.uri,
         );
+        await this.warmupAndTrack(name, handle);
+
+        let response = await handle.connection.request(
+          'textDocument/definition',
+          requestParams,
+        );
+
+        if (
+          this.isEmptyResponse(response) &&
+          this.shouldRetryAfterOpen(justOpened, handle)
+        ) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
+          response = await handle.connection.request(
+            'textDocument/definition',
+            requestParams,
+          );
+        }
+
         const candidates = Array.isArray(response)
           ? response
           : response
@@ -291,18 +907,37 @@ export class NativeLspService {
     limit = 200,
   ): Promise<LspReference[]> {
     const handles = this.getReadyHandles(serverName);
+    const requestParams = {
+      textDocument: { uri: location.uri },
+      position: location.range.start,
+      context: { includeDeclaration },
+    };
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
-        const response = await handle.connection.request(
-          'textDocument/references',
-          {
-            textDocument: { uri: location.uri },
-            position: location.range.start,
-            context: { includeDeclaration },
-          },
+        const justOpened = await this.ensureDocumentOpen(
+          name,
+          handle,
+          location.uri,
         );
+        await this.warmupAndTrack(name, handle);
+
+        let response = await handle.connection.request(
+          'textDocument/references',
+          requestParams,
+        );
+
+        if (
+          this.isEmptyResponse(response) &&
+          this.shouldRetryAfterOpen(justOpened, handle)
+        ) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
+          response = await handle.connection.request(
+            'textDocument/references',
+            requestParams,
+          );
+        }
+
         if (!Array.isArray(response)) {
           continue;
         }
@@ -338,14 +973,36 @@ export class NativeLspService {
     serverName?: string,
   ): Promise<LspHoverResult | null> {
     const handles = this.getReadyHandles(serverName);
+    const requestParams = {
+      textDocument: { uri: location.uri },
+      position: location.range.start,
+    };
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
-        const response = await handle.connection.request('textDocument/hover', {
-          textDocument: { uri: location.uri },
-          position: location.range.start,
-        });
+        const justOpened = await this.ensureDocumentOpen(
+          name,
+          handle,
+          location.uri,
+        );
+        await this.warmupAndTrack(name, handle);
+
+        let response = await handle.connection.request(
+          'textDocument/hover',
+          requestParams,
+        );
+
+        if (
+          this.isEmptyResponse(response) &&
+          this.shouldRetryAfterOpen(justOpened, handle)
+        ) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
+          response = await handle.connection.request(
+            'textDocument/hover',
+            requestParams,
+          );
+        }
+
         const normalized = this.normalizer.normalizeHoverResult(response, name);
         if (normalized) {
           return normalized;
@@ -367,16 +1024,29 @@ export class NativeLspService {
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
     const handles = this.getReadyHandles(serverName);
+    const requestParams = { textDocument: { uri } };
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
-        const response = await handle.connection.request(
+        const justOpened = await this.ensureDocumentOpen(name, handle, uri);
+        await this.warmupAndTrack(name, handle);
+
+        let response = await handle.connection.request(
           'textDocument/documentSymbol',
-          {
-            textDocument: { uri },
-          },
+          requestParams,
         );
+
+        if (
+          this.isEmptyResponse(response) &&
+          this.shouldRetryAfterOpen(justOpened, handle)
+        ) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
+          response = await handle.connection.request(
+            'textDocument/documentSymbol',
+            requestParams,
+          );
+        }
+
         if (!Array.isArray(response)) {
           continue;
         }
@@ -430,17 +1100,36 @@ export class NativeLspService {
     limit = 50,
   ): Promise<LspDefinition[]> {
     const handles = this.getReadyHandles(serverName);
+    const requestParams = {
+      textDocument: { uri: location.uri },
+      position: location.range.start,
+    };
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
-        const response = await handle.connection.request(
-          'textDocument/implementation',
-          {
-            textDocument: { uri: location.uri },
-            position: location.range.start,
-          },
+        const justOpened = await this.ensureDocumentOpen(
+          name,
+          handle,
+          location.uri,
         );
+        await this.warmupAndTrack(name, handle);
+
+        let response = await handle.connection.request(
+          'textDocument/implementation',
+          requestParams,
+        );
+
+        if (
+          this.isEmptyResponse(response) &&
+          this.shouldRetryAfterOpen(justOpened, handle)
+        ) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
+          response = await handle.connection.request(
+            'textDocument/implementation',
+            requestParams,
+          );
+        }
+
         const candidates = Array.isArray(response)
           ? response
           : response
@@ -482,17 +1171,36 @@ export class NativeLspService {
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
     const handles = this.getReadyHandles(serverName);
+    const requestParams = {
+      textDocument: { uri: location.uri },
+      position: location.range.start,
+    };
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
-        const response = await handle.connection.request(
-          'textDocument/prepareCallHierarchy',
-          {
-            textDocument: { uri: location.uri },
-            position: location.range.start,
-          },
+        const justOpened = await this.ensureDocumentOpen(
+          name,
+          handle,
+          location.uri,
         );
+        await this.warmupAndTrack(name, handle);
+
+        let response = await handle.connection.request(
+          'textDocument/prepareCallHierarchy',
+          requestParams,
+        );
+
+        if (
+          this.isEmptyResponse(response) &&
+          this.shouldRetryAfterOpen(justOpened, handle)
+        ) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
+          response = await handle.connection.request(
+            'textDocument/prepareCallHierarchy',
+            requestParams,
+          );
+        }
+
         const candidates = Array.isArray(response)
           ? response
           : response
@@ -538,7 +1246,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'callHierarchy/incomingCalls',
           {
@@ -585,7 +1293,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'callHierarchy/outgoingCalls',
           {
@@ -631,7 +1339,8 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, uri);
+        await this.warmupAndTrack(name, handle);
 
         // Request pull diagnostics if the server supports it
         const response = await handle.connection.request(
@@ -681,7 +1390,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.warmupAndTrack(name, handle);
 
         // Request workspace diagnostics if supported
         const response = await handle.connection.request(
@@ -735,7 +1444,8 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, uri);
+        await this.warmupAndTrack(name, handle);
 
         // Convert context diagnostics to LSP format
         const lspDiagnostics = context.diagnostics.map((d: LspDiagnostic) =>
@@ -834,12 +1544,26 @@ export class NativeLspService {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 
-    // Read the current file content
+    // Concurrency: this is an async read-modify-write (readFile → splice →
+    // access(W_OK) → atomicWriteFile) with await points between read and
+    // write. atomicWriteFile keeps the file from being torn, but does NOT
+    // serialize writers — two overlapping applyTextEdits calls for the SAME
+    // path can both read the same base content and the second rename clobbers
+    // the first (lost update). Latent today: applyWorkspaceEdit has no
+    // production caller and no workspace/applyEdit handler is wired. Before
+    // wiring one, serialize per resolved filePath (see jsonl-utils getFileLock).
+
+    // Read the current file content. Only treat ENOENT as "new file"; any
+    // other read failure (EACCES on a read-protected file, EISDIR, etc.)
+    // must propagate — otherwise the atomic rename below would silently
+    // replace the unreadable target with edits applied to an empty buffer.
     let content: string;
     try {
-      content = fs.readFileSync(filePath, 'utf-8');
-    } catch {
-      // File doesn't exist, treat as empty
+      content = await fsp.readFile(filePath, 'utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
       content = '';
     }
 
@@ -875,8 +1599,36 @@ export class NativeLspService {
       lines.splice(startLine, endLine - startLine + 1, ...newLines);
     }
 
-    // Write back to file
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    // Honor file-level write permissions. Atomic rename (tmp + rename)
+    // would otherwise bypass a chmod 0444 lock because rename only needs
+    // parent-directory write access. ENOENT is fine — LSP may be creating
+    // the file via edits.
+    try {
+      await fsp.access(filePath, fs.constants.W_OK);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+
+    // Atomic write so a crash mid-edit can't leave the user file half-written.
+    // Async variant avoids blocking the event loop on the LSP edit hot path
+    // (sync renameWithRetry can stall up to 350ms under Atomics.wait backoff).
+    await atomicWriteFile(filePath, lines.join('\n'), { encoding: 'utf-8' });
+  }
+
+  /**
+   * Check if an LSP response represents an empty/null result, used to decide
+   * whether a retry is worthwhile after a freshly opened document.
+   */
+  private isEmptyResponse(response: unknown): boolean {
+    if (response === null || response === undefined) {
+      return true;
+    }
+    if (Array.isArray(response) && response.length === 0) {
+      return true;
+    }
+    return false;
   }
 
   private isNoProjectErrorResponse(response: unknown): boolean {
@@ -891,4 +1643,8 @@ export class NativeLspService {
           : '';
     return message.includes('No Project');
   }
+}
+
+function formatServerNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
 }

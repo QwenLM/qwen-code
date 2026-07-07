@@ -16,6 +16,7 @@ import { LspConnectionFactory } from './LspConnectionFactory.js';
 import {
   DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS,
   DEFAULT_LSP_MAX_RESTARTS,
+  DEFAULT_LSP_SHUTDOWN_TIMEOUT_MS,
   DEFAULT_LSP_SOCKET_MAX_RETRY_DELAY_MS,
   DEFAULT_LSP_SOCKET_RETRY_DELAY_MS,
   DEFAULT_LSP_STARTUP_TIMEOUT_MS,
@@ -23,22 +24,45 @@ import {
 } from './constants.js';
 import type {
   LspConnectionResult,
+  LspProcessDiagnostics,
+  LspReconcileResult,
   LspServerConfig,
   LspServerHandle,
   LspServerStatus,
   LspSocketOptions,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { lspServerConfigHash } from './configHash.js';
 
 const debugLogger = createDebugLogger('LSP');
+const SECURITY_SENSITIVE_ENV_KEYS = new Set([
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'LD_PRELOAD',
+  'NODE_OPTIONS',
+]);
 
 export interface LspServerManagerOptions {
   requireTrustedWorkspace: boolean;
   workspaceRoot: string;
 }
 
+/**
+ * Owns the per-session lifecycle of configured LSP servers.
+ *
+ * The manager is deliberately session-local: it stores one handle per server
+ * name, starts/stops subprocess or socket-backed connections, and reconciles
+ * config changes without replacing unchanged handles. Callers must pass only
+ * configs that have already passed service-level admission checks.
+ */
 export class LspServerManager {
   private serverHandles: Map<string, LspServerHandle> = new Map();
+  private serverConfigHashes: Map<string, string> = new Map();
+  /** Serializes hot-reload reconcile calls so stop/start operations do not race. */
+  private reconcileQueue: Promise<unknown> = Promise.resolve();
+  private stoppingAll = false;
   private requireTrustedWorkspace: boolean;
   private workspaceRoot: string;
 
@@ -54,16 +78,32 @@ export class LspServerManager {
 
   setServerConfigs(configs: LspServerConfig[]): void {
     this.serverHandles.clear();
+    this.serverConfigHashes.clear();
     for (const config of configs) {
       this.serverHandles.set(config.name, {
         config,
         status: 'NOT_STARTED',
       });
+      this.serverConfigHashes.set(config.name, lspServerConfigHash(config));
     }
+    debugLogger.info(
+      `Prepared ${configs.length} LSP server config(s): ${formatServerNames(
+        configs.map((config) => config.name),
+      )}`,
+    );
   }
 
+  /** Drops all prepared handles without attempting process shutdown. */
   clearServerHandles(): void {
+    if (this.serverHandles.size > 0) {
+      debugLogger.info(
+        `Clearing ${this.serverHandles.size} LSP server handle(s): ${formatServerNames(
+          Array.from(this.serverHandles.keys()),
+        )}`,
+      );
+    }
     this.serverHandles.clear();
+    this.serverConfigHashes.clear();
   }
 
   getHandles(): ReadonlyMap<string, LspServerHandle> {
@@ -84,30 +124,164 @@ export class LspServerManager {
     }
   }
 
+  /**
+   * Stops every server after any in-flight reconcile has drained.
+   *
+   * This prevents shutdown from clearing handles while a queued reconcile is
+   * still able to start a new process.
+   */
   async stopAll(): Promise<void> {
-    for (const [name, handle] of Array.from(this.serverHandles)) {
-      await this.stopServer(name, handle);
+    this.stoppingAll = true;
+    const stop = async () => {
+      try {
+        for (const [name, handle] of Array.from(this.serverHandles)) {
+          await this.stopServer(name, handle);
+        }
+        this.serverHandles.clear();
+        this.serverConfigHashes.clear();
+      } finally {
+        this.stoppingAll = false;
+      }
+    };
+    const next = this.reconcileQueue.then(stop, stop);
+    this.reconcileQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  async reconcileServerConfigs(
+    configs: LspServerConfig[],
+  ): Promise<LspReconcileResult> {
+    // Keep the returned promise as the caller-visible result, but store a
+    // swallowed version in the queue so one failed reconcile does not poison
+    // every future hot reload.
+    const run = async () => this.doReconcileServerConfigs(configs);
+    const next = this.reconcileQueue.then(run, run);
+    this.reconcileQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Applies a desired config set incrementally.
+   *
+   * Hashes identify semantic config changes. Unchanged servers keep their
+   * existing connection and warm state; removed or changed servers are stopped
+   * before their handles are deleted or replaced.
+   */
+  private async doReconcileServerConfigs(
+    configs: LspServerConfig[],
+  ): Promise<LspReconcileResult> {
+    debugLogger.info(
+      `Reconciling LSP server configs: desired=${formatServerNames(
+        configs.map((config) => config.name),
+      )}`,
+    );
+    const desiredConfigs = new Map<string, LspServerConfig>();
+    const desiredHashes = new Map<string, string>();
+    for (const config of configs) {
+      desiredConfigs.set(config.name, config);
+      desiredHashes.set(config.name, lspServerConfigHash(config));
     }
-    this.serverHandles.clear();
+
+    const result: LspReconcileResult = {
+      added: [],
+      removed: [],
+      restarted: [],
+      unchanged: [],
+      failed: [],
+    };
+
+    for (const [name, handle] of Array.from(this.serverHandles)) {
+      const nextConfig = desiredConfigs.get(name);
+      if (!nextConfig) {
+        await this.abortAndWaitForStartup(handle);
+        await this.stopServer(name, handle);
+        this.serverHandles.delete(name);
+        this.serverConfigHashes.delete(name);
+        result.removed.push(name);
+        continue;
+      }
+
+      const nextHash = desiredHashes.get(name);
+      if (this.serverConfigHashes.get(name) !== nextHash) {
+        await this.abortAndWaitForStartup(handle);
+        await this.stopServer(name, handle);
+        const nextHandle: LspServerHandle = {
+          config: nextConfig,
+          status: 'NOT_STARTED',
+        };
+        this.serverHandles.set(name, nextHandle);
+        await this.startServer(name, nextHandle);
+        if (nextHandle.status === 'FAILED') {
+          this.serverConfigHashes.delete(name);
+          result.failed.push(name);
+        } else {
+          if (nextHash) {
+            this.serverConfigHashes.set(name, nextHash);
+          }
+          result.restarted.push(name);
+        }
+      } else {
+        result.unchanged.push(name);
+      }
+    }
+
+    for (const [name, config] of desiredConfigs) {
+      if (this.serverHandles.has(name)) {
+        continue;
+      }
+      const handle: LspServerHandle = {
+        config,
+        status: 'NOT_STARTED',
+      };
+      this.serverHandles.set(name, handle);
+      await this.startServer(name, handle);
+      if (handle.status === 'FAILED') {
+        this.serverConfigHashes.delete(name);
+        result.failed.push(name);
+      } else {
+        const hash = desiredHashes.get(name);
+        if (hash) {
+          this.serverConfigHashes.set(name, hash);
+        }
+        result.added.push(name);
+      }
+    }
+
+    debugLogger.info(
+      `LSP reconcile result: added=${formatServerNames(
+        result.added,
+      )}, removed=${formatServerNames(
+        result.removed,
+      )}, restarted=${formatServerNames(
+        result.restarted,
+      )}, unchanged=${formatServerNames(
+        result.unchanged,
+      )}, failed=${formatServerNames(result.failed)}`,
+    );
+    return result;
   }
 
   /**
    * Ensure tsserver has at least one file open so navto/navtree requests succeed.
    * Sets warmedUp flag only after successful warm-up to allow retry on failure.
+   *
+   * @param handle - The LSP server handle
+   * @param force - Force re-warmup even if already warmed up
+   * @returns The URI of the file opened during warmup, or undefined if no file was opened
    */
   async warmupTypescriptServer(
     handle: LspServerHandle,
     force = false,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     if (!handle.connection || !this.isTypescriptServer(handle)) {
-      return;
+      return undefined;
     }
     if (handle.warmedUp && !force) {
-      return;
+      return undefined;
     }
     const tsFile = this.findFirstTypescriptFile();
     if (!tsFile) {
-      return;
+      return undefined;
     }
 
     const uri = pathToFileURL(tsFile).toString();
@@ -138,9 +312,11 @@ export class LspServerManager {
       );
       // Only mark as warmed up after successful completion
       handle.warmedUp = true;
+      return uri;
     } catch (error) {
       // Do not set warmedUp to true on failure, allowing retry
       debugLogger.warn('TypeScript server warm-up failed:', error);
+      return undefined;
     }
   }
 
@@ -167,7 +343,8 @@ export class LspServerManager {
     name: string,
     handle: LspServerHandle,
   ): Promise<void> {
-    // If already starting, wait for the existing promise
+    // A handle can be reached by startAll(), reconcile, or crash restart. Share
+    // one startup promise so concurrent callers cannot spawn duplicate servers.
     if (handle.startingPromise) {
       return handle.startingPromise;
     }
@@ -176,17 +353,22 @@ export class LspServerManager {
       return;
     }
     handle.stopRequested = false;
+    handle.processExitedUnexpectedly = false;
 
-    // Create a promise to lock concurrent calls
     handle.startingPromise = this.doStartServer(name, handle).finally(() => {
       handle.startingPromise = undefined;
+      handle.startupAbortController = undefined;
     });
 
     return handle.startingPromise;
   }
 
   /**
-   * Internal method that performs the actual server startup.
+   * Performs startup after the per-handle startup lock is installed.
+   *
+   * All admission and command safety checks happen before process creation.
+   * If creation or initialize fails after resources exist, the catch path tears
+   * them down and leaves a FAILED handle for status reporting.
    *
    * @param name - The name of the LSP server
    * @param handle - The LSP server handle
@@ -204,24 +386,41 @@ export class LspServerManager {
         `LSP server ${name} requires trusted workspace, skipping startup`,
       );
       handle.status = 'FAILED';
+      this.serverConfigHashes.delete(name);
       return;
     }
 
-    // Request user confirmation
-    const consent = await this.requestUserConsent(
+    // Check workspace trust before starting the server
+    const trusted = await this.checkWorkspaceTrust(
       name,
       handle.config,
       workspaceTrusted,
     );
-    if (!consent) {
-      debugLogger.info(`User declined to start LSP server ${name}`);
+    if (!trusted) {
+      debugLogger.warn(
+        `Workspace trust check failed, not starting LSP server ${name}`,
+      );
       handle.status = 'FAILED';
+      this.serverConfigHashes.delete(name);
       return;
     }
 
     // Check if command exists
     if (handle.config.command) {
       const commandCwd = handle.config.workspaceFolder ?? this.workspaceRoot;
+      // Check path safety before any command probe can spawn the configured
+      // executable.
+      if (
+        !this.isPathSafe(handle.config.command, this.workspaceRoot, commandCwd)
+      ) {
+        debugLogger.warn(
+          `LSP server ${name} command path is unsafe: ${handle.config.command}`,
+        );
+        handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
+        return;
+      }
+
       if (
         !(await this.commandExists(
           handle.config.command,
@@ -233,33 +432,47 @@ export class LspServerManager {
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
-        return;
-      }
-
-      // Check path safety
-      if (
-        !this.isPathSafe(handle.config.command, this.workspaceRoot, commandCwd)
-      ) {
-        debugLogger.warn(
-          `LSP server ${name} command path is unsafe: ${handle.config.command}`,
-        );
-        handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
     }
 
     try {
+      const startupAbortController = new AbortController();
+      handle.startupAbortController = startupAbortController;
       handle.error = undefined;
+      handle.processDiagnostics = undefined;
       handle.warmedUp = false;
       handle.status = 'IN_PROGRESS';
+      debugLogger.info(
+        `Starting LSP server ${name}: command=${
+          handle.config.command ?? '<none>'
+        }, transport=${handle.config.transport}, languages=${formatServerNames(
+          handle.config.languages,
+        )}`,
+      );
 
       // Create LSP connection
-      const connection = await this.createLspConnection(handle.config);
+      const connection = await this.createLspConnection(
+        handle.config,
+        startupAbortController.signal,
+      );
       handle.connection = connection.connection;
       handle.process = connection.process;
+      handle.processDiagnostics = connection.processDiagnostics;
 
-      // Initialize LSP server
-      await this.initializeLspServer(connection, handle.config);
+      const startupExit = this.createStartupExitWatcher(name, handle);
+      try {
+        // Initialize LSP server
+        await this.raceStartupAbort(
+          this.initializeLspServer(connection, handle.config),
+          startupAbortController.signal,
+          undefined,
+          startupExit?.promise,
+        );
+      } finally {
+        startupExit?.dispose();
+      }
 
       handle.status = 'READY';
       this.attachRestartHandler(name, handle);
@@ -267,52 +480,133 @@ export class LspServerManager {
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
+      const processDiagnostics =
+        typeof error === 'object' && error !== null
+          ? (error as { processDiagnostics?: LspProcessDiagnostics })
+              .processDiagnostics
+          : undefined;
+      if (processDiagnostics) {
+        handle.processDiagnostics = processDiagnostics;
+      }
+      this.serverConfigHashes.delete(name);
+      if (!handle.processExitedUnexpectedly) {
+        handle.stopRequested = true;
+      }
+      await this.releaseServerResources(name, handle, false);
+      if (handle.processDiagnostics) {
+        debugLogger.error(
+          `LSP server ${name} process diagnostics:`,
+          handle.processDiagnostics,
+        );
+      }
+      handle.connection = undefined;
+      handle.process = undefined;
       debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
 
   /**
-   * Stop individual LSP server
+   * Stops a server and resets runtime-only handle state.
    */
   private async stopServer(
     name: string,
     handle: LspServerHandle,
   ): Promise<void> {
+    debugLogger.info(`Stopping LSP server ${name}`);
     handle.stopRequested = true;
+    handle.startupAbortController?.abort();
 
-    if (handle.connection) {
-      try {
-        await this.shutdownConnection(handle);
-      } catch (error) {
-        debugLogger.error(`Error closing LSP server ${name}:`, error);
-      }
-    } else if (handle.process && handle.process.exitCode === null) {
-      handle.process.kill();
+    if (handle.startingPromise) {
+      await handle.startingPromise;
     }
+    await this.releaseServerResources(name, handle, true);
     handle.connection = undefined;
     handle.process = undefined;
+    handle.processDiagnostics = undefined;
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
+    debugLogger.info(`LSP server ${name} stopped`);
   }
 
+  private async abortAndWaitForStartup(handle: LspServerHandle): Promise<void> {
+    if (!handle.startingPromise) {
+      return;
+    }
+    handle.startupAbortController?.abort();
+    await handle.startingPromise.catch(() => undefined);
+  }
+
+  /**
+   * Releases runtime resources for a handle without changing its logical config.
+   *
+   * Connection shutdown and process termination are intentionally isolated so a
+   * broken JSON-RPC stream cannot prevent killing an owned server process.
+   */
+  private async releaseServerResources(
+    name: string,
+    handle: LspServerHandle,
+    graceful: boolean,
+  ): Promise<void> {
+    // Connection teardown and process kill are separate on purpose: a broken
+    // pipe during end()/shutdown() must not prevent killing an owned process.
+    if (handle.connection) {
+      try {
+        if (graceful) {
+          await this.shutdownConnection(handle);
+        } else {
+          handle.connection.end();
+        }
+      } catch (error) {
+        debugLogger.error(`Error closing LSP server ${name}:`, error);
+      }
+    }
+
+    if (handle.process && handle.process.exitCode === null) {
+      try {
+        handle.process.kill();
+      } catch (error) {
+        debugLogger.warn(`Error killing LSP server ${name} process:`, error);
+      }
+    }
+  }
+
+  /**
+   * Performs graceful LSP shutdown with a bounded wait, then always closes the
+   * underlying JSON-RPC connection to avoid retaining streams or sockets.
+   */
   private async shutdownConnection(handle: LspServerHandle): Promise<void> {
     if (!handle.connection) {
       return;
     }
     try {
       const shutdownPromise = handle.connection.shutdown();
-      if (typeof handle.config.shutdownTimeout === 'number') {
+      void shutdownPromise.catch(() => undefined);
+      const timeout =
+        handle.config.shutdownTimeout ?? DEFAULT_LSP_SHUTDOWN_TIMEOUT_MS;
+      let timerId: ReturnType<typeof setTimeout> | undefined;
+      try {
         await Promise.race([
           shutdownPromise,
-          new Promise<void>((resolve) =>
-            setTimeout(resolve, handle.config.shutdownTimeout),
-          ),
+          new Promise<void>((resolve) => {
+            timerId = setTimeout(resolve, timeout);
+            if (
+              typeof timerId === 'object' &&
+              timerId !== null &&
+              'unref' in timerId
+            ) {
+              timerId.unref();
+            }
+          }),
         ]);
-      } else {
-        await shutdownPromise;
+      } finally {
+        if (timerId !== undefined) {
+          clearTimeout(timerId);
+        }
       }
     } finally {
+      // Always end the JSON-RPC connection, even if shutdown rejects or times
+      // out, so streams and socket handles are not retained.
       handle.connection.end();
     }
   }
@@ -325,13 +619,24 @@ export class LspServerManager {
       if (handle.stopRequested) {
         return;
       }
+      handle.processExitedUnexpectedly = true;
+      // Only unexpected process exits can trigger restart. Explicit stops set
+      // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
+        debugLogger.warn(
+          `LSP server ${name} exited but restartOnCrash is disabled`,
+        );
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
       const maxRestarts = handle.config.maxRestarts ?? DEFAULT_LSP_MAX_RESTARTS;
       if (maxRestarts <= 0) {
+        debugLogger.warn(
+          `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
+        );
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
       const attempts = handle.restartAttempts ?? 0;
@@ -340,30 +645,105 @@ export class LspServerManager {
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.status = 'FAILED';
+        this.serverConfigHashes.delete(name);
         return;
       }
       handle.restartAttempts = attempts + 1;
       debugLogger.warn(
         `LSP server ${name} exited (code ${code ?? 'unknown'}), restarting (${handle.restartAttempts}/${maxRestarts})`,
       );
+      this.enqueueCrashRestart(name, handle);
+    });
+  }
+
+  private createStartupExitWatcher(
+    name: string,
+    handle: LspServerHandle,
+  ):
+    | {
+        promise: Promise<never>;
+        dispose: () => void;
+      }
+    | undefined {
+    if (!handle.process) {
+      return undefined;
+    }
+    let onExit:
+      | ((code: number | null, signal: NodeJS.Signals | null) => void)
+      | undefined;
+    const promise = new Promise<never>((_, reject) => {
+      onExit = (code, signal) => {
+        handle.processExitedUnexpectedly = true;
+        reject(
+          new Error(
+            `LSP server ${name} exited before initialization completed (code ${
+              code ?? 'unknown'
+            }, signal ${signal ?? 'unknown'})`,
+          ),
+        );
+      };
+      handle.process!.once('exit', onExit);
+    });
+    return {
+      promise,
+      dispose: () => {
+        if (onExit) {
+          handle.process?.off('exit', onExit);
+        }
+      },
+    };
+  }
+
+  private enqueueCrashRestart(name: string, handle: LspServerHandle): void {
+    const restart = async () => {
+      if (handle.startingPromise) {
+        await handle.startingPromise.catch(() => undefined);
+      }
+      if (
+        this.stoppingAll ||
+        this.serverHandles.get(name) !== handle ||
+        handle.stopRequested
+      ) {
+        return;
+      }
       this.resetHandle(handle);
-      void this.startServer(name, handle);
+      await this.startServer(name, handle);
+      if (handle.status === 'FAILED') {
+        this.serverConfigHashes.delete(name);
+      }
+    };
+    const next = this.reconcileQueue.then(restart, restart);
+    this.reconcileQueue = next.catch(() => undefined);
+    void next.catch((error) => {
+      debugLogger.warn(`LSP server ${name} crash restart failed:`, error);
     });
   }
 
   private resetHandle(handle: LspServerHandle): void {
+    // Crash restart reuses the same logical handle, so clear runtime resources
+    // while preserving config and restartAttempts.
     if (handle.connection) {
-      handle.connection.end();
+      try {
+        handle.connection.end();
+      } catch (error) {
+        debugLogger.warn('Error closing LSP connection during reset:', error);
+      }
     }
     if (handle.process && handle.process.exitCode === null) {
-      handle.process.kill();
+      try {
+        handle.process.kill();
+      } catch (error) {
+        debugLogger.warn('Error killing LSP process during reset:', error);
+      }
     }
     handle.connection = undefined;
     handle.process = undefined;
+    handle.processDiagnostics = undefined;
     handle.status = 'NOT_STARTED';
     handle.error = undefined;
     handle.warmedUp = false;
     handle.stopRequested = false;
+    handle.processExitedUnexpectedly = false;
   }
 
   private buildProcessEnv(
@@ -372,26 +752,73 @@ export class LspServerManager {
     if (!env || Object.keys(env).length === 0) {
       return undefined;
     }
-    return { ...process.env, ...env };
+    const filteredEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(env)) {
+      if (SECURITY_SENSITIVE_ENV_KEYS.has(key.toUpperCase())) {
+        debugLogger.warn(
+          `Ignoring security-sensitive LSP server env override: ${key}`,
+        );
+        continue;
+      }
+      filteredEnv[key] = value;
+    }
+    return { ...process.env, ...filteredEnv };
+  }
+
+  /**
+   * Builds the environment used only for the pre-start command probe.
+   *
+   * The probe runs `command --version`, so a workspace-controlled PATH could
+   * redirect a bare command such as `clangd` to an unintended executable before
+   * the real LSP server startup path is reached. Keep regular env values that
+   * probes may need, but always resolve commands through the current process
+   * PATH instead of `.lsp.json`.
+   */
+  private buildCommandProbeEnv(
+    env: Record<string, string> | undefined,
+  ): NodeJS.ProcessEnv | undefined {
+    if (!env || Object.keys(env).length === 0) {
+      return undefined;
+    }
+    const filteredEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(env)) {
+      const normalizedKey = key.toUpperCase();
+      if (
+        normalizedKey === 'PATH' ||
+        SECURITY_SENSITIVE_ENV_KEYS.has(normalizedKey)
+      ) {
+        debugLogger.warn(
+          `Ignoring security-sensitive LSP command probe env override: ${key}`,
+        );
+        continue;
+      }
+      filteredEnv[key] = value;
+    }
+    return { ...process.env, ...filteredEnv };
   }
 
   private async connectSocketWithRetry(
     socket: LspSocketOptions,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<
     Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
   > {
+    // Socket-based servers may need a short boot window after the command is
+    // spawned. Retry until the startup deadline instead of failing immediately.
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
     while (true) {
+      this.throwIfStartupAborted(signal);
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         throw new Error('LSP server connection timeout');
       }
       try {
-        return await LspConnectionFactory.createSocketConnection(
-          socket,
-          remaining,
+        return await this.raceStartupAbort(
+          LspConnectionFactory.createSocketConnection(socket, remaining),
+          signal,
+          (connection) => connection.connection.end(),
         );
       } catch (error) {
         attempt += 1;
@@ -402,16 +829,105 @@ export class LspServerManager {
           DEFAULT_LSP_SOCKET_RETRY_DELAY_MS * attempt,
           DEFAULT_LSP_SOCKET_MAX_RETRY_DELAY_MS,
         );
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await this.delayWithAbort(delay, signal);
+      }
+    }
+  }
+
+  private throwIfStartupAborted(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) {
+      throw new Error('LSP server startup cancelled');
+    }
+  }
+
+  private async delayWithAbort(
+    delayMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return;
+    }
+    this.throwIfStartupAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timerId);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('LSP server startup cancelled'));
+      };
+      const timerId = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, delayMs);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private async raceStartupAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal | undefined,
+    cleanupAfterAbort?: (value: T) => void,
+    failurePromise?: Promise<never>,
+  ): Promise<T> {
+    if (!signal) {
+      if (!failurePromise) {
+        return promise;
+      }
+      void promise.catch(() => undefined);
+      void failurePromise.catch(() => undefined);
+      return Promise.race([promise, failurePromise]);
+    }
+    this.throwIfStartupAborted(signal);
+    let abortWon = false;
+    const observedPromise = promise.then(
+      (value) => {
+        if (abortWon) {
+          cleanupAfterAbort?.(value);
+        }
+        return value;
+      },
+      (error: unknown) => {
+        throw error;
+      },
+    );
+    void observedPromise.catch(() => undefined);
+    if (failurePromise) {
+      void failurePromise.catch(() => undefined);
+    }
+    let onAbort: (() => void) | undefined;
+    try {
+      const raceInputs: Array<Promise<T> | Promise<never>> = [
+        observedPromise,
+        new Promise<T>((_, reject) => {
+          onAbort = () => {
+            abortWon = true;
+            signal.removeEventListener('abort', onAbort!);
+            reject(new Error('LSP server startup cancelled'));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        }),
+      ];
+      if (failurePromise) {
+        raceInputs.push(failurePromise);
+      }
+      return await Promise.race(raceInputs);
+    } finally {
+      if (onAbort) {
+        signal.removeEventListener('abort', onAbort);
       }
     }
   }
 
   /**
-   * Create LSP connection
+   * Creates a transport-specific LSP connection.
+   *
+   * For stdio, the spawned process is always owned by this manager. For
+   * tcp/socket, the process is owned only when a command was provided; otherwise
+   * the connection is to an externally managed daemon.
    */
   private async createLspConnection(
     config: LspServerConfig,
+    signal?: AbortSignal,
   ): Promise<LspConnectionResult> {
     const workspaceFolder = config.workspaceFolder ?? this.workspaceRoot;
     const startupTimeout =
@@ -434,6 +950,7 @@ export class LspServerManager {
       return {
         connection: lspConnection.connection,
         process: lspConnection.process as ChildProcess,
+        processDiagnostics: lspConnection.processDiagnostics,
         shutdown: async () => {
           await lspConnection.connection.shutdown();
         },
@@ -452,29 +969,50 @@ export class LspServerManager {
       }
 
       let process: ChildProcess | undefined;
+      let processDiagnostics: LspProcessDiagnostics | undefined;
+      let earlyExit:
+        | {
+            promise: Promise<never>;
+            dispose: () => void;
+          }
+        | undefined;
       if (config.command) {
+        this.throwIfStartupAborted(signal);
+        processDiagnostics = { stderrTail: '' };
         process = spawn(config.command, config.args ?? [], {
           cwd: workspaceFolder,
           env,
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'pipe'],
         });
-        await new Promise<void>((resolve, reject) => {
-          process?.once('spawn', () => resolve());
-          process?.once('error', (error) => {
-            reject(new Error(`Failed to spawn LSP server: ${error.message}`));
-          });
+        process.stderr?.on('data', (chunk: Buffer | string) => {
+          processDiagnostics!.stderrTail = (
+            processDiagnostics!.stderrTail + chunk.toString()
+          ).slice(-4000);
         });
+        earlyExit = this.watchSocketProcessEarlyExit(
+          process,
+          processDiagnostics,
+        );
+        await this.waitForSocketProcessSpawn(process, signal);
       }
 
       try {
-        const lspConnection = await this.connectSocketWithRetry(
+        const socketConnection = this.connectSocketWithRetry(
           config.socket,
           startupTimeout,
+          signal,
         );
+        const lspConnection = process
+          ? await this.waitForSocketConnectionOrProcessExit(
+              socketConnection,
+              earlyExit!,
+            )
+          : await socketConnection;
 
         return {
           connection: lspConnection.connection,
           process,
+          processDiagnostics,
           shutdown: async () => {
             await lspConnection.connection.shutdown();
           },
@@ -485,6 +1023,15 @@ export class LspServerManager {
             lspConnection.connection.initialize(params),
         };
       } catch (error) {
+        if (
+          processDiagnostics &&
+          error instanceof Error &&
+          !('processDiagnostics' in error)
+        ) {
+          (
+            error as Error & { processDiagnostics: LspProcessDiagnostics }
+          ).processDiagnostics = processDiagnostics;
+        }
         if (process && process.exitCode === null) {
           process.kill();
         }
@@ -493,6 +1040,110 @@ export class LspServerManager {
     } else {
       throw new Error(`Unsupported transport: ${config.transport}`);
     }
+  }
+
+  private async waitForSocketConnectionOrProcessExit(
+    socketConnection: Promise<
+      Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
+    >,
+    earlyExit: { promise: Promise<never>; dispose: () => void },
+  ): Promise<
+    Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
+  > {
+    try {
+      return await Promise.race([socketConnection, earlyExit.promise]);
+    } finally {
+      earlyExit.dispose();
+    }
+  }
+
+  /**
+   * Waits for the LSP server child process to successfully spawn.
+   *
+   * Resolves when the 'spawn' event fires, rejects if an error occurs during
+   * spawning or if the provided abort signal is triggered. Ensures all event
+   * listeners are cleaned up regardless of outcome to prevent memory leaks.
+   *
+   * @param process - The child process to monitor for successful spawn
+   * @param signal - Optional AbortSignal to cancel the wait; if already aborted,
+   *                 the process is killed immediately and the promise rejects
+   */
+  private async waitForSocketProcessSpawn(
+    process: ChildProcess,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    this.throwIfStartupAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        process.off('spawn', onSpawn);
+        process.off('error', onError);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const settle = (complete: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        complete();
+      };
+      const onSpawn = () => settle(resolve);
+      const onError = (error: Error) =>
+        settle(() =>
+          reject(new Error(`Failed to spawn LSP server: ${error.message}`)),
+        );
+      const onAbort = () =>
+        settle(() => {
+          if (process.exitCode === null) {
+            try {
+              process.kill();
+            } catch (error) {
+              debugLogger.warn(
+                'Error killing aborted LSP socket process:',
+                error,
+              );
+            }
+          }
+          reject(new Error('LSP server startup cancelled'));
+        });
+
+      process.once('spawn', onSpawn);
+      process.once('error', onError);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+      }
+    });
+  }
+
+  private watchSocketProcessEarlyExit(
+    process: ChildProcess,
+    diagnostics: LspProcessDiagnostics | undefined,
+  ): { promise: Promise<never>; dispose: () => void } {
+    let onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
+    const promise = new Promise<never>((_, reject) => {
+      onExit = (code, signal) => {
+        if (diagnostics) {
+          diagnostics.exitCode = code;
+          diagnostics.exitSignal = signal;
+        }
+        reject(
+          new Error(
+            `LSP server exited before socket connection was ready: code=${
+              code ?? 'unknown'
+            }, signal=${signal ?? 'none'}`,
+          ),
+        );
+      };
+      process.once('exit', onExit);
+    });
+    return {
+      promise,
+      dispose: () => {
+        process.off('exit', onExit);
+      },
+    };
   }
 
   /**
@@ -559,40 +1210,22 @@ export class LspServerManager {
       });
     }
 
-    // Warm up TypeScript server by opening a workspace file so it can create a project.
-    if (
-      config.name.includes('typescript') ||
-      (config.command?.includes('typescript') ?? false)
-    ) {
-      try {
-        const tsFile = this.findFirstTypescriptFile();
-        if (tsFile) {
-          const uri = pathToFileURL(tsFile).toString();
-          const languageId = tsFile.endsWith('.tsx')
-            ? 'typescriptreact'
-            : 'typescript';
-          const text = fs.readFileSync(tsFile, 'utf-8');
-          connection.connection.send({
-            jsonrpc: '2.0',
-            method: 'textDocument/didOpen',
-            params: {
-              textDocument: {
-                uri,
-                languageId,
-                version: 1,
-                text,
-              },
-            },
-          });
-        }
-      } catch (error) {
-        debugLogger.warn('TypeScript LSP warm-up failed:', error);
-      }
-    }
+    // Note: TypeScript server warm-up is handled by warmupTypescriptServer()
+    // which is called before every LSP request. This avoids duplicate
+    // textDocument/didOpen notifications that aren't tracked in openedDocuments.
   }
 
   /**
-   * Check if command exists
+   * Check if command exists by spawning it with --version.
+   * Only returns false when the spawn itself fails (e.g. ENOENT).
+   * A timeout means the process started successfully (command exists)
+   * but didn't exit in time — common for servers like jdtls that
+   * don't support --version and start their full runtime instead.
+   *
+   * @param command - The command to check
+   * @param env - Optional environment variables
+   * @param cwd - Optional working directory
+   * @returns true if the command can be spawned, false if not found
    */
   private async commandExists(
     command: string,
@@ -601,37 +1234,57 @@ export class LspServerManager {
   ): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false;
-      const child = spawn(command, ['--version'], {
-        stdio: ['ignore', 'ignore', 'ignore'],
-        cwd: cwd ?? this.workspaceRoot,
-        env: this.buildProcessEnv(env),
-      });
-
-      child.on('error', () => {
-        settled = true;
-        resolve(false);
-      });
-
-      child.on('exit', (code) => {
+      const settle = (value: boolean) => {
         if (settled) {
           return;
         }
-        // If command exists, it typically returns 0 or other non-error codes
-        // Some commands with --version may return non-0, but won't throw error
-        resolve(code !== 127); // 127 typically indicates command not found
+        settled = true;
+        clearTimeout(timerId);
+        resolve(value);
+      };
+      const child = spawn(command, ['--version'], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        cwd: cwd ?? this.workspaceRoot,
+        env: this.buildCommandProbeEnv(env),
       });
 
-      // Set timeout to avoid long waits
-      setTimeout(() => {
-        settled = true;
-        child.kill();
-        resolve(false);
+      child.on('error', () => {
+        settle(false);
+      });
+
+      child.on('exit', (code) => {
+        // 127 typically indicates command not found in shell
+        settle(code !== 127);
+      });
+
+      // If the process is still running after the timeout, it means the
+      // command was found and started — it just didn't finish in time.
+      // This is expected for servers like jdtls that don't support --version.
+      const timerId = setTimeout(() => {
+        if (!settled) {
+          child.kill();
+          settle(true);
+        }
       }, DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS);
+      if (
+        typeof timerId === 'object' &&
+        timerId !== null &&
+        'unref' in timerId
+      ) {
+        timerId.unref();
+      }
     });
   }
 
   /**
-   * Check path safety
+   * Check path safety.
+   *
+   * Allows:
+   * - Bare command names (resolved via PATH, e.g. "clangd")
+   * - Absolute paths (explicit user intent, e.g. "/usr/bin/clangd")
+   *
+   * Blocks:
+   * - Relative paths that escape the workspace (e.g. "../../bin/evil")
    */
   private isPathSafe(
     command: string,
@@ -644,12 +1297,18 @@ export class LspServerManager {
       return true;
     }
 
-    // For explicit paths (absolute or relative), verify they're within workspace
+    // Allow absolute paths — the user explicitly specified a full path to
+    // the server binary (e.g. /usr/bin/clangd, /opt/tools/jdtls/bin/jdtls).
+    // Trust checks (workspace trust + user consent) already gate server startup.
+    if (path.isAbsolute(command)) {
+      return true;
+    }
+
+    // For relative paths, verify they resolve within the workspace to prevent
+    // path traversal attacks (e.g. "../../malicious-binary").
     const resolvedWorkspacePath = path.resolve(workspacePath);
     const basePath = cwd ? path.resolve(cwd) : resolvedWorkspacePath;
-    const resolvedPath = path.isAbsolute(command)
-      ? path.resolve(command)
-      : path.resolve(basePath, command);
+    const resolvedPath = path.resolve(basePath, command);
 
     return (
       resolvedPath.startsWith(resolvedWorkspacePath + path.sep) ||
@@ -658,9 +1317,13 @@ export class LspServerManager {
   }
 
   /**
-   * 请求用户确认启动 LSP 服务器
+   * Check whether the workspace trust level allows starting an LSP server.
+   *
+   * Auto-allows in trusted workspaces. In untrusted workspaces, blocks
+   * servers that require trust (`trustRequired` or global
+   * `requireTrustedWorkspace`), and cautiously allows the rest.
    */
-  private async requestUserConsent(
+  private async checkWorkspaceTrust(
     serverName: string,
     serverConfig: LspServerConfig,
     workspaceTrusted: boolean,
@@ -717,4 +1380,8 @@ export class LspServerManager {
 
     return undefined;
   }
+}
+
+function formatServerNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
 }

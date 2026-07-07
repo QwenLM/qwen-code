@@ -10,8 +10,15 @@ import { glob, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { resolveAndValidatePath } from '../utils/paths.js';
+import {
+  resolveAndValidatePath,
+  resolvePath,
+  isSubpath,
+  unescapePath,
+} from '../utils/paths.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { type Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   type FileFilteringOptions,
@@ -20,6 +27,7 @@ import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
@@ -99,60 +107,171 @@ class GlobToolInvocation extends BaseToolInvocation<
     return description;
   }
 
+  /**
+   * Returns 'ask' for paths outside the workspace, so that external glob
+   * searches require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (!this.params.path) {
+      return 'allow'; // Default workspace directory
+    }
+    const workspaceContext = this.config.getWorkspaceContext();
+    const resolvedPath = resolvePath(
+      this.config.getTargetDir(),
+      this.params.path,
+    );
+    if (
+      workspaceContext.isPathWithinWorkspace(resolvedPath) ||
+      isSubpath(getMemoryBaseDir(), resolvedPath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
+  /**
+   * Runs glob search in a single directory and returns filtered entries.
+   */
+  private async globInDirectory(
+    searchDir: string,
+    pattern: string,
+    signal: AbortSignal,
+  ): Promise<GlobPath[]> {
+    let effectivePattern = pattern;
+    const fullPath = path.join(searchDir, effectivePattern);
+    if (fs.existsSync(fullPath)) {
+      effectivePattern = escape(effectivePattern);
+    }
+
+    const projectRoot = this.config.getTargetDir();
+    const fileFilteringOptions = this.getFileFilteringOptions();
+
+    // Prune ignored directories DURING traversal (glob's `childrenIgnored`)
+    // rather than only post-filtering the results. Delegating to
+    // FileDiscoveryService reuses the real .gitignore/.qwenignore semantics
+    // (anchoring, negation/re-inclusion, nested ignore files) — a hand-rolled
+    // gitignore→glob pattern conversion cannot reproduce these correctly.
+    const isTraversalIgnored = (entry: {
+      fullpath(): string;
+      isDirectory(): boolean;
+    }): boolean => {
+      try {
+        const relativePath = path.relative(projectRoot, entry.fullpath());
+        // Never prune paths outside the project root (e.g. an external search
+        // dir); ignore rules are only defined relative to the root.
+        if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
+          return false;
+        }
+        // Append trailing '/' for directories so the ignore library matches
+        // directory-only patterns like `node_modules/`.
+        const ignorePath = entry.isDirectory()
+          ? relativePath + '/'
+          : relativePath;
+        return this.fileService.shouldIgnoreFile(
+          ignorePath,
+          fileFilteringOptions,
+        );
+      } catch (error) {
+        // Fail open: if an ignore check throws, don't prune. The post-filter
+        // below is the source of truth, so a missed prune only costs a little
+        // extra traversal, whereas a false prune would hide real matches and
+        // be indistinguishable from a legitimately empty result.
+        debugLogger.debug(
+          `traversal ignore check failed for ${entry.fullpath()}: ${getErrorMessage(error)}`,
+        );
+        return false;
+      }
+    };
+
+    const entries = (await glob(effectivePattern, {
+      cwd: searchDir,
+      withFileTypes: true,
+      nodir: true,
+      stat: true,
+      nocase: true,
+      dot: true,
+      follow: false,
+      signal,
+      ignore: {
+        ignored: isTraversalIgnored,
+        childrenIgnored: isTraversalIgnored,
+      },
+    })) as GlobPath[];
+
+    // Filter using paths relative to the project root (the base that
+    // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
+    // Using searchDir-relative paths would cause ignore rules to be
+    // evaluated against incorrect paths when searchDir != projectRoot.
+    const relativePaths = entries.map((p) =>
+      path.relative(projectRoot, p.fullpath()),
+    );
+
+    const { filteredPaths } = this.fileService.filterFilesWithReport(
+      relativePaths,
+      fileFilteringOptions,
+    );
+
+    const normalizePathForComparison = (p: string) =>
+      process.platform === 'win32' || process.platform === 'darwin'
+        ? p.toLowerCase()
+        : p;
+
+    const filteredAbsolutePaths = new Set(
+      filteredPaths.map((p) =>
+        normalizePathForComparison(path.resolve(projectRoot, p)),
+      ),
+    );
+
+    return entries.filter((entry) =>
+      filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
+    );
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Default to target directory if no path is provided
-      const searchDirAbs = resolveAndValidatePath(
-        this.config,
-        this.params.path,
-      );
-      const searchLocationDescription = this.params.path
-        ? `within ${searchDirAbs}`
-        : `in the workspace directory`;
+      // Determine which directories to search
+      const searchDirs: string[] = [];
+      let searchLocationDescription: string;
 
-      // Collect entries from the search directory
-      let pattern = this.params.pattern;
-      const fullPath = path.join(searchDirAbs, pattern);
-      if (fs.existsSync(fullPath)) {
-        pattern = escape(pattern);
+      if (this.params.path) {
+        // User specified a path — search only that directory
+        const searchDirAbs = resolveAndValidatePath(
+          this.config,
+          this.params.path,
+          { allowExternalPaths: true },
+        );
+        searchDirs.push(searchDirAbs);
+        searchLocationDescription = `within ${searchDirAbs}`;
+      } else {
+        // No path specified — search all workspace directories
+        const workspaceDirs = this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        searchDirs.push(...workspaceDirs);
+        searchLocationDescription =
+          workspaceDirs.length > 1
+            ? `across ${workspaceDirs.length} workspace directories`
+            : `in the workspace directory`;
       }
 
-      const allEntries = (await glob(pattern, {
-        cwd: searchDirAbs,
-        withFileTypes: true,
-        nodir: true,
-        stat: true,
-        nocase: true,
-        dot: true,
-        follow: false,
-        signal,
-      })) as GlobPath[];
+      // Collect entries from all search directories
+      const pattern = this.params.pattern;
+      const allFilteredEntries: GlobPath[] = [];
+      const seenPaths = new Set<string>();
 
-      const relativePaths = allEntries.map((p) =>
-        path.relative(this.config.getTargetDir(), p.fullpath()),
-      );
+      for (const searchDir of searchDirs) {
+        const entries = await this.globInDirectory(searchDir, pattern, signal);
+        for (const entry of entries) {
+          // Deduplicate entries that might appear in overlapping directories
+          const normalized = entry.fullpath();
+          if (!seenPaths.has(normalized)) {
+            seenPaths.add(normalized);
+            allFilteredEntries.push(entry);
+          }
+        }
+      }
 
-      const { filteredPaths } = this.fileService.filterFilesWithReport(
-        relativePaths,
-        this.getFileFilteringOptions(),
-      );
-
-      const normalizePathForComparison = (p: string) =>
-        process.platform === 'win32' || process.platform === 'darwin'
-          ? p.toLowerCase()
-          : p;
-
-      const filteredAbsolutePaths = new Set(
-        filteredPaths.map((p) =>
-          normalizePathForComparison(
-            path.resolve(this.config.getTargetDir(), p),
-          ),
-        ),
-      );
-
-      const filteredEntries = allEntries.filter((entry) =>
-        filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
-      );
+      const filteredEntries = allFilteredEntries;
 
       if (!filteredEntries || filteredEntries.length === 0) {
         return {
@@ -202,6 +321,7 @@ class GlobToolInvocation extends BaseToolInvocation<
       return {
         llmContent: resultMessage,
         returnDisplay: `Found ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        resultFilePaths: sortedAbsolutePaths,
       };
     } catch (error) {
       const errorMessage =
@@ -228,6 +348,9 @@ class GlobToolInvocation extends BaseToolInvocation<
       respectQwenIgnore:
         options?.respectQwenIgnore ??
         DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+      customIgnoreFiles:
+        options?.customIgnoreFiles ??
+        DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
     };
   }
 }
@@ -278,8 +401,11 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
-        resolveAndValidatePath(this.config, params.path);
+        resolveAndValidatePath(this.config, params.path, {
+          allowExternalPaths: true,
+        });
       } catch (error) {
         return getErrorMessage(error);
       }

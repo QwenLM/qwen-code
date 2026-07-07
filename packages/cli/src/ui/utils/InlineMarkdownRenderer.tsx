@@ -9,6 +9,19 @@ import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { renderInlineLatex } from './latexRenderer.js';
+import {
+  MD_LINK_CAPTURE,
+  MD_LINK_PATTERN,
+  isSafeOscScheme,
+  labelMayDeceive,
+  osc8Close,
+  osc8Open,
+  sanitizeForOsc,
+  shouldWrapMarkdownLink,
+  supportsHyperlinks,
+  trimTrailingUrlPunctuation,
+} from './osc8.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -17,27 +30,53 @@ const STRIKETHROUGH_MARKER_LENGTH = 2; // For "~~")
 const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
+const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
+const INLINE_MATH_MAX_CHARS = 1024;
+const INLINE_MATH_PATTERN = new RegExp(
+  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
+  'g',
+);
+const INLINE_MARKDOWN_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
+const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
 
 const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
 interface RenderInlineProps {
   text: string;
   textColor?: string;
+  enableInlineMath?: boolean;
 }
 
 const RenderInlineInternal: React.FC<RenderInlineProps> = ({
   text,
   textColor = theme.text.primary,
+  enableInlineMath = false,
 }) => {
   // Early return for plain text without markdown or URLs
-  if (!/[*_~`<[https?:]/.test(text)) {
+  if (
+    !/[*_~`<[]|https?:/.test(text) &&
+    !(enableInlineMath && text.includes('$'))
+  ) {
     return <Text color={textColor}>{text}</Text>;
   }
 
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
-  const inlineRegex =
-    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+  // Capability is stable for the duration of a single render — read it once
+  // here so each matched link/URL doesn't re-walk the env-var table.
+  const canHyperlink = supportsHyperlinks();
+  const inlineRegex = enableInlineMath
+    ? INLINE_MARKDOWN_WITH_MATH_REGEX
+    : INLINE_MARKDOWN_REGEX;
+  inlineRegex.lastIndex = 0;
   let match;
 
   while ((match = inlineRegex.exec(text)) !== null) {
@@ -103,7 +142,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
         if (codeMatch && codeMatch[2]) {
           renderedNode = (
-            <Text key={key} color={theme.text.accent}>
+            <Text key={key} color={theme.text.code}>
               {codeMatch[2]}
             </Text>
           );
@@ -113,11 +152,47 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         fullMatch.includes('](') &&
         fullMatch.endsWith(')')
       ) {
-        const linkMatch = fullMatch.match(/\[(.*?)\]\((.*?)\)/);
+        const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
         if (linkMatch) {
-          const linkText = linkMatch[1];
-          const url = linkMatch[2];
-          renderedNode = (
+          const linkText = linkMatch[1] ?? '';
+          const url = linkMatch[2] ?? '';
+          const wrapOsc8 = shouldWrapMarkdownLink(url, canHyperlink);
+          // When OSC 8 is active, render ONLY the markdown label — the
+          // clickable target lives in the envelope, so repeating a long URL
+          // in plain text would just clutter the output. Empty labels
+          // (`[](url)`) fall back to showing the URL so the link stays
+          // discoverable.
+          //
+          // When OSC 8 is NOT active (unsupported terminal, unsafe scheme,
+          // whitespace in URL) we emit byte-identical legacy `label (url)`
+          // rendering so the user can still read and copy the target.
+          // The label is rendered inside the clickable region, so any bidi /
+          // C0 / C1 byte the model embedded would still spoof the visible
+          // text even though the OSC target is sanitized. Run the same
+          // sanitizer over both the visible label AND any URL bytes that
+          // end up as visible text (empty-label fallback, anti-deception
+          // `(url)` suffix) when OSC 8 is active. The legacy `label (url)`
+          // branch leaves both intact so today's unsupported-terminal
+          // output stays byte-identical.
+          const safeLabel = wrapOsc8 ? sanitizeForOsc(linkText) : linkText;
+          const safeUrl = wrapOsc8 ? sanitizeForOsc(url) : url;
+          // Keep the `(url)` suffix visible when the label itself looks
+          // like a (mismatched) URL — pre-OSC-8 rendering always showed the
+          // target; eliding it now would let `[https://google.com](https://attacker.com)`
+          // present a clickable "google.com" that resolves elsewhere.
+          const showUrlSuffix = wrapOsc8 && labelMayDeceive(safeLabel, safeUrl);
+          renderedNode = wrapOsc8 ? (
+            <Text key={key}>
+              <Text color={theme.text.link}>
+                {osc8Open(url)}
+                {safeLabel || safeUrl}
+                {osc8Close()}
+              </Text>
+              {showUrlSuffix ? (
+                <Text color={theme.text.link}> ({safeUrl})</Text>
+              ) : null}
+            </Text>
+          ) : (
             <Text key={key}>
               {linkText}
               <Text color={theme.text.link}> ({url})</Text>
@@ -138,10 +213,38 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
             )}
           </Text>
         );
+      } else if (
+        enableInlineMath &&
+        fullMatch.startsWith('$') &&
+        fullMatch.endsWith('$') &&
+        fullMatch.length > INLINE_MATH_MARKER_LENGTH * 2
+      ) {
+        renderedNode = (
+          <Text key={key} color={theme.text.accent}>
+            {renderInlineLatex(
+              fullMatch.slice(
+                INLINE_MATH_MARKER_LENGTH,
+                -INLINE_MATH_MARKER_LENGTH,
+              ),
+            )}
+          </Text>
+        );
       } else if (fullMatch.match(/^https?:\/\//)) {
+        // The bare-URL regex greedily eats trailing punctuation (`.`, `)`,
+        // `,`, …). Trim that off the OSC 8 *target* so the clickable link
+        // resolves correctly, while leaving the visible bytes unchanged so
+        // unsupported terminals see today's output exactly. The bare-URL
+        // alternative is anchored on `https?://`, so `isSafeOscScheme` is
+        // redundant but kept as a cheap defense-in-depth assertion.
+        const trimmedUrl = canHyperlink
+          ? trimTrailingUrlPunctuation(fullMatch)
+          : fullMatch;
+        const wrapOsc8 = canHyperlink && isSafeOscScheme(trimmedUrl);
         renderedNode = (
           <Text key={key} color={theme.text.link}>
+            {wrapOsc8 ? osc8Open(trimmedUrl) : null}
             {fullMatch}
+            {wrapOsc8 ? osc8Close() : null}
           </Text>
         );
       }
@@ -167,13 +270,23 @@ export const RenderInline = React.memo(RenderInlineInternal);
  * Utility function to get the plain text length of a string with markdown formatting
  * This is useful for calculating column widths in tables
  */
-export const getPlainTextLength = (text: string): number => {
+export const getPlainTextLength = (
+  text: string,
+  enableInlineMath = false,
+): number => {
   const cleanText = text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')
     .replace(/~~(.*?)~~/g, '$1')
     .replace(/`(.*?)`/g, '$1')
+    .replace(INLINE_MATH_PATTERN, (match: string) =>
+      enableInlineMath
+        ? renderInlineLatex(
+            match.slice(INLINE_MATH_MARKER_LENGTH, -INLINE_MATH_MARKER_LENGTH),
+          )
+        : match,
+    )
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
   return stringWidth(cleanText);

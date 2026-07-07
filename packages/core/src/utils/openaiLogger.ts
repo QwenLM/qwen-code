@@ -9,8 +9,141 @@ import { promises as fs } from 'node:fs';
 import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
 import { createDebugLogger } from './debugLogger.js';
+import { isInternalPromptId } from './internalPromptIds.js';
+import { getRateLimitErrorDetails } from './rateLimit.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
+const MAIN_SESSION_PROMPT_ID_DELIMITER = '########';
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export interface OpenAILogContext {
+  promptId?: string;
+  sessionId?: string;
+}
+
+export function resolveOpenAILogDir(
+  customLogDir?: string,
+  cwd?: string,
+): string {
+  const baseCwd = cwd || process.cwd();
+  if (!customLogDir) {
+    return path.join(baseCwd, 'logs', 'openai');
+  }
+
+  let resolvedPath = customLogDir;
+  if (customLogDir === '~' || customLogDir.startsWith('~/')) {
+    resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
+  } else if (!path.isAbsolute(customLogDir)) {
+    resolvedPath = path.resolve(baseCwd, customLogDir);
+  }
+  return path.normalize(resolvedPath);
+}
+
+function sanitizeDiagnosticSuffix(
+  suffix: string | undefined,
+): string | undefined {
+  if (!suffix) return undefined;
+  const sanitized = suffix
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return sanitized || undefined;
+}
+
+function extractSubagentSuffix(promptId: string): string | undefined {
+  const parts = promptId.split('#');
+  if (parts.length !== 3) return undefined;
+
+  const [, subagentId, turn] = parts;
+  if (!subagentId || !turn || !/^\d+$/.test(turn)) {
+    return undefined;
+  }
+
+  return `subagent-${subagentId}`;
+}
+
+function promptIdSuffixForFilename(
+  promptId: string | undefined,
+): string | undefined {
+  if (!promptId) return undefined;
+  if (isInternalPromptId(promptId)) {
+    return sanitizeDiagnosticSuffix(promptId);
+  }
+  return sanitizeDiagnosticSuffix(extractSubagentSuffix(promptId));
+}
+
+function sessionIdFromPromptId(
+  promptId: string | undefined,
+): string | undefined {
+  if (!promptId) return undefined;
+
+  const mainSessionDelimiterIndex = promptId.indexOf(
+    MAIN_SESSION_PROMPT_ID_DELIMITER,
+  );
+  if (mainSessionDelimiterIndex > 0) {
+    return promptId.slice(0, mainSessionDelimiterIndex);
+  }
+
+  if (UUID_PATTERN.test(promptId)) {
+    return promptId;
+  }
+
+  const parts = promptId.split('#');
+  if (parts.length >= 3 && parts[0]) {
+    return parts[0];
+  }
+
+  return undefined;
+}
+
+function contextForPromptId(
+  promptId: string | undefined,
+): OpenAILogContext | null {
+  const trimmedPromptId = promptId?.trim();
+  const sessionId = sessionIdFromPromptId(trimmedPromptId);
+
+  if (!trimmedPromptId && !sessionId) {
+    return null;
+  }
+
+  return {
+    ...(trimmedPromptId ? { promptId: trimmedPromptId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+function getErrorRequestId(error: Error): string | undefined {
+  const source = error as {
+    requestID?: unknown;
+    request_id?: unknown;
+    requestId?: unknown;
+    response_id?: unknown;
+  };
+  return (
+    getString(source.requestID) ??
+    getString(source.request_id) ??
+    getString(source.requestId) ??
+    getString(source.response_id) ??
+    getRateLimitErrorDetails(error).requestId
+  );
+}
+
+function serializeError(error: Error): {
+  message: string;
+  stack?: string;
+  requestId?: string;
+} {
+  const requestId = getErrorRequestId(error);
+  return {
+    message: error.message,
+    stack: error.stack,
+    ...(requestId ? { requestId } : {}),
+  };
+}
 
 /**
  * Logger specifically for OpenAI API requests and responses
@@ -22,22 +155,12 @@ export class OpenAILogger {
   /**
    * Creates a new OpenAI logger
    * @param customLogDir Optional custom log directory path (supports relative paths, absolute paths, and ~ expansion)
+   * @param cwd Optional working directory for resolving relative paths. Defaults to process.cwd().
+   *            In ACP mode, process.cwd() may be '/' (filesystem root), so callers should
+   *            pass the project working directory from Config.getWorkingDir().
    */
-  constructor(customLogDir?: string) {
-    if (customLogDir) {
-      // Resolve relative paths to absolute paths
-      // Handle ~ expansion
-      let resolvedPath = customLogDir;
-      if (customLogDir === '~' || customLogDir.startsWith('~/')) {
-        resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
-      } else if (!path.isAbsolute(customLogDir)) {
-        // If it's a relative path, resolve it relative to current working directory
-        resolvedPath = path.resolve(process.cwd(), customLogDir);
-      }
-      this.logDir = path.normalize(resolvedPath);
-    } else {
-      this.logDir = path.join(process.cwd(), 'logs', 'openai');
-    }
+  constructor(customLogDir?: string, cwd?: string) {
+    this.logDir = resolveOpenAILogDir(customLogDir, cwd);
   }
 
   /**
@@ -60,12 +183,15 @@ export class OpenAILogger {
    * @param request The request sent to OpenAI
    * @param response The response received from OpenAI
    * @param error Optional error if the request failed
+   * @param promptId Optional prompt id; internal and subagent prompt ids are
+   *                 appended to the filename after timestamp and id.
    * @returns The file path where the log was written
    */
   async logInteraction(
     request: unknown,
     response?: unknown,
     error?: Error,
+    promptId?: string,
   ): Promise<string> {
     if (!this.initialized) {
       await this.initialize();
@@ -73,19 +199,18 @@ export class OpenAILogger {
 
     const timestamp = new Date().toISOString().replace(/:/g, '-');
     const id = uuidv4().slice(0, 8);
-    const filename = `openai-${timestamp}-${id}.json`;
+    const promptIdSuffix = promptIdSuffixForFilename(promptId);
+    const filename = promptIdSuffix
+      ? `openai-${timestamp}-${id}-${promptIdSuffix}.json`
+      : `openai-${timestamp}-${id}.json`;
     const filePath = path.join(this.logDir, filename);
 
     const logData = {
       timestamp: new Date().toISOString(),
       request,
       response: response || null,
-      error: error
-        ? {
-            message: error.message,
-            stack: error.stack,
-          }
-        : null,
+      error: error ? serializeError(error) : null,
+      context: contextForPromptId(promptId),
       system: {
         hostname: os.hostname(),
         platform: os.platform(),
@@ -121,7 +246,7 @@ export class OpenAILogger {
         .sort()
         .reverse();
 
-      return limit ? logFiles.slice(0, limit) : logFiles;
+      return limit === undefined ? logFiles : logFiles.slice(0, limit);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];

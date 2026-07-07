@@ -36,6 +36,7 @@ import {
   OUTPUT_UPDATE_INTERVAL_MS,
 } from './shellCommandProcessor.js';
 import {
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   type Config,
   type GeminiClient,
   type ShellExecutionResult,
@@ -143,6 +144,7 @@ describe('useShellCommandProcessor', () => {
           status: ToolCallStatus.Executing,
         }),
       ],
+      isUserInitiated: true,
     });
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
     const wrappedCommand = `{ ls -l; }; __code=$?; pwd > "${tmpFile}"; exit $__code`;
@@ -187,6 +189,70 @@ describe('useShellCommandProcessor', () => {
     );
     expect(mockGeminiClient.addHistory).toHaveBeenCalled();
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
+  });
+
+  it('compacts large shell output for UI history without changing model history behavior', async () => {
+    const largeOutput = `head-${'x'.repeat(100_000)}-tail`;
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'generate-large-output',
+        new AbortController().signal,
+      );
+    });
+    const execPromise = onExecMock.mock.calls[0][0];
+
+    act(() => {
+      resolveExecutionPromise(createMockServiceResult({ output: largeOutput }));
+    });
+    await act(async () => await execPromise);
+
+    const finalHistoryItem = addItemToHistoryMock.mock.calls[1][0];
+    const finalDisplay = finalHistoryItem.tools[0].resultDisplay as string;
+    expect(finalDisplay.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(finalDisplay).toContain('head-');
+    expect(finalDisplay).toContain('-tail');
+    expect(finalDisplay).toContain('truncated from');
+
+    const modelHistoryText = (
+      vi.mocked(mockGeminiClient.addHistory).mock.calls[0]![0].parts![0]! as {
+        text: string;
+      }
+    ).text;
+    expect(modelHistoryText.length).toBeGreaterThan(10_000);
+    expect(modelHistoryText.length).toBeLessThan(10_500);
+    expect(modelHistoryText).toContain('head-');
+    expect(modelHistoryText).not.toContain('-tail');
+    expect(modelHistoryText).toContain('... (truncated)');
+  });
+
+  it('preserves unmatched surrogate code units in truncated shell model history', async () => {
+    const longOutput = `head-\uD800-${'x'.repeat(11_000)}`;
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'surrogate-output',
+        new AbortController().signal,
+      );
+    });
+    const execPromise = onExecMock.mock.calls[0][0];
+
+    act(() => {
+      resolveExecutionPromise(createMockServiceResult({ output: longOutput }));
+    });
+    await act(async () => await execPromise);
+
+    const modelHistoryText = (
+      vi.mocked(mockGeminiClient.addHistory).mock.calls[0]![0].parts![0]! as {
+        text: string;
+      }
+    ).text;
+    expect(modelHistoryText).toContain('\uD800');
+    expect(modelHistoryText).not.toContain('\uFFFD');
   });
 
   it('should handle command failure and display error status', async () => {

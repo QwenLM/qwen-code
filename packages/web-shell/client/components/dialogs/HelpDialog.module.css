@@ -1,0 +1,212 @@
+.dialog {
+  display: flex;
+  min-height: 460px;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 8px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tab {
+  min-height: 30px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+}
+
+.tab:hover,
+.tabActive {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.tabActive {
+  border-color: transparent;
+}
+
+.search {
+  width: min(240px, 42vw);
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  outline: none;
+}
+
+.general {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcut {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.shortcut:hover {
+  background: var(--secondary);
+}
+
+.shortcutKey {
+  min-width: 0;
+  color: var(--agent-blue-500);
+  text-align: right;
+  overflow-wrap: anywhere;
+  white-space: nowrap;
+}
+
+.shortcutDesc {
+  min-width: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.commandList {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.commandCard {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+}
+
+.commandCard:hover,
+.commandCardExpanded {
+  background: var(--secondary);
+}
+
+.commandRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.commandName {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--agent-blue-500);
+  overflow-wrap: anywhere;
+}
+
+.commandTag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+  transition: transform 120ms ease;
+}
+
+.chevronExpanded {
+  transform: rotate(90deg);
+}
+
+.commandDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 8px 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--background);
+}
+
+.commandDescription,
+.commandSubcommands {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  color: var(--muted-foreground);
+  padding: 16px 0;
+}
+
+@media (max-width: 720px) {
+  .dialog {
+    min-height: 0;
+  }
+
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tabs {
+    overflow-x: auto;
+  }
+
+  .tab {
+    flex: 0 0 auto;
+  }
+
+  .search {
+    width: 100%;
+  }
+
+  .commandRow {
+    align-items: center;
+  }
+}

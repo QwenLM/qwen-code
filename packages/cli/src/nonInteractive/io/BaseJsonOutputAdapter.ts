@@ -11,7 +11,7 @@ import type {
   ToolCallResponseInfo,
   SessionMetrics,
   ServerGeminiStreamEvent,
-  TaskResultDisplay,
+  AgentResultDisplay,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -29,6 +29,7 @@ import type {
   CLIResultMessageSuccess,
   CLIUserMessage,
   ContentBlock,
+  ControlMessage,
   ExtendedUsage,
   TextBlock,
   ThinkingBlock,
@@ -65,6 +66,12 @@ export interface ResultOptions {
   readonly stats?: SessionMetrics;
   readonly summary?: string;
   readonly subtype?: string;
+  /**
+   * Payload that the model submitted via the synthetic `structured_output`
+   * tool. When set, `result` is forced to the JSON-stringified form and a
+   * top-level `structured_result` field is added to the result message.
+   */
+  readonly structuredResult?: unknown;
 }
 
 /**
@@ -110,7 +117,7 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
 
   startSubagentAssistantMessage?(parentToolUseId: string): void;
   processSubagentToolCall?(
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ): void;
   finalizeSubagentAssistantMessage?(
@@ -282,12 +289,12 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    if (lastBlock.type === 'text') {
-      const index = state.blocks.length - 1;
-      this.onBlockClosed(state, index, actualParentToolUseId);
-      this.closeBlock(state, index);
-    } else if (lastBlock.type === 'thinking') {
-      const index = state.blocks.length - 1;
+    const index = state.blocks.length - 1;
+    if (!state.openBlocks.has(index)) {
+      return;
+    }
+
+    if (lastBlock.type === 'text' || lastBlock.type === 'thinking') {
       this.onBlockClosed(state, index, actualParentToolUseId);
       this.closeBlock(state, index);
     }
@@ -392,7 +399,9 @@ export abstract class BaseJsonOutputAdapter {
     }
 
     const message = this.buildMessage(parentToolUseId);
-    this.emitMessageImpl(message);
+    if (state.messageStarted) {
+      this.emitMessageImpl(message);
+    }
     return message;
   }
 
@@ -405,6 +414,15 @@ export abstract class BaseJsonOutputAdapter {
    * @param message - Message to emit (already contains parent_tool_use_id if applicable)
    */
   protected abstract emitMessageImpl(message: CLIMessage): void;
+
+  /**
+   * Emits a control-plane message (control_request / control_response).
+   * Only meaningful in streaming adapters; batch adapters inherit this
+   * no-op since control messages are not collected into the final array.
+   */
+  protected emitControlMessageImpl(_message: ControlMessage): void {
+    // Default: no-op for non-streaming / batch adapters.
+  }
 
   /**
    * Abstract method to determine if stream events should be emitted.
@@ -627,6 +645,17 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
+      case GeminiEventType.ModelFallback:
+        // Surface model fallback transitions so non-interactive consumers
+        // (CI pipelines, SDK clients) can observe capacity-driven model
+        // switches without parsing assistant content.
+        this.emitSystemMessage('model_fallback', {
+          fromModel: event.fromModel,
+          toModel: event.toModel,
+          statusCode: event.statusCode,
+          fallbackIndex: event.fallbackIndex,
+        });
+        break;
       default:
         break;
     }
@@ -656,12 +685,7 @@ export abstract class BaseJsonOutputAdapter {
     parentToolUseId: string,
   ): CLIAssistantMessage {
     const state = this.getMessageState(parentToolUseId);
-    const message = this.finalizeAssistantMessageInternal(
-      state,
-      parentToolUseId,
-    );
-    this.updateLastAssistantMessage(message);
-    return message;
+    return this.finalizeAssistantMessageInternal(state, parentToolUseId);
   }
 
   /**
@@ -696,7 +720,7 @@ export abstract class BaseJsonOutputAdapter {
    * @param parentToolUseId - Parent tool use ID
    */
   processSubagentToolCall(
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ): void {
     const state = this.getMessageState(parentToolUseId);
@@ -747,7 +771,7 @@ export abstract class BaseJsonOutputAdapter {
   protected processSubagentToolUseBlock(
     state: MessageState,
     index: number,
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ): void {
     // Emit tool_use block creation event (with empty input)
@@ -940,7 +964,7 @@ export abstract class BaseJsonOutputAdapter {
    */
   protected createSubagentToolUseBlock(
     state: MessageState,
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     _parentToolUseId: string,
   ): { block: ToolUseBlock; index: number } {
     const index = state.blocks.length;
@@ -1065,6 +1089,67 @@ export abstract class BaseJsonOutputAdapter {
   }
 
   /**
+   * Emits a `can_use_tool` permission control_request so an external consumer
+   * can approve or deny the tool call. Pairs with {@link emitControlResponse}.
+   */
+  emitPermissionRequest(
+    requestId: string,
+    toolName: string,
+    toolUseId: string,
+    input: unknown,
+    blockedPath: string | null = null,
+  ): void {
+    const message: ControlMessage = {
+      type: 'control_request',
+      request_id: requestId,
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: toolName,
+        tool_use_id: toolUseId,
+        input,
+        permission_suggestions: null,
+        blocked_path: blockedPath,
+      },
+    };
+    this.emitControlMessageImpl(message);
+  }
+
+  /**
+   * Emits a control_response carrying a permission approval result.
+   * Used both to mirror TUI-native resolutions back to external consumers
+   * and to acknowledge externally-supplied confirmation_responses.
+   */
+  emitControlResponse(requestId: string, allowed: boolean): void {
+    const message: ControlMessage = {
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: requestId,
+        response: { allowed },
+      },
+    };
+    this.emitControlMessageImpl(message);
+  }
+
+  /**
+   * Emits a control_response with subtype `error`. Used to reject an
+   * external confirmation_response that cannot be honored (unknown
+   * request_id, tool call already resolved, etc.) so the consumer can
+   * surface or retry, instead of waiting forever for an implicit ack.
+   */
+  emitControlError(requestId: string, errorMessage: string): void {
+    const message: ControlMessage = {
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: requestId,
+        error: errorMessage,
+      },
+    };
+    this.emitControlMessageImpl(message);
+  }
+
+  /**
    * Emits a tool progress stream event.
    * Default implementation is a no-op. StreamJsonOutputAdapter overrides this
    * to emit stream events when includePartialMessages is enabled.
@@ -1120,7 +1205,28 @@ export abstract class BaseJsonOutputAdapter {
         error: { message: errorMessage },
       };
     } else {
-      const success: CLIResultMessageSuccess & { stats?: SessionMetrics } = {
+      // Track presence by property existence — `runNonInteractive` may
+      // legitimately pass `structuredResult: undefined` (e.g. the model
+      // called structured_output with no args under an empty schema).
+      // A `!== undefined` sentinel would silently fall back to the
+      // free-text `resultText` path and drop the `structured_result`
+      // field, breaking the structured-output contract.
+      //
+      // Normalize an `undefined` submission to `null` so both
+      // `JSON.stringify` (for `result`) and the top-level
+      // `structured_result` field render as a JSON-safe `null` instead
+      // of being silently omitted.
+      const hasStructured = 'structuredResult' in options;
+      const normalizedStructured = hasStructured
+        ? (options.structuredResult ?? null)
+        : undefined;
+      const finalResult = hasStructured
+        ? JSON.stringify(normalizedStructured)
+        : resultText;
+      const success: CLIResultMessageSuccess & {
+        stats?: SessionMetrics;
+        structured_result?: unknown;
+      } = {
         type: 'result',
         subtype:
           (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
@@ -1130,13 +1236,16 @@ export abstract class BaseJsonOutputAdapter {
         duration_ms: options.durationMs,
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
-        result: resultText,
+        result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
       if (options.stats) {
         success.stats = options.stats;
+      }
+      if (hasStructured) {
+        success.structured_result = normalizedStructured;
       }
 
       return success;

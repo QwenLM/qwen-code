@@ -16,6 +16,8 @@ export type TransportOptions = {
   model?: string;
   permissionMode?: PermissionMode;
   env?: Record<string, string>;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   abortController?: AbortController;
   debug?: boolean;
   stderr?: (message: string) => void;
@@ -45,6 +47,14 @@ export type TransportOptions = {
    */
   sessionId?: string;
 };
+
+export interface QuerySystemPromptPreset {
+  type: 'preset';
+  preset: 'qwen_code';
+  append?: string;
+}
+
+export type QuerySystemPrompt = string | QuerySystemPromptPreset;
 
 type ToolInput = Record<string, unknown>;
 
@@ -227,6 +237,16 @@ export interface QueryOptions {
   env?: Record<string, string>;
 
   /**
+   * System prompt configuration for the Qwen CLI session.
+   *
+   * - `string`: fully overrides the main session system prompt
+   * - `{ type: 'preset', preset: 'qwen_code', append?: string }`:
+   *   uses Qwen Code's built-in prompt as the base and optionally appends extra
+   *   instructions for the main session
+   */
+  systemPrompt?: QuerySystemPrompt;
+
+  /**
    * Permission mode controlling how the SDK handles tool execution approval.
    *
    * - 'default': Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`.
@@ -234,6 +254,10 @@ export interface QueryOptions {
    * - 'plan': Blocks all write tools, instructing AI to present a plan first.
    *   Read-only tools execute normally.
    * - 'auto-edit': Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+   * - 'auto': An LLM classifier evaluates each tool call and auto-approves
+   *   safe ones / blocks risky ones. Fail-closed: classifier outages route
+   *   the call to manual approval. Best for long autonomous sessions in
+   *   trusted projects. See `docs/users/features/auto-mode.md`.
    * - 'yolo': All tools execute automatically without confirmation.
    *
    * **Priority Chain (highest to lowest):**
@@ -241,15 +265,16 @@ export interface QueryOptions {
    * 2. `permissionMode: 'plan'` - Blocks non-read-only tools (except exit_plan_mode)
    * 3. `permissionMode: 'yolo'` - Auto-approves all tools
    * 4. `allowedTools` - Auto-approves matching tools
-   * 5. `canUseTool` callback - Custom approval logic
-   * 6. Default behavior - Auto-deny in SDK mode
+   * 5. `permissionMode: 'auto'` - Classifier-mediated approval for the rest
+   * 6. `canUseTool` callback - Custom approval logic
+   * 7. Default behavior - Auto-deny in SDK mode
    *
    * @default 'default'
    * @see canUseTool For custom permission handling
    * @see allowedTools For auto-approving specific tools
    * @see excludeTools For blocking specific tools
    */
-  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'yolo';
+  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
   /**
    * Custom permission handler for tool execution approval.
@@ -342,15 +367,19 @@ export interface QueryOptions {
   maxSessionTurns?: number;
 
   /**
-   * Equivalent to `tool.core` in settings.json.
-   * List of core tools to enable for the session.
-   * If specified, only these tools will be available to the AI.
-   * @example ['read_file', 'write_file', 'run_terminal_cmd']
+   * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
+   * If specified, only matching core tools are registered for the session.
+   * This is separate from `permissions.allow`, which auto-approves matching
+   * tool calls but does not restrict tool registration.
+   * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
+   * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
+   * tool registration, not invocation.
+   * @example ['read_file', 'edit', 'run_shell_command']
    */
   coreTools?: string[];
 
   /**
-   * Equivalent to `tool.exclude` in settings.json.
+   * Equivalent to `permissions.deny` in settings.json.
    * List of tools to exclude from the session.
    *
    * **Behavior:**
@@ -359,17 +388,17 @@ export interface QueryOptions {
    * - Tools will not be available to the AI, even if in `coreTools` or `allowedTools`
    *
    * **Pattern matching:**
-   * - Tool name: `'write_file'`, `'run_shell_command'`
-   * - Tool class: `'WriteTool'`, `'ShellTool'`
-   * - Shell command prefix: `'ShellTool(git commit)'` (matches commands starting with "git commit")
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(rm *)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
    *
-   * @example ['run_terminal_cmd', 'delete_file', 'ShellTool(rm )']
+   * @example ['Bash(rm *)', 'Read(.env)', 'Edit(/secrets/**)']
    * @see allowedTools For allowing specific tools
    */
   excludeTools?: string[];
 
   /**
-   * Equivalent to `tool.allowed` in settings.json.
+   * Equivalent to `permissions.allow` in settings.json.
    * List of tools that are allowed to run without confirmation.
    *
    * **Behavior:**
@@ -380,16 +409,16 @@ export interface QueryOptions {
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
    *
    * **Pattern matching:**
-   * - Tool name: `'write_file'`, `'run_shell_command'`
-   * - Tool class: `'WriteTool'`, `'ShellTool'`
-   * - Shell command prefix: `'ShellTool(git status)'` (matches commands starting with "git status")
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(git status)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
    *
    * **Use cases:**
-   * - Auto-approve safe shell commands: `['ShellTool(git status)', 'ShellTool(ls)']`
+   * - Auto-approve safe shell commands: `['Bash(git status)', 'Bash(ls)']`
    * - Auto-approve specific tools: `['write_file', 'edit']`
    * - Combine with `permissionMode: 'default'` to selectively auto-approve tools
    *
-   * @example ['read_file', 'ShellTool(git status)', 'ShellTool(npm test)']
+   * @example ['Read', 'Bash(git status)', 'Bash(npm test)']
    * @see canUseTool For custom approval logic
    * @see excludeTools For blocking specific tools
    */
@@ -398,10 +427,10 @@ export interface QueryOptions {
   /**
    * Authentication type for the AI service.
    * - 'openai': Use OpenAI-compatible authentication
-   * - 'qwen-oauth': Use Qwen OAuth authentication
+   * - 'qwen-oauth': Legacy Qwen OAuth authentication
    *
-   * Though we support 'qwen-oauth', it's not recommended to use it in the SDK.
-   * Because the credentials are stored in `~/.qwen` and may need to refresh periodically.
+   * Qwen OAuth free tier was discontinued on 2026-04-15. New SDK setups should
+   * use OpenAI-compatible authentication or another supported provider.
    */
   authType?: AuthType;
 

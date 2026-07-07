@@ -29,6 +29,21 @@ describe('markdownUtilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
+    it('should not split at a \n\n inside a tilde (~~~) fenced code block', () => {
+      // Same as the backtick case but with ~~~ fences: the internal blank line
+      // must not be chosen as a split point.
+      const content = '~~~\nignore this\n\nnewline\n~~~KeepThis';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should not split inside a 4+ backtick fenced block (no phantom fence)', () => {
+      // A 6-backtick fence must count as ONE delimiter. Matching only the first
+      // three characters would produce a phantom close-then-reopen, mark the
+      // internal blank line as outside the block, and split there.
+      const content = '``````\nignore this\n\nnewline\n``````KeepThis';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
     it('should correctly identify the last \n\n even if it is followed by text not in a code block', () => {
       const content =
         'First part.\n\nSecond part.\n\nThird part, then some more text.';
@@ -45,6 +60,31 @@ describe('markdownUtilities', () => {
     it('should return content.length if content has no newlines and no code blocks', () => {
       const content = 'Single line of text';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should hard split a long single line when a max length is provided', () => {
+      const content = 'a'.repeat(100);
+      expect(findLastSafeSplitPoint(content, 40)).toBe(40);
+    });
+
+    it('should prefer a safe newline before the max length', () => {
+      const content = 'first line\nsecond line\nthird line';
+      expect(findLastSafeSplitPoint(content, 18)).toBe(11);
+    });
+
+    it('should not split past the max length for a boundary newline', () => {
+      const content = `${'a'.repeat(40)}\n\nrest`;
+      expect(findLastSafeSplitPoint(content, 40)).toBe(40);
+    });
+
+    it('should preserve an opening code block when possible with a max length', () => {
+      const content = 'intro\n\n```ts\nconst value = 1;\n';
+      expect(findLastSafeSplitPoint(content, 20)).toBe(7);
+    });
+
+    it('should hard split an oversized leading code block with a max length', () => {
+      const content = '```ts\n' + 'a'.repeat(100);
+      expect(findLastSafeSplitPoint(content, 40)).toBe(40);
     });
   });
 });

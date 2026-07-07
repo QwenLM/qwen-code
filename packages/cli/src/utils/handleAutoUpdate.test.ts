@@ -11,7 +11,9 @@ import { updateEventEmitter } from './updateEventEmitter.js';
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import EventEmitter from 'node:events';
-import { handleAutoUpdate } from './handleAutoUpdate.js';
+import { handleAutoUpdate, setUpdateHandler } from './handleAutoUpdate.js';
+import { performStandaloneUpdate } from './standalone-update.js';
+import { MessageType } from '../ui/types.js';
 
 vi.mock('./installationInfo.js', async () => {
   const actual = await vi.importActual('./installationInfo.js');
@@ -21,14 +23,14 @@ vi.mock('./installationInfo.js', async () => {
   };
 });
 
+vi.mock('./standalone-update.js', () => ({
+  performStandaloneUpdate: vi.fn(),
+}));
+
 vi.mock('./updateEventEmitter.js', async () => {
-  const actual = await vi.importActual('./updateEventEmitter.js');
+  const { EventEmitter } = await import('node:events');
   return {
-    ...actual,
-    updateEventEmitter: {
-      ...actual.updateEventEmitter,
-      emit: vi.fn(),
-    },
+    updateEventEmitter: new EventEmitter(),
   };
 });
 
@@ -41,17 +43,19 @@ interface MockChildProcess extends EventEmitter {
 }
 
 const mockGetInstallationInfo = vi.mocked(getInstallationInfo);
-const mockUpdateEventEmitter = vi.mocked(updateEventEmitter);
+const mockPerformStandaloneUpdate = vi.mocked(performStandaloneUpdate);
 
 describe('handleAutoUpdate', () => {
   let mockSpawn: Mock;
   let mockUpdateInfo: UpdateObject;
   let mockSettings: LoadedSettings;
   let mockChildProcess: MockChildProcess;
+  let emitSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     mockSpawn = vi.fn();
     vi.clearAllMocks();
+    emitSpy = vi.spyOn(updateEventEmitter, 'emit');
     mockUpdateInfo = {
       update: {
         latest: '2.0.0',
@@ -84,13 +88,13 @@ describe('handleAutoUpdate', () => {
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   it('should do nothing if update info is null', () => {
     handleAutoUpdate(null, mockSettings, '/root', mockSpawn);
     expect(mockGetInstallationInfo).not.toHaveBeenCalled();
-    expect(mockUpdateEventEmitter.emit).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
@@ -109,13 +113,10 @@ describe('handleAutoUpdate', () => {
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
     // Should still emit update-received with manual update message
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith(
-      'update-received',
-      {
-        message:
-          'An update is available!\nPlease run npm i -g @qwen-code/qwen-code@latest to update',
-      },
-    );
+    expect(emitSpy).toHaveBeenCalledWith('update-received', {
+      message:
+        'An update is available!\nPlease run npm i -g @qwen-code/qwen-code@latest to update',
+    });
     // Should NOT spawn update when enableAutoUpdate is false
     expect(mockSpawn).not.toHaveBeenCalled();
   });
@@ -130,13 +131,10 @@ describe('handleAutoUpdate', () => {
 
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledTimes(1);
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith(
-      'update-received',
-      {
-        message: 'An update is available!\nCannot determine update command.',
-      },
-    );
+    expect(emitSpy).toHaveBeenCalledTimes(1);
+    expect(emitSpy).toHaveBeenCalledWith('update-received', {
+      message: 'An update is available!\nCannot determine update command.',
+    });
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
@@ -150,13 +148,10 @@ describe('handleAutoUpdate', () => {
 
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledTimes(1);
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith(
-      'update-received',
-      {
-        message: 'An update is available!\nThis is an additional message.',
-      },
-    );
+    expect(emitSpy).toHaveBeenCalledTimes(1);
+    expect(emitSpy).toHaveBeenCalledWith('update-received', {
+      message: 'An update is available!\nThis is an additional message.',
+    });
   });
 
   it('should attempt to perform an update when conditions are met', async () => {
@@ -196,7 +191,7 @@ describe('handleAutoUpdate', () => {
       handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
     });
 
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith('update-failed', {
+    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
       message:
         'Automatic update failed. Please try updating manually. (command: npm i -g @qwen-code/qwen-code@2.0.0, stderr: An error occurred)',
     });
@@ -220,7 +215,7 @@ describe('handleAutoUpdate', () => {
       handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
     });
 
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith('update-failed', {
+    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
       message:
         'Automatic update failed. Please try updating manually. (error: Spawn error)',
     });
@@ -267,9 +262,381 @@ describe('handleAutoUpdate', () => {
       handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
     });
 
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith('update-success', {
+    expect(emitSpy).toHaveBeenCalledWith('update-success', {
+      message:
+        'Update successful! Please restart Qwen Code to use the new version. ' +
+        'Switching model providers before restarting may not work correctly.',
+    });
+  });
+});
+
+describe('handleAutoUpdate — standalone path', () => {
+  let mockSpawn: Mock;
+  let mockUpdateInfo: UpdateObject;
+  let mockSettings: LoadedSettings;
+  let emitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockSpawn = vi.fn();
+    vi.clearAllMocks();
+    emitSpy = vi.spyOn(updateEventEmitter, 'emit');
+    mockUpdateInfo = {
+      update: {
+        latest: '2.0.0',
+        current: '1.0.0',
+        type: 'major',
+        name: '@qwen-code/qwen-code',
+      },
+      message: 'An update is available!',
+    };
+    mockSettings = {
+      merged: { general: { enableAutoUpdate: true } },
+    } as LoadedSettings;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('calls performStandaloneUpdate and does NOT spawn npm', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockResolvedValue('done');
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-success', expect.anything()),
+    );
+
+    expect(mockPerformStandaloneUpdate).toHaveBeenCalledWith(
+      '/home/user/.local/lib/qwen-code',
+      '2.0.0',
+    );
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('emits deferred message when result is "deferred"', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockResolvedValue('deferred');
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-success', expect.anything()),
+    );
+
+    expect(emitSpy).toHaveBeenCalledWith('update-success', {
+      message:
+        'Update downloaded. It will be applied after you exit this session.',
+    });
+  });
+
+  it('emits "done" success message when result is "done"', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockResolvedValue('done');
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-success', expect.anything()),
+    );
+
+    expect(emitSpy).toHaveBeenCalledWith('update-success', {
       message:
         'Update successful! The new version will be used on your next run.',
     });
+  });
+
+  it('emits update-failed on rejection', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockRejectedValue(new Error('Download failed'));
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-failed', expect.anything()),
+    );
+
+    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
+      message:
+        'Automatic update failed: Download failed. Re-run the installer to update manually.',
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('setUpdateHandler', () => {
+  let addItem: Mock;
+  let setUpdateInfo: Mock;
+
+  beforeEach(() => {
+    addItem = vi.fn();
+    setUpdateInfo = vi.fn();
+    updateEventEmitter.removeAllListeners();
+  });
+
+  afterEach(() => {
+    updateEventEmitter.removeAllListeners();
+  });
+
+  it('should call addItem immediately when idle', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-success', {
+      message: 'Update successful!',
+    });
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text: 'Update successful!',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should use default success message when update-success has no message', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-success', {});
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text:
+          'Update successful! Please restart Qwen Code to use the new version. ' +
+          'Switching model providers before restarting may not work correctly.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should use default failure message when update-failed has no message', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-failed', {});
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: 'Automatic update failed. Please try updating manually.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should defer addItem when not idle (update-success)', () => {
+    const isIdleRef = { current: false };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-success', {
+      message: 'Update successful!',
+    });
+
+    expect(addItem).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it('should defer addItem when not idle (update-failed)', () => {
+    const isIdleRef = { current: false };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-failed', {
+      message: 'Update failed',
+    });
+
+    expect(addItem).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it('should flush deferred notifications when flush is called', () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    updateEventEmitter.emit('update-success', {
+      message: 'Update successful!',
+    });
+
+    expect(addItem).not.toHaveBeenCalled();
+
+    isIdleRef.current = true;
+    flush();
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text: 'Update successful!',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should flush update-failed notifications correctly', () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    updateEventEmitter.emit('update-failed', {
+      message: 'Update failed',
+    });
+
+    expect(addItem).not.toHaveBeenCalled();
+
+    flush();
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: 'Update failed',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should flush multiple deferred notifications in order', () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    updateEventEmitter.emit('update-info', { message: 'Info message' });
+    updateEventEmitter.emit('update-success', { message: 'Success!' });
+
+    expect(addItem).not.toHaveBeenCalled();
+
+    flush();
+
+    expect(addItem).toHaveBeenCalledTimes(2);
+    expect(addItem).toHaveBeenNthCalledWith(
+      1,
+      { type: MessageType.INFO, text: 'Info message' },
+      expect.any(Number),
+    );
+    expect(addItem).toHaveBeenNthCalledWith(
+      2,
+      {
+        type: MessageType.INFO,
+        text: 'Success!',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should clear pending notifications on cleanup', () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    updateEventEmitter.emit('update-success', { message: 'Success!' });
+    expect(addItem).not.toHaveBeenCalled();
+
+    cleanup();
+    flush();
+
+    // Pending queue was cleared by cleanup, so addItem should not be called
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
+  it('should be a no-op when flushing an empty queue', () => {
+    const isIdleRef = { current: true };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    flush();
+
+    expect(addItem).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it('should deliver immediately after transitioning from busy to idle', () => {
+    const isIdleRef = { current: false };
+    const { cleanup, flush } = setUpdateHandler(
+      addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+
+    // First event while busy — deferred
+    updateEventEmitter.emit('update-info', { message: 'Deferred msg' });
+    expect(addItem).not.toHaveBeenCalled();
+
+    // Transition to idle
+    isIdleRef.current = true;
+
+    // Next event while idle — delivered immediately
+    updateEventEmitter.emit('update-info', { message: 'Immediate msg' });
+    expect(addItem).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledWith(
+      { type: MessageType.INFO, text: 'Immediate msg' },
+      expect.any(Number),
+    );
+
+    // The earlier deferred message should still be in the queue
+    flush();
+    expect(addItem).toHaveBeenCalledTimes(2);
+    expect(addItem).toHaveBeenNthCalledWith(
+      2,
+      { type: MessageType.INFO, text: 'Deferred msg' },
+      expect.any(Number),
+    );
+
+    cleanup();
   });
 });

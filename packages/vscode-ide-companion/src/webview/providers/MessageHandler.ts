@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type * as vscode from 'vscode';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
 import type {
@@ -74,10 +75,15 @@ export class MessageHandler {
   }
 
   /**
-   * Set login handler
+   * Set auth interactive handler — interactive auth flow.
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.router.setLoginHandler(handler);
+  setAuthInteractiveHandler(
+    handler: (
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
+    ) => Promise<void>,
+  ): void {
+    this.router.setAuthInteractiveHandler(handler);
   }
 
   /**
@@ -85,5 +91,9 @@ export class MessageHandler {
    */
   appendStreamContent(chunk: string): void {
     this.router.appendStreamContent(chunk);
+  }
+
+  setupFileWatchers(): vscode.Disposable {
+    return this.router.setupFileWatchers();
   }
 }

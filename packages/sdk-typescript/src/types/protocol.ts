@@ -230,7 +230,7 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'yolo';
+export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Authentication types supported by the CLI.
@@ -267,6 +267,15 @@ export interface HookCallbackResult {
 
 export interface CLIControlInterruptRequest {
   subtype: 'interrupt';
+}
+
+/**
+ * Continue the most recent unfinished turn from existing history without
+ * sending a new user message. The reply reports whether a continuation was
+ * accepted; the resumed turn's output then flows as regular stream messages.
+ */
+export interface CLIControlContinueLastTurnRequest {
+  subtype: 'continue_last_turn';
 }
 
 export interface CLIControlPermissionRequest {
@@ -334,6 +343,9 @@ export type WireSDKMcpServerConfig = Omit<SDKMcpServerConfig, 'instance'>;
 export interface CLIControlInitializeRequest {
   subtype: 'initialize';
   hooks?: HookRegistration[] | null;
+  timeout?: {
+    canUseTool?: number;
+  };
   /**
    * SDK MCP servers config
    * These are MCP servers running in the SDK process, connected via control plane.
@@ -383,8 +395,14 @@ export interface CLIControlSupportedCommandsRequest {
   subtype: 'supported_commands';
 }
 
+export interface CLIControlGetContextUsageRequest {
+  subtype: 'get_context_usage';
+  show_details?: boolean;
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
+  | CLIControlContinueLastTurnRequest
   | CLIControlPermissionRequest
   | CLIControlInitializeRequest
   | CLIControlSetPermissionModeRequest
@@ -392,7 +410,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
-  | CLIControlSupportedCommandsRequest;
+  | CLIControlSupportedCommandsRequest
+  | CLIControlGetContextUsageRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -545,12 +564,6 @@ export function isToolResultBlock(block: any): block is ToolResultBlock {
 
 export type SubagentLevel = 'session';
 
-export interface ModelConfig {
-  model?: string;
-  temp?: number;
-  top_p?: number;
-}
-
 export interface RunConfig {
   max_time_minutes?: number;
   max_turns?: number;
@@ -563,7 +576,7 @@ export interface SubagentConfig {
   systemPrompt: string;
   level: SubagentLevel;
   filePath?: string;
-  modelConfig?: Partial<ModelConfig>;
+  model?: string;
   runConfig?: Partial<RunConfig>;
   color?: string;
   readonly isBuiltin?: boolean;
@@ -589,8 +602,10 @@ export enum ControlRequestType {
   // SystemController requests
   INITIALIZE = 'initialize',
   INTERRUPT = 'interrupt',
+  CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
   SUPPORTED_COMMANDS = 'supported_commands',
+  GET_CONTEXT_USAGE = 'get_context_usage',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

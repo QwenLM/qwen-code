@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { extractSessionListItems } from './qwenAgentManager.js';
+import {
+  extractSessionListItems,
+  QwenAgentManager,
+} from './qwenAgentManager.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
 
 vi.mock('vscode', () => ({
   window: {
@@ -52,5 +56,121 @@ describe('extractSessionListItems', () => {
     expect(extractSessionListItems({ sessions: 'not-array' })).toEqual([]);
     expect(extractSessionListItems({ items: 123 })).toEqual([]);
     expect(extractSessionListItems({})).toEqual([]);
+  });
+});
+
+describe('QwenAgentManager.setModelFromUi', () => {
+  it('emits the selected model metadata from the available models list', async () => {
+    const manager = new QwenAgentManager();
+    const onModelChanged = vi.fn();
+    manager.onModelChanged(onModelChanged);
+
+    const selectedModel: ModelInfo = {
+      modelId: 'qwen3-coder-plus',
+      name: 'Qwen3 Coder Plus',
+      _meta: {
+        contextLimit: 262144,
+      },
+    };
+
+    (
+      manager as unknown as {
+        baselineAvailableModels: ModelInfo[];
+      }
+    ).baselineAvailableModels = [
+      {
+        modelId: 'qwen3-coder-base',
+        name: 'Qwen3 Coder Base',
+        _meta: {
+          contextLimit: 131072,
+        },
+      },
+      selectedModel,
+    ];
+
+    (
+      manager as unknown as {
+        connection: {
+          setModel: (modelId: string) => Promise<{ modelId: string }>;
+        };
+      }
+    ).connection = {
+      setModel: vi.fn().mockResolvedValue({ modelId: selectedModel.modelId }),
+    };
+
+    await manager.setModelFromUi(selectedModel.modelId);
+
+    expect(onModelChanged).toHaveBeenCalledWith(selectedModel);
+  });
+});
+
+describe('QwenAgentManager.createNewSession', () => {
+  it('creates a fresh ACP session when explicitly requested even if one is already active', async () => {
+    const manager = new QwenAgentManager();
+    const connection = {
+      currentSessionId: 'session-1',
+      newSession: vi.fn().mockImplementation(async () => {
+        connection.currentSessionId = 'session-2';
+        return { sessionId: 'session-2' };
+      }),
+      authenticate: vi.fn(),
+    };
+
+    (
+      manager as unknown as {
+        connection: typeof connection;
+      }
+    ).connection = connection;
+
+    const newSessionId = await manager.createNewSession('/workspace', {
+      forceNew: true,
+    } as never);
+
+    expect(connection.newSession).toHaveBeenCalledWith('/workspace');
+    expect(newSessionId).toBe('session-2');
+  });
+
+  it('creates a distinct fresh session after an in-flight bootstrap when forceNew is requested', async () => {
+    const manager = new QwenAgentManager();
+    const connection = {
+      currentSessionId: null as string | null,
+      newSession: vi.fn().mockImplementation(async () => {
+        connection.currentSessionId = 'session-2';
+        return { sessionId: 'session-2' };
+      }),
+      authenticate: vi.fn(),
+    };
+
+    let resolveBootstrap: ((value: string | null) => void) | undefined;
+    const bootstrapSession = new Promise<string | null>((resolve) => {
+      resolveBootstrap = (value) => {
+        connection.currentSessionId = value;
+        resolve(value);
+      };
+    });
+
+    (
+      manager as unknown as {
+        connection: typeof connection;
+        sessionCreateInFlight: Promise<string | null> | null;
+      }
+    ).connection = connection;
+    (
+      manager as unknown as {
+        sessionCreateInFlight: Promise<string | null> | null;
+      }
+    ).sessionCreateInFlight = bootstrapSession;
+
+    const newSessionPromise = manager.createNewSession('/workspace', {
+      forceNew: true,
+    } as never);
+
+    expect(connection.newSession).not.toHaveBeenCalled();
+
+    resolveBootstrap?.('session-1');
+
+    await expect(newSessionPromise).resolves.toBe('session-2');
+    expect(connection.newSession).toHaveBeenCalledTimes(1);
+    expect(connection.newSession).toHaveBeenCalledWith('/workspace');
   });
 });

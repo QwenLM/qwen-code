@@ -12,6 +12,7 @@ import {
   INSTALL_METADATA_FILENAME,
   EXTENSIONS_CONFIG_FILENAME,
 } from './variables.js';
+import { ExtensionStorage } from './storage.js';
 import { QWEN_DIR } from '../config/storage.js';
 import {
   ExtensionManager,
@@ -33,6 +34,8 @@ const mockGit = {
   revparse: vi.fn(),
   path: vi.fn(),
 };
+const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
+const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
 
 vi.mock('simple-git', () => ({
   simpleGit: vi.fn((path: string) => {
@@ -45,9 +48,11 @@ vi.mock('./github.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./github.js')>();
   return {
     ...actual,
+    downloadFromArchiveUrl: mockDownloadFromArchiveUrl,
     downloadFromGitHubRelease: vi
       .fn()
       .mockRejectedValue(new Error('Mocked GitHub release download failure')),
+    extractArchiveFile: mockExtractArchiveFile,
   };
 });
 
@@ -134,6 +139,8 @@ describe('extension tests', () => {
     mockHomedir.mockReturnValue(tempHomeDir);
     vi.spyOn(process, 'cwd').mockReturnValue(tempWorkspaceDir);
     Object.values(mockGit).forEach((fn) => fn.mockReset());
+    mockDownloadFromArchiveUrl.mockReset();
+    mockExtractArchiveFile.mockReset();
   });
 
   afterEach(() => {
@@ -150,6 +157,185 @@ describe('extension tests', () => {
       ...options,
     });
   }
+
+  describe('installExtension', () => {
+    function writeExtractedExtension(destination: string, name: string) {
+      fs.mkdirSync(destination, { recursive: true });
+      fs.writeFileSync(
+        path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name, version: '1.0.0' }),
+      );
+    }
+
+    it('should install an extension from a local archive', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'local-archive-extension');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: archivePath,
+          type: 'local',
+        },
+        async () => {},
+      );
+
+      expect(mockExtractArchiveFile).toHaveBeenCalledWith(
+        archivePath,
+        expect.any(String),
+      );
+      expect(extension.name).toBe('local-archive-extension');
+      expect(extension.installMetadata).toMatchObject({
+        source: archivePath,
+        type: 'local',
+      });
+    });
+
+    it('should clean up converted temp dir for local archive installs', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'gemini-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      const tempDirs: string[] = [];
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(
+        async () => {
+          const tempDir = fs.mkdtempSync(
+            path.join(tempHomeDir, 'tracked-extension-'),
+          );
+          tempDirs.push(tempDir);
+          return tempDir;
+        },
+      );
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({
+              name: 'gemini-archive-extension',
+              version: '1.0.0',
+            }),
+          );
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: archivePath,
+          type: 'local',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('gemini-archive-extension');
+      expect(tempDirs).toHaveLength(2);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+      expect(fs.existsSync(tempDirs[1])).toBe(false);
+      expect(
+        fs.existsSync(
+          path.join(
+            userExtensionsDir,
+            'gemini-archive-extension',
+            EXTENSIONS_CONFIG_FILENAME,
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it('should install an extension from an archive URL', async () => {
+      mockDownloadFromArchiveUrl.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          writeExtractedExtension(destination, 'archive-url-extension');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: 'https://example.com/archive-extension.zip',
+          type: 'archive-url',
+        },
+        async () => {},
+      );
+
+      expect(mockDownloadFromArchiveUrl).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: 'https://example.com/archive-extension.zip',
+          type: 'archive-url',
+        }),
+        expect.any(String),
+      );
+      expect(extension.name).toBe('archive-url-extension');
+      expect(extension.installMetadata).toMatchObject({
+        source: 'https://example.com/archive-extension.zip',
+        type: 'archive-url',
+      });
+    });
+
+    it('should clean up the temp dir when archive URL download fails', async () => {
+      let tempDir: string | undefined;
+      mockDownloadFromArchiveUrl.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          tempDir = destination;
+          throw new Error('download failed');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          {
+            source: 'https://example.com/archive-extension.zip',
+            type: 'archive-url',
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow('download failed');
+
+      expect(tempDir).toBeDefined();
+      expect(fs.existsSync(tempDir!)).toBe(false);
+    });
+
+    it('should clean up the temp dir when local archive extraction fails', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      let tempDir: string | undefined;
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          tempDir = destination;
+          throw new Error('extract failed');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          {
+            source: archivePath,
+            type: 'local',
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow('extract failed');
+
+      expect(tempDir).toBeDefined();
+      expect(fs.existsSync(tempDir!)).toBe(false);
+    });
+  });
 
   describe('loadExtension', () => {
     it('should include extension path in loaded extension', async () => {
@@ -310,6 +496,196 @@ describe('extension tests', () => {
       expect(extensions[0].config.mcpServers?.['test-server']?.trust).toBe(
         true,
       );
+    });
+
+    it('should only load explicitly named extensions when refreshCache is filtered', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext2',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache({ names: ['ext2'] });
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].name).toBe('ext2');
+    });
+
+    describe('command discovery', () => {
+      it('should discover .md command files', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'md-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'greet.md'), 'Hello!');
+        fs.writeFileSync(path.join(commandsDir, 'farewell.md'), 'Bye!');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find((e) => e.config.name === 'md-commands-ext');
+        expect(ext?.commands).toEqual(
+          expect.arrayContaining(['greet', 'farewell']),
+        );
+        expect(ext?.commands).toHaveLength(2);
+      });
+
+      it('should discover .toml command files', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'toml-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(commandsDir, 'caveman.toml'),
+          'prompt = "Talk like caveman"\ndescription = "Caveman mode"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find(
+          (e) => e.config.name === 'toml-commands-ext',
+        );
+        expect(ext?.commands).toEqual(['caveman']);
+      });
+
+      it('should discover both .md and .toml command files', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'mixed-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'greet.md'), 'Hello!');
+        fs.writeFileSync(
+          path.join(commandsDir, 'caveman.toml'),
+          'prompt = "Talk like caveman"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find(
+          (e) => e.config.name === 'mixed-commands-ext',
+        );
+        expect(ext?.commands).toEqual(
+          expect.arrayContaining(['greet', 'caveman']),
+        );
+        expect(ext?.commands).toHaveLength(2);
+      });
+
+      it('should list both entries when .md and .toml exist for same command name', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'dedup-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'greet.md'), 'Hello!');
+        fs.writeFileSync(
+          path.join(commandsDir, 'greet.toml'),
+          'prompt = "Hello!"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find(
+          (e) => e.config.name === 'dedup-commands-ext',
+        );
+        // No dedup at discovery level — both entries surface so the consent
+        // UI shows the true count; downstream CommandService handles conflicts.
+        expect(ext?.commands).toEqual(['greet', 'greet']);
+      });
+
+      it('should discover nested .toml command files with colon-separated names', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'nested-toml-ext',
+          version: '1.0.0',
+        });
+        const nestedDir = path.join(extDir, 'commands', 'caveman');
+        fs.mkdirSync(nestedDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(nestedDir, 'intensity.toml'),
+          'prompt = "Switch intensity"',
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find((e) => e.config.name === 'nested-toml-ext');
+        expect(ext?.commands).toEqual(['caveman:intensity']);
+      });
+
+      it('should replace colons in path segments with underscores', async () => {
+        if (process.platform !== 'linux') return; // colons forbidden in filenames on macOS/Windows
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'colon-name-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'foo:bar.md'), 'content');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+        const ext = extensions.find((e) => e.config.name === 'colon-name-ext');
+        expect(ext?.commands).toEqual(['foo_bar']);
+      });
+
+      it('should return empty commands when commands directory does not exist', async () => {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'no-cmd-dir-ext',
+          version: '1.0.0',
+        });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+        const ext = extensions.find((e) => e.config.name === 'no-cmd-dir-ext');
+        expect(ext?.commands).toEqual([]);
+      });
+
+      it('should return empty commands when no .md or .toml files exist', async () => {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'no-commands-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'readme.txt'), 'not a cmd');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        const ext = extensions.find((e) => e.config.name === 'no-commands-ext');
+        expect(ext?.commands).toEqual([]);
+      });
     });
   });
 
@@ -755,6 +1131,343 @@ describe('extension tests', () => {
         const id = getExtensionId(config, metadata);
         expect(id).toBe(hashValue('https://github.com/owner/repo'));
       });
+
+      it('should use source as-is for non-GitHub git URLs (e.g., GitLab)', () => {
+        // For non-GitHub git servers, fall back to using the source URL directly
+        const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
+        const metadata = {
+          type: 'git' as const,
+          source: 'https://gitlab.company.com/team/extension-repo',
+        };
+
+        const id = getExtensionId(config, metadata);
+        expect(id).toBe(
+          hashValue('https://gitlab.company.com/team/extension-repo'),
+        );
+      });
+    });
+  });
+
+  describe('hooks loading and processing', () => {
+    it('should load hooks from qwen-extension.json', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'hooks-extension');
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create qwen-extension.json with hooks
+      const configWithHooks = {
+        name: 'hooks-extension',
+        version: '1.0.0',
+        hooks: {
+          PreToolUse: [
+            {
+              description: 'Run before tool start',
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'echo "hello"',
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithHooks),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe('echo "hello"');
+    });
+
+    it('should load hooks from hooks/hooks.json when not in main config', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-from-file-extension',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create qwen-extension.json without hooks
+      const configWithoutHooks = {
+        name: 'hooks-from-file-extension',
+        version: '1.0.0',
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithoutHooks),
+      );
+
+      // Create hooks directory and hooks.json
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+
+      const hooksJson = {
+        PostToolUse: [
+          {
+            description: 'Run after install',
+            hooks: [
+              {
+                type: 'command',
+                command: `echo "installed in ${extensionDir}"`,
+              },
+            ],
+          },
+        ],
+      };
+
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify(hooksJson),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PostToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PostToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe(`echo "installed in ${extensionDir}"`);
+    });
+
+    it('should substitute ${CLAUDE_PLUGIN_ROOT} variable in hooks', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'hooks-var-extension');
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create qwen-extension.json with hooks using ${CLAUDE_PLUGIN_ROOT}
+      const configWithHooks = {
+        name: 'hooks-var-extension',
+        version: '1.0.0',
+        hooks: {
+          PreToolUse: [
+            {
+              description: 'Run before start with var',
+              hooks: [
+                {
+                  type: 'command',
+                  command: '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithHooks),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe(`${extensionDir}/scripts/setup.sh`);
+    });
+
+    it('should load hooks from config.hooks string path', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-from-config-path',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create custom hooks directory and hooks file
+      const customHooksDir = path.join(extensionDir, 'custom-hooks');
+      fs.mkdirSync(customHooksDir, { recursive: true });
+
+      const hooksJson = {
+        PreToolUse: [
+          {
+            description: 'Run from custom path',
+            hooks: [
+              {
+                type: 'command',
+                command: 'echo "custom hooks path"',
+              },
+            ],
+          },
+        ],
+      };
+
+      fs.writeFileSync(
+        path.join(customHooksDir, 'hooks.json'),
+        JSON.stringify(hooksJson),
+      );
+
+      // Create qwen-extension.json with hooks as string path
+      const configWithHooksPath = {
+        name: 'hooks-from-config-path',
+        version: '1.0.0',
+        hooks: 'custom-hooks/hooks.json',
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithHooksPath),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe('echo "custom hooks path"');
+    });
+
+    it('should prefer config.hooks string path over hooks/hooks.json', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-prefer-config-path',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create hooks/hooks.json
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              description: 'From hooks directory',
+              hooks: [{ type: 'command', command: 'echo "hooks dir"' }],
+            },
+          ],
+        }),
+      );
+
+      // Create custom hooks file
+      const customHooksDir = path.join(extensionDir, 'custom');
+      fs.mkdirSync(customHooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(customHooksDir, 'my-hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              description: 'From config path',
+              hooks: [{ type: 'command', command: 'echo "config path"' }],
+            },
+          ],
+        }),
+      );
+
+      // Create qwen-extension.json with hooks as string path
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'hooks-prefer-config-path',
+          version: '1.0.0',
+          hooks: 'custom/my-hooks.json',
+        }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe('echo "config path"');
+    });
+
+    it('should substitute ${CLAUDE_PLUGIN_ROOT} in hooks file from config.hooks string path', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-var-from-config-path',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      const customHooksDir = path.join(extensionDir, 'my-hooks');
+      fs.mkdirSync(customHooksDir, { recursive: true });
+
+      const hooksJson = {
+        PreToolUse: [
+          {
+            description: 'Run with variable',
+            hooks: [
+              {
+                type: 'command',
+                command: '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
+              },
+            ],
+          },
+        ],
+      };
+
+      fs.writeFileSync(
+        path.join(customHooksDir, 'hooks.json'),
+        JSON.stringify(hooksJson),
+      );
+
+      const configWithHooksPath = {
+        name: 'hooks-var-from-config-path',
+        version: '1.0.0',
+        hooks: 'my-hooks/hooks.json',
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithHooksPath),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe(`${extensionDir}/scripts/setup.sh`);
     });
   });
 });

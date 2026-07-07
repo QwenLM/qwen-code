@@ -16,6 +16,7 @@ import type {
   PlanEntryStatus,
 } from './shared/index.js';
 import { CheckboxDisplay } from './CheckboxDisplay.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 /**
  * Custom container for UpdatedPlanToolCall with specific styling
@@ -65,6 +66,7 @@ const mapToolStatusToBullet = (
     case 'failed':
       return 'error';
     case 'in_progress':
+    case 'cancelled':
       return 'warning';
     case 'pending':
       return 'loading';
@@ -130,7 +132,7 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
   if (errors.length > 0) {
     return (
       <PlanToolCallContainer
-        label="TodoWrite"
+        label="TodoList"
         status="error"
         isFirst={isFirst}
         isLast={isLast}
@@ -141,7 +143,10 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
   }
 
   const entries = parsePlanEntries(textOutputs);
-  const label = safeTitle(toolCall.title) || 'TodoWrite';
+  const label = getToolDisplayLabel({
+    kind: toolCall.kind,
+    title: safeTitle(toolCall.title),
+  });
 
   return (
     <PlanToolCallContainer

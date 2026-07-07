@@ -4,34 +4,42 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import {
-  DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
+  DASHSCOPE_PROXY_BASE_URL,
+  resolveRequestTimeout,
 } from '../constants.js';
 import type {
-  OpenAICompatibleProvider,
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
-import { tokenLimit } from '../../tokenLimits.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
+import { DefaultOpenAICompatibleProvider } from './default.js';
 
-export class DashScopeOpenAICompatibleProvider
-  implements OpenAICompatibleProvider
-{
-  private contentGeneratorConfig: ContentGeneratorConfig;
-  private cliConfig: Config;
+const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
+export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
     cliConfig: Config,
   ) {
-    this.cliConfig = cliConfig;
-    this.contentGeneratorConfig = contentGeneratorConfig;
+    super(contentGeneratorConfig, cliConfig);
   }
 
+  /**
+   * Determines whether to use the DashScope-compatible provider.
+   * Covers dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com,
+   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
+   * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
+   * and proxy matches.
+   *
+   * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
+   * DashScope-compatible endpoint by design. Keep this generic and avoid
+   * embedding individual private gateway hostnames in provider detection.
+   */
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
@@ -40,11 +48,75 @@ export class DashScopeOpenAICompatibleProvider
     if (authType === AuthType.QWEN_OAUTH) return true;
     if (!baseUrl) return true;
 
-    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
-    return /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
+    const normalizedBaseUrl = baseUrl.endsWith('/')
+      ? baseUrl.slice(0, -1)
+      : baseUrl;
+
+    // Parse the URL and check hostname instead of regex to avoid ReDoS on
+    // attacker-controlled baseUrl and to reject path-only matches like
+    // https://evil.example/dashscope.aliyuncs.com/...
+    let hostname: string | null = null;
+    try {
+      hostname = new URL(normalizedBaseUrl).hostname.toLowerCase();
+    } catch {
+      hostname = null;
+    }
+
+    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com,
+    // dashscope-intl.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
+    const isDashscopeOrigin =
+      hostname !== null &&
+      (hostname === 'dashscope.aliyuncs.com' ||
+        hostname === 'dashscope-intl.aliyuncs.com' ||
+        hostname.endsWith('.dashscope.aliyuncs.com') ||
+        hostname.endsWith('.dashscope-intl.aliyuncs.com'));
+
+    const isTokenPlanOrigin =
+      hostname !== null &&
+      hostname.startsWith('token-plan.') &&
+      hostname.endsWith('.maas.aliyuncs.com');
+
+    // Internal Alibaba domains proxying to DashScope-compatible APIs.
+    // Covers *.alibaba-inc.com and *.aliyun-inc.com.
+    const isInternalOrigin =
+      hostname !== null &&
+      (hostname.endsWith('.alibaba-inc.com') ||
+        hostname.endsWith('.aliyun-inc.com'));
+
+    // Check if proxy is configured and matches
+    const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
+      ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
+      : DASHSCOPE_PROXY_BASE_URL;
+
+    const isProxyMatch = Boolean(
+      normalizedProxyUrl &&
+        normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
+    );
+
+    if (
+      normalizedProxyUrl &&
+      !isDashscopeOrigin &&
+      !isTokenPlanOrigin &&
+      !isInternalOrigin &&
+      !isProxyMatch
+    ) {
+      debugLogger.debug(
+        `DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match. DashScope headers/cache control will be skipped.`,
+      );
+    }
+
+    if (isInternalOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via internal origin: ${hostname}`,
+      );
+    }
+
+    return (
+      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
+    );
   }
 
-  buildHeaders(): Record<string, string | undefined> {
+  override buildHeaders(): Record<string, string | undefined> {
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
@@ -60,16 +132,17 @@ export class DashScopeOpenAICompatibleProvider
       : defaultHeaders;
   }
 
-  buildClient(): OpenAI {
+  override buildClient(): OpenAI {
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
@@ -98,15 +171,31 @@ export class DashScopeOpenAICompatibleProvider
    * @param userPromptId - Unique identifier for the user prompt for session tracking
    * @returns Configured request with DashScope-specific parameters applied
    */
-  buildRequest(
+  override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
     let tools = request.tools;
 
-    // Apply DashScope cache control if enabled (default is enabled).
-    if (this.shouldEnableCacheControl()) {
+    // glm-* models served via DashScope only parse structured "content parts"
+    // arrays when the request is in function-calling mode. A tool-less request
+    // (e.g. web_fetch's side-query: system + user, no tools, no tool messages)
+    // with array content has its prompt silently dropped server-side —
+    // prompt_tokens collapses and the model answers from an empty prompt. This
+    // is glm-specific; other DashScope models read array content fine. Caching
+    // is also moot for these one-shot side-queries, so for glm tool-less
+    // requests we skip cache control and collapse content to plain strings (the
+    // only form glm reliably reads here). Every other case keeps the existing
+    // cache-control path unchanged.
+    const flattenPlainTextForGlm =
+      this.isGlmModel(request.model) &&
+      !this.hasFunctionCallingContext(request);
+
+    if (flattenPlainTextForGlm) {
+      messages = this.flattenTextContent(messages);
+    } else if (this.shouldEnableCacheControl()) {
+      // Apply DashScope cache control if enabled (default is enabled).
       const { messages: updatedMessages, tools: updatedTools } =
         this.addDashScopeCacheControl(
           request,
@@ -116,31 +205,96 @@ export class DashScopeOpenAICompatibleProvider
       tools = updatedTools;
     }
 
-    // Apply output token limits based on model capabilities
-    // This ensures max_tokens doesn't exceed the model's maximum output limit
+    // Apply output token limits using parent class logic.
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
     const extraBody = this.contentGeneratorConfig.extra_body;
 
+    // When the user picks a reasoning effort (/effort), turn thinking on for
+    // qwen hybrid models. qwen has no per-tier `reasoning_effort` field yet, so
+    // the unified effort maps onto the on/off `enable_thinking` switch — extend
+    // this to a real tier mapping when qwen ships one. User extra_body wins
+    // (merged last); the disable path (reasoning: false) is handled upstream in
+    // the pipeline.
+    const enableThinkingFromEffort = this.shouldEnableThinkingFromEffort(
+      request.model,
+    );
+
     if (this.isVisionModel(request.model)) {
-      return {
+      // DashScope-exclusive fields not present in the OpenAI SDK types; spread
+      // through a loose record so they don't trip excess-property checks.
+      // Several vision models (e.g. qwen3.6-plus, qwen3.7-plus) are reasoning
+      // models that need `preserve_thinking` for multi-turn reasoning continuity.
+      const dashscopeExtras: Record<string, unknown> = {
+        vl_high_resolution_images: true,
+        preserve_thinking: true,
+        ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+      };
+      const visionResult: Record<string, unknown> = {
         ...requestWithTokenLimits,
         messages,
         ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
-        /* @ts-expect-error dashscope exclusive */
-        vl_high_resolution_images: true,
+        ...dashscopeExtras,
+      };
+      // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+      // `reasoning` object the pipeline injects from /effort. Drop it so we
+      // don't ship two competing knobs (mirrors deepseek.ts / zai.ts). User
+      // extra_body still wins (merged last).
+      if (enableThinkingFromEffort && 'reasoning' in visionResult) {
+        delete visionResult['reasoning'];
+      }
+      return {
+        ...visionResult,
         ...(extraBody ? extraBody : {}),
-      } as OpenAI.Chat.ChatCompletionCreateParams;
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
-    return {
+    // DashScope-exclusive fields not present in the OpenAI SDK types; user
+    // extra_body wins (merged last).
+    const dashscopeExtras: Record<string, unknown> = {
+      preserve_thinking: true,
+      ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+    };
+    const result: Record<string, unknown> = {
       ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      ...dashscopeExtras,
+    };
+    // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
+    // `reasoning` object the pipeline injects from /effort. Drop it so we don't
+    // ship two competing knobs (mirrors deepseek.ts / zai.ts). User extra_body
+    // still wins (merged last).
+    if (enableThinkingFromEffort && 'reasoning' in result) {
+      delete result['reasoning'];
+    }
+    return {
+      ...result,
       ...(extraBody ? extraBody : {}),
-    } as OpenAI.Chat.ChatCompletionCreateParams;
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  /**
+   * Whether to send `enable_thinking: true` because the user selected a
+   * reasoning effort. qwen's hybrid-thinking models expose thinking as the
+   * boolean `enable_thinking` rather than a tiered `reasoning_effort`, so the
+   * unified effort ladder collapses to on/off here. Gated to qwen-family wire
+   * models (mirroring the pipeline's disable gate) so the qwen-specific field
+   * never leaks to a non-qwen model sharing the DashScope endpoint.
+   */
+  private shouldEnableThinkingFromEffort(model: string | undefined): boolean {
+    const reasoning = this.contentGeneratorConfig.reasoning;
+    if (!reasoning || reasoning.effort === undefined) {
+      return false;
+    }
+    const wireModel = (
+      model ??
+      this.contentGeneratorConfig.model ??
+      ''
+    ).toLowerCase();
+    return wireModel.startsWith('qwen') || wireModel === 'coder-model';
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
@@ -155,10 +309,8 @@ export class DashScopeOpenAICompatibleProvider
     };
   }
 
-  getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      temperature: 0.3,
-    };
+  override getDefaultGenerationConfig(): GenerateContentConfig {
+    return {};
   }
 
   /**
@@ -279,6 +431,70 @@ export class DashScopeOpenAICompatibleProvider
   }
 
   /**
+   * True for glm-* models (e.g. glm-4.5, glm-5.2). Uses the same `^glm-` prefix
+   * convention as the GLM matchers in tokenLimits.ts, keeping model detection
+   * consistent across the codebase.
+   */
+  private isGlmModel(model: string | undefined): boolean {
+    return !!model && model.toLowerCase().startsWith('glm-');
+  }
+
+  /**
+   * Whether the request is in "function-calling mode" — it declares `tools`, or
+   * its history already contains a tool result / assistant tool_call. glm needs
+   * one of these present to parse structured content-part arrays.
+   */
+  private hasFunctionCallingContext(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+  ): boolean {
+    if (request.tools && request.tools.length > 0) {
+      return true;
+    }
+    return request.messages.some((message) => {
+      if (message.role === 'tool') {
+        return true;
+      }
+      if (message.role === 'assistant') {
+        const toolCalls = (message as { tool_calls?: unknown[] }).tool_calls;
+        return Array.isArray(toolCalls) && toolCalls.length > 0;
+      }
+      return false;
+    });
+  }
+
+  /**
+   * Collapse text-only content arrays back to a plain string, leaving
+   * media-bearing parts (image/audio/...) as arrays. Used for glm tool-less
+   * requests, where the array form would otherwise be dropped server-side.
+   * Multiple text parts are joined with a blank line, matching the DeepSeek
+   * provider's flattening (separate parts read as separate blocks).
+   * Only called on the flatten branch, which skips cache control, so no part
+   * here carries a `cache_control` marker.
+   */
+  private flattenTextContent(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return messages.map((message) => {
+      if (!('content' in message) || !Array.isArray(message.content)) {
+        return message;
+      }
+      const parts = message.content as Array<{ type?: string; text?: string }>;
+      if (parts.length === 0) {
+        return message;
+      }
+      const isTextOnly = parts.every((part) => part && part.type === 'text');
+      if (!isTextOnly) {
+        return message;
+      }
+      const text = parts.map((part) => part.text ?? '').join('\n\n');
+      return {
+        ...message,
+        content: text,
+      } as OpenAI.Chat.ChatCompletionMessageParam;
+    });
+  }
+
+  /**
    * Vision-capable model patterns.
    * Supports exact matches and prefix patterns for easy extension.
    */
@@ -288,6 +504,8 @@ export class DashScopeOpenAICompatibleProvider
     'qwen-vl', // qwen-vl-max, qwen-vl-max-latest, etc.
     'qwen3-vl-plus', // qwen3-vl-plus variants
     'qwen3.5-plus', // qwen3.5-plus (has built-in vision capabilities)
+    'qwen3.6-plus', // qwen3.6-plus (multimodal)
+    'qwen3.7-plus', // qwen3.7-plus (multimodal)
   ];
 
   private isVisionModel(model: string | undefined): boolean {
@@ -314,41 +532,6 @@ export class DashScopeOpenAICompatibleProvider
     }
 
     return false;
-  }
-
-  /**
-   * Apply output token limit to a request's max_tokens parameter.
-   *
-   * Ensures that existing max_tokens parameters don't exceed the model's maximum output
-   * token limit. Only modifies max_tokens when already present in the request.
-   *
-   * @param request - The chat completion request parameters
-   * @returns The request with max_tokens adjusted to respect the model's limits (if present)
-   */
-  private applyOutputTokenLimit<
-    T extends { max_tokens?: number | null; model: string },
-  >(request: T): T {
-    const currentMaxTokens = request.max_tokens;
-
-    // Only process if max_tokens is already present in the request
-    if (currentMaxTokens === undefined || currentMaxTokens === null) {
-      return request; // No max_tokens parameter, return unchanged
-    }
-
-    // Dynamically calculate output token limit using tokenLimit function
-    // This ensures we always use the latest model-specific limits without relying on user configuration
-    const modelLimit = tokenLimit(request.model, 'output');
-
-    // If max_tokens exceeds the model limit, cap it to the model's limit
-    if (currentMaxTokens > modelLimit) {
-      return {
-        ...request,
-        max_tokens: modelLimit,
-      };
-    }
-
-    // If max_tokens is within the limit, return the request unchanged
-    return request;
   }
 
   /**

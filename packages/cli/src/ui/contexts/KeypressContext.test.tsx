@@ -13,6 +13,7 @@ import {
   KeypressProvider,
   useKeypressContext,
   DRAG_COMPLETION_TIMEOUT_MS,
+  PASTE_IDLE_TIMEOUT_MS,
   // CSI_END_O,
   // SS3_END,
   SINGLE_QUOTE,
@@ -90,6 +91,127 @@ describe('KeypressContext - Kitty Protocol', () => {
   });
 
   describe('Enter key handling', () => {
+    it('preserves typed µ as printable text', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.pressKey({
+          name: 'µ',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'µ',
+        });
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'µ',
+          meta: false,
+          sequence: 'µ',
+        }),
+      );
+    });
+
+    it('rewrites macOS composed Option+t glyph "†" to Alt+t', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 't',
+            meta: true,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('leaves "†" untouched on non-macOS platforms', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: '',
+            meta: false,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('should recognize regular enter key (keycode 13) in kitty protocol', async () => {
       const keyHandler = vi.fn();
 
@@ -228,6 +350,79 @@ describe('KeypressContext - Kitty Protocol', () => {
           shift: false,
         }),
       );
+    });
+
+    it('Ctrl+C escapes a paste mode that never received its paste-end marker', async () => {
+      // Regression test for the "must restart terminal" lockup reported by
+      // a user on Ghostty + Sogou pinyin: bracketed-paste-start arrived,
+      // isPaste was set true, and paste-end never followed. Every
+      // subsequent keystroke — including Ctrl+C — was silently buffered.
+      // This test checks that Ctrl+C is always dispatched regardless of
+      // paste mode state.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Send ONLY the paste-start marker (no paste-end) — this puts the
+      // dispatcher into the broken state.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Ctrl+C should fire now, not get buffered into the stuck paste.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x03'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const ctrlCSeen = keyHandler.mock.calls.some(
+        (c) => c[0]?.ctrl === true && c[0]?.name === 'c',
+      );
+      expect(ctrlCSeen).toBe(true);
+    });
+
+    it('auto-recovers from a stuck paste mode via idle timeout', async () => {
+      // Automatic recovery safety net for the same "must restart terminal"
+      // lockup the Ctrl+C test above covers manually: if paste-end never
+      // arrives, an idle timeout should flush whatever is in the paste
+      // buffer and reset paste state so normal typing resumes automatically
+      // (without requiring the user to hit Ctrl+C or restart the terminal).
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~hello'));
+      });
+
+      // Wait long enough for the paste idle timeout to trigger recovery.
+      // Derived from the production constant so the test stays in sync
+      // if the timeout is ever tuned.
+      await new Promise((r) => setTimeout(r, PASTE_IDLE_TIMEOUT_MS + 200));
+
+      // A plain ASCII key after recovery must reach the handler.
+      act(() => {
+        stdin.emit('data', Buffer.from('z'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const zSeen = keyHandler.mock.calls.some(
+        (c) => c[0]?.sequence === 'z' && c[0]?.paste !== true,
+      );
+      expect(zSeen).toBe(true);
     });
 
     it('should not process kitty sequences when kitty protocol is disabled', async () => {
@@ -445,6 +640,117 @@ describe('KeypressContext - Kitty Protocol', () => {
             name: '',
           }),
         );
+      });
+
+      it('should not dispatch SGR mouse events embedded in pasted content', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // An SGR left-press (\x1b[<0;5;5M) hidden inside bracketed paste must
+        // be treated as paste content, never reconstructed into a real click —
+        // otherwise a pasted payload could select a dialog option or move the
+        // cursor without the user pressing anything.
+        const mouseSequence = '\x1b[<0;5;5M';
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          stdin.emit('data', Buffer.from(`\x1b[200~${mouseSequence}\x1b[201~`));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledTimes(1);
+        });
+
+        // No mouse event should ever be dispatched from pasted bytes.
+        expect(mouseHandler).not.toHaveBeenCalled();
+        // The bytes are delivered as a single paste event instead, carrying
+        // the SGR payload as literal content.
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ paste: true }),
+        );
+        expect(keyHandler.mock.calls[0][0].sequence).toContain('0;5;5');
+      });
+
+      it('should not dispatch SGR mouse events when a paste begins mid-reassembly', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // Race: a real mouse-move starts an SGR fragment (`\x1b[<…` with no
+        // terminating `M` yet), then a bracketed paste begins. paste-start must
+        // not be swallowed into the SGR buffer — otherwise `isPaste` stays false
+        // and an SGR left-press embedded in the pasted content gets
+        // reconstructed into a real click (e.g. auto-selecting a dialog option).
+        const partialMouseMove = '\x1b[<35;10;5';
+        const embeddedClick = '\x1b[<0;5;5M';
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          // Partial mouse-move fragment arrives first (no terminating M).
+          stdin.emit('data', Buffer.from(partialMouseMove));
+          // Then a paste carrying an embedded SGR left-press.
+          stdin.emit('data', Buffer.from(`\x1b[200~${embeddedClick}\x1b[201~`));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalled();
+        });
+
+        // No mouse event should ever be dispatched from the pasted bytes.
+        expect(mouseHandler).not.toHaveBeenCalled();
+        // The embedded SGR payload arrives as literal paste content.
+        const pasteCall = keyHandler.mock.calls.find((c) => c[0]?.paste);
+        expect(pasteCall).toBeDefined();
+        expect(pasteCall?.[0].sequence).toContain('0;5;5');
+      });
+
+      it('abandons a runaway SGR mouse buffer so later keystrokes still arrive', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // A malformed `\x1b[<` with no terminator (e.g. stray subprocess output)
+        // must not swallow input indefinitely: once the reassembly buffer passes
+        // the SGR length cap it is abandoned, so a following keystroke is
+        // delivered normally instead of being buffered and discarded.
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          // Start SGR reassembly, then feed long garbage without a terminator
+          // to overflow the cap, followed by a plain 'a'.
+          stdin.emit('data', Buffer.from('\x1b[<'));
+          stdin.emit('data', Buffer.from('1'.repeat(60)));
+          stdin.emit('data', Buffer.from('a'));
+        });
+
+        await waitFor(() => {
+          expect(
+            keyHandler.mock.calls.some((c) => c[0]?.sequence === 'a'),
+          ).toBe(true);
+        });
+        // The garbage never reconstructs into a real mouse event.
+        expect(mouseHandler).not.toHaveBeenCalled();
       });
 
       it('should handle empty paste sequence', async () => {
@@ -883,6 +1189,63 @@ describe('KeypressContext - Kitty Protocol', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should keep a literal tab key as a non-paste keypress', () => {
+      vi.useFakeTimers();
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      try {
+        act(() => {
+          stdin.emit('data', Buffer.from('\t'));
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'tab',
+            sequence: '\t',
+            paste: false,
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should mark single-line tabbed raw chunks as paste', async () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('first\tsecond'));
+      });
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledTimes(1);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: 'first\tsecond',
+          paste: true,
+        }),
+      );
     });
 
     it('should concatenate new data and reset timeout', () => {
@@ -1367,6 +1730,75 @@ describe('KeypressContext - Kitty Protocol', () => {
         }),
       );
     });
+
+    it('drops unsupported Kitty CSI-u keys without blocking later input', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[57358u`)); // CAPS_LOCK
+      act(() =>
+        stdin.pressKey({
+          name: 'a',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'a',
+        }),
+      );
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'a',
+          sequence: 'a',
+        }),
+      );
+    });
+
+    it('recovers plain text that arrives in the same chunk after an unsupported CSI-u key', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() =>
+        stdin.pressKey({
+          name: '',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b[57358ua',
+        }),
+      );
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'a',
+          sequence: 'a',
+          kittyProtocol: true,
+        }),
+      );
+    });
+
+    it('drops unsupported CSI-u variants with event metadata and keeps parsing', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[57358;1:1u\x1b[100u`));
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'd',
+          sequence: 'd',
+          kittyProtocol: true,
+        }),
+      );
+    });
   });
 
   describe('Kitty keypad private-use keys', () => {
@@ -1570,7 +2002,7 @@ describe('Drag and Drop Handling', () => {
   });
 
   describe('drag start by quotes', () => {
-    it('should start collecting when single quote arrives and not broadcast immediately', async () => {
+    it('should broadcast single quote immediately without lag', async () => {
       const keyHandler = vi.fn();
 
       const { result } = renderHook(() => useKeypressContext(), { wrapper });
@@ -1590,10 +2022,17 @@ describe('Drag and Drop Handling', () => {
         });
       });
 
-      expect(keyHandler).not.toHaveBeenCalled();
+      // Quote should be broadcast immediately without any delay
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sequence: SINGLE_QUOTE,
+          paste: false,
+        }),
+      );
     });
 
-    it('should start collecting when double quote arrives and not broadcast immediately', async () => {
+    it('should broadcast double quote immediately without lag', async () => {
       const keyHandler = vi.fn();
 
       const { result } = renderHook(() => useKeypressContext(), { wrapper });
@@ -1613,12 +2052,19 @@ describe('Drag and Drop Handling', () => {
         });
       });
 
-      expect(keyHandler).not.toHaveBeenCalled();
+      // Quote should be broadcast immediately without any delay
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sequence: DOUBLE_QUOTE,
+          paste: false,
+        }),
+      );
     });
   });
 
   describe('drag collection and completion', () => {
-    it('should collect single character inputs during drag mode', async () => {
+    it('should broadcast all characters immediately (no quote-based drag detection)', async () => {
       const keyHandler = vi.fn();
 
       const { result } = renderHook(() => useKeypressContext(), { wrapper });
@@ -1627,7 +2073,7 @@ describe('Drag and Drop Handling', () => {
         result.current.subscribe(keyHandler);
       });
 
-      // Start by single quote
+      // Send quote
       act(() => {
         stdin.pressKey({
           name: undefined,
@@ -1639,7 +2085,9 @@ describe('Drag and Drop Handling', () => {
         });
       });
 
-      // Send single character
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+
+      // Send path characters - all should be broadcast immediately
       act(() => {
         stdin.pressKey({
           name: undefined,
@@ -1647,50 +2095,10 @@ describe('Drag and Drop Handling', () => {
           meta: false,
           shift: false,
           paste: false,
-          sequence: 'a',
+          sequence: '/',
         });
       });
 
-      // Character should not be immediately broadcast
-      expect(keyHandler).not.toHaveBeenCalled();
-
-      // Fast-forward to completion timeout
-      act(() => {
-        vi.advanceTimersByTime(DRAG_COMPLETION_TIMEOUT_MS + 10);
-      });
-
-      // Should broadcast the collected path as paste (includes starting quote)
-      expect(keyHandler).toHaveBeenCalledWith(
-        expect.objectContaining({
-          name: '',
-          paste: true,
-          sequence: `${SINGLE_QUOTE}a`,
-        }),
-      );
-    });
-
-    it('should collect multiple characters and complete on timeout', async () => {
-      const keyHandler = vi.fn();
-
-      const { result } = renderHook(() => useKeypressContext(), { wrapper });
-
-      act(() => {
-        result.current.subscribe(keyHandler);
-      });
-
-      // Start by single quote
-      act(() => {
-        stdin.pressKey({
-          name: undefined,
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-          sequence: SINGLE_QUOTE,
-        });
-      });
-
-      // Send multiple characters
       act(() => {
         stdin.pressKey({
           name: undefined,
@@ -1735,22 +2143,16 @@ describe('Drag and Drop Handling', () => {
         });
       });
 
-      // Characters should not be immediately broadcast
-      expect(keyHandler).not.toHaveBeenCalled();
+      // All characters should be broadcast immediately
+      expect(keyHandler).toHaveBeenCalledTimes(6);
 
-      // Fast-forward to completion timeout
+      // Fast-forward timeout - should not trigger any additional broadcasts
       act(() => {
         vi.advanceTimersByTime(DRAG_COMPLETION_TIMEOUT_MS + 10);
       });
 
-      // Should broadcast the collected path as paste (includes starting quote)
-      expect(keyHandler).toHaveBeenCalledWith(
-        expect.objectContaining({
-          name: '',
-          paste: true,
-          sequence: `${SINGLE_QUOTE}path`,
-        }),
-      );
+      // Still 6 broadcasts - no drag detection
+      expect(keyHandler).toHaveBeenCalledTimes(6);
     });
   });
 });

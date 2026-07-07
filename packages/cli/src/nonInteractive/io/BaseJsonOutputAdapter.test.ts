@@ -10,7 +10,7 @@ import {
   type Config,
   type ServerGeminiStreamEvent,
   type ToolCallRequestInfo,
-  type TaskResultDisplay,
+  type AgentResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
@@ -144,7 +144,7 @@ class TestJsonOutputAdapter extends BaseJsonOutputAdapter {
 
   exposeCreateSubagentToolUseBlock(
     state: MessageState,
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ) {
     return this.createSubagentToolUseBlock(state, toolCall, parentToolUseId);
@@ -1244,6 +1244,70 @@ describe('BaseJsonOutputAdapter', () => {
         expect(result.result).toBe('');
       }
     });
+
+    it('includes structured_result and JSON-stringifies result when structuredResult is provided', () => {
+      const payload = { summary: 'hi', score: 42 };
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+        structuredResult: payload,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      if (!result.is_error) {
+        expect(result.result).toBe(JSON.stringify(payload));
+        expect(
+          (result as unknown as { structured_result?: unknown })
+            .structured_result,
+        ).toEqual(payload);
+      }
+    });
+
+    it('omits structured_result when structuredResult is undefined (back-compat)', () => {
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      expect(
+        (result as unknown as { structured_result?: unknown })
+          .structured_result,
+      ).toBeUndefined();
+    });
+
+    it('emits structured_result=null when the field is explicitly present but undefined', () => {
+      // runNonInteractive sets `structuredResult: undefined` when the
+      // model called structured_output with no args under an empty
+      // schema (`{}`). The previous `!== undefined` guard collapsed
+      // "absent" with "submitted-as-undefined", silently dropping the
+      // field and falling back to the free-text result. Track presence
+      // by key existence and normalize undefined to null so both
+      // `result` and `structured_result` render as JSON-safe values.
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+        structuredResult: undefined,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      if (!result.is_error) {
+        expect(result.result).toBe('null');
+      }
+      expect(
+        (result as unknown as { structured_result?: unknown })
+          .structured_result,
+      ).toBeNull();
+    });
   });
 
   describe('startSubagentAssistantMessage', () => {
@@ -1314,7 +1378,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should process subagent tool call', () => {
       const parentToolUseId = 'parent-tool-1';
       adapter.startSubagentAssistantMessage(parentToolUseId);
-      const toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number] = {
+      const toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number] = {
         callId: 'tool-1',
         name: 'test_tool',
         args: { param: 'value' },
@@ -1346,7 +1410,7 @@ describe('BaseJsonOutputAdapter', () => {
       const state = adapter.exposeGetMessageState(parentToolUseId);
       adapter.exposeAppendText(state, 'Text', parentToolUseId);
 
-      const toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number] = {
+      const toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number] = {
         callId: 'tool-1',
         name: 'test_tool',
         args: {},
@@ -1367,7 +1431,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should create tool_use block for subagent', () => {
       const state = adapter.exposeCreateMessageState();
       adapter.startAssistantMessage();
-      const toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number] = {
+      const toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number] = {
         callId: 'tool-1',
         name: 'test_tool',
         args: { param: 'value' },

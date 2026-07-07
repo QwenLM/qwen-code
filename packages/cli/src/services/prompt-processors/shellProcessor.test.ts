@@ -19,6 +19,19 @@ import type { PromptPipelineContent } from './types.js';
 // mirroring the logic in the actual `escapeShellArg` implementation.
 function getExpectedEscapedArgForPlatform(arg: string): string {
   if (os.platform() === 'win32') {
+    // Detect Git Bash / MSYS2 / MinTTY environments (same logic as getShellConfiguration)
+    const msystem = process.env['MSYSTEM'];
+    const term = process.env['TERM'] || '';
+    const isGitBash =
+      msystem?.startsWith('MINGW') ||
+      msystem?.startsWith('MSYS') ||
+      term.includes('msys') ||
+      term.includes('cygwin');
+
+    if (isGitBash) {
+      return quote([arg]);
+    }
+
     const comSpec = (process.env['ComSpec'] || 'cmd.exe').toLowerCase();
     const isPowerShell =
       comSpec.endsWith('powershell.exe') || comSpec.endsWith('pwsh.exe');
@@ -72,7 +85,9 @@ describe('ShellProcessor', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
       getShellExecutionConfig: vi.fn().mockReturnValue({}),
-      getAllowedTools: vi.fn().mockReturnValue([]),
+      getPermissionsAllow: vi.fn().mockReturnValue([]),
+      // Default: no permission manager (tests that need one set it explicitly)
+      getPermissionManager: vi.fn().mockReturnValue(null),
     };
 
     context = createMockCommandContext({
@@ -206,9 +221,11 @@ describe('ShellProcessor', () => {
       allAllowed: false,
       disallowedCommands: ['rm -rf /'],
     });
-    (mockConfig.getAllowedTools as Mock).mockReturnValue([
-      'ShellTool(rm -rf /)',
-    ]);
+    // Simulate allowedTools being pre-merged into permissionsAllow by Config,
+    // so PermissionManager returns 'allow' for this command.
+    (mockConfig.getPermissionManager as Mock).mockReturnValue({
+      isCommandAllowed: (_cmd: string) => 'allow',
+    });
     mockShellExecute.mockReturnValue({
       result: Promise.resolve({ ...SUCCESS_RESULT, output: 'deleted' }),
     });

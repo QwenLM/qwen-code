@@ -498,6 +498,20 @@ export class TerminalCapture {
     // 2. Wait for xterm.js rendering to complete
     await this.sleep(150);
 
+    // 2b. Anchor the viewport to the live bottom. xterm.js does not re-scroll
+    //     to the latest output once the viewport has drifted up — which happens
+    //     after an idle period or a full-screen repaint (e.g. the agent-team
+    //     leader goes idle waiting for teammate reports, then repaints a long
+    //     summary). Without this, a plain viewport screenshot can show stale
+    //     scrollback (the banner / start of the session) instead of the current
+    //     state. Mirrors captureFull's scrollToTop().
+    await this.page.evaluate(() => {
+      const W = window as unknown as Record<string, unknown>;
+      const term = W['term'] as { scrollToBottom?: () => void } | undefined;
+      term?.scrollToBottom?.();
+    });
+    await this.sleep(50);
+
     // 3. Prepare output directory
     const dir = outputDir ?? this.outputDir;
     mkdirSync(dir, { recursive: true });
@@ -638,6 +652,46 @@ export class TerminalCapture {
    */
   getRawOutput(): string {
     return this.rawOutput;
+  }
+
+  /**
+   * Get the current rendered terminal screen text from xterm.js.
+   *
+   * Unlike getOutput() which returns the accumulated raw PTY stream (with
+   * duplicates from Ink TUI redraws), this returns the actual screen content
+   * as rendered by xterm.js — what a user would see right now.
+   *
+   * Includes scrollback buffer content.
+   */
+  async getScreenText(): Promise<string> {
+    if (!this.page) throw new Error('Not initialized');
+    await this.flush();
+    return this.page.evaluate(() => {
+      const W = window as unknown as Record<string, unknown>;
+      const term = W['term'] as {
+        buffer: {
+          active: {
+            length: number;
+            getLine: (
+              i: number,
+            ) =>
+              | { translateToString: (trimRight?: boolean) => string }
+              | undefined;
+          };
+        };
+      };
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        lines.push(line ? line.translateToString(true) : '');
+      }
+      // Trim trailing empty lines
+      while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+        lines.pop();
+      }
+      return lines.join('\n');
+    });
   }
 
   // ── Cleanup ──────────────────────────────

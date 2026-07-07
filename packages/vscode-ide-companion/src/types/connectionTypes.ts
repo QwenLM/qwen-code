@@ -27,7 +27,7 @@ export interface AcpConnectionCallbacks {
     optionId: string;
   }>;
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void;
-  onEndTurn: (reason?: string) => void;
+  onEndTurn: (reason?: string, source?: string) => void;
   onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
     optionId: string;
     answers?: Record<string, string>;

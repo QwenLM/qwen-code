@@ -4,7 +4,7 @@ exports[`DescriptiveRadioButtonSelect > should render correctly with custom prop
 "▲
   1. Foo Title
      This is Foo.
-● 2. Bar Title
+› 2. Bar Title
      This is Bar.
   3. Baz Title
      This is Baz.
@@ -12,7 +12,7 @@ exports[`DescriptiveRadioButtonSelect > should render correctly with custom prop
 `;
 
 exports[`DescriptiveRadioButtonSelect > should render correctly with default props 1`] = `
-"● Foo Title
+"› Foo Title
   This is Foo.
   Bar Title
   This is Bar.

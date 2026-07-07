@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
+  ActiveGoal,
   SubagentConfig,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
@@ -201,6 +202,7 @@ export interface MessageStartStreamEvent {
     id: string;
     role: 'assistant';
     model: string;
+    content: [];
   };
 }
 
@@ -245,13 +247,19 @@ export interface ToolProgressStreamEvent {
   content: McpToolProgressData;
 }
 
+export interface ActiveGoalStreamEvent {
+  type: 'active_goal';
+  active_goal: ActiveGoal | null;
+}
+
 export type StreamEvent =
   | MessageStartStreamEvent
   | ContentBlockStartEvent
   | ContentBlockDeltaEvent
   | ContentBlockStopEvent
   | MessageStopStreamEvent
-  | ToolProgressStreamEvent;
+  | ToolProgressStreamEvent
+  | ActiveGoalStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';
@@ -261,7 +269,7 @@ export interface CLIPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'yolo';
+export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Permission suggestion for tool use requests
@@ -294,6 +302,15 @@ export interface HookCallbackResult {
 
 export interface CLIControlInterruptRequest {
   subtype: 'interrupt';
+}
+
+/**
+ * Continue the most recent unfinished turn from existing history without
+ * sending a new user message. The reply reports whether a continuation was
+ * accepted; the resumed turn's output then flows as regular stream messages.
+ */
+export interface CLIControlContinueLastTurnRequest {
+  subtype: 'continue_last_turn';
 }
 
 export interface CLIControlPermissionRequest {
@@ -356,6 +373,9 @@ export interface CLIMcpServerConfig {
 export interface CLIControlInitializeRequest {
   subtype: 'initialize';
   hooks?: HookRegistration[] | null;
+  timeout?: {
+    canUseTool?: number;
+  };
   /**
    * SDK MCP servers config
    * These are MCP servers running in the SDK process, connected via control plane.
@@ -406,8 +426,14 @@ export interface CLIControlSupportedCommandsRequest {
   subtype: 'supported_commands';
 }
 
+export interface CLIControlGetContextUsageRequest {
+  subtype: 'get_context_usage';
+  show_details?: boolean;
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
+  | CLIControlContinueLastTurnRequest
   | CLIControlPermissionRequest
   | CLIControlInitializeRequest
   | CLIControlSetPermissionModeRequest
@@ -415,7 +441,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
-  | CLIControlSupportedCommandsRequest;
+  | CLIControlSupportedCommandsRequest
+  | CLIControlGetContextUsageRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';

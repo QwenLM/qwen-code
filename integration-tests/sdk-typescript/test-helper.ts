@@ -11,7 +11,7 @@
  */
 
 import { mkdir, writeFile, readFile, rm, chmod } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import type {
   SDKMessage,
@@ -121,6 +121,9 @@ export class SDKTestHelper {
       throw new Error('Test directory not initialized. Call setup() first.');
     }
     const filePath = join(this.testDir, fileName);
+    // Ensure parent directories exist before writing the file
+    const parentDir = dirname(filePath);
+    await mkdir(parentDir, { recursive: true });
     await writeFile(filePath, content, 'utf-8');
     return filePath;
   }

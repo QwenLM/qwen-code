@@ -35,6 +35,7 @@ describe('executeToolCall', () => {
 
     mockToolRegistry = {
       getTool: vi.fn(),
+      ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
       getAllToolNames: vi.fn(),
     } as unknown as ToolRegistry;
 
@@ -62,6 +63,16 @@ describe('executeToolCall', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     abortController = new AbortController();

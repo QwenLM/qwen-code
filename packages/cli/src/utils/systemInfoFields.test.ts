@@ -21,6 +21,7 @@ describe('getAboutSystemInfoFields', () => {
       modelVersion: 'test-model',
       selectedAuthType: 'test-auth',
       ideClient: 'test-ide',
+      lspStatus: 'enabled, 1/1 ready',
       sessionId: 'test-session-id',
       memoryUsage: '100 MB',
       baseUrl: undefined,
@@ -35,9 +36,11 @@ describe('getAboutSystemInfoFields', () => {
       'Qwen Code',
       'Runtime',
       'IDE Client',
+      'LSP',
       'OS',
       'Auth',
       'Model',
+      'Fast Model',
       'Session ID',
       'Sandbox',
       'Proxy',
@@ -48,6 +51,9 @@ describe('getAboutSystemInfoFields', () => {
       labels.indexOf('Sandbox'),
     );
     expect(labels.indexOf('Session ID')).toBeLessThan(labels.indexOf('Proxy'));
+
+    const lspField = fields.find((f) => f.label === 'LSP');
+    expect(lspField?.value).toBe('enabled, 1/1 ready');
 
     const proxyField = fields.find((f) => f.label === 'Proxy');
     expect(proxyField?.value).toBe('http://***:***@localhost:7890/');

@@ -40,6 +40,13 @@ export const AgentViewerStep = ({ selectedAgent }: AgentViewerStepProps) => {
           <Text>{toolsDisplay}</Text>
         </Box>
 
+        {agent.model && (
+          <Box>
+            <Text color={theme.text.primary}>{t('Model: ')}</Text>
+            <Text>{agent.model}</Text>
+          </Box>
+        )}
+
         {shouldShowColor(agent.color) && (
           <Box>
             <Text color={theme.text.primary}>{t('Color: ')}</Text>

@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { Storage } from '../../config/storage.js';
 
 import type {
   StartSessionEvent,
@@ -30,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
@@ -46,6 +48,10 @@ import type {
   RipgrepFallbackEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
+  HookCallEvent,
 } from '../types.js';
 import type {
   RumEvent,
@@ -62,6 +68,7 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
+import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -297,17 +304,29 @@ export class QwenLogger {
 
   readSourceInfo(): string {
     try {
-      const sourceJsonPath = path.join(os.homedir(), '.qwen', 'source.json');
-      if (fs.existsSync(sourceJsonPath)) {
-        const sourceJsonContent = fs.readFileSync(sourceJsonPath, 'utf8');
-        const sourceData = JSON.parse(sourceJsonContent);
-        if (
-          sourceData &&
-          typeof sourceData === 'object' &&
-          sourceData.source &&
-          sourceData.source !== 'unknown'
-        ) {
-          return sourceData.source;
+      const globalDir = Storage.getGlobalQwenDir();
+      const sourceJsonPath = path.join(globalDir, 'source.json');
+
+      // Also check legacy ~/.qwen/source.json when QWEN_HOME is set,
+      // since the installer writes to ~/.qwen/ regardless of the env var.
+      const legacyPath = path.join(os.homedir(), '.qwen', 'source.json');
+      const candidates =
+        path.normalize(sourceJsonPath) !== path.normalize(legacyPath)
+          ? [sourceJsonPath, legacyPath]
+          : [sourceJsonPath];
+
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          const sourceJsonContent = fs.readFileSync(candidate, 'utf8');
+          const sourceData = JSON.parse(sourceJsonContent);
+          if (
+            sourceData &&
+            typeof sourceData === 'object' &&
+            sourceData.source &&
+            sourceData.source !== 'unknown'
+          ) {
+            return sourceData.source;
+          }
         }
       }
     } catch (_error) {
@@ -468,6 +487,7 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+        ...(event.model ? { model: event.model } : {}),
       },
     });
 
@@ -593,6 +613,7 @@ export class QwenLogger {
       properties: {
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
     });
 
@@ -610,13 +631,13 @@ export class QwenLogger {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
       },
       snapshots: JSON.stringify({
         input_token_count: event.input_token_count,
         output_token_count: event.output_token_count,
         cached_content_token_count: event.cached_content_token_count,
         thoughts_token_count: event.thoughts_token_count,
-        tool_token_count: event.tool_token_count,
       }),
     });
 
@@ -630,6 +651,7 @@ export class QwenLogger {
         model: event.model,
         prompt_id: event.prompt_id,
         auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
       },
     });
 
@@ -642,12 +664,14 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 0,
-      message: event.error,
+      message: event.error_message,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        subagent_name: event.subagent_name,
+        error_message: event.error_message,
         error_type: event.error_type,
       },
     });
@@ -889,6 +913,7 @@ export class QwenLogger {
       properties: {
         skill_name: event.skill_name,
         success: event.success ? 1 : 0,
+        prompt_id: event.prompt_id,
       },
     });
 
@@ -936,12 +961,118 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
+  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  logApiRetryEvent(event: ApiRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'api_retry', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        attempt_number: event.attempt_number,
+        error_type: event.error_type ?? 'unknown',
+        status_code:
+          event.status_code !== undefined ? String(event.status_code) : '',
+        retry_delay_ms: event.retry_delay_ms,
+        subagent_name: event.subagent_name ?? '',
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // arena events
+  logArenaSessionStartedEvent(event: ArenaSessionStartedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_started', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        model_ids: JSON.stringify(event.model_ids),
+        task_length: event.task_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaAgentCompletedEvent(event: ArenaAgentCompletedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_agent_completed', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        agent_session_id: event.agent_session_id,
+        agent_model_id: event.agent_model_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        rounds: event.rounds,
+        total_tokens: event.total_tokens,
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        tool_calls: event.tool_calls,
+        successful_tool_calls: event.successful_tool_calls,
+        failed_tool_calls: event.failed_tool_calls,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaSessionEndedEvent(event: ArenaSessionEndedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_ended', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        display_backend: event.display_backend,
+        agent_count: event.agent_count,
+        completed_agents: event.completed_agents,
+        failed_agents: event.failed_agents,
+        cancelled_agents: event.cancelled_agents,
+        winner_model_id: event.winner_model_id,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  /**
+   * Log a hook call event
+   * Records hook execution telemetry for observability
+   */
+  logHookCallEvent(event: HookCallEvent): void {
+    // Sanitize hook name to remove potentially sensitive information
+    const sanitizedHookName = sanitizeHookName(event.hook_name);
+
+    const properties: Record<string, unknown> = {
+      hook_event_name: event.hook_event_name,
+      hook_type: event.hook_type,
+      hook_name: sanitizedHookName,
+      duration_ms: event.duration_ms,
+      success: event.success ? 1 : 0,
+      exit_code: event.exit_code,
+    };
+
+    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
+      properties['error'] = event.error;
+    }
+
+    const rumEvent = this.createActionEvent(
+      'hook',
+      `hook_call#${event.hook_event_name}`,
+      { properties },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   getProxyAgent() {
     const proxyUrl = this.config?.getProxy();
     if (!proxyUrl) return undefined;
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
-    if (proxyUrl.startsWith('http')) {
+    if (/^https?:\/\//i.test(proxyUrl)) {
       return new HttpsProxyAgent(proxyUrl);
     } else {
       throw new Error('Unsupported proxy type');

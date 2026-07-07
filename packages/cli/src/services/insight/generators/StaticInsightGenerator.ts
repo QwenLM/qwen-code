@@ -6,7 +6,6 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import os from 'os';
 import { DataProcessor } from './DataProcessor.js';
 import { TemplateRenderer } from './TemplateRenderer.js';
 import type {
@@ -14,7 +13,7 @@ import type {
   InsightProgressCallback,
 } from '../types/StaticInsightTypes.js';
 
-import { updateSymlink, type Config } from '@qwen-code/qwen-code-core';
+import { updateSymlink, Storage, type Config } from '@qwen-code/qwen-code-core';
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
@@ -27,7 +26,7 @@ export class StaticInsightGenerator {
 
   // Ensure the output directory exists
   private async ensureOutputDirectory(): Promise<string> {
-    const outputDir = path.join(os.homedir(), '.qwen', 'insights');
+    const outputDir = path.join(Storage.getRuntimeBaseDir(), 'insights');
     await fs.mkdir(outputDir, { recursive: true });
     return outputDir;
   }

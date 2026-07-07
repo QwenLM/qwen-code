@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,7 +12,13 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
+import type {
+  HookRegistryEntry,
+  SessionHookEntry,
+  HookEventName,
+} from '@qwen-code/qwen-code-core';
+import { supportsMatchers } from '../components/hooks/constants.js';
+import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 
 /**
  * Format hook source for display
@@ -20,23 +26,18 @@ import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
 function formatHookSource(source: string): string {
   switch (source) {
     case 'project':
-      return 'Project';
+      return t('Project');
     case 'user':
-      return 'User';
+      return t('User');
     case 'system':
-      return 'System';
+      return t('System');
     case 'extensions':
-      return 'Extension';
+      return t('Extension');
+    case 'session':
+      return t('Session (temporary)');
     default:
       return source;
   }
-}
-
-/**
- * Format hook status for display
- */
-function formatHookStatus(enabled: boolean): string {
-  return enabled ? '✓ Enabled' : '✗ Disabled';
 }
 
 const listCommand: SlashCommand = {
@@ -45,6 +46,7 @@ const listCommand: SlashCommand = {
     return t('List all configured hooks');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     _args: string,
@@ -70,40 +72,114 @@ const listCommand: SlashCommand = {
     }
 
     const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
+    const configHooks = registry.getAllHooks();
 
-    if (allHooks.length === 0) {
+    const sessionId = config.getSessionId();
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const sessionHooks = sessionId
+      ? sessionHooksManager.getAllSessionHooks(sessionId)
+      : [];
+
+    const totalHooks = configHooks.length + sessionHooks.length;
+
+    if (totalHooks === 0) {
       return {
         type: 'message',
         messageType: 'info',
         content: t(
-          'No hooks configured. Add hooks in your settings.json file.',
+          'No hooks configured. Add hooks in your settings.json file or invoke a skill with hooks.',
         ),
       };
     }
 
-    // Group hooks by event
-    const hooksByEvent = new Map<string, HookRegistryEntry[]>();
-    for (const hook of allHooks) {
-      const eventName = hook.eventName;
-      if (!hooksByEvent.has(eventName)) {
-        hooksByEvent.set(eventName, []);
-      }
-      hooksByEvent.get(eventName)!.push(hook);
+    interface FlattenedHook {
+      name: string;
+      source: string;
     }
 
-    let output = `**Configured Hooks (${allHooks.length} total)**\n\n`;
+    const hooksByEvent = new Map<string, Map<string, FlattenedHook[]>>();
 
-    for (const [eventName, hooks] of hooksByEvent) {
-      output += `### ${eventName}\n`;
-      for (const hook of hooks) {
-        const name = hook.config.name || hook.config.command || 'unnamed';
-        const source = formatHookSource(hook.source);
-        const status = formatHookStatus(hook.enabled);
-        const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
-        output += `- **${name}** [${source}] ${status}${matcher}\n`;
+    const addHook = (
+      eventName: string,
+      matcher: string,
+      hook: FlattenedHook,
+    ): void => {
+      const matcherKey = supportsMatchers(eventName as HookEventName)
+        ? matcher
+        : '*';
+      let matcherMap = hooksByEvent.get(eventName);
+      if (!matcherMap) {
+        matcherMap = new Map<string, FlattenedHook[]>();
+        hooksByEvent.set(eventName, matcherMap);
       }
-      output += '\n';
+      let bucket = matcherMap.get(matcherKey);
+      if (!bucket) {
+        bucket = [];
+        matcherMap.set(matcherKey, bucket);
+      }
+      bucket.push(hook);
+    };
+
+    const extractName = (config: {
+      type: string;
+      command?: string;
+      url?: string;
+      name?: string;
+    }): string =>
+      config.name ||
+      (config.type === 'command' ? config.command : undefined) ||
+      (config.type === 'http' ? config.url : undefined) ||
+      'unnamed';
+
+    for (const hook of configHooks) {
+      const configHook = hook as HookRegistryEntry;
+      const config = configHook.config as {
+        type: string;
+        command?: string;
+        url?: string;
+        name?: string;
+      };
+      addHook(configHook.eventName, normalizeMatcher(configHook.matcher), {
+        name: extractName(config),
+        source: formatHookSource(configHook.source),
+      });
+    }
+
+    for (const hook of sessionHooks) {
+      const sessionHook = hook as SessionHookEntry;
+      const config = sessionHook.config as {
+        type: string;
+        command?: string;
+        url?: string;
+        name?: string;
+      };
+      addHook(sessionHook.eventName, normalizeMatcher(sessionHook.matcher), {
+        name: extractName(config),
+        source: formatHookSource('session'),
+      });
+    }
+
+    let output = `**Configured Hooks (${totalHooks} total)**\n\n`;
+
+    for (const [eventName, matcherMap] of hooksByEvent) {
+      output += `### ${eventName}\n\n`;
+      const useMatchers = supportsMatchers(eventName as HookEventName);
+      if (useMatchers) {
+        for (const [matcher, hookList] of matcherMap) {
+          output += `#### ${t('Matcher:')} ${matcher}\n`;
+          for (const hook of hookList) {
+            output += `- **${hook.name}** [${hook.source}]\n`;
+          }
+          output += '\n';
+        }
+      } else {
+        for (const hookList of matcherMap.values()) {
+          for (const hook of hookList) {
+            output += `- **${hook.name}** [${hook.source}]\n`;
+          }
+        }
+        output += '\n';
+      }
     }
 
     return {
@@ -114,209 +190,26 @@ const listCommand: SlashCommand = {
   },
 };
 
-const enableCommand: SlashCommand = {
-  name: 'enable',
-  get description() {
-    return t('Enable a disabled hook');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<MessageActionReturn> => {
-    const hookName = args.trim();
-    if (!hookName) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Please specify a hook name. Usage: /hooks enable <hook-name>',
-        ),
-      };
-    }
-
-    const { config } = context.services;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Hooks are not enabled.'),
-      };
-    }
-
-    const registry = hookSystem.getRegistry();
-    registry.setHookEnabled(hookName, true);
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: t('Hook "{{name}}" has been enabled for this session.', {
-        name: hookName,
-      }),
-    };
-  },
-  completion: async (context: CommandContext, partialArg: string) => {
-    const { config } = context.services;
-    if (!config) return [];
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) return [];
-
-    const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
-
-    // Return disabled hooks for enable command (deduplicated by name)
-    const disabledHookNames = allHooks
-      .filter((hook) => !hook.enabled)
-      .map((hook) => hook.config.name || hook.config.command || '')
-      .filter((name) => name && name.startsWith(partialArg));
-    return [...new Set(disabledHookNames)];
-  },
-};
-
-const disableCommand: SlashCommand = {
-  name: 'disable',
-  get description() {
-    return t('Disable an active hook');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<MessageActionReturn> => {
-    const hookName = args.trim();
-    if (!hookName) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Please specify a hook name. Usage: /hooks disable <hook-name>',
-        ),
-      };
-    }
-
-    const { config } = context.services;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Hooks are not enabled.'),
-      };
-    }
-
-    const registry = hookSystem.getRegistry();
-    registry.setHookEnabled(hookName, false);
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: t('Hook "{{name}}" has been disabled for this session.', {
-        name: hookName,
-      }),
-    };
-  },
-  completion: async (context: CommandContext, partialArg: string) => {
-    const { config } = context.services;
-    if (!config) return [];
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) return [];
-
-    const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
-
-    // Return enabled hooks for disable command (deduplicated by name)
-    const enabledHookNames = allHooks
-      .filter((hook) => hook.enabled)
-      .map((hook) => hook.config.name || hook.config.command || '')
-      .filter((name) => name && name.startsWith(partialArg));
-    return [...new Set(enabledHookNames)];
-  },
-};
-
 export const hooksCommand: SlashCommand = {
   name: 'hooks',
   get description() {
     return t('Manage Qwen Code hooks');
   },
   kind: CommandKind.BUILT_IN,
-  subCommands: [listCommand, enableCommand, disableCommand],
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<SlashCommandActionReturn> => {
-    // If no subcommand provided, show list
-    if (!args.trim()) {
-      const result = await listCommand.action?.(context, '');
-      return result ?? { type: 'message', messageType: 'info', content: '' };
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode === 'interactive') {
+      return {
+        type: 'dialog',
+        dialog: 'hooks',
+      };
     }
 
-    const [subcommand, ...rest] = args.trim().split(/\s+/);
-    const subArgs = rest.join(' ');
-
-    let result: SlashCommandActionReturn | void;
-    switch (subcommand.toLowerCase()) {
-      case 'list':
-        result = await listCommand.action?.(context, subArgs);
-        break;
-      case 'enable':
-        result = await enableCommand.action?.(context, subArgs);
-        break;
-      case 'disable':
-        result = await disableCommand.action?.(context, subArgs);
-        break;
-      default:
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            'Unknown subcommand: {{cmd}}. Available: list, enable, disable',
-            {
-              cmd: subcommand,
-            },
-          ),
-        };
-    }
+    const result = await listCommand.action?.(context, args);
     return result ?? { type: 'message', messageType: 'info', content: '' };
-  },
-  completion: async (context: CommandContext, partialArg: string) => {
-    const subcommands = ['list', 'enable', 'disable'];
-    const parts = partialArg.split(/\s+/);
-
-    if (parts.length <= 1) {
-      // Complete subcommand
-      return subcommands.filter((cmd) => cmd.startsWith(partialArg));
-    }
-
-    // Complete subcommand arguments
-    const [subcommand, ...rest] = parts;
-    const subArgs = rest.join(' ');
-
-    switch (subcommand.toLowerCase()) {
-      case 'enable':
-        return enableCommand.completion?.(context, subArgs) ?? [];
-      case 'disable':
-        return disableCommand.completion?.(context, subArgs) ?? [];
-      default:
-        return [];
-    }
   },
 };

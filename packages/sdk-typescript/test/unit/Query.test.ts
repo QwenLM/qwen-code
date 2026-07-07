@@ -16,6 +16,7 @@ import type {
   CLIControlRequest,
   CLIControlResponse,
   ControlCancelRequest,
+  CLIControlInitializeRequest,
 } from '../../src/types/protocol.js';
 import { ControlRequestType } from '../../src/types/protocol.js';
 import { AbortError } from '../../src/types/errors.js';
@@ -308,6 +309,29 @@ describe('Query', () => {
         transport.getLastWrittenMessage() as CLIControlRequest;
       expect(initRequest.type).toBe('control_request');
       expect(initRequest.request.subtype).toBe('initialize');
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
+    it('should include canUseTool timeout in initialize request', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: {
+          canUseTool: 120_000,
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(initRequest.request.subtype).toBe('initialize');
+      expect(
+        (initRequest.request as CLIControlInitializeRequest).timeout,
+      ).toEqual({ canUseTool: 120_000 });
 
       await respondToInitialize(transport, query);
       await query.close();
@@ -1184,6 +1208,68 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should provide getContextUsage() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const usagePromise = query.getContextUsage(true);
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const usageMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_CONTEXT_USAGE,
+        );
+        expect(usageMsg).toBeDefined();
+      });
+
+      // Respond with context usage data
+      const messages = transport.getAllWrittenMessages();
+      const usageMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_CONTEXT_USAGE,
+      )!;
+
+      expect((usageMsg.request as Record<string, unknown>).show_details).toBe(
+        true,
+      );
+
+      transport.simulateMessage(
+        createControlResponse(usageMsg.request_id, true, {
+          subtype: 'get_context_usage',
+          modelName: 'test-model',
+          totalTokens: 50000,
+          contextWindowSize: 200000,
+          breakdown: {
+            systemPrompt: 5000,
+            builtinTools: 10000,
+            mcpTools: 0,
+            memoryFiles: 2000,
+            skills: 3000,
+            messages: 25000,
+            freeSpace: 145000,
+            autocompactBuffer: 10000,
+          },
+          builtinTools: [{ name: 'Read', tokens: 500 }],
+          mcpTools: [],
+          memoryFiles: [],
+          skills: [],
+          showDetails: true,
+        }),
+      );
+
+      const result = await usagePromise;
+      expect(result).toMatchObject({
+        modelName: 'test-model',
+        totalTokens: 50000,
+        contextWindowSize: 200000,
+        showDetails: true,
+      });
+
+      await query.close();
+    });
+
     it('should throw if methods called on closed query', async () => {
       const query = new Query(transport, { cwd: '/test' });
       await respondToInitialize(transport, query);
@@ -1198,6 +1284,7 @@ describe('Query', () => {
         'Query is closed',
       );
       await expect(query.mcpServerStatus()).rejects.toThrow('Query is closed');
+      await expect(query.getContextUsage()).rejects.toThrow('Query is closed');
     });
   });
 

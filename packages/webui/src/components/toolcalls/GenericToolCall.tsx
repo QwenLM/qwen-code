@@ -6,7 +6,7 @@
  * Generic tool call component - handles all tool call types as fallback
  */
 
-import type { FC } from 'react';
+import { useState, type FC } from 'react';
 import {
   ToolCallContainer,
   ToolCallCard,
@@ -14,8 +14,49 @@ import {
   LocationsList,
   safeTitle,
   groupContent,
+  mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
+import { getToolDisplayLabel } from './labelUtils.js';
+import { MarkdownRenderer } from '../messages/MarkdownRenderer/MarkdownRenderer.js';
+
+const COLLAPSED_HEIGHT = 200;
+const EXPAND_THRESHOLD = 400;
+
+const CollapsibleOutput: FC<{ content: string }> = ({ content }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const isLongContent = content.length > EXPAND_THRESHOLD;
+
+  return (
+    <div className="flex flex-col gap-[3px]">
+      <div
+        className="text-[13px] opacity-90 overflow-hidden"
+        style={
+          !isExpanded && isLongContent
+            ? {
+                maxHeight: `${COLLAPSED_HEIGHT}px`,
+                maskImage: `linear-gradient(to bottom, var(--app-primary-background) 140px, transparent ${COLLAPSED_HEIGHT}px)`,
+                WebkitMaskImage: `linear-gradient(to bottom, var(--app-primary-background) 140px, transparent ${COLLAPSED_HEIGHT}px)`,
+              }
+            : undefined
+        }
+      >
+        <MarkdownRenderer content={content} enableFileLinks={false} />
+      </div>
+      {isLongContent && (
+        <div className="flex justify-center border-t border-[var(--app-input-border)] pt-1">
+          <button
+            type="button"
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="text-[var(--app-secondary-foreground)] text-[0.8em] hover:text-[var(--app-primary-foreground)] cursor-pointer bg-transparent border-none px-2 py-1 rounded hover:bg-[var(--app-input-background)] transition-colors"
+          >
+            {isExpanded ? '▲ Collapse' : '▼ Show more'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
 
 /**
  * Generic tool call component that can display any tool call type
@@ -29,24 +70,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 }) => {
   const { kind, title, content, locations, toolCallId } = toolCall;
   const operationText = safeTitle(title);
-
-  /**
-   * Map tool call kind to appropriate display name
-   */
-  const getDisplayLabel = (): string => {
-    const normalizedKind = kind.toLowerCase();
-    if (normalizedKind === 'task') {
-      return 'Task';
-    } else if (normalizedKind === 'web_fetch') {
-      return 'WebFetch';
-    } else if (normalizedKind === 'web_search') {
-      return 'WebSearch';
-    } else if (normalizedKind === 'exit_plan_mode') {
-      return 'ExitPlanMode';
-    } else {
-      return kind; // fallback to original kind if not mapped
-    }
-  };
+  const displayLabel = getToolDisplayLabel({ kind, title });
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
@@ -55,7 +79,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
   if (errors.length > 0) {
     return (
       <ToolCallCard icon="🔧">
-        <ToolCallRow label={getDisplayLabel()}>
+        <ToolCallRow label={displayLabel}>
           <div>{operationText}</div>
         </ToolCallRow>
         <ToolCallRow label="Error">
@@ -71,31 +95,23 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
     const isLong = output.length > 150;
 
     if (isLong) {
-      const truncatedOutput =
-        output.length > 300 ? output.substring(0, 300) + '...' : output;
-
       return (
         <ToolCallCard icon="🔧">
-          <ToolCallRow label={getDisplayLabel()}>
+          <ToolCallRow label={displayLabel}>
             <div>{operationText}</div>
           </ToolCallRow>
           <ToolCallRow label="Output">
-            <div className="whitespace-pre-wrap font-mono text-[13px] opacity-90">
-              {truncatedOutput}
-            </div>
+            <CollapsibleOutput content={output} />
           </ToolCallRow>
         </ToolCallCard>
       );
     }
 
     // Short output - compact format
-    const statusFlag: 'success' | 'error' | 'warning' | 'loading' | 'default' =
-      toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+    const statusFlag = mapToolStatusToContainerStatus(toolCall.status);
     return (
       <ToolCallContainer
-        label={getDisplayLabel()}
+        label={displayLabel}
         status={statusFlag}
         toolCallId={toolCallId}
         isFirst={isFirst}
@@ -108,13 +124,10 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 
   // Success with files: show operation + file list in compact format
   if (locations && locations.length > 0) {
-    const statusFlag: 'success' | 'error' | 'warning' | 'loading' | 'default' =
-      toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+    const statusFlag = mapToolStatusToContainerStatus(toolCall.status);
     return (
       <ToolCallContainer
-        label={getDisplayLabel()}
+        label={displayLabel}
         status={statusFlag}
         toolCallId={toolCallId}
         isFirst={isFirst}
@@ -127,13 +140,10 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 
   // No output - show just the operation
   if (operationText) {
-    const statusFlag: 'success' | 'error' | 'warning' | 'loading' | 'default' =
-      toolCall.status === 'in_progress' || toolCall.status === 'pending'
-        ? 'loading'
-        : 'success';
+    const statusFlag = mapToolStatusToContainerStatus(toolCall.status);
     return (
       <ToolCallContainer
-        label={getDisplayLabel()}
+        label={displayLabel}
         status={statusFlag}
         toolCallId={toolCallId}
         isFirst={isFirst}

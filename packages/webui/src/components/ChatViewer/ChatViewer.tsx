@@ -15,17 +15,8 @@ import { UserMessage } from '../messages/UserMessage.js';
 import { AssistantMessage } from '../messages/Assistant/AssistantMessage.js';
 import { ThinkingMessage } from '../messages/ThinkingMessage.js';
 import {
-  GenericToolCall,
-  ThinkToolCall,
-  SaveMemoryToolCall,
-  EditToolCall,
-  WriteToolCall,
-  SearchToolCall,
-  UpdatedPlanToolCall,
-  ShellToolCall,
-  ReadToolCall,
-  WebFetchToolCall,
   shouldShowToolCall,
+  getToolCallComponent,
 } from '../toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from '../toolcalls/index.js';
 import './ChatViewer.css';
@@ -141,52 +132,6 @@ function extractContent(message: ChatMessageData['message']): string {
 function parseTimestamp(isoString: string): number {
   const date = new Date(isoString);
   return isNaN(date.getTime()) ? Date.now() : date.getTime();
-}
-
-/**
- * Get the appropriate tool call component based on kind
- */
-function getToolCallComponent(kind: string) {
-  const normalizedKind = kind.toLowerCase();
-
-  switch (normalizedKind) {
-    case 'read':
-      return ReadToolCall;
-    case 'write':
-      return WriteToolCall;
-    case 'edit':
-      return EditToolCall;
-    case 'execute':
-    case 'bash':
-    case 'command':
-      return ShellToolCall;
-    case 'updated_plan':
-    case 'updatedplan':
-    case 'todo_write':
-    case 'update_todos':
-    case 'todowrite':
-      return UpdatedPlanToolCall;
-    case 'search':
-    case 'grep':
-    case 'glob':
-    case 'find':
-      return SearchToolCall;
-    case 'think':
-    case 'thinking':
-      return ThinkToolCall;
-    case 'save_memory':
-    case 'savememory':
-    case 'memory':
-      return SaveMemoryToolCall;
-    case 'fetch':
-    case 'web_fetch':
-    case 'webfetch':
-    case 'web_search':
-    case 'websearch':
-      return WebFetchToolCall;
-    default:
-      return GenericToolCall;
-  }
 }
 
 /**
@@ -313,7 +258,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
 
       // Handle tool calls
       if (msg.type === 'tool_call' && msg.toolCall) {
-        const ToolCallComponent = getToolCallComponent(msg.toolCall.kind);
+        const ToolCallComponent = getToolCallComponent(msg.toolCall);
 
         if (!ToolCallComponent) {
           return null;

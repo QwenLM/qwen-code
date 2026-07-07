@@ -6,8 +6,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HookRunner } from './hookRunner.js';
-import { HookEventName, HookType, HooksConfigSource } from './types.js';
-import type { HookConfig, HookInput } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  HooksConfigSource,
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+} from './types.js';
+import type {
+  HookConfig,
+  HookInput,
+  UserPromptExpansionInput,
+  UserPromptSubmitInput,
+} from './types.js';
 
 // Hoisted mock
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -231,6 +241,65 @@ describe('HookRunner', () => {
       expect(result.output?.reason).toBe('stderr error message');
     });
 
+    it('should parse JSON from stderr on exit code 2 to preserve additionalContext', async () => {
+      // Exit code 2 with JSON in stderr should parse structured output
+      // to preserve hookSpecificOutput.additionalContext
+      const jsonOutput = JSON.stringify({
+        decision: 'deny',
+        reason: 'blocked by policy',
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: '[Hook] Tool execution blocked with context',
+        },
+      });
+      const mockProcess = createMockProcess(2, 'stdout ignored', jsonOutput);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 2',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('blocked by policy');
+      expect(result.output?.hookSpecificOutput).toEqual({
+        hookEventName: 'PostToolUse',
+        additionalContext: '[Hook] Tool execution blocked with context',
+      });
+    });
+
+    it('should fall back to plain text when stderr JSON is invalid on exit code 2', async () => {
+      const mockProcess = createMockProcess(2, '', 'plain blocking error');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 2',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('plain blocking error');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+    });
+
     it('should not parse JSON on exit code 2', async () => {
       // Exit code 2 should ignore JSON in stdout
       const mockProcess = createMockProcess(
@@ -331,6 +400,27 @@ describe('HookRunner', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
     });
+
+    it('should throw error for prompt hook without config', async () => {
+      // HookRunner without config cannot execute prompt hooks
+      const runnerWithoutConfig = new HookRunner();
+
+      const hookConfig: HookConfig = {
+        type: HookType.Prompt,
+        prompt: 'Test prompt: $ARGUMENTS',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await runnerWithoutConfig.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('Prompt hook requires Config');
+    });
   });
 
   describe('executeHooksParallel', () => {
@@ -388,6 +478,213 @@ describe('HookRunner', () => {
 
       expect(onHookStart).toHaveBeenCalledTimes(1);
       expect(onHookEnd).toHaveBeenCalledTimes(1);
+    });
+
+    it('should chain UserPromptExpansion additional context into the next hook input', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptExpansion',
+            additionalContext: 'Hook context',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptExpansionInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptExpansion,
+        }),
+        command_name: 'custom',
+        command_args: 'with args',
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptExpansion,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe('Base prompt\n\nHook context');
+    });
+
+    it('should preserve raw UserPromptSubmit additional context when chaining', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: '<xml><item>raw</item></xml>',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptSubmitInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptSubmit,
+        }),
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptSubmit,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe(
+        'Base prompt\n\n<xml><item>raw</item></xml>',
+      );
+    });
+
+    it('should not append empty UserPromptSubmit additional context', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: '',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptSubmitInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptSubmit,
+        }),
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptSubmit,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe('Base prompt');
+    });
+
+    it('should truncate UserPromptExpansion context before sanitizing it for chaining', async () => {
+      const unsafeContext =
+        '<tag>' +
+        'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptExpansion',
+            additionalContext: unsafeContext,
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptExpansionInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptExpansion,
+        }),
+        command_name: 'custom',
+        command_args: 'with args',
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptExpansion,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      const chainedContext = secondInput.prompt?.replace('Base prompt\n\n', '');
+      expect(chainedContext?.startsWith('&lt;tag&gt;')).toBe(true);
+      expect(chainedContext).toContain('x'.repeat(9_989));
+      expect(chainedContext).not.toContain('<tag>');
+      expect(chainedContext).toHaveLength(
+        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+      );
     });
   });
 
@@ -598,7 +895,7 @@ describe('HookRunner', () => {
       expect(result.output?.systemMessage).toBe('plain text response');
     });
 
-    it('should convert non-zero exit code to deny output', async () => {
+    it('should treat non-blocking non-zero exit codes as non-blocking warnings', async () => {
       const mockProcess = createMockProcess(3, '', 'error message');
       mockSpawn.mockImplementation(() => mockProcess);
 
@@ -616,8 +913,8 @@ describe('HookRunner', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.output?.decision).toBe('deny');
-      expect(result.output?.reason).toBe('error message');
+      expect(result.output?.decision).toBe('allow');
+      expect(result.output?.systemMessage).toBe('Warning: error message');
     });
 
     it('should use stderr when stdout is empty on success', async () => {
@@ -679,6 +976,75 @@ describe('HookRunner', () => {
       );
 
       expect(result.output?.decision).toBe('allow');
+    });
+  });
+
+  describe('shell configuration', () => {
+    it('should use global shell configuration when hookConfig.shell is not specified', async () => {
+      const mockProcess = createMockProcess(0, '{"continue": true}');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+        source: HooksConfigSource.Project,
+        // No shell specified - should use global config
+      };
+      const input = createMockInput();
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with global shell config
+      expect(mockSpawn).toHaveBeenCalled();
+      const spawnArgs = mockSpawn.mock.calls[0];
+      // Global config uses bash or cmd depending on platform
+      expect(spawnArgs[2].shell).toBe(false);
+    });
+
+    it('should use bash shell when hookConfig.shell is bash', async () => {
+      const mockProcess = createMockProcess(0, '{"continue": true}');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+        source: HooksConfigSource.Project,
+        shell: 'bash',
+      };
+      const input = createMockInput();
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with bash configuration
+      expect(mockSpawn).toHaveBeenCalled();
+      const spawnArgs = mockSpawn.mock.calls[0];
+      // Should use bash executable
+      expect(spawnArgs[0]).toMatch(/bash/);
+      expect(spawnArgs[1]).toContain('-c');
+      expect(spawnArgs[2].shell).toBe(false);
+    });
+
+    it('should use powershell when hookConfig.shell is powershell', async () => {
+      const mockProcess = createMockProcess(0, '{"continue": true}');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'Write-Output test',
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+      const input = createMockInput();
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with powershell configuration
+      expect(mockSpawn).toHaveBeenCalled();
+      const spawnArgs = mockSpawn.mock.calls[0];
+      // Should use powershell executable
+      expect(spawnArgs[0]).toBe('powershell');
+      expect(spawnArgs[1]).toContain('-Command');
+      expect(spawnArgs[2].shell).toBe(false);
     });
   });
 });

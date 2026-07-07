@@ -10,6 +10,7 @@
  * Handles Qwen Agent connection establishment, authentication, and session creation
  */
 
+import * as vscode from 'vscode';
 import type { AcpConnection } from './acpConnection.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { authMethod } from '../types/acpTypes.js';
@@ -73,8 +74,41 @@ export class QwenConnectionHandler {
 
     // Build extra CLI arguments (only essential parameters)
     const extraArgs: string[] = [];
+    const httpConfig = vscode.workspace.getConfiguration('http');
+    const proxyUrl =
+      httpConfig.get<string>('proxy') || httpConfig.get<string>('https.proxy');
+    if (proxyUrl) {
+      extraArgs.push('--proxy', proxyUrl);
+      console.log(
+        '[QwenAgentManager] Using proxy from VSCode settings:',
+        proxyUrl,
+      );
+    }
 
-    await connection.connect(cliEntryPath!, workingDir, extraArgs);
+    // Retry loop for connection.connect() to handle transient spawn failures
+    // (e.g., SIGTERM during the 1-second startup grace period)
+    const maxConnectAttempts = 3;
+    for (let attempt = 1; attempt <= maxConnectAttempts; attempt++) {
+      try {
+        console.log(
+          `[QwenAgentManager] Connecting to ACP process (attempt ${attempt}/${maxConnectAttempts})...`,
+        );
+        await connection.connect(cliEntryPath!, workingDir, extraArgs);
+        console.log('[QwenAgentManager] ACP process connected successfully');
+        break;
+      } catch (connectError) {
+        console.error(
+          `[QwenAgentManager] Connect attempt ${attempt} failed:`,
+          getErrorMessage(connectError),
+        );
+        if (attempt === maxConnectAttempts) {
+          throw connectError;
+        }
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 4000);
+        console.log(`[QwenAgentManager] Retrying connect in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
 
     // Try to restore existing session or create new session
     // Note: Auto-restore on connect is disabled to avoid surprising loads

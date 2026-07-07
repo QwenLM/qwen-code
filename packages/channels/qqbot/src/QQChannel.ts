@@ -1,0 +1,1551 @@
+/**
+ * QQ Bot channel adapter for Qwen Code.
+ *
+ * Connects QQ Bot via official QQ Bot WebSocket API.
+ * Extends ChannelBase for streaming, access control, and session routing.
+ * Supports QR code login, credential persistence, C2C and group chat.
+ *
+ * Cross-server context continuation: persists SessionRouter mappings and
+ * QQ-specific routing state (chatTypeMap, replyMsgId, msgSeqMap) to disk,
+ * restoring them on reconnect so conversations survive daemon restarts.
+ *
+ * @see https://bot.q.qq.com/wiki/develop/api-v2/
+ */
+
+import {
+  ChannelBase,
+  SessionRouter,
+  getGlobalQwenDir,
+  sanitizeSenderName,
+  sanitizePromptText,
+  sanitizeLogText,
+} from '@qwen-code/channel-base';
+import type {
+  ChannelConfig,
+  ChannelBaseOptions,
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from '@qwen-code/channel-base';
+import WebSocket from 'ws';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { OpCode, Intent } from './types.js';
+import type {
+  QQChannelConfig,
+  QQMessageEvent,
+  QQGroupMessageEvent,
+} from './types.js';
+import {
+  getCredsFilePath,
+  loadCredentials,
+  saveCredentials,
+} from './accounts.js';
+import { qrCodeLogin } from './login.js';
+import {
+  fetchAccessToken,
+  fetchGatewayUrl,
+  getApiBase,
+  sendQQMessage,
+} from './api.js';
+
+/** Validate chatId to prevent SSRF when constructing URLs. */
+export function isValidChatId(id: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
+}
+
+export class QQChannel extends ChannelBase {
+  private ws: WebSocket | null = null;
+  private accessToken: string = '';
+  private tokenExpiresAt: number = 0;
+  private tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatInterval: number = 45000;
+  private seq: number = 0;
+  private reconnectAttempts: number = 0;
+  private readonly maxReconnectAttempts: number = 20;
+  /** QQ Bot session_id from READY, used for RESUME on reconnect. */
+  private sessionId: string = '';
+  /** Whether this connection attempt should try RESUME first. */
+  private tryResume: boolean = false;
+  private readonly qqConfig: QQChannelConfig;
+  /** Set when server sends RECONNECT opcode — close handler uses this to force reconnect. */
+  private serverRequestedReconnect: boolean = false;
+  /** Pending connect promise reject — called when WebSocket closes before READY. */
+  private connectReject: ((err: Error) => void) | null = null;
+  /** Set to true when channel is disconnected — prevents orphaned connections. */
+  private disposed: boolean = false;
+  /** Deduplicate inbound messages on reconnect replay (messageId → timestamp). */
+  private seenMessages: Map<string, number> = new Map();
+  /** Cleanup timer for seenMessages TTL eviction. */
+  private seenCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp of last received HEARTBEAT_ACK, for zombie-connection detection. */
+  private lastHeartbeatAck: number = 0;
+  /** Debounce timer for saveQQState to avoid blocking event loop. */
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** beforeExit hook to flush state when the event loop drains naturally. Does NOT fire for SIGKILL, OOM kills, or uncaughtException. */
+  private beforeExitHook: (() => void) | null = null;
+  /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 30s READY timeout to prevent hanging on gateway without response. */
+  private readyTimeout: ReturnType<typeof setTimeout> | null = null;
+  /** Guard against parallel reconnectWithRetry chains from stale close events. */
+  private isReconnecting: boolean = false;
+
+  /** Track whether a chatId is a group or C2C for correct API routing. */
+  private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
+  /** Track the latest user messageId per chatId for proper reply (msg_id). */
+  private replyMsgId: Map<string, { msgId: string; timestamp: number }> =
+    new Map();
+  /** msg_seq counter per user messageId, for multi-block streaming. */
+  private msgSeqMap: Map<string, number> = new Map();
+  /** Periodic cleanup timer for expired replyMsgId entries. */
+  private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
+  private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
+  /** Idle-flush timeout: buffer is sent after this many ms of silence. */
+  private static readonly IDLE_FLUSH_MS = 2000;
+  /** Max consecutive send failures before the stream is abandoned. */
+  private static readonly MAX_FLUSH_RETRIES = 3;
+  /** Retry delay for subsequent attempts (backoff beyond first retry). */
+  private static readonly IDLE_FLUSH_BACKOFF_MS = 4000;
+  /** Max buffer length before forcing an immediate flush. */
+  private static readonly MAX_BUFFER_LENGTH = 4096;
+
+  /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
+
+  /**
+   * Streaming state machine with per-session buffers.
+   *
+   * Three states for each session:
+   *   active   — accumulating chunks in buffer (onResponseChunk extends timer)
+   *   flushing — sendMessage() is in-flight (prevents parallel sends)
+   *   idle     — waiting for next chunk (timer counting down to idleFlush)
+   *
+   * Transitions:
+   *   active → flushing: idleFlush timer fires, or onToolCall cancels timer
+   *   flushing → idle: send settles, idle timer restarts on retry
+   *   any → done: onResponseComplete sends remaining content
+   *
+   * Guards:
+   *   - flushingSessions prevents concurrent sends per session
+   *   - pendingStreamDelete defers cleanup until in-flight send resolves
+   *   - flushedSessions tracks already-sent sessions to skip final fullText
+   */
+  // ── Streaming state ───────────────────────────────────────────
+  private streamState: Map<
+    string,
+    {
+      chatId: string;
+      buffer: string;
+      timer: ReturnType<typeof setTimeout> | null;
+      retryCount: number;
+    }
+  > = new Map();
+  private flushingSessions: Set<string> = new Set();
+  private pendingStreamDelete: Set<string> = new Set();
+  private reconnectId: number = 0;
+  private blockStreaming: boolean = false;
+  private flushedSessions: Set<string> = new Set();
+  private readonly qqStatePath: string;
+  /**
+   * Path to the SessionRouter persistence file we back up before shutdown.
+   * start.ts passes a shared router; standalone QQChannel instances use a
+   * per-channel router file.
+   */
+  private readonly globalSessionsPath: string;
+  /** Backup of sessions.json so conversations survive daemon restarts. */
+  private readonly sessionsBackupPath: string;
+
+  constructor(
+    name: string,
+    config: ChannelConfig & Record<string, unknown>,
+    bridge: ChannelAgentBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    const safeName = name.replace(/[^A-Za-z0-9_-]/g, '_');
+    const stateDir = join(getGlobalQwenDir(), 'channels');
+    mkdirSync(stateDir, { recursive: true });
+    const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
+
+    const hasExternalRouter = Boolean(options?.router);
+    const router =
+      options?.router ??
+      new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
+
+    super(name, config, bridge, {
+      ...options,
+      router,
+      registerBridgeEvents: options?.registerBridgeEvents ?? !hasExternalRouter,
+    });
+    this.qqConfig = config as unknown as QQChannelConfig;
+    this.blockStreaming = this.config.blockStreaming === 'on';
+    this.qqStatePath = join(stateDir, `${safeName}-state.json`);
+    this.globalSessionsPath = hasExternalRouter
+      ? join(stateDir, 'sessions.json')
+      : sessionsPath;
+    this.sessionsBackupPath = join(
+      stateDir,
+      `${safeName}-sessions-backup.json`,
+    );
+  }
+
+  // ── ChannelBase interface ──────────────────────────────────────
+
+  async connect(): Promise<void> {
+    this.disposed = false;
+    this.reconnectId++;
+    if (!this.config.instructions) {
+      this.config.instructions = [
+        '## QQ Bot Channel',
+        '',
+        '你是通过 QQ Bot 与用户对话的 AI 助手。',
+        '回复控制在 2000 字符以内，支持 Markdown 格式。',
+      ].join('\n');
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.fetchToken();
+        await this.connectGateway();
+        // Register beforeExit hook so the unref'd debounce timer's unflushed
+        // state is persisted when the event loop drains naturally. Does NOT
+        // fire for SIGKILL, OOM kills, or uncaughtException.
+        if (this.beforeExitHook) {
+          process.off('beforeExit', this.beforeExitHook);
+        }
+        this.beforeExitHook = () => this.flushQQState();
+        process.on('beforeExit', this.beforeExitHook);
+        this.startReplyMsgIdCleanup();
+        return;
+      } catch (e: unknown) {
+        if (attempt < 2) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(
+            `[QQ:${this.name}] Connect attempt ${attempt + 1} failed: ${sanitizeLogText(msg, 200)}, retrying...\n`,
+          );
+          await this.sleep(2000);
+        } else {
+          // Final attempt: wrap the connection error with sanitized text.
+          // The sanitizeLogText path is exercised by the existing connect gateway
+          // retry tests in send.test.ts (gateway reconnect timer block).
+          throw new Error(
+            sanitizeLogText(e instanceof Error ? e.message : String(e), 200),
+            { cause: e },
+          );
+        }
+      }
+    }
+  }
+
+  async sendMessage(chatId: string, text: string): Promise<void> {
+    // <noreply> suppression
+    if (text.trim() === '<noreply>') {
+      process.stderr.write(
+        `[QQ:${this.name}] <noreply> skipped for ${sanitizeLogText(chatId, 64)}\n`,
+      );
+      return;
+    }
+
+    const route = await this.resolveRoute(chatId);
+    if (!route) return;
+
+    // Look up reply context with TTL check
+    const entry = this.replyMsgId.get(chatId);
+    const msgId =
+      entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+        ? entry.msgId
+        : undefined;
+    if (entry && !msgId) {
+      process.stderr.write(
+        `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
+      );
+      this.msgSeqMap.delete(entry.msgId);
+      this.replyMsgId.delete(chatId);
+      this.saveQQState();
+    }
+
+    let nextSeq = 0;
+    let rollbackApplied = false;
+    try {
+      // Try markdown first (msg_type: 2)
+      const body: Record<string, unknown> = {
+        msg_type: 2,
+        markdown: { content: text },
+      };
+      nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
+      if (msgId) {
+        this.msgSeqMap.set(msgId, nextSeq);
+        body['msg_id'] = msgId;
+        body['msg_seq'] = nextSeq;
+      }
+
+      const resp = await sendQQMessage(
+        route.base,
+        route.path,
+        this.accessToken,
+        body,
+      );
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[QQ:${this.name}] Send failed (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)})\n`,
+        );
+
+        // 429 = rate-limited — do not retry, bail immediately
+        if (resp.status === 429) {
+          process.stderr.write(
+            `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on markdown attempt for ${sanitizeLogText(chatId, 64)}\n`,
+          );
+          if (msgId) {
+            this.msgSeqMap.set(msgId, nextSeq - 1);
+            this.saveQQState();
+          }
+          return;
+        }
+
+        if (msgId) {
+          this.msgSeqMap.set(msgId, nextSeq - 1);
+          rollbackApplied = true;
+          const activeBody: Record<string, unknown> = {
+            content: text,
+            msg_type: 0,
+            msg_id: msgId,
+            msg_seq: nextSeq,
+          };
+          const activeResp = await sendQQMessage(
+            route.base,
+            route.path,
+            this.accessToken,
+            activeBody,
+          );
+          if (activeResp.ok) {
+            process.stderr.write(
+              `[QQ:${this.name}] Active retry succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+            const current = this.replyMsgId.get(chatId);
+            if (current?.msgId === msgId) {
+              this.msgSeqMap.set(msgId, nextSeq);
+            }
+            this.saveQQState();
+            await activeResp.text().catch(() => '');
+            return;
+          }
+          process.stderr.write(
+            `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${sanitizeLogText(await activeResp.text().catch(() => ''), 200)})\n`,
+          );
+          if (activeResp.status === 429) {
+            process.stderr.write(
+              `[QQ:${this.name}] MESSAGE DROPPED: active retry rate-limited (HTTP 429) for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+            this.saveQQState();
+            return;
+          }
+          // Active retry failed with non-429 — don't fall through to plain-text
+          process.stderr.write(
+            `[QQ:${this.name}] MESSAGE DROPPED: both passive and active send failed for ${sanitizeLogText(chatId, 64)}\n`,
+          );
+          this.saveQQState();
+          return;
+        }
+
+        // Plain-text fallback for active messages (no reply context)
+        const plainBody: Record<string, unknown> = {
+          content: text,
+          msg_type: 0,
+        };
+        const fallbackRes = await sendQQMessage(
+          route.base,
+          route.path,
+          this.accessToken,
+          plainBody,
+        );
+        if (!fallbackRes.ok) {
+          const fbErrBody = await fallbackRes.text().catch(() => '');
+          if (fallbackRes.status === 429) {
+            process.stderr.write(
+              `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on plain-text fallback for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+            return;
+          }
+          process.stderr.write(
+            `[QQ:${this.name}] MESSAGE DROPPED: plain-text fallback failed (HTTP ${fallbackRes.status}: ${sanitizeLogText(fbErrBody, 200)}) for ${sanitizeLogText(chatId, 64)}\n`,
+          );
+          return;
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] Plain-text fallback succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+        );
+        await fallbackRes.text().catch(() => '');
+        return;
+      }
+
+      await resp.text().catch(() => '');
+      if (msgId) this.saveQQState();
+    } catch (e) {
+      // Rollback on failure if we haven't already
+      if (msgId && !rollbackApplied) {
+        this.msgSeqMap.set(msgId, nextSeq - 1);
+      }
+      if (msgId) this.saveQQState();
+      // Note: sendQQMessage only throws on network/timeout errors, never HTTP status.
+      // Rate-limit (429) handling is in the resp.status checks above.
+      process.stderr.write(
+        `[QQ:${this.name}] Send error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
+      throw e; // Re-throw for .catch() callers
+    }
+  }
+
+  /**
+   * Resolve API routing: handles disposed check, token refresh, chatId validation,
+   * sandbox detection, and C2C/group path selection. Returns null if any guard fails.
+   */
+  private async resolveRoute(
+    chatId: string,
+  ): Promise<{ base: string; path: string } | null> {
+    if (this.disposed) return null;
+    if (Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch {
+        return null;
+      }
+    }
+    if (!this.accessToken || !isValidChatId(chatId)) return null;
+    const base = getApiBase(Boolean(this.qqConfig.sandbox));
+    const path =
+      this.chatTypeMap.get(chatId) === 'group'
+        ? `/v2/groups/${chatId}/messages`
+        : `/v2/users/${chatId}/messages`;
+    return { base, path };
+  }
+
+  disconnect(): void {
+    this.disposed = true;
+    this.stopHeartbeat();
+    this.stopTokenRefresh();
+    this.stopReplyMsgIdCleanup();
+    if (this.seenCleanupTimer) {
+      clearInterval(this.seenCleanupTimer);
+      this.seenCleanupTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.beforeExitHook) {
+      process.off('beforeExit', this.beforeExitHook);
+      this.beforeExitHook = null;
+    }
+    this.flushQQState();
+    this.backupGlobalSessions();
+    if (this.readyTimeout) {
+      clearTimeout(this.readyTimeout);
+      this.readyTimeout = null;
+    }
+    if (this.ws) {
+      this.ws.close(1000);
+      this.ws = null;
+    }
+    if (this.connectReject) {
+      this.connectReject(new Error('Channel disconnected'));
+      this.connectReject = null;
+    }
+    this.chatTypeMap.clear();
+    this.replyMsgId.clear();
+    this.msgSeqMap.clear();
+    for (const [, state] of this.streamState) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.streamState.clear();
+    this.flushingSessions.clear();
+    this.pendingStreamDelete.clear();
+    this.flushedSessions.clear();
+    this.seenMessages.clear();
+    this.reconnectId++;
+  }
+
+  /**
+   * QQ Bot API V2 does not provide a typing indicator endpoint.
+   * ChannelBase calls these hooks to signal prompt start/end;
+   * they are intentionally no-ops for this channel.
+   */
+  protected override onPromptStart(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  protected override onPromptEnd(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  // ── Streaming (idle-flush with per-session buffers) ────────────
+
+  protected override onResponseChunk(
+    chatId: string,
+    chunk: string,
+    sessionId: string,
+  ): void {
+    if (this.blockStreaming) return;
+    let state = this.streamState.get(sessionId);
+    if (!state) {
+      state = { chatId, buffer: chunk, timer: null, retryCount: 0 } as {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+      };
+      this.streamState.set(sessionId, state);
+    } else {
+      state.buffer += chunk;
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+      // Flush immediately when buffer exceeds max to prevent unbounded growth
+      if (state.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
+        const buf = state.buffer;
+        state.buffer = '';
+        this.flushAndTrack(sessionId, buf, state, 'idleFlush');
+        return;
+      }
+    }
+    const reconnectId = this.reconnectId;
+    state.timer = setTimeout(() => {
+      this.idleFlush(sessionId, reconnectId);
+    }, QQChannel.IDLE_FLUSH_MS);
+    state.timer.unref?.();
+  }
+
+  private idleFlush(sessionId: string, reconnectId: number): void {
+    if (this.reconnectId !== reconnectId) {
+      process.stderr.write(
+        `[QQ:${this.name}] idleFlush discarded (reconnect) session=${sanitizeLogText(sessionId, 32)}\n`,
+      );
+      return;
+    }
+    const state = this.streamState.get(sessionId);
+    if (!state || !state.buffer) return;
+    if (this.flushingSessions.has(sessionId)) {
+      // Another send is in-flight — re-schedule idle timer so we retry later
+      if (!state.timer) {
+        const retryReconnectId = this.reconnectId;
+        state.timer = setTimeout(() => {
+          this.idleFlush(sessionId, retryReconnectId);
+        }, QQChannel.IDLE_FLUSH_MS);
+        state.timer.unref?.();
+      }
+      return;
+    }
+    const buffer = state.buffer;
+    state.buffer = '';
+    state.timer = null; // Clear expired one-shot timer reference
+    this.flushAndTrack(sessionId, buffer, state, 'idleFlush');
+  }
+
+  /**
+   * Shared send-and-track helper used by idleFlush and onToolCall.
+   * Encapsulates .then() (cleanup on success) and .catch() (retry/re-buffer
+   * on failure) logic to eliminate duplication.
+   */
+  private flushAndTrack(
+    sessionId: string,
+    buffer: string,
+    state: {
+      chatId: string;
+      buffer: string;
+      timer: ReturnType<typeof setTimeout> | null;
+      retryCount: number;
+    },
+    logLabel: string,
+  ): void {
+    this.flushingSessions.add(sessionId);
+    // NOTE: sendMessage resolves for HTTP errors (e.g., 429, 500) without
+    // rejecting, so .then() may fire even when the send didn't actually
+    // succeed. Fixing this requires sendMessage to propagate HTTP errors
+    // (upstream issue). The .catch() path below handles network-level errors.
+    this.sendMessage(state.chatId, buffer)
+      .then(() => {
+        // #3: Guard — if session died during in-flight send, touch nothing
+        const current = this.streamState.get(sessionId);
+        if (current !== state) return;
+        current.retryCount = 0;
+        this.flushedSessions.add(sessionId);
+
+        if (this.pendingStreamDelete.has(sessionId)) {
+          this.pendingStreamDelete.delete(sessionId);
+          // #2: Flush immediately — idle timer would add unnecessary delay
+          const s = this.streamState.get(sessionId);
+          if (s === state && s.buffer) {
+            // Don't clear buffer or retryCount — idleFlush will pick them up.
+            this.idleFlush(sessionId, this.reconnectId);
+            // Don't return — let .finally() clear flushingSessions
+            // so deferred idleFlush can proceed.
+          }
+        }
+
+        // #8: Clean up streamState only if no content arrived during send
+        const s = this.streamState.get(sessionId);
+        if (s === state && !s.buffer) {
+          this.streamState.delete(sessionId);
+        }
+      })
+      .catch((e: unknown) => {
+        process.stderr.write(
+          `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+        // #1: Never undo previously-succeeded flush records on failure
+
+        if (this.pendingStreamDelete.has(sessionId)) {
+          // Session is ending - retry up to MAX_FLUSH_RETRIES
+          this.pendingStreamDelete.delete(sessionId);
+          const current = this.streamState.get(sessionId);
+          if (current === state) {
+            current.buffer = buffer;
+            current.retryCount++;
+            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+              const reconnectId = this.reconnectId;
+              const delay =
+                current.retryCount > 1
+                  ? QQChannel.IDLE_FLUSH_BACKOFF_MS
+                  : QQChannel.IDLE_FLUSH_MS;
+              current.timer = setTimeout(() => {
+                this.idleFlush(sessionId, reconnectId);
+              }, delay);
+              current.timer.unref?.();
+            } else {
+              this.streamState.delete(sessionId);
+              // #2: Clean up flushedSessions on retry exhaustion
+              this.flushedSessions.delete(sessionId);
+              process.stderr.write(
+                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+              );
+            }
+          }
+        } else {
+          // Not ending - re-buffer and retry
+          const current = this.streamState.get(sessionId);
+          // #6: Identity guard — only operate on the same state reference
+          if (current === state) {
+            current.buffer = buffer + (current.buffer || '');
+            // #3: If re-buffer exceeds max length, flush immediately
+            if (current.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
+              this.idleFlush(sessionId, this.reconnectId);
+              // Don't return — let .finally() clear flushingSessions.
+              // Skip retry scheduling: idleFlush handles it.
+            } else {
+              current.retryCount++;
+              if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+                if (!current.timer) {
+                  const reconnectId = this.reconnectId;
+                  const delay =
+                    current.retryCount > 1
+                      ? QQChannel.IDLE_FLUSH_BACKOFF_MS
+                      : QQChannel.IDLE_FLUSH_MS;
+                  current.timer = setTimeout(() => {
+                    this.idleFlush(sessionId, reconnectId);
+                  }, delay);
+                  current.timer.unref?.();
+                }
+              } else {
+                this.streamState.delete(sessionId);
+                // #2: Clean up flushedSessions on retry exhaustion
+                this.flushedSessions.delete(sessionId);
+                process.stderr.write(
+                  `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+                );
+              }
+            }
+          }
+        }
+      })
+      .finally(() => {
+        // #1: Identity guard — only delete if no new state replaced us
+        const current = this.streamState.get(sessionId);
+        if (!current || current === state) {
+          this.flushingSessions.delete(sessionId);
+        }
+      });
+  }
+
+  override onToolCall(_chatId: string, event: ToolCallEvent): void {
+    const state = this.streamState.get(event.sessionId);
+    if (!state || !state.buffer) return;
+    if (this.flushingSessions.has(event.sessionId)) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    const buffer = state.buffer;
+    state.buffer = '';
+    this.flushAndTrack(event.sessionId, buffer, state, 'toolCallFlush');
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    fullText: string,
+    sessionId: string,
+  ): Promise<void> {
+    const state = this.streamState.get(sessionId);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state && this.flushingSessions.has(sessionId)) {
+      this.pendingStreamDelete.add(sessionId);
+      process.stderr.write(
+        `[QQ:${this.name}] onResponseComplete deferred (flush in-flight) session=${sanitizeLogText(sessionId, 32)}\n`,
+      );
+      return;
+    }
+    const wasFlushed = this.flushedSessions.has(sessionId);
+    const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
+    this.streamState.delete(sessionId);
+    this.flushedSessions.delete(sessionId);
+    if (remaining) {
+      await super.onResponseComplete(chatId, remaining, sessionId);
+    }
+  }
+
+  override onSessionDied(sessionId: string): void {
+    const state = this.streamState.get(sessionId);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+    }
+    this.streamState.delete(sessionId);
+    this.flushingSessions.delete(sessionId);
+    this.pendingStreamDelete.delete(sessionId);
+    this.flushedSessions.delete(sessionId);
+    super.onSessionDied(sessionId);
+  }
+  // ── State Persistence (cross-server context continuation) ──────
+
+  /** Debounced state persistence to avoid blocking event loop. */
+  private saveQQState(): void {
+    // NOTE: guarded here; flushQQState() is intentionally NOT — disconnect()
+    // sets disposed=true *before* calling it, so it must still write final state.
+    if (this.disposed) return;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    const tmpPath = this.qqStatePath + '.tmp';
+    this.saveTimer = setTimeout(() => {
+      if (this.disposed) return;
+      try {
+        writeFileSync(
+          tmpPath,
+          JSON.stringify({
+            chatTypeMap: Array.from(this.chatTypeMap.entries()),
+            replyMsgId: Array.from(this.replyMsgId.entries()),
+            msgSeqMap: Array.from(this.msgSeqMap.entries()),
+          }),
+          { mode: 0o600 },
+        );
+        renameSync(tmpPath, this.qqStatePath);
+      } catch (e) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort */
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+      }
+    }, 500);
+    this.saveTimer.unref();
+  }
+
+  /** Flush pending state writes immediately (called on disconnect). */
+  private flushQQState(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    const tmpPath = this.qqStatePath + '.tmp';
+    try {
+      writeFileSync(
+        tmpPath,
+        JSON.stringify({
+          chatTypeMap: Array.from(this.chatTypeMap.entries()),
+          replyMsgId: Array.from(this.replyMsgId.entries()),
+          msgSeqMap: Array.from(this.msgSeqMap.entries()),
+        }),
+        { mode: 0o600 },
+      );
+      renameSync(tmpPath, this.qqStatePath);
+    } catch (e) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* best-effort */
+      }
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
+    }
+  }
+
+  /**
+   * Restore QQ routing state from disk.
+   * Validates and filters every entry on restore — corrupt or unexpected
+   * entries (e.g. unknown chat types, oversized replyMsgIds, negative seqs)
+   * are silently dropped so they don't propagate into runtime routing.
+   */
+  private restoreQQState(): boolean {
+    try {
+      if (!existsSync(this.qqStatePath)) return false;
+      const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        process.stderr.write(
+          `[QQ:${this.name}] Invalid QQ state file (not an object), ignoring\n`,
+        );
+        return false;
+      }
+      if (raw.chatTypeMap && Array.isArray(raw.chatTypeMap)) {
+        const rawCT = raw.chatTypeMap as Array<[string, unknown]>;
+        // Validate: only accept 'c2c' | 'group' values
+        this.chatTypeMap = new Map(
+          rawCT.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              (v === 'c2c' || v === 'group'),
+          ),
+        ) as Map<string, 'c2c' | 'group'>;
+        const dropped = rawCT.length - this.chatTypeMap.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid chatTypeMap entries during restore\n`,
+          );
+      }
+      if (raw.replyMsgId && Array.isArray(raw.replyMsgId)) {
+        const now = Date.now();
+        const rawRM = raw.replyMsgId as Array<[string, unknown]>;
+        this.replyMsgId = new Map(
+          rawRM
+            .map(([k, v]) =>
+              // Old format: string -> { msgId: v, timestamp: now }
+              // New format: { msgId, timestamp } -> pass through
+              typeof v === 'string'
+                ? ([k, { msgId: v, timestamp: now }] as const)
+                : ([k, v] as const),
+            )
+            .filter(([k, v]) => {
+              if (typeof k !== 'string' || k.length > 256) return false;
+              if (typeof v !== 'object' || v === null) return false;
+              const entry = v as { msgId?: unknown; timestamp?: unknown };
+              return (
+                typeof entry.msgId === 'string' &&
+                entry.msgId.length <= 128 &&
+                typeof entry.timestamp === 'number' &&
+                Number.isFinite(entry.timestamp) &&
+                entry.timestamp <= now + QQChannel.REPLY_MSG_ID_TTL_MS
+              );
+            }),
+        ) as Map<string, { msgId: string; timestamp: number }>;
+        const dropped = rawRM.length - this.replyMsgId.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid replyMsgId entries during restore\n`,
+          );
+      }
+      if (raw.msgSeqMap && Array.isArray(raw.msgSeqMap)) {
+        const rawMS = raw.msgSeqMap as Array<[string, unknown]>;
+        // Validate: entries must be non-negative safe integers
+        this.msgSeqMap = new Map(
+          rawMS.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'number' &&
+              Number.isSafeInteger(v) &&
+              v >= 0,
+          ),
+        ) as Map<string, number>;
+        const dropped = rawMS.length - this.msgSeqMap.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid msgSeqMap entries during restore\n`,
+          );
+      }
+      return true;
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] Failed to restore QQ state: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Backup the global sessions.json before start.ts deletes it on shutdown.
+   * Restored on next connect so conversations survive daemon restarts.
+   */
+  private backupGlobalSessions(): void {
+    try {
+      if (existsSync(this.globalSessionsPath)) {
+        const data = readFileSync(this.globalSessionsPath, 'utf-8');
+        if (data.trim())
+          writeFileSync(this.sessionsBackupPath, data, { mode: 0o600 });
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private restoreGlobalSessions(): void {
+    try {
+      if (
+        !existsSync(this.globalSessionsPath) &&
+        existsSync(this.sessionsBackupPath)
+      ) {
+        writeFileSync(
+          this.globalSessionsPath,
+          readFileSync(this.sessionsBackupPath, 'utf-8'),
+          { mode: 0o600 },
+        );
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Compatibility repair for legacy restored session state where older router
+   * code could keep an empty session id after bridge.loadSession() failed to
+   * return a session_id.
+   *
+   * **Fragile**: accesses SessionRouter's private `toSession`/`toTarget`/`toCwd`
+   * maps via type coercion. If SessionRouter internals change, this breaks
+   * silently. The only signal will be cross-server conversations failing to
+   * restore after daemon restart — no crash, no log.
+   *
+   * Keep this while old persisted files may still exist.
+   */
+  private fixRestoredSessions(): void {
+    try {
+      if (!existsSync(this.globalSessionsPath)) return;
+      const raw = JSON.parse(readFileSync(this.globalSessionsPath, 'utf-8'));
+      const r = this.router as unknown as Record<string, unknown>;
+      const tm = r['toSession'] as Map<string, string> | undefined;
+      const tt = r['toTarget'] as Map<string, unknown> | undefined;
+      const tc = r['toCwd'] as Map<string, string> | undefined;
+      if (!tm || !tt) return;
+
+      for (const [key, sid] of tm) {
+        if (sid) continue;
+        const entry = raw[key] as
+          | { sessionId?: string; target?: unknown; cwd?: string }
+          | undefined;
+        if (!entry?.sessionId) continue;
+        const correctId: string = entry.sessionId;
+        // sid is undefined here — use entry.target directly instead of tt.get(undefined)
+        const target = entry.target;
+        tm.set(key, correctId);
+        tt.delete(undefined as unknown as string);
+        tt.set(correctId, target);
+        if (tc) {
+          tc.delete(undefined as unknown as string);
+          tc.set(correctId, entry.cwd || '');
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // ── ReplyMsgId helpers ────────────────────────────────────────
+
+  /**
+   * Set replyMsgId for a chat, cleaning up the previous entry's msgSeqMap
+   * to prevent orphaned entries accumulating over time.
+   */
+  private setReplyMsgId(chatId: string, msgId: string): void {
+    const oldEntry = this.replyMsgId.get(chatId);
+    if (oldEntry && oldEntry.msgId !== msgId) {
+      this.msgSeqMap.delete(oldEntry.msgId);
+    }
+    this.replyMsgId.set(chatId, { msgId, timestamp: Date.now() });
+    this.saveQQState();
+  }
+
+  /**
+   * Start periodic cleanup of expired replyMsgId entries.
+   * Evicts entries older than 5 minutes every 60 seconds, and cascades
+   * to msgSeqMap.
+   */
+  private startReplyMsgIdCleanup(): void {
+    this.stopReplyMsgIdCleanup();
+    this.replyMsgIdCleanupTimer = setInterval(() => {
+      const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
+      let dirty = false;
+      for (const [chatId, entry] of this.replyMsgId) {
+        if (entry.timestamp < cutoff) {
+          this.msgSeqMap.delete(entry.msgId);
+          this.replyMsgId.delete(chatId);
+          dirty = true;
+        }
+      }
+      if (dirty) this.saveQQState();
+    }, 60_000);
+    this.replyMsgIdCleanupTimer.unref();
+  }
+
+  private stopReplyMsgIdCleanup(): void {
+    if (this.replyMsgIdCleanupTimer) {
+      clearInterval(this.replyMsgIdCleanupTimer);
+      this.replyMsgIdCleanupTimer = null;
+    }
+  }
+
+  // ── Token ──────────────────────────────────────────────────────
+
+  private async fetchToken(): Promise<void> {
+    const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
+    const credsFile = getCredsFilePath(safeName);
+
+    // Try load persisted credentials first, then fall back to config
+    let appID = this.qqConfig.appID;
+    let appSecret = this.qqConfig.appSecret;
+
+    if (!appID || !appSecret) {
+      const saved = loadCredentials(credsFile);
+      if (saved) {
+        appID = saved.appId;
+        appSecret = saved.appSecret;
+        this.qqConfig.appID = appID;
+        this.qqConfig.appSecret = appSecret;
+      }
+    }
+
+    // If still no credentials, launch QR code login
+    if (!appID || !appSecret) {
+      process.stderr.write(
+        `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
+      );
+      const creds = await qrCodeLogin();
+      appID = creds.appId;
+      appSecret = creds.appSecret;
+      this.qqConfig.appID = appID;
+      this.qqConfig.appSecret = appSecret;
+      saveCredentials(credsFile, appID, appSecret);
+    }
+
+    const token = await fetchAccessToken(appID, appSecret);
+    this.accessToken = token.accessToken;
+    this.tokenExpiresAt = Date.now() + token.expiresIn * 1000;
+    this.scheduleTokenRefresh();
+  }
+
+  private scheduleTokenRefresh(): void {
+    if (this.disposed) return;
+    this.stopTokenRefresh();
+    const ttl = Math.max(0, this.tokenExpiresAt - Date.now());
+    // Refresh at 80% of TTL, minimum 60s before expiry
+    const delay = Math.max(Math.min(ttl * 0.8, ttl - 60_000), 60_000);
+    if (delay > 0) {
+      this.tokenRefreshTimer = setTimeout(() => {
+        this.fetchToken().catch((e) => {
+          if (this.disposed) return;
+          process.stderr.write(
+            `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in 60s\n`,
+          );
+          this.scheduleTokenRefreshRetry();
+        });
+      }, delay);
+    }
+  }
+
+  private scheduleTokenRefreshRetry(): void {
+    if (this.disposed) return;
+    this.stopTokenRefresh();
+    this.tokenRefreshTimer = setTimeout(() => {
+      this.fetchToken().catch((e) => {
+        if (this.disposed) return;
+        process.stderr.write(
+          `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in 60s\n`,
+        );
+        this.scheduleTokenRefreshRetry();
+      });
+    }, 60_000);
+  }
+
+  private stopTokenRefresh(): void {
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = null;
+    }
+  }
+
+  // ── WebSocket Gateway ──────────────────────────────────────────
+
+  private async connectGateway(): Promise<void> {
+    if (this.disposed) throw new Error('Channel disposed');
+    const url = await fetchGatewayUrl(
+      this.accessToken,
+      Boolean(this.qqConfig.sandbox),
+    );
+
+    return new Promise<void>((resolve, reject) => {
+      this.connectReject = reject;
+      this.dialGateway(url, resolve, reject);
+    });
+  }
+
+  private dialGateway(
+    url: string,
+    resolve: () => void,
+    reject: (err: Error) => void,
+  ): void {
+    this.ws = new WebSocket(url);
+    const dialed = this.ws; // capture for stale-close guard
+    this.readyTimeout = setTimeout(() => {
+      if (this.ws !== dialed) return;
+      this.ws.close(4002, 'READY timeout');
+      reject(new Error(`[QQ:${this.name}] READY timeout after 30s`));
+    }, 30_000);
+    this.readyTimeout.unref?.();
+
+    this.ws.on('open', () => {
+      process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
+    });
+
+    this.ws.on('message', (data: Buffer) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        this.handleGatewayMessage(msg, resolve);
+      } catch (e) {
+        process.stderr.write(
+          `[QQ:${this.name}] Malformed gateway message: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+      }
+    });
+
+    this.ws.on('close', (code: number) => {
+      // Stale-close guard: if a new dialGateway() call has since
+      // replaced this.ws, this close event belongs to a dead socket
+      // and must not nuke the live connection.
+      if (this.ws !== dialed) return;
+      process.stderr.write(
+        `[QQ:${this.name}] WebSocket closed (code=${code})\n`,
+      );
+      if (this.readyTimeout) {
+        clearTimeout(this.readyTimeout);
+        this.readyTimeout = null;
+      }
+      this.stopHeartbeat();
+      this.ws = null;
+
+      const shouldReconnect =
+        this.serverRequestedReconnect ||
+        (code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts);
+
+      this.serverRequestedReconnect = false;
+
+      if (shouldReconnect && this.connectReject) {
+        // Pre-READY close: reject so the caller's retry loop retries.
+        // connectReject is null after READY; when it's still set,
+        // we're waiting for the first READY and must not internal-reconnect
+        // (which would create a competing WebSocket and leak the Promise).
+        this.connectReject(
+          new Error(`WebSocket closed before READY (code=${code})`),
+        );
+        this.connectReject = null;
+      } else if (shouldReconnect) {
+        this.reconnectAttempts++;
+        const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30000);
+        process.stderr.write(
+          `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
+        );
+        if (!this.isReconnecting) {
+          this.reconnectTimer = setTimeout(
+            () => this.reconnectWithRetry(),
+            delay,
+          );
+          this.reconnectTimer.unref();
+        }
+      } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        process.stderr.write(
+          `[QQ:${this.name}] FATAL: reconnect exhausted after ${this.maxReconnectAttempts} attempts. Bot is offline until daemon restart.\n`,
+        );
+        // Reject pending connect promise if we're not reconnecting
+        if (this.connectReject) {
+          this.connectReject(
+            new Error(
+              `WebSocket closed (max reconnect attempts, code=${code})`,
+            ),
+          );
+          this.connectReject = null;
+        }
+      } else {
+        // Reject pending connect promise if we're not reconnecting
+        if (this.connectReject) {
+          this.connectReject(
+            new Error(`WebSocket closed before READY (code=${code})`),
+          );
+          this.connectReject = null;
+        }
+      }
+    });
+
+    this.ws.on('error', (e: Error) => {
+      process.stderr.write(
+        `[QQ:${this.name}] WebSocket error: ${sanitizeLogText(e.message, 200)}\n`,
+      );
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(e);
+      }
+    });
+  }
+
+  private handleGatewayMessage(
+    msg: Record<string, unknown>,
+    onReady: () => void,
+  ): void {
+    const op = msg['op'] as number;
+
+    switch (op) {
+      case OpCode.HELLO: {
+        this.heartbeatInterval = Math.max(
+          ((msg['d'] as Record<string, unknown> | undefined)?.[
+            'heartbeat_interval'
+          ] as number) || 45000,
+          5000,
+        );
+        this.sendIdentify();
+        break;
+      }
+      case OpCode.DISPATCH: {
+        const t = msg['t'] as string;
+        const s = msg['s'] as number | undefined;
+        if (s !== undefined) this.seq = s;
+
+        if (t === 'READY') {
+          this.reconnectAttempts = 0;
+          this.isReconnecting = false;
+          if (this.readyTimeout) {
+            clearTimeout(this.readyTimeout);
+            this.readyTimeout = null;
+          }
+          this.sessionId =
+            ((msg['d'] as Record<string, unknown> | undefined)?.[
+              'session_id'
+            ] as string) || '';
+          this.tryResume = true;
+          this.connectReject = null;
+          this.startHeartbeat();
+          this.restoreGlobalSessions();
+          this.restoreQQState();
+          this.router
+            .restoreSessions()
+            .then(() => {
+              this.fixRestoredSessions();
+              const all = (
+                this.router as unknown as {
+                  getAll?: () => Array<{
+                    target?: { chatId?: string };
+                    sessionId?: string;
+                  }>;
+                }
+              ).getAll?.();
+              const sessions =
+                all
+                  ?.map((e) => `${e.target?.chatId}:${e.sessionId}`)
+                  .join(', ') || 'none';
+              process.stderr.write(
+                `[QQ:${this.name}] Ready (sessions: ${sessions})\n`,
+              );
+              onReady();
+            })
+            .catch(() => onReady());
+        } else if (t === 'C2C_MESSAGE_CREATE') {
+          this.handleC2C(msg['d'] as unknown as QQMessageEvent);
+        } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
+          this.handleGroup(msg['d'] as unknown as QQGroupMessageEvent);
+        } else if (t === 'RESUMED') {
+          // RESUME success — the process did NOT restart, all in-memory
+          // session state, QQ routing state, and global sessions.json are
+          // still intact. Calling restoreSessions() would drop and re-attach
+          // every session, aborting in-flight LLM prompts.
+          this.reconnectAttempts = 0;
+          this.isReconnecting = false;
+          if (this.readyTimeout) {
+            clearTimeout(this.readyTimeout);
+            this.readyTimeout = null;
+          }
+          this.connectReject = null;
+          this.startHeartbeat();
+          onReady();
+        }
+        break;
+      }
+      case OpCode.HEARTBEAT_ACK:
+        this.lastHeartbeatAck = Date.now();
+        break;
+      case OpCode.RECONNECT:
+        this.serverRequestedReconnect = true;
+        this.ws?.close(4000);
+        break;
+      case OpCode.INVALID_SESSION:
+        process.stderr.write(
+          `[QQ:${this.name}] Server sent INVALID_SESSION, falling back to IDENTIFY\n`,
+        );
+        this.tryResume = false;
+        this.sendIdentify();
+        break;
+      default:
+        break;
+    }
+  }
+
+  private sendIdentify(): void {
+    if (!this.ws) return;
+    if (this.tryResume && this.sessionId) {
+      process.stderr.write(
+        `[QQ:${this.name}] Sending RESUME (session: ${this.sessionId})\n`,
+      );
+      this.ws.send(
+        JSON.stringify({
+          op: OpCode.RESUME,
+          d: {
+            token: `QQBot ${this.accessToken}`,
+            session_id: this.sessionId,
+            seq: this.seq,
+          },
+        }),
+      );
+      return;
+    }
+    this.ws.send(
+      JSON.stringify({
+        op: OpCode.IDENTIFY,
+        d: {
+          token: `QQBot ${this.accessToken}`,
+          intents: Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE,
+          shard: [0, 1],
+          properties: {},
+        },
+      }),
+    );
+  }
+
+  /**
+   * Reconnect loop with retry on gateway fetch failures.
+   * Refreshes token before each attempt, and retries GW HTTP failures
+   * with exponential backoff. Keeps retrying until success.
+   */
+  private async reconnectWithRetry(): Promise<void> {
+    // Guard: if the channel was disposed (daemon shutdown) while a reconnect
+    // timeout was pending, bail out immediately to avoid an infinite loop.
+    if (this.disposed) return;
+    // Guard: prevent parallel reconnection chains when multiple close events
+    // fire in rapid succession, each scheduling reconnectWithRetry.
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      process.stderr.write(
+        `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
+      );
+      this.isReconnecting = false;
+      return;
+    }
+
+    const maxGwRetries = 5;
+    let gatewayAttempted = false;
+    for (let attempt = 0; attempt < maxGwRetries; attempt++) {
+      try {
+        // Refresh token before reconnect attempt
+        try {
+          await this.fetchToken();
+        } catch {
+          process.stderr.write(
+            `[QQ:${this.name}] RC: token refresh failed, retrying...\n`,
+          );
+          await this.sleep(2000);
+          continue;
+        }
+        gatewayAttempted = true;
+        await this.connectGateway();
+        return; // success
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
+        process.stderr.write(
+          `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
+        );
+        if (attempt < maxGwRetries - 1) await this.sleep(backoff);
+      }
+    }
+    process.stderr.write(
+      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} reconnect retries, will retry in 60s\n`,
+    );
+    if (gatewayAttempted) this.reconnectAttempts++;
+    this.tryResume = false; // fall back to full IDENTIFY next time
+    this.isReconnecting = false; // release guard for future retries
+    // Schedule another attempt with longer delay
+    this.reconnectTimer = setTimeout(() => this.reconnectWithRetry(), 60000);
+    this.reconnectTimer.unref();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.lastHeartbeatAck = Date.now();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.ws?.readyState !== WebSocket.OPEN) return;
+      // Check if previous heartbeat was acknowledged
+      const elapsed = Date.now() - this.lastHeartbeatAck;
+      if (elapsed > this.heartbeatInterval * 2) {
+        process.stderr.write(
+          `[QQ:${this.name}] Heartbeat ACK timeout (${elapsed}ms), forcing reconnect\n`,
+        );
+        this.ws?.close(4001);
+        return;
+      }
+      this.ws.send(JSON.stringify({ op: OpCode.HEARTBEAT, d: this.seq }));
+    }, this.heartbeatInterval);
+    this.heartbeatTimer.unref();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  // ── Message Handlers ───────────────────────────────────────────
+
+  /** Check if a message ID was already processed (reconnect replay dedup). */
+  private isDuplicate(eventId: string): boolean {
+    if (this.seenMessages.has(eventId)) return true;
+    const now = Date.now();
+    this.seenMessages.set(eventId, now);
+    // Evict entries older than 5 minutes
+    if (!this.seenCleanupTimer) {
+      this.seenCleanupTimer = setInterval(() => {
+        const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
+        for (const [id, ts] of this.seenMessages) {
+          if (ts < cutoff) this.seenMessages.delete(id);
+        }
+        if (this.seenMessages.size === 0) {
+          clearInterval(this.seenCleanupTimer!);
+          this.seenCleanupTimer = null;
+        }
+      }, 60_000).unref();
+    }
+    return false;
+  }
+
+  private handleC2C(event: QQMessageEvent): void {
+    if (this.isDuplicate(event.id)) return;
+    // Ignore messages with no text content (images, stickers, etc.)
+    if (!event.content?.trim()) return;
+    if (!event.author) return;
+    // user_openid and author.id are scoped differently — falling back to
+    // author.id may produce a different identity for the same user across
+    // C2C and group contexts, creating two separate sessions. QQ Bot does
+    // not expose a unified user identity, so this is unavoidable.
+    const chatId = event.author.user_openid || event.author.id;
+    this.chatTypeMap.set(chatId, 'c2c');
+    this.setReplyMsgId(chatId, event.id);
+    this.handleInbound({
+      channelName: this.name,
+      senderId: chatId,
+      senderName: event.author.username || event.author.id || 'QQ User',
+      chatId,
+      text: event.content,
+      messageId: event.id,
+      isGroup: false,
+      isMentioned: true,
+      isReplyToBot: false,
+    }).catch((e) =>
+      process.stderr.write(
+        `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      ),
+    );
+  }
+
+  private handleGroup(event: QQGroupMessageEvent): void {
+    if (this.isDuplicate(event.id)) return;
+    if (!event.group_openid) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group message dropped: missing group_openid\n`,
+      );
+      return;
+    }
+    const chatId = event.group_openid;
+    this.chatTypeMap.set(chatId, 'group');
+    this.setReplyMsgId(chatId, event.id);
+    const senderName = event.author.username || event.author.id || 'QQ User';
+    // Strip @mention tags from message content. QQ Bot API docs state the API
+    // cleans these, but the format varies across API versions:
+    //   - Legacy: <@!12345> (numeric user ID with bang)
+    //   - V2:     <@D5B53C...> (hex openid, no bang)
+    // Use a broad pattern to handle both. Bound to 64 chars — QQ openids
+    // and user IDs are short; this prevents quadratic backtracking on <@<@... chains.
+    const cleanText = (event.content || '')
+      .replace(/<@[^>]{1,64}>/g, '')
+      .trim();
+    // Ignore messages that have no meaningful text after @mention stripping
+    // (pure @mention, image, or sticker messages).
+    if (!cleanText) return;
+    const isSlash = cleanText.startsWith('/');
+    // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
+    // [..]/newline/length sanitization — so neutralize the nick here too (same
+    // shared helper), or a crafted QQ nickname could inject brackets/newlines.
+    // Hoisted above the audit log so the log uses the sanitized name too:
+    // event.author.username is attacker-controlled, and a crafted nick bearing
+    // CR/LF/ANSI escapes could otherwise forge or corrupt the operator audit log.
+    const safeName = sanitizeSenderName(senderName);
+    // Log slash commands for an audit trail. cleanText is attacker-controlled, so
+    // neutralize it with the shared log sanitizer (same helper as ChannelBase's
+    // dropped-turn log): it renders newlines visibly and strips the C0/DEL controls
+    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line break
+    // that could forge an extra log line), the Unicode line/paragraph separators
+    // U+2028/U+2029, and the bidi overrides — any of which would otherwise inject,
+    // overwrite, or reorder an operator's audit line.
+    if (isSlash) {
+      const loggedCmd = sanitizeLogText(cleanText, 80);
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
+      );
+    }
+    // Don't prefix slash commands; for normal messages, sanitize the body here
+    // because alreadyPrefixed tells ChannelBase not to rewrite the prefix.
+    const text = isSlash
+      ? cleanText
+      : `[${safeName}]: ${sanitizePromptText(cleanText)}`;
+    this.handleInbound({
+      channelName: this.name,
+      senderId: event.author.user_openid || event.author.id,
+      senderName,
+      chatId,
+      text,
+      messageId: event.id,
+      isGroup: true,
+      isMentioned: true,
+      // QQ Bot only receives group messages when explicitly @mentioned, so
+      // every group message is semantically a reply to the bot.
+      isReplyToBot: true,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+    }).catch((e) =>
+      process.stderr.write(
+        `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      ),
+    );
+  }
+}

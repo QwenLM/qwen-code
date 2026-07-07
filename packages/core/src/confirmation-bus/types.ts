@@ -109,6 +109,8 @@ export interface HookExecutionRequest {
   eventName: string;
   input: Record<string, unknown>;
   correlationId: string;
+  /** Optional AbortSignal to cancel hook execution */
+  signal?: AbortSignal;
 }
 
 export interface HookExecutionResponse {
@@ -117,6 +119,8 @@ export interface HookExecutionResponse {
   success: boolean;
   output?: Record<string, unknown>;
   error?: Error;
+  /** Number of stop hooks that were executed */
+  stopHookCount?: number;
 }
 
 export type Message =

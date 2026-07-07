@@ -16,51 +16,54 @@ import {
 
 describe('quotaErrorDetection', () => {
   describe('isQwenQuotaExceededError', () => {
-    it('should detect insufficient_quota error message', () => {
-      const error = new Error('insufficient_quota');
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect free allocated quota exceeded error message', () => {
-      const error = new Error('Free allocated quota exceeded.');
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded error message', () => {
-      const error = new Error('quota exceeded');
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded in string error', () => {
-      const error = 'insufficient_quota';
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded in structured error', () => {
-      const error = { message: 'Free allocated quota exceeded.', status: 429 };
-      expect(isQwenQuotaExceededError(error)).toBe(true);
-    });
-
-    it('should detect quota exceeded in API error', () => {
-      const error: ApiError = {
-        error: {
-          code: 429,
-          message: 'insufficient_quota',
-          status: 'RESOURCE_EXHAUSTED',
-          details: [],
-        },
+    it('should detect the Qwen insufficient_quota error', () => {
+      const error = {
+        status: 429,
+        code: 'insufficient_quota',
+        message: 'Free allocated quota exceeded.',
       };
       expect(isQwenQuotaExceededError(error)).toBe(true);
     });
 
-    it('should not detect throttling errors as quota exceeded', () => {
-      const error = new Error('requests throttling triggered');
+    it('should not match when status is not 429', () => {
+      const error = {
+        status: 400,
+        code: 'insufficient_quota',
+        message: 'Free allocated quota exceeded.',
+      };
       expect(isQwenQuotaExceededError(error)).toBe(false);
     });
 
-    it('should not detect unrelated errors', () => {
-      const error = new Error('Network error');
+    it('should not match temporary throttling (concurrency 429)', () => {
+      const error = {
+        status: 429,
+        code: 'rate_limit_exceeded',
+        message: 'Rate limit exceeded',
+      };
       expect(isQwenQuotaExceededError(error)).toBe(false);
+    });
+
+    it('should not match paid account quota exceeded', () => {
+      const error = {
+        status: 429,
+        code: 'insufficient_quota',
+        message: 'You exceeded your current quota.',
+      };
+      expect(isQwenQuotaExceededError(error)).toBe(false);
+    });
+
+    it('should not match plain Error objects', () => {
+      const error = new Error('insufficient_quota');
+      expect(isQwenQuotaExceededError(error)).toBe(false);
+    });
+
+    it('should not match string errors', () => {
+      expect(isQwenQuotaExceededError('insufficient_quota')).toBe(false);
+    });
+
+    it('should not match null or undefined', () => {
+      expect(isQwenQuotaExceededError(null)).toBe(false);
+      expect(isQwenQuotaExceededError(undefined)).toBe(false);
     });
   });
 

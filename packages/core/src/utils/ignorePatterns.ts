@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import type { Config } from '../config/config.js';
-import { getAllGeminiMdFilenames } from '../tools/memoryTool.js';
+import { getAllGeminiMdFilenames } from '../memory/const.js';
 
 /**
  * Common ignore patterns used across multiple tools for basic exclusions.
@@ -269,7 +269,6 @@ export const BINARY_EXTENSIONS: string[] = [
     ...PYTHON_EXCLUDES,
   ]),
   // Additional binary extensions not in the main patterns
-  '.dat',
   '.obj',
   '.o',
   '.a',

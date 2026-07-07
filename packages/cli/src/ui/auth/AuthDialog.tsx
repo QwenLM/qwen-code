@@ -5,356 +5,302 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
-import { ApiKeyInput } from '../components/ApiKeyInput.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
 import {
-  CodingPlanRegion,
-  isCodingPlanConfig,
-} from '../../constants/codingPlan.js';
+  findProviderById,
+  findProviderByCredentials,
+  findExistingProviderModels,
+  getDefaultModelIds,
+  customProvider,
+  ALIBABA_PROVIDERS,
+  THIRD_PARTY_PROVIDERS,
+  type ProviderConfig,
+} from '@qwen-code/qwen-code-core';
+import { useProviderSetupFlow } from './useProviderSetupFlow.js';
+import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
-const MODEL_PROVIDERS_DOCUMENTATION_URL =
-  'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/';
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
-function parseDefaultAuthType(
-  defaultAuthType: string | undefined,
-): AuthType | null {
-  if (
-    defaultAuthType &&
-    Object.values(AuthType).includes(defaultAuthType as AuthType)
-  ) {
-    return defaultAuthType as AuthType;
-  }
-  return null;
+type ViewLevel =
+  | 'main'
+  | 'alibaba-select'
+  | 'thirdparty-select'
+  | 'provider-setup';
+
+type MainOption =
+  | 'ALIBABA_MODELSTUDIO'
+  | 'THIRD_PARTY_PROVIDERS'
+  | 'CUSTOM_PROVIDER';
+
+// ---------------------------------------------------------------------------
+// Static data
+// ---------------------------------------------------------------------------
+
+const MAIN_ITEMS = [
+  {
+    key: 'ALIBABA_MODELSTUDIO',
+    title: t('Alibaba ModelStudio'),
+    label: t('Alibaba ModelStudio'),
+    description: t(
+      'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+    ),
+    value: 'ALIBABA_MODELSTUDIO' as MainOption,
+  },
+  {
+    key: 'THIRD_PARTY_PROVIDERS',
+    title: t('Third-party Providers'),
+    label: t('Third-party Providers'),
+    description: t('Choose a built-in provider and connect with an API key'),
+    value: 'THIRD_PARTY_PROVIDERS' as MainOption,
+  },
+  {
+    key: 'CUSTOM_PROVIDER',
+    title: t('Custom Provider'),
+    label: t('Custom Provider'),
+    description: t(
+      'Manually connect a local server, proxy, or unsupported provider',
+    ),
+    value: 'CUSTOM_PROVIDER' as MainOption,
+  },
+];
+
+function providerToItem(config: ProviderConfig) {
+  return {
+    key: config.id,
+    title: t(config.label),
+    label: t(config.label),
+    description: t(config.description),
+    value: config.id,
+  };
 }
 
-// Main menu option type
-type MainOption = typeof AuthType.QWEN_OAUTH | 'CODING_PLAN' | 'API_KEY';
+// ---------------------------------------------------------------------------
+// Step label for provider-setup title bar
+// ---------------------------------------------------------------------------
 
-// View level for navigation
-type ViewLevel = 'main' | 'region-select' | 'api-key-input' | 'custom-info';
+function getStepLabel(step: string | null, p: ProviderConfig): string {
+  if (step === 'protocol') return t('Protocol');
+  if (step === 'baseUrl') {
+    if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
+    return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
+  }
+  if (step === 'apiKey') return t('API Key');
+  if (step === 'models') return t('Model IDs');
+  if (step === 'advancedConfig') return t('Advanced Config');
+  if (step === 'review') return t('Review');
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// View titles
+// ---------------------------------------------------------------------------
+
+const VIEW_TITLES: Record<string, string> = {
+  main: t('Connect a Provider'),
+  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': t('Third-party Providers · Provider'),
+};
+
+// ---------------------------------------------------------------------------
+// AuthDialog
+// ---------------------------------------------------------------------------
 
 export function AuthDialog(): React.JSX.Element {
-  const { pendingAuthType, authError } = useUIState();
   const {
-    handleAuthSelect: onAuthSelect,
-    handleCodingPlanSubmit,
-    onAuthError,
-    openModelDialog,
+    auth: { authError },
+  } = useUIState();
+  const {
+    auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
   } = useUIActions();
   const config = useConfig();
+  const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
-  const [regionIndex, setRegionIndex] = useState<number>(0);
-  const [region, setRegion] = useState<CodingPlanRegion>(
-    CodingPlanRegion.CHINA,
+  const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
+
+  const [mainIndex, setMainIndex] = useState<number | null>(null);
+  const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
+
+  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+
+  // -- Navigation -----------------------------------------------------------
+
+  const clearErrors = () => {
+    setErrorMessage(null);
+    onAuthError(null);
+  };
+
+  const pushView = (view: ViewLevel) => {
+    setViewStack((prev) => [...prev, viewLevel]);
+    setViewLevel(view);
+  };
+
+  const goBack = () => {
+    clearErrors();
+
+    if (viewLevel === 'provider-setup') {
+      if (setupFlow.goBack()) return;
+    }
+
+    setViewStack((prev) => {
+      const next = [...prev];
+      const parent = next.pop() ?? 'main';
+      setViewLevel(parent);
+      return next;
+    });
+  };
+
+  // -- Sub-menu definitions (data-driven) -----------------------------------
+
+  const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
+  const thirdPartyItems = useMemo(
+    () => THIRD_PARTY_PROVIDERS.map(providerToItem),
+    [],
   );
 
-  // Main authentication entries (flat three-option layout)
-  const mainItems = [
-    {
-      key: AuthType.QWEN_OAUTH,
-      title: t('Qwen OAuth'),
-      label: t('Qwen OAuth'),
-      description: t(
-        'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
-      ),
-      value: AuthType.QWEN_OAUTH as MainOption,
-    },
-    {
-      key: 'CODING_PLAN',
-      title: t('Alibaba Cloud Coding Plan'),
-      label: t('Alibaba Cloud Coding Plan'),
-      description: t(
-        'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
-      ),
-      value: 'CODING_PLAN' as MainOption,
-    },
-    {
-      key: 'API_KEY',
-      title: t('API Key'),
-      label: t('API Key'),
-      description: t('Bring your own API key'),
-      value: 'API_KEY' as MainOption,
-    },
-  ];
+  const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  // Region selection entries (shown after selecting Alibaba Cloud Coding Plan)
-  const regionItems = [
-    {
-      key: 'china',
-      title: '阿里云百炼 (aliyun.com)',
-      label: '阿里云百炼 (aliyun.com)',
-      description: (
-        <Link
-          url="https://help.aliyun.com/zh/model-studio/coding-plan"
-          fallback={false}
-        >
-          <Text color={theme.text.secondary}>
-            https://help.aliyun.com/zh/model-studio/coding-plan
-          </Text>
-        </Link>
-      ),
-      value: CodingPlanRegion.CHINA,
-    },
-    {
-      key: 'global',
-      title: 'Alibaba Cloud (alibabacloud.com)',
-      label: 'Alibaba Cloud (alibabacloud.com)',
-      description: (
-        <Link
-          url="https://www.alibabacloud.com/help/en/model-studio/coding-plan"
-          fallback={false}
-        >
-          <Text color={theme.text.secondary}>
-            https://www.alibabacloud.com/help/en/model-studio/coding-plan
-          </Text>
-        </Link>
-      ),
-      value: CodingPlanRegion.GLOBAL,
-    },
-  ];
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findExistingProviderModels(
+      providerConfig,
+      settings.merged.modelProviders as Record<string, unknown> | undefined,
+    );
+    if (!saved) return [];
+    const builtinIds = new Set(getDefaultModelIds(providerConfig));
+    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+  };
 
-  // Map an AuthType to the corresponding main menu option.
-  // QWEN_OAUTH maps directly; any other auth type maps to CODING_PLAN only
-  // if the current config actually uses a Coding Plan baseUrl+envKey,
-  // otherwise it maps to API_KEY.
+  const handleProviderSelect = (providerId: string) => {
+    clearErrors();
+    const providerConfig = findProviderById(providerId);
+    if (!providerConfig) return;
+    setupFlow.start(
+      providerConfig,
+      undefined,
+      existingEnv,
+      getExistingModelIds(providerConfig),
+    );
+    pushView('provider-setup');
+  };
+
+  const subMenus: Record<
+    string,
+    {
+      items: Array<ReturnType<typeof providerToItem>>;
+      onSelect: (v: string) => void;
+    }
+  > = {
+    'alibaba-select': {
+      items: alibabaItems,
+      onSelect: handleProviderSelect,
+    },
+    'thirdparty-select': {
+      items: thirdPartyItems,
+      onSelect: handleProviderSelect,
+    },
+  };
+
+  const activeSubMenu = subMenus[viewLevel];
+
+  // -- Default main index from current auth state ---------------------------
+
   const contentGenConfig = config.getContentGeneratorConfig();
-  const isCurrentlyCodingPlan =
-    isCodingPlanConfig(
-      contentGenConfig?.baseUrl,
-      contentGenConfig?.apiKeyEnvKey,
-    ) !== false;
-
-  const authTypeToMainOption = (authType: AuthType): MainOption => {
-    if (authType === AuthType.QWEN_OAUTH) return AuthType.QWEN_OAUTH;
-    if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan)
-      return 'CODING_PLAN';
-    return 'API_KEY';
-  };
-
-  const initialAuthIndex = Math.max(
-    0,
-    mainItems.findIndex((item) => {
-      // Priority 1: pendingAuthType
-      if (pendingAuthType) {
-        return item.value === authTypeToMainOption(pendingAuthType);
-      }
-
-      // Priority 2: config.getAuthType() - the source of truth
-      const currentAuthType = config.getAuthType();
-      if (currentAuthType) {
-        return item.value === authTypeToMainOption(currentAuthType);
-      }
-
-      // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
-      const defaultAuthType = parseDefaultAuthType(
-        process.env['QWEN_DEFAULT_AUTH_TYPE'],
-      );
-      if (defaultAuthType) {
-        return item.value === authTypeToMainOption(defaultAuthType);
-      }
-
-      // Priority 4: default to QWEN_OAUTH
-      return item.value === AuthType.QWEN_OAUTH;
-    }),
+  const matchedProvider = findProviderByCredentials(
+    contentGenConfig?.baseUrl,
+    contentGenConfig?.apiKeyEnvKey,
   );
 
-  const handleMainSelect = async (value: MainOption) => {
-    setErrorMessage(null);
-    onAuthError(null);
+  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
+  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
+  // (resolveMetadataKey returns config.id for *any* provider with a static
+  // models[], so it can't be used to detect "Alibaba" specifically.)
+  const defaultMainIndex = useMemo(() => {
+    if (matchedProvider?.uiGroup === 'third-party') return 1;
+    if (matchedProvider?.uiGroup === 'custom') return 2;
+    return 0;
+  }, [matchedProvider]);
 
-    if (value === 'CODING_PLAN') {
-      // Navigate to region selection
-      setViewLevel('region-select');
-      return;
-    }
+  // -- Handlers -------------------------------------------------------------
 
-    if (value === 'API_KEY') {
-      // Check if there are already configured models for USE_OPENAI
-      const configuredModels =
-        config?.getAllConfiguredModels([AuthType.USE_OPENAI]) ?? [];
-      if (configuredModels.length > 0) {
-        // If models are configured, open ModelDialog directly.
-        // Keep AuthDialog open in background so that if user closes ModelDialog
-        // without selecting a model, they return to AuthDialog.
-        // After successful model selection, AuthDialog will be closed automatically
-        // because config.getAuthType() will be set.
-        openModelDialog();
-        return;
-      }
-      // Otherwise, navigate to custom API key info
-      setViewLevel('custom-info');
-      return;
-    }
-
-    // For Qwen OAuth, proceed directly
-    await onAuthSelect(value);
-  };
-
-  const handleRegionSelect = async (selectedRegion: CodingPlanRegion) => {
-    setErrorMessage(null);
-    onAuthError(null);
-    setRegion(selectedRegion);
-    setViewLevel('api-key-input');
-  };
-
-  const handleApiKeyInputSubmit = async (apiKey: string) => {
-    setErrorMessage(null);
-
-    if (!apiKey.trim()) {
-      setErrorMessage(t('API key cannot be empty.'));
-      return;
-    }
-
-    // Submit to parent for processing with region info
-    await handleCodingPlanSubmit(apiKey, region);
-  };
-
-  const handleGoBack = () => {
-    setErrorMessage(null);
-    onAuthError(null);
-
-    if (viewLevel === 'region-select' || viewLevel === 'custom-info') {
-      setViewLevel('main');
-    } else if (viewLevel === 'api-key-input') {
-      setViewLevel('region-select');
+  const handleMainSelect = (value: MainOption) => {
+    clearErrors();
+    switch (value) {
+      case 'ALIBABA_MODELSTUDIO':
+        pushView('alibaba-select');
+        break;
+      case 'THIRD_PARTY_PROVIDERS':
+        pushView('thirdparty-select');
+        break;
+      case 'CUSTOM_PROVIDER':
+        setupFlow.start(
+          customProvider,
+          undefined,
+          existingEnv,
+          getExistingModelIds(customProvider),
+        );
+        pushView('provider-setup');
+        break;
+      default:
+        break;
     }
   };
+
+  // -- Keyboard handling ----------------------------------------------------
 
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        // Handle Escape based on current view level
-        if (viewLevel === 'region-select') {
-          handleGoBack();
+        if (viewLevel !== 'main') {
+          goBack();
           return;
         }
-
-        if (viewLevel === 'api-key-input' || viewLevel === 'custom-info') {
-          handleGoBack();
-          return;
-        }
-
-        // For main view, use existing logic
-        if (errorMessage) {
-          return;
-        }
+        if (errorMessage) return;
         if (config.getAuthType() === undefined) {
           setErrorMessage(
             t(
-              'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+              'You must connect a provider to proceed. Press Ctrl+C again to exit.',
             ),
           );
           return;
         }
-        onAuthSelect(undefined);
+        closeAuthDialog();
       }
     },
     { isActive: true },
   );
 
-  // Render main auth selection
-  const renderMainView = () => (
-    <>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={mainItems}
-          initialIndex={initialAuthIndex}
-          onSelect={handleMainSelect}
-          itemGap={1}
-        />
-      </Box>
-    </>
-  );
+  // -- View title -----------------------------------------------------------
 
-  // Render region selection for Alibaba Cloud Coding Plan
-  const renderRegionSelectView = () => (
-    <>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('Choose based on where your account is registered')}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={regionItems}
-          initialIndex={regionIndex}
-          onSelect={handleRegionSelect}
-          onHighlight={(value) => {
-            const index = regionItems.findIndex((item) => item.value === value);
-            setRegionIndex(index);
-          }}
-          itemGap={1}
-        />
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-        </Text>
-      </Box>
-    </>
-  );
-
-  // Render API key input for coding-plan mode
-  const renderApiKeyInputView = () => (
-    <Box marginTop={1}>
-      <ApiKeyInput
-        onSubmit={handleApiKeyInputSubmit}
-        onCancel={handleGoBack}
-        region={region}
-      />
-    </Box>
-  );
-
-  // Render custom mode info
-  const renderCustomInfoView = () => (
-    <>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>
-          {t('You can configure your API key and models in settings.json')}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text>{t('Refer to the documentation for setup instructions')}</Text>
-      </Box>
-      <Box marginTop={0}>
-        <Link url={MODEL_PROVIDERS_DOCUMENTATION_URL} fallback={false}>
-          <Text color={theme.text.link}>
-            {MODEL_PROVIDERS_DOCUMENTATION_URL}
-          </Text>
-        </Link>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
-      </Box>
-    </>
-  );
-
-  const getViewTitle = () => {
-    switch (viewLevel) {
-      case 'main':
-        return t('Select Authentication Method');
-      case 'region-select':
-        return t('Select Region for Coding Plan');
-      case 'api-key-input':
-        return t('Enter Coding Plan API Key');
-      case 'custom-info':
-        return t('Custom Configuration');
-      default:
-        return t('Select Authentication Method');
+  const viewTitle = useMemo(() => {
+    if (viewLevel !== 'provider-setup') {
+      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
     }
-  };
+    const p = setupFlow.state.provider;
+    if (!p) return t('Provider Setup');
+    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const { stepIndex, totalSteps, step } = setupFlow.state;
+    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
+      flowTitle,
+      step: String(stepIndex),
+      total: String(totalSteps),
+      stepLabel: getStepLabel(step, p),
+    });
+  }, [viewLevel, setupFlow.state]);
+
+  // -- Render ---------------------------------------------------------------
 
   return (
     <Box
@@ -364,12 +310,53 @@ export function AuthDialog(): React.JSX.Element {
       padding={1}
       width="100%"
     >
-      <Text bold>{getViewTitle()}</Text>
+      <Text bold>{viewTitle}</Text>
 
-      {viewLevel === 'main' && renderMainView()}
-      {viewLevel === 'region-select' && renderRegionSelectView()}
-      {viewLevel === 'api-key-input' && renderApiKeyInputView()}
-      {viewLevel === 'custom-info' && renderCustomInfoView()}
+      {viewLevel === 'main' && (
+        <Box marginTop={1}>
+          <DescriptiveRadioButtonSelect
+            items={MAIN_ITEMS}
+            initialIndex={mainIndex != null ? mainIndex : defaultMainIndex}
+            onSelect={handleMainSelect}
+            onHighlight={(value) => {
+              setMainIndex(
+                MAIN_ITEMS.findIndex((item) => item.value === value),
+              );
+            }}
+            itemGap={1}
+          />
+        </Box>
+      )}
+
+      {activeSubMenu && (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={activeSubMenu.items}
+              initialIndex={subMenuIndex[viewLevel] ?? 0}
+              onSelect={activeSubMenu.onSelect}
+              onHighlight={(value) => {
+                setSubMenuIndex((prev) => ({
+                  ...prev,
+                  [viewLevel]: activeSubMenu.items.findIndex(
+                    (i) => i.value === value,
+                  ),
+                }));
+              }}
+              itemGap={1}
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme?.text?.secondary}>
+              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {viewLevel === 'provider-setup' && (
+        <ProviderSetupSteps flow={setupFlow} />
+      )}
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>
@@ -379,13 +366,8 @@ export function AuthDialog(): React.JSX.Element {
 
       {viewLevel === 'main' && (
         <>
-          {/* <Box marginTop={1}>
-            <Text color={theme.text.secondary}>
-              {t('Enter to select, \u2191\u2193 to navigate, Esc to close')}
-            </Text>
-          </Box> */}
           <Box marginY={1}>
-            <Text color={theme.border.default}>{'\u2500'.repeat(80)}</Text>
+            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
           </Box>
           <Box>
             <Text color={theme.text.primary}>

@@ -20,6 +20,11 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
+const MAX_TCP_PORT = 65_535;
+
+export type LspUserConfigLoadResult =
+  | { ok: true; configs: LspServerConfig[] }
+  | { ok: false; error: Error };
 
 export class LspConfigLoader {
   constructor(private readonly workspaceRoot: string) {}
@@ -37,10 +42,29 @@ export class LspConfigLoader {
     try {
       const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
       const data = JSON.parse(configContent);
-      return this.parseConfigSource(data, lspConfigPath);
+      return this.parseConfigSource(data, lspConfigPath, {
+        forceTrustRequired: true,
+      });
     } catch (error) {
       debugLogger.warn('Failed to load user .lsp.json config:', error);
       return [];
+    }
+  }
+
+  async loadUserConfigsStrict(): Promise<LspUserConfigLoadResult> {
+    const lspConfigPath = path.join(this.workspaceRoot, '.lsp.json');
+    try {
+      const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
+      const data = JSON.parse(configContent);
+      return this.parseUserConfigSourceStrict(data, lspConfigPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { ok: true, configs: [] };
+      }
+      return {
+        ok: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
     }
   }
 
@@ -106,18 +130,17 @@ export class LspConfigLoader {
   }
 
   /**
-   * Merge configs: built-in presets + extension configs + user configs
+   * Merge configs: extension configs + user configs
+   * Note: Built-in presets are disabled. LSP servers must be explicitly configured
+   * by the user via .lsp.json or through extensions.
    */
   mergeConfigs(
-    detectedLanguages: string[],
+    _detectedLanguages: string[],
     extensionConfigs: LspServerConfig[],
     userConfigs: LspServerConfig[],
   ): LspServerConfig[] {
-    // Built-in preset configurations
-    const presets = this.getBuiltInPresets(detectedLanguages);
-
     // Merge configs, user configs take priority
-    const mergedConfigs = [...presets];
+    const mergedConfigs: LspServerConfig[] = [];
 
     const applyConfigs = (configs: LspServerConfig[]) => {
       for (const config of configs) {
@@ -162,77 +185,13 @@ export class LspConfigLoader {
   }
 
   /**
-   * Get built-in preset configurations
-   */
-  private getBuiltInPresets(detectedLanguages: string[]): LspServerConfig[] {
-    const presets: LspServerConfig[] = [];
-
-    // Convert directory path to file URI format
-    const rootUri = pathToFileURL(this.workspaceRoot).toString();
-
-    // Generate corresponding LSP server config based on detected languages
-    if (
-      detectedLanguages.includes('typescript') ||
-      detectedLanguages.includes('javascript')
-    ) {
-      presets.push({
-        name: 'typescript-language-server',
-        languages: [
-          'typescript',
-          'javascript',
-          'typescriptreact',
-          'javascriptreact',
-        ],
-        command: 'typescript-language-server',
-        args: ['--stdio'],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('python')) {
-      presets.push({
-        name: 'pylsp',
-        languages: ['python'],
-        command: 'pylsp',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('go')) {
-      presets.push({
-        name: 'gopls',
-        languages: ['go'],
-        command: 'gopls',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    // Additional language presets can be added as needed
-
-    return presets;
-  }
-
-  /**
    * Parse configuration source and extract server configs.
    * Expects basic format keyed by language identifier.
    */
   private parseConfigSource(
     source: unknown,
     origin: string,
+    options: { forceTrustRequired?: boolean } = {},
   ): LspServerConfig[] {
     if (!this.isRecord(source)) {
       return [];
@@ -250,13 +209,54 @@ export class LspConfigLoader {
       const name =
         typeof spec['command'] === 'string' ? (spec['command'] as string) : key;
 
-      const config = this.buildServerConfig(name, languages, spec, origin);
+      const config = this.buildServerConfig(name, languages, spec, origin, {
+        forceTrustRequired: options.forceTrustRequired,
+      });
       if (config) {
         configs.push(config);
       }
     }
 
     return configs;
+  }
+
+  private parseUserConfigSourceStrict(
+    source: unknown,
+    origin: string,
+  ): LspUserConfigLoadResult {
+    if (!this.isRecord(source)) {
+      return {
+        ok: false,
+        error: new Error(`LSP config in ${origin} must be an object`),
+      };
+    }
+
+    const configs: LspServerConfig[] = [];
+    for (const [key, spec] of Object.entries(source)) {
+      if (!this.isRecord(spec)) {
+        return {
+          ok: false,
+          error: new Error(
+            `LSP config error in ${origin}: ${key} must be an object`,
+          ),
+        };
+      }
+      const languages = [key];
+      const name =
+        typeof spec['command'] === 'string' ? (spec['command'] as string) : key;
+      const config = this.buildServerConfig(name, languages, spec, origin, {
+        forceTrustRequired: true,
+      });
+      if (!config) {
+        return {
+          ok: false,
+          error: new Error(`Invalid LSP server config in ${origin}: ${key}`),
+        };
+      }
+      configs.push(config);
+    }
+
+    return { ok: true, configs };
   }
 
   private resolveExtensionConfigPath(
@@ -286,6 +286,7 @@ export class LspConfigLoader {
     languages: string[],
     spec: Record<string, unknown>,
     origin: string,
+    options: { forceTrustRequired?: boolean } = {},
   ): LspServerConfig | null {
     const transport = this.normalizeTransport(spec['transport']);
     const command =
@@ -314,8 +315,9 @@ export class LspConfigLoader {
         ? (spec['restartOnCrash'] as boolean)
         : undefined;
     const maxRestarts = this.normalizeMaxRestarts(spec['maxRestarts']);
-    const trustRequired =
-      typeof spec['trustRequired'] === 'boolean'
+    const trustRequired = options.forceTrustRequired
+      ? true
+      : typeof spec['trustRequired'] === 'boolean'
         ? (spec['trustRequired'] as boolean)
         : true;
     const socket = this.normalizeSocketOptions(spec);
@@ -434,6 +436,26 @@ export class LspConfigLoader {
     return value;
   }
 
+  private normalizePort(value: unknown): number | undefined {
+    let port: number;
+    if (typeof value === 'number') {
+      port = value;
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!/^\d+$/.test(trimmed)) {
+        return undefined;
+      }
+      port = Number(trimmed);
+    } else {
+      return undefined;
+    }
+
+    if (!Number.isSafeInteger(port) || port < 1 || port > MAX_TCP_PORT) {
+      return undefined;
+    }
+    return port;
+  }
+
   private normalizeSocketOptions(
     value: Record<string, unknown>,
   ): LspSocketOptions | undefined {
@@ -453,20 +475,14 @@ export class LspConfigLoader {
         : typeof source['socketPath'] === 'string'
           ? (source['socketPath'] as string)
           : undefined;
-    const portValue = source['port'];
-    const port =
-      typeof portValue === 'number'
-        ? portValue
-        : typeof portValue === 'string'
-          ? Number(portValue)
-          : undefined;
+    const port = this.normalizePort(source['port']);
 
     const socket: LspSocketOptions = {};
     if (host) {
       socket.host = host;
     }
-    if (Number.isFinite(port) && (port as number) > 0) {
-      socket.port = port as number;
+    if (port !== undefined) {
+      socket.port = port;
     }
     if (pathValue) {
       socket.path = pathValue;

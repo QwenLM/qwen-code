@@ -7,7 +7,11 @@ import { serializeJsonLine } from '../utils/jsonLines.js';
 import { ProcessTransport } from '../transport/ProcessTransport.js';
 import { prepareSpawnInfo, type SpawnInfo } from '../utils/cliPath.js';
 import { Query } from './Query.js';
-import type { QueryOptions } from '../types/types.js';
+import type {
+  QueryOptions,
+  QuerySystemPrompt,
+  TransportOptions,
+} from '../types/types.js';
 import { QueryOptionsSchema } from '../types/queryOptionsSchema.js';
 import { SdkLogger } from '../utils/logger.js';
 import { randomUUID } from 'node:crypto';
@@ -44,6 +48,7 @@ export function query({
 
   // Generate or use provided session ID for SDK-CLI alignment
   const sessionId = options.resume ?? options.sessionId ?? randomUUID();
+  const resolvedSystemPrompt = resolveSystemPromptOption(options.systemPrompt);
 
   const transport = new ProcessTransport({
     pathToQwenExecutable,
@@ -52,6 +57,7 @@ export function query({
     model: options.model,
     permissionMode: options.permissionMode,
     env: options.env,
+    ...resolvedSystemPrompt,
     abortController,
     debug: options.debug,
     stderr: options.stderr,
@@ -110,6 +116,20 @@ export function query({
   }
 
   return queryInstance;
+}
+
+function resolveSystemPromptOption(
+  systemPrompt: QuerySystemPrompt | undefined,
+): Pick<TransportOptions, 'systemPrompt' | 'appendSystemPrompt'> {
+  if (!systemPrompt) {
+    return {};
+  }
+
+  if (typeof systemPrompt === 'string') {
+    return { systemPrompt };
+  }
+
+  return systemPrompt.append ? { appendSystemPrompt: systemPrompt.append } : {};
 }
 
 function validateOptions(options: QueryOptions): SpawnInfo | undefined {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type * as vscode from 'vscode';
 import type { IMessageHandler } from './BaseMessageHandler.js';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
@@ -24,6 +25,7 @@ export class MessageRouter {
   private handlers: IMessageHandler[] = [];
   private sessionHandler: SessionMessageHandler;
   private authHandler: AuthMessageHandler;
+  private fileHandler: FileMessageHandler;
   private currentConversationId: string | null = null;
   private permissionHandler:
     | ((message: PermissionResponseMessage) => void)
@@ -46,9 +48,10 @@ export class MessageRouter {
       conversationStore,
       currentConversationId,
       sendToWebView,
+      (id) => this.setCurrentConversationId(id),
     );
 
-    const fileHandler = new FileMessageHandler(
+    this.fileHandler = new FileMessageHandler(
       agentManager,
       conversationStore,
       currentConversationId,
@@ -72,10 +75,14 @@ export class MessageRouter {
     // Register handlers in order of priority
     this.handlers = [
       this.sessionHandler,
-      fileHandler,
+      this.fileHandler,
       editorHandler,
       this.authHandler,
     ];
+  }
+
+  setupFileWatchers(): vscode.Disposable {
+    return this.fileHandler.setupFileWatchers();
   }
 
   /**
@@ -159,11 +166,22 @@ export class MessageRouter {
   }
 
   /**
-   * Set login handler
+   * Set auth interactive handler — interactive auth flow.
+   * Also registers the handler on the session handler so
+   * "Configure" prompts in session flows trigger the interactive flow.
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.authHandler.setLoginHandler(handler);
-    this.sessionHandler?.setLoginHandler?.(handler);
+  setAuthInteractiveHandler(
+    handler: (
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
+    ) => Promise<void>,
+  ): void {
+    this.authHandler.setAuthInteractiveHandler(handler);
+    // SessionMessageHandler's authHandler is a simple () => Promise<void>.
+    // Wrap so "Configure" prompts trigger the full interactive auth QuickPick.
+    this.sessionHandler?.setAuthHandler?.(() =>
+      this.authHandler.handle({ type: 'auth' }),
+    );
   }
 
   /**

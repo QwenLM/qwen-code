@@ -5,6 +5,24 @@
  */
 
 import * as vscode from 'vscode';
+import { Storage } from '@qwen-code/qwen-code-core';
+
+export function getLocalResourceRoots(
+  extensionUri: vscode.Uri,
+  workspaceFolders: readonly vscode.WorkspaceFolder[] | undefined,
+): vscode.Uri[] {
+  const roots = [
+    vscode.Uri.joinPath(extensionUri, 'dist'),
+    vscode.Uri.joinPath(extensionUri, 'assets'),
+    vscode.Uri.file(Storage.getGlobalTempDir()),
+  ];
+
+  if (workspaceFolders && workspaceFolders.length > 0) {
+    roots.push(...workspaceFolders.map((folder) => folder.uri));
+  }
+
+  return roots;
+}
 
 /**
  * Panel and Tab Manager
@@ -62,10 +80,10 @@ export class PanelManager {
         {
           enableScripts: true,
           retainContextWhenHidden: true,
-          localResourceRoots: [
-            vscode.Uri.joinPath(this.extensionUri, 'dist'),
-            vscode.Uri.joinPath(this.extensionUri, 'assets'),
-          ],
+          localResourceRoots: getLocalResourceRoots(
+            this.extensionUri,
+            vscode.workspace.workspaceFolders,
+          ),
         },
       );
       // Track the group column hosting this panel
@@ -90,10 +108,10 @@ export class PanelManager {
           {
             enableScripts: true,
             retainContextWhenHidden: true,
-            localResourceRoots: [
-              vscode.Uri.joinPath(this.extensionUri, 'dist'),
-              vscode.Uri.joinPath(this.extensionUri, 'assets'),
-            ],
+            localResourceRoots: getLocalResourceRoots(
+              this.extensionUri,
+              vscode.workspace.workspaceFolders,
+            ),
           },
         );
         // Lock the group after creation
@@ -111,10 +129,10 @@ export class PanelManager {
         {
           enableScripts: true,
           retainContextWhenHidden: true,
-          localResourceRoots: [
-            vscode.Uri.joinPath(this.extensionUri, 'dist'),
-            vscode.Uri.joinPath(this.extensionUri, 'assets'),
-          ],
+          localResourceRoots: getLocalResourceRoots(
+            this.extensionUri,
+            vscode.workspace.workspaceFolders,
+          ),
         },
       );
 

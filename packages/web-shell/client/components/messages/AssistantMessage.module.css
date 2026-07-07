@@ -1,0 +1,333 @@
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.messageFooter {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 4px;
+  margin-left: -2px;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.message:hover .messageFooter,
+.message:focus-within .messageFooter {
+  opacity: 1;
+}
+
+.copyButton {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  color: var(--muted-foreground);
+  background: var(--secondary);
+  outline: none;
+}
+
+.copyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.footerTime {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.prefix {
+  color: var(--agent-purple-400);
+  flex-shrink: 0;
+  margin-right: 6px;
+  line-height: 1.2;
+}
+
+.thinking {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+}
+
+.thinking .prefix {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.thinkingBody {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+.thinkingBody p,
+.thinkingBody ul,
+.thinkingBody ol,
+.thinkingBody blockquote,
+.thinkingBody pre {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.thinkingBody :last-child {
+  margin-bottom: 0;
+}
+
+.thinkingBody ul,
+.thinkingBody ol {
+  padding-left: 24px;
+}
+
+.thinkingBody pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinkingSummary {
+  width: 100%;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.thinkingSummary:hover,
+.thinkingSummary:focus-visible {
+  color: var(--primary);
+  outline: none;
+}
+
+.thinkingSummary:hover .thinkingSummaryTextActive,
+.thinkingSummary:focus-visible .thinkingSummaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
+}
+
+.thinkingSummaryIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.thinkingSummaryIcon svg {
+  display: block;
+}
+
+.thinkingSummaryToolIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.thinkingSummaryText {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.thinkingSummaryTextActive {
+  color: var(--muted-foreground);
+  background-image: linear-gradient(
+    105deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    var(--muted-foreground) 54%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-summary-shine 5s linear infinite;
+}
+
+@keyframes thinking-summary-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.thinkingChevronRight,
+.thinkingChevronDown {
+  width: 14px;
+  height: 14px;
+  position: relative;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.thinkingChevronRight::before,
+.thinkingChevronRight::after,
+.thinkingChevronDown::before,
+.thinkingChevronDown::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.thinkingSummary:hover .thinkingChevronRight,
+.thinkingSummary:hover .thinkingChevronDown,
+.thinkingSummary:focus-visible .thinkingChevronRight,
+.thinkingSummary:focus-visible .thinkingChevronDown {
+  opacity: 1;
+}
+
+.thinkingChevronRight {
+  transform: none;
+}
+
+.thinkingChevronRight::before {
+  top: calc(50% - 2px);
+  left: calc(50% - 3px);
+  transform: rotate(45deg);
+}
+
+.thinkingChevronRight::after {
+  top: calc(50% + 2px);
+  left: calc(50% - 3px);
+  transform: rotate(-45deg);
+}
+
+.thinkingChevronDown {
+  transform: none;
+  opacity: 1;
+}
+
+.thinkingChevronDown::before {
+  top: 50%;
+  left: calc(50% - 5px);
+  transform: rotate(45deg);
+}
+
+.thinkingChevronDown::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  transform: rotate(-45deg);
+}
+
+.thinkingExpandedWrap {
+  margin-top: 4px;
+}
+
+.thinkingExpandedClip {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease;
+}
+
+.thinkingExpandedCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.thinkingExpandedInner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.expandToggle {
+  display: block;
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+  margin: 2px 0 0 auto;
+}
+
+.thinkingExpandedWrap .expandToggle {
+  position: absolute;
+  right: 0;
+  bottom: 2px;
+  background: var(--background);
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.thinkingExpandedWrap:hover .expandToggle,
+.thinkingExpandedWrap .expandToggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .messageFooter {
+    opacity: 1;
+  }
+
+  .thinkingExpandedWrap .expandToggle {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.expandToggle:hover {
+  color: var(--muted-foreground);
+}
+
+.content {
+  display: flex;
+  align-items: baseline;
+}
+
+.contentBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.contentBody pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--foreground);
+  margin: 0;
+}

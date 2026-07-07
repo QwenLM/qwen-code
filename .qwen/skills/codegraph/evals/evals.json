@@ -1,0 +1,23 @@
+{
+  "skill_name": "codegraph",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have pallets/click indexed in my .codegraph database. There's a bug report on GitHub — issue #3185 — about flag_value not working. Can you analyze it and find what code is most likely the root cause?",
+      "expected_output": "Should use cs.analyze_issue('pallets', 'click', 3185) and return root cause candidates related to flag_value/option processing in click's core code",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "openclaw seems to have a lot of bugs. I've indexed the openclaw repo. Can you fetch the top 5 bug issues and tell me which parts of the codebase are most problematic?",
+      "expected_output": "Should use cs.analyze_top_bugs('openclaw', 'openclaw', k=5) and provide an aggregated hotspot summary showing which modules/files appear across multiple bugs",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "I found a GitHub issue (openclaw/openclaw#43608) about cron tasks not executing even though the API returns success. The codebase is already indexed. Help me trace where the bug might be.",
+      "expected_output": "Should use cs.analyze_issue('openclaw', 'openclaw', 43608) and identify cron-related code (src/cron/, src/cli/cron-cli/) as root cause candidates",
+      "files": []
+    }
+  ]
+}

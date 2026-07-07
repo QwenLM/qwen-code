@@ -17,12 +17,45 @@
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  writeFileSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  symlinkSync,
+  mkdirSync,
+  readFileSync,
+} from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+
+// Ensure qc-helper bundled skill can find user docs in dev mode.
+// In dev, import.meta.url resolves to the source tree, so the bundled skill
+// directory is packages/core/src/skills/bundled/qc-helper/. We create a
+// symlink from there to docs/users/ so the skill can read docs at runtime.
+const qcHelperDocsLink = join(
+  root,
+  'packages',
+  'core',
+  'src',
+  'skills',
+  'bundled',
+  'qc-helper',
+  'docs',
+);
+const userDocsTarget = join(root, 'docs', 'users');
+if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
+  mkdirSync(dirname(qcHelperDocsLink), { recursive: true });
+  try {
+    symlinkSync(userDocsTarget, qcHelperDocsLink);
+  } catch {
+    // Symlink may fail on some systems; non-critical for dev
+  }
+}
 
 // Entry point for the CLI
 const cliEntry = join(cliPackageDir, 'index.ts');
@@ -71,21 +104,37 @@ const importFlag = `--import ${pathToFileURL(registerPath).href}`;
 const env = {
   ...process.env,
   DEV: 'true',
-  CLI_VERSION: 'dev',
+  // Report the real package version (like scripts/start.js) so the UI shows
+  // e.g. "v0.19.4" instead of "dev". DEV=true / NODE_ENV=development remain the
+  // signals that distinguish a dev build.
+  CLI_VERSION: pkg.version,
   NODE_ENV: 'development',
-  NODE_OPTIONS: `${existingNodeOptions} ${importFlag}`.trim(),
+  NODE_OPTIONS: `${existingNodeOptions} --expose-gc ${importFlag}`.trim(),
 };
 
 // On Windows, use tsx.cmd; on Unix, use tsx directly
 const isWin = platform() === 'win32';
-const tsxCmd = isWin ? 'tsx.cmd' : 'tsx';
-const tsxArgs = [cliEntry, ...process.argv.slice(2)];
+const tsxBinName = isWin ? 'tsx.cmd' : 'tsx';
+const localTsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const localTsxCmd = join(root, 'node_modules', '.bin', tsxBinName);
+const hasLocalTsxCli = existsSync(localTsxCli);
+const tsxCmd = hasLocalTsxCli
+  ? process.execPath
+  : existsSync(localTsxCmd)
+    ? localTsxCmd
+    : tsxBinName;
+const tsxArgs = [
+  ...(hasLocalTsxCli ? [localTsxCli] : []),
+  cliEntry,
+  ...process.argv.slice(2),
+];
+const useShell = isWin && !hasLocalTsxCli;
 
 const child = spawn(tsxCmd, tsxArgs, {
   stdio: 'inherit',
   env,
   cwd: process.cwd(),
-  shell: isWin, // Use shell on Windows to resolve .cmd files
+  shell: useShell, // Needed only when falling back to tsx.cmd on Windows.
 });
 
 child.on('error', (err) => {

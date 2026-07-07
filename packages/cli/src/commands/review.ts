@@ -1,0 +1,39 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Parent command for 'qwen review'. Hosts the internal helpers used by
+// the /review skill (presubmit checks, post-review cleanup) so the prompt
+// can stay short and the logic stays testable.
+
+import type { Argv, CommandModule } from 'yargs';
+import { fetchPrCommand } from './review/fetch-pr.js';
+import { prContextCommand } from './review/pr-context.js';
+import { loadRulesCommand } from './review/load-rules.js';
+import { presubmitCommand } from './review/presubmit.js';
+import { postSuggestionsCommand } from './review/post-suggestions.js';
+import { cleanupCommand } from './review/cleanup.js';
+
+export const reviewCommand: CommandModule = {
+  command: 'review',
+  describe:
+    'Internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, suggestion summary publishing, cleanup)',
+  builder: (yargs: Argv) =>
+    yargs
+      .command(fetchPrCommand)
+      .command(prContextCommand)
+      .command(loadRulesCommand)
+      .command(presubmitCommand)
+      .command(postSuggestionsCommand)
+      .command(cleanupCommand)
+      .demandCommand(
+        1,
+        'Specify a subcommand: fetch-pr, pr-context, load-rules, presubmit, post-suggestions, or cleanup.',
+      )
+      .version(false),
+  handler: () => {
+    // yargs handles this via demandCommand(1) above.
+  },
+};

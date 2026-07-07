@@ -5,10 +5,12 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
-import { Text, Box } from 'ink';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { Text, Box, type DOMElement } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useSelectionList } from '../../hooks/useSelectionList.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
+import { RowMouseController } from './RowMouseController.js';
 
 import type { SelectionListItem } from '../../hooks/useSelectionList.js';
 
@@ -33,6 +35,17 @@ export interface BaseSelectionListProps<
   /** Gap (in rows) between each item. */
   itemGap?: number;
   renderItem: (item: TItem, context: RenderItemContext) => React.ReactNode;
+}
+
+function getScrollOffsetForIndex(
+  activeIndex: number,
+  itemCount: number,
+  maxItemsToShow: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(activeIndex - maxItemsToShow + 1, itemCount - maxItemsToShow),
+  );
 }
 
 /**
@@ -64,7 +77,7 @@ export function BaseSelectionList<
   itemGap = 0,
   renderItem,
 }: BaseSelectionListProps<T, TItem>): React.JSX.Element {
-  const { activeIndex } = useSelectionList({
+  const { activeIndex, setActiveIndex, selectIndex } = useSelectionList({
     items,
     initialIndex,
     onSelect,
@@ -73,13 +86,16 @@ export function BaseSelectionList<
     showNumbers,
   });
 
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(() =>
+    getScrollOffsetForIndex(activeIndex, items.length, maxItemsToShow),
+  );
 
   // Handle scrolling for long lists
   useEffect(() => {
-    const newScrollOffset = Math.max(
-      0,
-      Math.min(activeIndex - maxItemsToShow + 1, items.length - maxItemsToShow),
+    const newScrollOffset = getScrollOffsetForIndex(
+      activeIndex,
+      items.length,
+      maxItemsToShow,
     );
     if (activeIndex < scrollOffset) {
       setScrollOffset(activeIndex);
@@ -88,11 +104,33 @@ export function BaseSelectionList<
     }
   }, [activeIndex, items.length, scrollOffset, maxItemsToShow]);
 
+  // Mouse input is enabled in alternate-screen mode (ui.useTerminalBuffer):
+  // the hit-test relies on alternate-screen coordinates where
+  // measureElementPosition rows line up with mouse event rows. In inline mode
+  // the live region floats, so the layer is not mounted there. It is mounted
+  // only when enabled, so dialogs that don't use it pull in no extra providers.
+  // Read the context raw (not the throwing useSettings) so the component still
+  // renders outside a SettingsProvider — e.g. in unit tests.
+  const settings = useContext(SettingsContext);
+  const mouseEnabled = !!settings?.merged.ui?.useTerminalBuffer;
+  const containerRef = useRef<DOMElement | null>(null);
+  const itemRefs = useRef<Array<DOMElement | null>>([]);
+
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
   const numberColumnWidth = String(items.length).length;
 
   return (
-    <Box flexDirection="column" gap={itemGap}>
+    <Box ref={containerRef} flexDirection="column" gap={itemGap}>
+      {mouseEnabled && isFocused && items.length > 0 && (
+        <RowMouseController
+          containerRef={containerRef}
+          itemRefs={itemRefs}
+          scrollOffset={scrollOffset}
+          isDisabled={(index) => !!items[index]?.disabled}
+          onHoverIndex={setActiveIndex}
+          onSelectIndex={selectIndex}
+        />
+      )}
       {/* Use conditional coloring instead of conditional rendering */}
       {showScrollArrows && (
         <Text
@@ -131,14 +169,20 @@ export function BaseSelectionList<
         )}.`;
 
         return (
-          <Box key={item.key} alignItems="flex-start">
+          <Box
+            key={item.key}
+            alignItems="flex-start"
+            ref={(node) => {
+              itemRefs.current[index] = node;
+            }}
+          >
             {/* Radio button indicator */}
             <Box minWidth={2} flexShrink={0}>
               <Text
                 color={isSelected ? theme.status.success : theme.text.primary}
                 aria-hidden
               >
-                {isSelected ? '●' : ' '}
+                {isSelected ? '›' : ' '}
               </Text>
             </Box>
 

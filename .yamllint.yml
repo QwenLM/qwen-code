@@ -88,3 +88,5 @@ ignore:
   - 'vendor/'
   - 'node_modules/'
   - 'integration-tests/terminal-bench/'
+  - 'packages/desktop/.github/'
+  - 'packages/desktop/apps/electron/electron-builder.yml'
