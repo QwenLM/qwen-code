@@ -155,6 +155,7 @@ export function KeypressProvider({
   pasteWorkaround = false,
   config,
   debugKeystrokeLogging,
+  initialInputChunks = [],
   initialCapturedInput,
 }: {
   children?: React.ReactNode;
@@ -162,17 +163,38 @@ export function KeypressProvider({
   pasteWorkaround?: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
+  initialInputChunks?: readonly Buffer[];
   initialCapturedInput?: Buffer;
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
   const mouseSubscribers = useRef<Set<MouseHandler>>(new Set()).current;
+  const initialInputReplayScheduled = useRef(false);
+  const initialInputChunksRef = useRef<readonly Buffer[]>(initialInputChunks);
+
+  const scheduleInitialInputReplay = useCallback(() => {
+    if (
+      initialInputReplayScheduled.current ||
+      initialInputChunksRef.current.length === 0
+    ) {
+      return;
+    }
+
+    initialInputReplayScheduled.current = true;
+    setTimeout(() => {
+      for (const chunk of initialInputChunksRef.current) {
+        stdin.emit('data', chunk);
+      }
+      initialInputChunksRef.current = [];
+    }, 0);
+  }, [stdin]);
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
       subscribers.add(handler);
+      scheduleInitialInputReplay();
     },
-    [subscribers],
+    [scheduleInitialInputReplay, subscribers],
   );
 
   const unsubscribe = useCallback(
@@ -1314,6 +1336,7 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    initialInputChunks,
     mouseSubscribers,
     initialCapturedInput,
   ]);

@@ -75,8 +75,20 @@ import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { preconnectApi } from './utils/apiPreconnect.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  drainEarlyInput,
+  EARLY_INPUT_ENV_KEY,
+  serializeEarlyInputChunks,
+  startCapturingEarlyInput,
+} from './utils/earlyInput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+function getSerializedEarlyInputEnv(chunks: readonly Buffer[]) {
+  return {
+    [EARLY_INPUT_ENV_KEY]: serializeEarlyInputChunks(chunks),
+  };
+}
 
 function clearCorruptionEnvVars(): void {
   delete process.env[ENV_CORRUPTED_PATH];
@@ -210,6 +222,7 @@ export async function main() {
     setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
   }
   setupUnhandledRejectionHandler();
+  startCapturingEarlyInput();
   initializeWarningHandler();
 
   if (process.argv.includes('--bare')) {
@@ -272,6 +285,7 @@ export async function main() {
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
+    drainEarlyInput();
     writeStderrLine(
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
@@ -420,20 +434,31 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
+      const sandboxInitialInputChunks = drainEarlyInput();
       await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+        start_sandbox(
+          sandboxConfig,
+          memoryArgs,
+          partialConfig,
+          sandboxArgs,
+          getSerializedEarlyInputEnv(sandboxInitialInputChunks),
+        ),
       );
       process.exit(0);
-    } else {
+    } else if (!process.env['QWEN_CODE_NO_RELAUNCH']) {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      await relaunchAppInChildProcess(memoryArgs, [], {
-        afterSpawn: clearCorruptionEnvVars,
-      });
+      const relaunchInputChunks = drainEarlyInput();
+      await relaunchAppInChildProcess(
+        memoryArgs,
+        [],
+        getSerializedEarlyInputEnv(relaunchInputChunks),
+        { afterSpawn: clearCorruptionEnvVars },
+      );
     }
   }
 
-  // When --worktree is going to chdir us into a worktree below, resolve
+// When --worktree is going to chdir us into a worktree below, resolve
   // any relative-path argv fields to absolute paths now — BEFORE the
   // chdir. Otherwise downstream `fs.existsSync('./mcp.json')` calls in
   // `loadCliConfig` re-resolve against the worktree dir, where the file
@@ -704,7 +729,7 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
-    let themeAutoDetectionComplete: Promise<void> | undefined;
+let themeAutoDetectionComplete: Promise<void> | undefined;
     if (config.isInteractive()) {
       registerCleanup(installInteractiveSignalHandlers(wasRaw));
     }
@@ -835,6 +860,7 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.isInteractive()) {
+      drainEarlyInput();
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
       // runNonInteractive's main/drain loops. In TUI mode the same call
@@ -879,6 +905,7 @@ export async function main() {
       return;
     }
 
+    drainEarlyInput();
     // Also clean up env vars for non-interactive paths so that
     // subprocesses don't inherit stale state.
     clearCorruptionEnvVars();

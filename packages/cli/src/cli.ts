@@ -9,11 +9,13 @@ import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
+import { startCapturingEarlyInput } from './utils/earlyInput.js';
 
 // Preserve the old entrypoint's profiling baseline before route-specific
 // dynamic imports or command handling shift startup measurements.
 initStartupProfiler();
 initCpuProfiler();
+startCapturingEarlyInput();
 
 type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 

@@ -13,6 +13,7 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
+import type { ReactElement, ReactNode } from 'react';
 import { readFileSync } from 'node:fs';
 import {
   createNonInteractivePromptId,
@@ -29,6 +30,15 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockEarlyInput = vi.hoisted(() => ({
+  EARLY_INPUT_ENV_KEY: 'QWEN_CODE_EARLY_INPUT',
+  startCapturingEarlyInput: vi.fn(),
+  drainEarlyInput: vi.fn(() => [] as Buffer[]),
+  serializeEarlyInputChunks: vi.fn<
+    (chunks: readonly Buffer[]) => string | undefined
+  >(() => undefined),
+}));
+
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const lspConfigWatcherMock = vi.hoisted(() => ({
   instances: [] as Array<{
@@ -149,6 +159,8 @@ vi.mock('./core/initializer.js', () => ({
   }),
 }));
 
+vi.mock('./utils/earlyInput.js', () => mockEarlyInput);
+
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
 }));
@@ -170,6 +182,15 @@ vi.mock('./config/settingsWatcher.js', () => ({
     }
   },
 }));
+
+vi.mock('./ui/hooks/useKittyKeyboardProtocol.js', () => ({
+  useKittyKeyboardProtocol: vi.fn(() => ({
+    supported: false,
+    enabled: false,
+    checking: false,
+  })),
+}));
+
 
 vi.mock('./config/lsp-config-watcher.js', () => ({
   LspConfigWatcher: class {
@@ -1081,6 +1102,80 @@ describe('gemini.tsx main function', () => {
     );
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
   });
+
+  it('forwards buffered startup input into the sandbox child process', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const bufferedChunks = [Buffer.from('typed before sandbox')];
+    mockEarlyInput.drainEarlyInput.mockReset();
+    mockEarlyInput.drainEarlyInput.mockReturnValueOnce(bufferedChunks);
+    mockEarlyInput.serializeEarlyInputChunks.mockReturnValueOnce(
+      'serialized-early-input',
+    );
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchOnExitCode } = await import('./utils/relaunch.js');
+    const { start_sandbox } = await import('./utils/sandbox.js');
+
+    const sandboxConfig = {
+      command: 'docker',
+      image: 'test-image',
+    };
+    const partialConfig = {
+      getProjectRoot: () => '/',
+    } as unknown as Config;
+
+    vi.mocked(loadSandboxConfig).mockResolvedValue(sandboxConfig as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(partialConfig);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: { useExternal: true } },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      acp: undefined,
+      experimentalAcp: undefined,
+      extensions: [],
+      inputFormat: undefined,
+      resume: undefined,
+    } as never);
+    vi.mocked(relaunchOnExitCode).mockImplementation(async (runner) => {
+      await runner();
+    });
+    vi.mocked(start_sandbox).mockResolvedValue(0);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      processExitSpy.mockRestore();
+    }
+
+    expect(start_sandbox).toHaveBeenCalledTimes(1);
+    expect(start_sandbox).toHaveBeenCalledWith(
+      sandboxConfig,
+      [],
+      partialConfig,
+      expect.any(Array),
+      { QWEN_CODE_EARLY_INPUT: 'serialized-early-input' },
+    );
+  });
 });
 
 describe('gemini.tsx main function kitty protocol', () => {
@@ -1144,6 +1239,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     const { detectAndEnableKittyProtocol } = await import(
       './ui/utils/kittyProtocolDetector.js'
     );
+    const earlyInputModule = await import('./utils/earlyInput.js');
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -1236,8 +1332,103 @@ describe('gemini.tsx main function kitty protocol', () => {
 
     await main();
 
+    expect(earlyInputModule.startCapturingEarlyInput).toHaveBeenCalledTimes(1);
+    expect(earlyInputModule.drainEarlyInput).toHaveBeenCalled();
     expect(setRawModeSpy).toHaveBeenCalledWith(true);
     expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves rehydrated startup input when relaunch is already disabled', async () => {
+    const { render } = await import('ink');
+    const { KeypressProvider } = await import(
+      './ui/contexts/KeypressContext.js'
+    );
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { loadSettings } = await import('./config/settings.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    const renderSpy = vi.mocked(render);
+    const bufferedChunks = [Buffer.from('typed before child boot')];
+
+    mockEarlyInput.drainEarlyInput.mockReset();
+    mockEarlyInput.drainEarlyInput
+      .mockReturnValueOnce(bufferedChunks)
+      .mockReturnValue([]);
+
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session',
+      getProjectRoot: () => '/root',
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+      resume: undefined,
+    } as never);
+
+    await main();
+
+    expect(vi.mocked(relaunchAppInChildProcess)).not.toHaveBeenCalled();
+
+    const [reactElement] = renderSpy.mock.calls.at(-1) ?? [];
+    expect(reactElement).toBeDefined();
+    const appTree = (
+      reactElement as ReactElement<unknown, () => ReactElement>
+    ).type();
+
+    const stack: ReactNode[] = [appTree];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || typeof node !== 'object' || !('type' in node)) {
+        continue;
+      }
+      if (node.type === KeypressProvider) {
+        expect(
+          (
+            node as ReactElement<{
+              initialInputChunks?: Buffer[];
+            }>
+          ).props.initialInputChunks,
+        ).toBe(bufferedChunks);
+        return;
+      }
+      const children = (node as ReactElement<{ children?: ReactNode }>).props
+        ?.children;
+      if (Array.isArray(children)) {
+        stack.push(...children);
+      } else if (children) {
+        stack.push(children);
+      }
+    }
+
+    throw new Error('KeypressProvider not found in rendered tree');
   });
 
   it('should run cleanup before exiting on interactive SIGINT', async () => {
@@ -1285,6 +1476,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getProxy: () => undefined,
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getProjectRoot: () => '/root',
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -1296,9 +1488,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
-      getUserHooks: () => undefined,
-      getProjectHooks: () => undefined,
-    } as never);
+} as never);
     vi.mocked(parseArguments).mockResolvedValue({
       extensions: undefined,
     } as never);
@@ -1448,6 +1638,7 @@ describe('startInteractiveUI', () => {
   const mockConfig = {
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
+    getSessionId: () => 'test-session',
   } as Config;
   const mockSettings = {
     merged: {
@@ -1467,6 +1658,8 @@ describe('startInteractiveUI', () => {
 
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
+    isKittyProtocolSupported: vi.fn(() => false),
+    isKittyProtocolEnabled: vi.fn(() => false),
     disableKittyProtocol: vi.fn(),
   }));
 
