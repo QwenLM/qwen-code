@@ -92,6 +92,28 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     });
   });
 
+  it('passes non-terminated turn error text through unchanged', () => {
+    const [message] = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'error-other',
+        kind: 'error',
+        source: 'turn_error',
+        text: 'context deadline exceeded',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(message).toMatchObject({
+      type: 'tool_call',
+      toolCall: {
+        kind: 'system_error',
+        rawOutput: 'context deadline exceeded',
+      },
+    });
+  });
+
   it('maps daemon tool statuses without leaving terminal states spinning', () => {
     const messages = daemonTranscriptToUnifiedMessages([
       createToolBlock('cancelled-tool', 'cancelled'),

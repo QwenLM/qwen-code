@@ -1273,6 +1273,26 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('drops unrecognized errorKind from turn error events', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 47,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'some error',
+        errorKind: 'some_future_kind',
+      },
+    });
+
+    expect(event).toMatchObject({
+      type: 'error',
+      source: 'turn_error',
+      text: 'some error',
+    });
+    expect(event).not.toHaveProperty('errorKind');
+  });
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({
