@@ -8,6 +8,9 @@ import { act } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { clearAutoMemoryRootCache } from '@qwen-code/qwen-code-core';
 import { MemoryDialog } from './MemoryDialog.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -64,6 +67,12 @@ const mockedSpawnSync = vi.mocked(spawnSync);
 describe('MemoryDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('QWEN_HOME', path.join(os.homedir(), '.qwen'));
+    vi.stubEnv(
+      'QWEN_CODE_MEMORY_BASE_DIR',
+      path.join(os.homedir(), '.qwen-memory-test'),
+    );
+    clearAutoMemoryRootCache();
 
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
@@ -93,6 +102,8 @@ describe('MemoryDialog', () => {
   });
 
   afterEach(() => {
+    clearAutoMemoryRootCache();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
