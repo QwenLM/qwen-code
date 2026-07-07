@@ -2400,8 +2400,35 @@ describe('showFallbackMessage', () => {
     stderrWriteSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
-    // Reset env
+    // Reset env — clear CI and other terminal-detection vars so
+    // supportsOsc8Hyperlinks() doesn't short-circuit on CI runners.
     process.env = { ...ORIGINAL_ENV };
+    delete process.env['CI'];
+    delete process.env['TMUX'];
+    delete process.env['STY'];
+    delete process.env['TERM_PROGRAM'];
+    delete process.env['TERM_PROGRAM_VERSION'];
+    delete process.env['WT_SESSION'];
+    delete process.env['KITTY_WINDOW_ID'];
+    delete process.env['VTE_VERSION'];
+    delete process.env['DOMTERM'];
+    delete process.env['GHOSTTY_RESOURCES_DIR'];
+    delete process.env['KONSOLE_VERSION'];
+    delete process.env['TERMINAL_EMULATOR'];
+    delete process.env['ALACRITTY_LOG'];
+    delete process.env['ALACRITTY_WINDOW_ID'];
+    delete process.env['ALACRITTY_SOCKET'];
+    delete process.env['FORCE_HYPERLINK'];
+    delete process.env['QWEN_DISABLE_HYPERLINKS'];
+    delete process.env['TEAMCITY_VERSION'];
+    // Keep TERM but clear known OSC 8 terminal names
+    if (
+      ['xterm-kitty', 'xterm-ghostty', 'alacritty'].includes(
+        process.env['TERM'] ?? '',
+      )
+    ) {
+      delete process.env['TERM'];
+    }
   });
 
   afterEach(() => {
