@@ -382,6 +382,7 @@ export interface RuntimeEnvironmentSnapshot {
   readonly effectiveEnv: Readonly<NodeJS.ProcessEnv>;
   readonly overlayKeys: readonly string[];
   readonly envFilePaths: readonly string[];
+  readonly envFileReadFailed: boolean;
 }
 
 function isEffectivelyUnset(env: NodeJS.ProcessEnv, key: string): boolean {
@@ -417,7 +418,9 @@ export function buildRuntimeEnvironment(
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const key in envFile.parsedEnv) {
-      if (!canApplyParsedEnvKey(envFile, key, excludedVars)) continue;
+      if (!canApplyParsedEnvKey(envFile, key, excludedVars, { reload: true })) {
+        continue;
+      }
       setRuntimeEnvIfUnset(effectiveEnv, key, envFile.parsedEnv[key]!);
     }
   }
@@ -426,6 +429,7 @@ export function buildRuntimeEnvironment(
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const [key, value] of Object.entries(settings.env)) {
+      if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
@@ -440,6 +444,7 @@ export function buildRuntimeEnvironment(
     effectiveEnv: Object.freeze({ ...effectiveEnv }),
     overlayKeys: Object.freeze(overlayKeys),
     envFilePaths: Object.freeze([...envFilePaths]),
+    envFileReadFailed: parsedEnvFiles.readFailed,
   };
 }
 

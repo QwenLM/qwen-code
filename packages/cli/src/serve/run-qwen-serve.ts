@@ -2043,7 +2043,13 @@ export async function runQwenServe(
           effectiveEnv: Object.freeze({ ...daemonRuntimeBaseEnv }),
           overlayKeys: Object.freeze([] as string[]),
           envFilePaths: Object.freeze([] as string[]),
+          envFileReadFailed: false,
         };
+    if (runtimeEnvSnapshot.envFileReadFailed) {
+      daemonLog.warn('one or more runtime env files could not be read', {
+        workspace: boundWorkspace,
+      });
+    }
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
     };
@@ -2055,11 +2061,19 @@ export async function runQwenServe(
       }
       Object.assign(runtimeEffectiveEnv, nextEnv);
     };
-    const primaryRuntimeEnv = {
+    const primaryRuntimeEnv: {
+      mode: 'runtime-overlay';
+      overlayKeys: string[];
+      envFilePaths: string[];
+      effectiveEnv: NodeJS.ProcessEnv;
+      envFileReadFailed: boolean;
+      fallbackReason?: string;
+    } = {
       mode: 'runtime-overlay' as const,
       overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
+      envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
     };
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
     let daemonTelemetrySettings: TelemetrySettings;
@@ -2281,7 +2295,7 @@ export async function runQwenServe(
     // (which registers a per-connection `ClientMcpRegistrar`'s sender on
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
-    const freshSessionAdmission = runtime.createTotalSessionAdmissionController(
+    const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
         getBridges: () => (bridgeRef ? [bridgeRef] : []),
@@ -2366,7 +2380,7 @@ export async function runQwenServe(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
-        freshSessionAdmission,
+        freshSessionAdmission: totalSessionAdmission.admit,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2429,6 +2443,7 @@ export async function runQwenServe(
           let refreshedRuntimeEnv: ReturnType<
             EnvironmentRuntime['buildRuntimeEnvironment']
           >;
+          let fallbackReason: string | undefined;
           try {
             refreshedRuntimeEnv =
               settingsRuntime.environment.buildRuntimeEnvironment(
@@ -2437,19 +2452,33 @@ export async function runQwenServe(
                 daemonRuntimeBaseEnv,
               );
           } catch (err) {
+            fallbackReason = err instanceof Error ? err.message : String(err);
             daemonLog.warn(
-              'failed to rebuild runtime env snapshot after daemon env reload; falling back to daemon base env',
+              'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
               {
-                error: err instanceof Error ? err.message : String(err),
+                error: fallbackReason,
               },
             );
             refreshedRuntimeEnv = {
-              effectiveEnv: { ...daemonRuntimeBaseEnv },
-              overlayKeys: [] as string[],
-              envFilePaths: [] as string[],
+              effectiveEnv: { ...runtimeEffectiveEnv },
+              overlayKeys: [...primaryRuntimeEnv.overlayKeys],
+              envFilePaths: [...primaryRuntimeEnv.envFilePaths],
+              envFileReadFailed: primaryRuntimeEnv.envFileReadFailed ?? false,
             };
           }
+          if (refreshedRuntimeEnv.envFileReadFailed) {
+            daemonLog.warn('one or more runtime env files could not be read', {
+              workspace,
+            });
+          }
           replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
+          if (fallbackReason) {
+            primaryRuntimeEnv.fallbackReason = fallbackReason;
+          } else {
+            delete primaryRuntimeEnv.fallbackReason;
+          }
+          primaryRuntimeEnv.envFileReadFailed =
+            refreshedRuntimeEnv.envFileReadFailed;
           primaryRuntimeEnv.overlayKeys.splice(
             0,
             primaryRuntimeEnv.overlayKeys.length,
@@ -2651,6 +2680,7 @@ export async function runQwenServe(
         },
       }),
       getMetricsSeries: () => metricsRing.snapshot(),
+      getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
       recordDaemonRequest: (durationMs, statusCode) =>
         metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,

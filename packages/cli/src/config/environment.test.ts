@@ -20,8 +20,11 @@ const TRACKED_ENV = [
   'RUNTIME_PARENT',
   'RUNTIME_SETTINGS',
   'RUNTIME_SETTINGS_ONLY',
+  'BASH_ENV',
+  'NODE_OPTIONS',
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  'QWEN_SERVER_TOKEN',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -73,6 +76,8 @@ describe('buildRuntimeEnvironment', () => {
         'RUNTIME_EMPTY=from-dotenv-empty',
         'RUNTIME_SETTINGS=dotenv-wins',
         'RUNTIME_EXCLUDED=excluded',
+        'NODE_OPTIONS=--require ./bad.js',
+        'QWEN_SERVER_TOKEN=dotenv-token',
         'QWEN_HOME=/tmp/ignored-qwen-home',
         '',
       ].join('\n'),
@@ -91,6 +96,7 @@ describe('buildRuntimeEnvironment', () => {
           RUNTIME_SETTINGS: 'settings-loses',
           RUNTIME_SETTINGS_ONLY: 'from-settings',
           RUNTIME_SETTINGS_EXCLUDED: 'settings-excluded',
+          BASH_ENV: '/tmp/bad-profile',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
         },
       }),
@@ -107,6 +113,9 @@ describe('buildRuntimeEnvironment', () => {
     );
     expect(snapshot.effectiveEnv['RUNTIME_EXCLUDED']).toBeUndefined();
     expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_EXCLUDED']).toBeUndefined();
+    expect(snapshot.effectiveEnv['NODE_OPTIONS']).toBeUndefined();
+    expect(snapshot.effectiveEnv['BASH_ENV']).toBeUndefined();
+    expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_RUNTIME_DIR']).toBeUndefined();
     expect(snapshot.overlayKeys).toEqual([
@@ -116,6 +125,7 @@ describe('buildRuntimeEnvironment', () => {
       'RUNTIME_SETTINGS_ONLY',
     ]);
     expect(snapshot.envFilePaths).toContain(path.join(workspace, '.env'));
+    expect(snapshot.envFileReadFailed).toBe(false);
 
     expect(baseEnv).toEqual({
       RUNTIME_PARENT: 'from-parent',
@@ -136,5 +146,17 @@ describe('buildRuntimeEnvironment', () => {
     );
     expect(snapshot.overlayKeys).toContain('GOOGLE_CLOUD_PROJECT');
     expect(process.env['GOOGLE_CLOUD_PROJECT']).toBeUndefined();
+  });
+
+  it('surfaces env file read failures in the runtime snapshot', () => {
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.mkdirSync(envPath);
+
+    const snapshot = buildRuntimeEnvironment(testSettings({}), workspace, {});
+
+    expect(snapshot.envFilePaths).toContain(envPath);
+    expect(snapshot.envFileReadFailed).toBe(true);
+    expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBeUndefined();
   });
 });

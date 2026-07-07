@@ -21,6 +21,7 @@ import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -61,6 +62,7 @@ export interface DaemonStartupSnapshot {
 export interface DaemonStatusIssue {
   code:
     | 'session_capacity_high'
+    | 'total_session_capacity_high'
     | 'connection_capacity_high'
     | 'pending_permissions'
     | 'acp_channel_down'
@@ -102,6 +104,7 @@ export interface BuildDaemonStatusOptions {
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -154,7 +157,7 @@ interface DaemonStatusLimits {
 interface DaemonStatusRuntime {
   loading?: boolean;
   error?: string;
-  sessions: { active: number };
+  sessions: { active: number; admissionInFlight?: number };
   permissions: {
     pending: number;
     policy: string;
@@ -285,6 +288,7 @@ export async function buildDaemonStatusResponse(
     state: 'disabled',
     channels: [],
   };
+  const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
 
@@ -295,6 +299,7 @@ export async function buildDaemonStatusResponse(
     rateLimitHits,
     input,
     channelWorker,
+    totalAdmissionSnapshot,
   );
 
   if (detail === 'full') {
@@ -352,7 +357,12 @@ export async function buildDaemonStatusResponse(
       features: [...input.features],
     },
     runtime: {
-      sessions: { active: bridgeSnapshot.sessionCount },
+      sessions: {
+        active: bridgeSnapshot.sessionCount,
+        ...(totalAdmissionSnapshot
+          ? { admissionInFlight: totalAdmissionSnapshot.inFlight }
+          : {}),
+      },
       permissions: {
         pending: bridgeSnapshot.pendingPermissionCount,
         policy: bridgeSnapshot.permissionPolicy,
@@ -525,6 +535,7 @@ function pushRuntimeIssues(
   rateLimitHits: Record<RateLimitTier, number>,
   input: BuildDaemonStatusOptions,
   channelWorker: ChannelWorkerSnapshot,
+  totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
 ): void {
   if (
     bridgeSnapshot.limits.maxSessions !== null &&
@@ -537,6 +548,19 @@ function pushRuntimeIssues(
       severity: 'warning',
       message: `Active sessions are at ${bridgeSnapshot.sessionCount}/${bridgeSnapshot.limits.maxSessions}.`,
     });
+  }
+
+  const maxTotalSessions = positiveFiniteOrNull(input.opts.maxTotalSessions);
+  if (maxTotalSessions !== null) {
+    const totalActive =
+      bridgeSnapshot.sessionCount + (totalAdmissionSnapshot?.inFlight ?? 0);
+    if (totalActive / maxTotalSessions >= CAPACITY_WARNING_RATIO) {
+      issues.push({
+        code: 'total_session_capacity_high',
+        severity: 'warning',
+        message: `Total active and in-flight sessions are at ${totalActive}/${maxTotalSessions}.`,
+      });
+    }
   }
 
   if (

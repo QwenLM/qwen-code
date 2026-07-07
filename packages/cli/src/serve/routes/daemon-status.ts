@@ -25,6 +25,7 @@ import type { ServeOptions } from '../types.js';
 import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
+import type { TotalSessionAdmissionSnapshot } from '../total-session-admission.js';
 
 interface RegisterDaemonStatusRoutesDeps {
   opts: ServeOptions;
@@ -46,6 +47,7 @@ interface RegisterDaemonStatusRoutesDeps {
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
 }
 
 export function registerDaemonStatusRoutes(
@@ -82,6 +84,8 @@ export function registerDaemonStatusRoutes(
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
           getPerfSnapshot: deps.getPerfSnapshot,
           getMetricsSeries: deps.getMetricsSeries,
+          getTotalSessionAdmissionSnapshot:
+            deps.getTotalSessionAdmissionSnapshot,
         }),
       );
     } catch (err) {

@@ -16,20 +16,22 @@ describe('createTotalSessionAdmissionController', () => {
       getBridges: () => bridges,
     });
 
-    const reservation = admission({
+    const reservation = admission.admit({
       operation: 'spawn',
       workspaceCwd: '/work/a',
     });
+    expect(admission.snapshot()).toEqual({ inFlight: 1 });
 
     expect(() =>
-      admission({ operation: 'spawn', workspaceCwd: '/work/b' }),
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' }),
     ).toThrow(TotalSessionLimitExceededError);
 
     if (!reservation) throw new Error('expected reservation');
     reservation.release();
+    expect(admission.snapshot()).toEqual({ inFlight: 0 });
     bridges[1]!.sessionCount = 1;
     expect(() =>
-      admission({ operation: 'spawn', workspaceCwd: '/work/c' }),
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/c' }),
     ).toThrow(TotalSessionLimitExceededError);
   });
 
@@ -40,7 +42,7 @@ describe('createTotalSessionAdmissionController', () => {
         getBridges: () => [{ sessionCount: 99 }],
       });
 
-      const reservation = admission({
+      const reservation = admission.admit({
         operation: 'spawn',
         workspaceCwd: '/work/a',
       });
@@ -55,20 +57,20 @@ describe('createTotalSessionAdmissionController', () => {
       getBridges: () => [{ sessionCount: 0 }],
     });
 
-    const reservation = admission({
+    const reservation = admission.admit({
       operation: 'spawn',
       workspaceCwd: '/work/a',
     });
     if (!reservation) throw new Error('expected reservation');
 
     expect(() =>
-      admission({ operation: 'spawn', workspaceCwd: '/work/b' }),
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' }),
     ).toThrow(TotalSessionLimitExceededError);
 
     reservation.release();
     reservation.release();
 
-    const nextReservation = admission({
+    const nextReservation = admission.admit({
       operation: 'spawn',
       workspaceCwd: '/work/c',
     });

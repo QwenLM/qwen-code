@@ -14,6 +14,7 @@ import request from 'supertest';
 import { trace, type Span } from '@opentelemetry/api';
 import {
   createServeApp,
+  computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
   PromptDeadlineExceededError,
@@ -12096,13 +12097,42 @@ describe('createServeApp', () => {
   });
 });
 
+describe('computeKeepaliveIntervalMs', () => {
+  it('keeps the first heartbeat inside small custom idle windows', () => {
+    expect(computeKeepaliveIntervalMs(10_000)).toBe(5_000);
+  });
+
+  it('caps large idle windows at the relaxed maximum cadence', () => {
+    expect(computeKeepaliveIntervalMs(60 * 60_000)).toBe(10 * 60_000);
+  });
+
+  it('uses the relaxed cadence when idle reaping is disabled', () => {
+    expect(computeKeepaliveIntervalMs(0)).toBe(10 * 60_000);
+  });
+});
+
 describe('runQwenServe', () => {
   let handle: RunHandle | undefined;
+  let runtimeDir: string | undefined;
+
+  beforeEach(async () => {
+    runtimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-runtime-'),
+    );
+    // Keep real scheduled task state out of startup/shutdown tests; otherwise a
+    // developer's ~/.qwen/scheduled_tasks.json could rehydrate sessions here.
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
 
   afterEach(async () => {
     if (handle) {
       await handle.close();
       handle = undefined;
+    }
+    Storage.setRuntimeBaseDir(null);
+    if (runtimeDir) {
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+      runtimeDir = undefined;
     }
     // Scrub any env vars individual tests may have set so leftover
     // state can't leak into the next test in this worker.

@@ -17,6 +17,8 @@ export interface WorkspaceRuntimeEnvMetadata {
   readonly overlayKeys: readonly string[];
   readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
   readonly envFilePaths?: readonly string[];
+  readonly envFileReadFailed?: boolean;
+  readonly fallbackReason?: string;
 }
 
 export interface WorkspaceRuntime {

@@ -96,7 +96,10 @@ import {
 } from './routes/workspace-voice.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
-import { createTotalSessionAdmissionController } from './total-session-admission.js';
+import {
+  createTotalSessionAdmissionController,
+  type TotalSessionAdmissionSnapshot,
+} from './total-session-admission.js';
 import {
   sendBridgeError as sendBridgeErrorResponse,
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
@@ -255,6 +258,7 @@ export interface ServeAppDeps {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -506,7 +510,7 @@ export function createServeApp(
       primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
     );
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
-  const freshSessionAdmission =
+  const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry
       ? createTotalSessionAdmissionController({
           maxTotalSessions: opts.maxTotalSessions,
@@ -519,7 +523,9 @@ export function createServeApp(
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
-      ...(freshSessionAdmission ? { freshSessionAdmission } : {}),
+      ...(totalSessionAdmission
+        ? { freshSessionAdmission: totalSessionAdmission.admit }
+        : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
@@ -761,6 +767,8 @@ export function createServeApp(
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
+    getTotalSessionAdmissionSnapshot:
+      deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
   });
 
   registerCapabilitiesRoutes(app, {

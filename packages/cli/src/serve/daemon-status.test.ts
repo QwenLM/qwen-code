@@ -51,6 +51,30 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.limits.maxTotalSessions).toBe(50);
   });
 
+  it('warns when total session capacity is high and reports in-flight admission', async () => {
+    const options = makeOptions({
+      totalAdmissionInFlight: 1,
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        sessionCount: 7,
+      },
+    });
+    options.opts.maxTotalSessions = 10;
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.sessions).toMatchObject({
+      active: 7,
+      admissionInFlight: 1,
+    });
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: 'total_session_capacity_high' }),
+      ]),
+    });
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
@@ -623,6 +647,7 @@ interface MakeOptionsInput {
   activePromptCount?: number;
   pendingPromptTotal?: number;
   lastActivityAt?: number | null;
+  totalAdmissionInFlight?: number;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -686,6 +711,13 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     ...(input.perfSnapshot
       ? { getPerfSnapshot: () => input.perfSnapshot! }
       : {}),
+    ...(input.totalAdmissionInFlight === undefined
+      ? {}
+      : {
+          getTotalSessionAdmissionSnapshot: () => ({
+            inFlight: input.totalAdmissionInFlight!,
+          }),
+        }),
   };
 }
 
