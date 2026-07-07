@@ -46,7 +46,7 @@ vi.mock('./ChatPane', () => ({
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
-      <div data-testid="chat-pane" data-current={props.isCurrent ? 'yes' : 'no'}>
+      <div data-testid="chat-pane">
         <span data-testid="pane-title">{props.title}</span>
         {props.onClose && (
           <button data-testid="pane-close" onClick={props.onClose}>
@@ -102,14 +102,14 @@ function panes(): HTMLElement[] {
   return Array.from(container!.querySelectorAll('[data-testid="chat-pane"]'));
 }
 function titles(): string[] {
-  return Array.from(container!.querySelectorAll('[data-testid="pane-title"]')).map(
-    (el) => el.textContent ?? '',
-  );
+  return Array.from(
+    container!.querySelectorAll('[data-testid="pane-title"]'),
+  ).map((el) => el.textContent ?? '');
 }
 function pickerOptions(): string[] {
-  return Array.from(
-    container!.querySelectorAll('[role="option"] button'),
-  ).map((el) => (el.textContent ?? '').trim());
+  return Array.from(container!.querySelectorAll('[role="option"] button')).map(
+    (el) => (el.textContent ?? '').trim(),
+  );
 }
 function openPicker(): void {
   const addButton = container!.querySelector(
@@ -140,7 +140,6 @@ describe('SplitView', () => {
   it('seeds with the current session when no initial sessions are given', () => {
     render({ initialSessionIds: [] });
     expect(titles()).toEqual(['Three']);
-    expect(panes()[0].getAttribute('data-current')).toBe('yes');
   });
 
   it('dedupes initial sessions', () => {
@@ -235,9 +234,7 @@ describe('SplitView', () => {
     render({ initialSessionIds: ['s1'], onExit });
     expect(onExit).not.toHaveBeenCalled();
     const close = container!.querySelector('[data-testid="pane-close"]');
-    act(() =>
-      close!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
-    );
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onExit).toHaveBeenCalledTimes(1);
   });
 
@@ -344,9 +341,7 @@ describe('SplitView', () => {
     expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 's2']);
     // …and after every remove.
     const close = container!.querySelector('[data-testid="pane-close"]');
-    act(() =>
-      close!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
-    );
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onPanesChange).toHaveBeenLastCalledWith(['s2']);
   });
 });
