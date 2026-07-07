@@ -292,10 +292,6 @@ function getDescriptionFromArgs(
     }
     return description;
   }
-  if (isSkillToolName(name)) {
-    const skillName = getStringArg(args, 'skill');
-    if (skillName) return skillName;
-  }
   if (args.file_path) {
     if (args.description) return String(args.description);
     return pathForDisplay(String(args.file_path), workspaceCwd);

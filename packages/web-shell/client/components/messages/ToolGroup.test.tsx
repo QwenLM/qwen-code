@@ -20,7 +20,6 @@ const {
   extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
-  formatRunningSingleToolSummary,
   formatToolGroupSummary,
   getActiveTool,
   getRawFileDiff,
@@ -248,20 +247,6 @@ describe('tool group summary logic', () => {
     ).toBe('Asked user');
   });
 
-  it('keeps running state and command details for a single active tool', () => {
-    expect(
-      formatRunningSingleToolSummary(
-        makeTool({
-          toolName: 'Shell',
-          status: 'in_progress',
-          args: { command: 'npm run build' },
-        }),
-        t,
-        '0:03',
-      ),
-    ).toBe('Running Shell npm run build 0:03');
-  });
-
   it('truncates long single tool descriptions in the chat summary', () => {
     const summary = formatSingleToolSummary(
       makeTool({
@@ -356,6 +341,7 @@ describe('tool expandability', () => {
       hasExpandableContent(
         makeTool({
           toolName: 'skill',
+          title: 'Skill: Use skill: "review"',
           args: { skill: 'review' },
         }),
       ),
@@ -546,6 +532,22 @@ describe('tool row rendering', () => {
     expect(output?.textContent).toBe(
       'Base directory for this skill: /repo\n# Code Review',
     );
+  });
+
+  it('keeps running state for single todo summaries', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'todo_write',
+        status: 'in_progress',
+        args: {
+          todos: [{ id: '1', content: 'Check UI', status: 'in_progress' }],
+        },
+      }),
+    ]);
+    const summary = container.querySelector('button');
+
+    expect(summary?.textContent).toContain('Running');
+    expect(summary?.textContent).toContain('Updated task list');
   });
 });
 

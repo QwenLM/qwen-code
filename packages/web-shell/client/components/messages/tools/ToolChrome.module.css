@@ -431,6 +431,9 @@
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .compactCount {

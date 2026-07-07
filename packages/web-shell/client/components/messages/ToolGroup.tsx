@@ -81,11 +81,7 @@ export function hasExpandableContent(tool: ACPToolCall): boolean {
     return !!text && text.trim().length > 0 && text.split('\n').length > 1;
   }
   if (isSkillToolName(name)) {
-    return (
-      !!getFirstToolContentText(tool) ||
-      !!tool.title ||
-      (typeof tool.args?.args === 'string' && !!tool.args.args.trim())
-    );
+    return !!getFirstToolContentText(tool);
   }
   if (name === 'edit' || name === 'write' || name === 'editfile') {
     return hasEditContent(tool);
@@ -640,18 +636,23 @@ function SingleToolSummary({
   workspaceCwd?: string;
 }) {
   const { t } = useI18n();
+  const runningPrefix =
+    isActiveToolStatus(tool.status) && t('toolGroup.runningPrefix').trim();
 
   if (
     isTodoWriteToolName(tool.toolName) ||
     isAskUserQuestionToolName(tool.toolName)
   ) {
-    return <>{formatSingleToolSummary(tool, t, workspaceCwd)}</>;
+    return (
+      <>
+        {runningPrefix && <span>{runningPrefix} </span>}
+        {formatSingleToolSummary(tool, t, workspaceCwd)}
+        {runningDuration && <span> {runningDuration}</span>}
+      </>
+    );
   }
 
   const info = getSingleToolSummaryInfo(tool, t, workspaceCwd);
-  const runningPrefix =
-    isActiveToolStatus(tool.status) &&
-    t('toolGroup.running', { name: '' }).trim();
 
   return (
     <>
@@ -665,19 +666,6 @@ function SingleToolSummary({
       {runningDuration && <span> {runningDuration}</span>}
     </>
   );
-}
-
-export function formatRunningSingleToolSummary(
-  tool: ACPToolCall,
-  t: ReturnType<typeof useI18n>['t'],
-  duration?: string,
-  workspaceCwd?: string,
-): string {
-  return t('toolGroup.running', {
-    name: formatSingleToolSummary(tool, t, workspaceCwd),
-    count: 1,
-    duration: duration ?? '',
-  });
 }
 
 function formatCompletedToolSummary(
