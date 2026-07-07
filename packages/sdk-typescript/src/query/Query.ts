@@ -984,6 +984,21 @@ export class Query implements AsyncIterable<SDKMessage> {
   }
 
   /**
+   * Get local usage statistics from the CLI
+   *
+   * @param range Time range: 'today', 'week', 'month', or 'all'
+   * @returns Promise resolving to usage dashboard data
+   * @throws Error if query is closed
+   */
+  async getUsageInfo(
+    range: 'today' | 'week' | 'month' | 'all' = 'today',
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_USAGE_INFO, {
+      range,
+    });
+  }
+
+  /**
    * Get list of control commands supported by the CLI
    *
    * @returns Promise resolving to list of supported command names

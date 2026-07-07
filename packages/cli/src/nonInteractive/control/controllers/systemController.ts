@@ -20,6 +20,7 @@ import type {
   CLIControlSetModelRequest,
   CLIMcpServerConfig,
   CLIControlGetContextUsageRequest,
+  CLIControlGetUsageInfoRequest,
 } from '../../types.js';
 import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
 import {
@@ -79,6 +80,12 @@ export class SystemController extends BaseController {
           signal,
         );
 
+      case 'get_usage_info':
+        return this.handleGetUsageInfo(
+          payload as CLIControlGetUsageInfoRequest,
+          signal,
+        );
+
       default:
         throw new Error(`Unsupported request subtype in SystemController`);
     }
@@ -121,6 +128,38 @@ export class SystemController extends BaseController {
         '[SystemController] Failed to get context usage:',
         error,
       );
+      throw new Error(errorMessage);
+    }
+  }
+
+  private async handleGetUsageInfo(
+    payload: CLIControlGetUsageInfoRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const { loadUsageDashboard } = await import('@qwen-code/qwen-code-core');
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+
+      const range = payload.range ?? 'today';
+      const dashboard = await loadUsageDashboard({ range });
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+
+      return {
+        subtype: 'get_usage_info',
+        ...dashboard,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get usage info';
+      debugLogger.error('[SystemController] Failed to get usage info:', error);
       throw new Error(errorMessage);
     }
   }

@@ -377,6 +377,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       case 'set_model':
       case 'supported_commands':
       case 'get_context_usage':
+      case 'get_usage_info':
         return this.systemController;
 
       case 'can_use_tool':

@@ -431,6 +431,11 @@ export interface CLIControlGetContextUsageRequest {
   show_details?: boolean;
 }
 
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlContinueLastTurnRequest
@@ -442,7 +447,8 @@ export type ControlRequestPayload =
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';

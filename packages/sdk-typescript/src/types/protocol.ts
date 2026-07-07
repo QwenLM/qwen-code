@@ -400,6 +400,11 @@ export interface CLIControlGetContextUsageRequest {
   show_details?: boolean;
 }
 
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlContinueLastTurnRequest
@@ -411,7 +416,8 @@ export type ControlRequestPayload =
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -606,6 +612,7 @@ export enum ControlRequestType {
   SET_MODEL = 'set_model',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',
+  GET_USAGE_INFO = 'get_usage_info',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

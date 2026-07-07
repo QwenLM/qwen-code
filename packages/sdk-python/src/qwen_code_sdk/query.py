@@ -482,6 +482,14 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
+    async def get_usage_info(
+        self, range: str = "today"
+    ) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request(
+            "get_usage_info", {"range": range}
+        )
+
     @property
     def control_request_timeout(self) -> float:
         return self._options.timeout.control_request
