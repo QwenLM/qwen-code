@@ -1055,6 +1055,7 @@ export async function processSingleFileContent(
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB).`,
         error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
+        stats,
       };
     }
     if (pageRange && fileSizeInMB > PDF_PAGED_TEXT_EXTRACTION_MAX_MB) {
@@ -1063,16 +1064,12 @@ export async function processSingleFileContent(
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB).`,
         error: `PDF exceeds page-range extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
+        stats,
       };
     }
     if (willExtractPdfText && !pageRange) {
-      const heuristicRequirement = shouldRequirePDFPageRange(null, stats.size);
-      let pageCount: number | null = null;
-      let requirement = heuristicRequirement;
-      if (heuristicRequirement.required) {
-        pageCount = await getPDFPageCount(filePath);
-        requirement = shouldRequirePDFPageRange(pageCount, stats.size);
-      }
+      const pageCount = await getPDFPageCount(filePath);
+      const requirement = shouldRequirePDFPageRange(pageCount, stats.size);
       debugLogger.debug(
         `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pageCount ?? 'unknown'}, required=${requirement.required}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
       );
@@ -1314,6 +1311,9 @@ export async function processSingleFileContent(
         if (pdfResult.success) {
           const estimatedTokens = estimatePDFTextOutputTokens(pdfResult.text);
           if (estimatedTokens > PDF_TEXT_RESULT_MAX_TOKENS) {
+            debugLogger.debug(
+              `PDF text extraction output exceeds token limit: file=${relativePathForDisplay}, pages=${normalizedPages ?? 'all'}, estimatedTokens=${estimatedTokens}, limit=${PDF_TEXT_RESULT_MAX_TOKENS}`,
+            );
             const guidance = buildPDFTextTooLargeGuidance(
               displayName,
               estimatedTokens,
