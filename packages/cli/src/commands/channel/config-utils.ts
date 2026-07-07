@@ -190,11 +190,27 @@ function parseWebhookSource(
   }
 
   let secret: string | undefined;
-  if (typeof record['secret'] === 'string' && record['secret'] !== '') {
-    secret = resolveEnvVars(record['secret']);
+  if (
+    record['secret'] !== undefined &&
+    record['secret'] !== null &&
+    record['secret'] !== ''
+  ) {
+    secret = resolveEnvVars(
+      requireStringField(channelName, `${path}.secret`, record['secret']),
+    );
   }
-  if (typeof record['secretEnv'] === 'string' && record['secretEnv'] !== '') {
-    secret = resolveEnvVars(`$${record['secretEnv']}`);
+  if (
+    record['secretEnv'] !== undefined &&
+    record['secretEnv'] !== null &&
+    record['secretEnv'] !== ''
+  ) {
+    secret = resolveEnvVars(
+      `$${requireStringField(
+        channelName,
+        `${path}.secretEnv`,
+        record['secretEnv'],
+      )}`,
+    );
   }
 
   return secret === undefined ? { targets } : { secret, targets };

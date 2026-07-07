@@ -313,4 +313,52 @@ describe('parseChannelConfig', () => {
       'Channel "dingtalk-main" field "webhooks.sources.custom.targets.default.senderId" must be a string.',
     );
   });
+
+  it('rejects webhook sources with non-string secretEnv', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secretEnv: 123,
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.secretEnv" must be a string.',
+    );
+  });
+
+  it('rejects webhook sources with non-string secret', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secret: false,
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.secret" must be a string.',
+    );
+  });
 });
