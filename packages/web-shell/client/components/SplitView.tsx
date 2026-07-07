@@ -119,23 +119,23 @@ export function SplitView({
   // Also refresh when the parent signals the list changed elsewhere (a session
   // created / deleted / renamed in the sidebar or another tab), so an open
   // picker — or the next open — reflects it without re-entering the split.
-  // Skip while a reload is already in flight: a burst of session changes (bulk
-  // create/delete) bumps the token repeatedly, and we don't want a redundant
-  // concurrent round-trip per bump. `useDaemonResource` already discards stale
-  // responses via its sequence counter; this just avoids the wasted requests.
-  const reloadInFlightRef = useRef(false);
+  // Reload on every distinct token bump. `useDaemonResource` serializes
+  // responses via its sequence counter (last write wins), so overlapping reloads
+  // are safe; and the token is bumped only on discrete session-change events
+  // (App fires an immediate bump plus one delayed follow-up per change), not as a
+  // high-frequency stream. Deliberately *not* skipping while a reload is in
+  // flight: doing so would drop a bump that lands mid-reload — the effect has
+  // already run for that value and clearing an in-flight flag wouldn't re-run it,
+  // so the picker could stay stale after a burst. An occasional redundant fetch
+  // is far cheaper than a lost refresh, and the split has no polling fallback.
   const prevReloadTokenRef = useRef(sessionListReloadToken);
   useEffect(() => {
     if (
       sessionListReloadToken !== undefined &&
-      sessionListReloadToken !== prevReloadTokenRef.current &&
-      !reloadInFlightRef.current
+      sessionListReloadToken !== prevReloadTokenRef.current
     ) {
       prevReloadTokenRef.current = sessionListReloadToken;
-      reloadInFlightRef.current = true;
-      void Promise.resolve(reload()).finally(() => {
-        reloadInFlightRef.current = false;
-      });
+      void reload();
     }
   }, [sessionListReloadToken, reload]);
 
