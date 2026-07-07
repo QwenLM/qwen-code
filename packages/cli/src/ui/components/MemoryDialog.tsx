@@ -16,6 +16,7 @@ import {
   getAutoMemoryRoot,
   getAutoMemoryProjectStateDir,
   getUserAutoMemoryRoot,
+  AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -29,6 +30,7 @@ import { t } from '../../i18n/index.js';
 
 type MemoryDialogTarget = 'project' | 'global';
 type MemoryDialogAction = 'file' | 'folder';
+const DISPLAY_ENV_VARS = ['DISPLAY', 'WAYLAND_DISPLAY', 'MIR_SOCKET'] as const;
 
 interface MemoryDialogProps {
   onClose: () => void;
@@ -88,6 +90,13 @@ function openFolderPath(folderPath: string): void {
   if (typeof result.status === 'number' && result.status !== 0) {
     throw new Error(`Folder opener exited with status ${result.status}`);
   }
+}
+
+function shouldOpenFolderPath(): boolean {
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    return true;
+  }
+  return DISPLAY_ENV_VARS.some((key) => Boolean(process.env[key]));
 }
 
 async function ensureFileExists(filePath: string): Promise<void> {
@@ -288,7 +297,13 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         const targetPath = await resolveTargetPath(item);
         if (item.action === 'folder') {
           await fs.mkdir(targetPath, { recursive: true });
-          openFolderPath(targetPath);
+          if (shouldOpenFolderPath()) {
+            openFolderPath(targetPath);
+          } else {
+            const indexPath = path.join(targetPath, AUTO_MEMORY_INDEX_FILENAME);
+            await ensureFileExists(indexPath);
+            await launchEditor(indexPath);
+          }
         } else {
           await ensureFileExists(targetPath);
           await launchEditor(targetPath);
