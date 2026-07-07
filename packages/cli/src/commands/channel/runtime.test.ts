@@ -1,5 +1,6 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { parseConfiguredChannels } from './runtime.js';
+import { parseConfiguredChannels, registerPermissionRelay } from './runtime.js';
 
 vi.mock('./channel-registry.js', () => ({
   getPlugin: async (type: string) =>
@@ -40,5 +41,81 @@ describe('parseConfiguredChannels', () => {
         }),
       }),
     ]);
+  });
+});
+
+describe('registerPermissionRelay', () => {
+  function createBridge() {
+    const emitter = new EventEmitter();
+    return Object.assign(emitter, {
+      availableCommands: [],
+      newSession: vi.fn(),
+      loadSession: vi.fn(),
+      prompt: vi.fn(),
+      cancelSession: vi.fn(),
+      respondToPermission: vi.fn().mockResolvedValue(true),
+    });
+  }
+
+  it('cancels permission requests when no route exists', async () => {
+    const bridge = createBridge();
+    const router = { getTarget: vi.fn() };
+
+    registerPermissionRelay(bridge, router as never, new Map());
+    bridge.emit('permissionRequest', {
+      requestId: 'req-1',
+      sessionId: 'missing-session',
+      request: {
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'shell',
+          title: 'Run command',
+        },
+        options: [],
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(bridge.respondToPermission).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'cancelled' },
+      }),
+    );
+  });
+
+  it('cancels permission requests when channel dispatch fails', async () => {
+    const bridge = createBridge();
+    const router = {
+      getTarget: vi.fn(() => ({ channelName: 'telegram', chatId: 'chat1' })),
+    };
+    const channel = {
+      dispatchPermissionRequest: vi
+        .fn()
+        .mockRejectedValue(new Error('send failed')),
+      dispatchPermissionResolved: vi.fn(),
+    };
+
+    registerPermissionRelay(
+      bridge,
+      router as never,
+      new Map([['telegram', channel as never]]),
+    );
+    bridge.emit('permissionRequest', {
+      requestId: 'req-1',
+      sessionId: 'session-1',
+      request: {
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'shell',
+          title: 'Run command',
+        },
+        options: [],
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(bridge.respondToPermission).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'cancelled' },
+      }),
+    );
   });
 });

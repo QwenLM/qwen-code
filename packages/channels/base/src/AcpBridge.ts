@@ -77,6 +77,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
+  private permissionCounter = 0;
+  private readonly pendingPermissions = new Map<
+    string,
+    {
+      sessionId: string;
+      resolve: (response: RequestPermissionResponse) => void;
+    }
+  >();
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -109,7 +117,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString().trim();
       if (msg) {
-        process.stderr.write(`[AcpBridge] ${msg}\n`);
+        process.stderr.write(`[AcpBridge] ${sanitizeLogText(msg, 4096)}\n`);
         this.maybeKillOnEventLoopStall(msg);
       }
     });
@@ -120,6 +128,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       );
       // Do not emit sessionDied here: a full ACP process exit is handled by
       // channel start crash recovery, which reloads the persisted sessions.
+      this.resolvePendingPermissions();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -147,15 +156,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
         requestPermission: async (
           params: RequestPermissionRequest,
-        ): Promise<RequestPermissionResponse> => {
-          // Auto-approve for now; Phase 5 will add interactive approval
-          const options = Array.isArray(params.options) ? params.options : [];
-          const optionId =
-            options.find((o) => o.optionId === 'proceed_once')?.optionId ||
-            options[0]?.optionId ||
-            'proceed_once';
-          return { outcome: { outcome: 'selected', optionId } };
-        },
+        ): Promise<RequestPermissionResponse> => this.requestPermission(params),
 
         extMethod: async (
           method: string,
@@ -245,10 +246,32 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   async cancelSession(sessionId: string): Promise<void> {
     const conn = this.ensureConnection();
-    await conn.cancel({ sessionId });
+    try {
+      await conn.cancel({ sessionId });
+    } finally {
+      this.resolvePendingPermissions(sessionId);
+    }
+  }
+
+  async respondToPermission(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean> {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) {
+      return false;
+    }
+    this.pendingPermissions.delete(requestId);
+    pending.resolve(response);
+    this.emit('permissionResolved', {
+      requestId,
+      outcome: response.outcome,
+    });
+    return true;
   }
 
   stop(): void {
+    this.resolvePendingPermissions();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -317,6 +340,42 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Not connected to ACP agent');
     }
     return this.connection;
+  }
+
+  private requestPermission(
+    request: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const requestId = `acp-permission-${++this.permissionCounter}`;
+    const sessionId =
+      typeof request.sessionId === 'string' && request.sessionId.length > 0
+        ? request.sessionId
+        : request.toolCall.toolCallId;
+
+    return new Promise<RequestPermissionResponse>((resolve) => {
+      this.pendingPermissions.set(requestId, { sessionId, resolve });
+      this.emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request,
+      });
+    });
+  }
+
+  private resolvePendingPermissions(sessionId?: string): void {
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'cancelled' },
+    };
+    for (const [requestId, pending] of this.pendingPermissions) {
+      if (sessionId !== undefined && pending.sessionId !== sessionId) {
+        continue;
+      }
+      this.pendingPermissions.delete(requestId);
+      pending.resolve(response);
+      this.emit('permissionResolved', {
+        requestId,
+        outcome: response.outcome,
+      });
+    }
   }
 
   private maybeKillOnEventLoopStall(stderr: string): void {

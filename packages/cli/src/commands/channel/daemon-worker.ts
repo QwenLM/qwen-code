@@ -31,6 +31,7 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
@@ -150,6 +151,10 @@ export function createDaemonChannelBridgeFacade(
     prompt: bridge.prompt.bind(bridge),
     cancelSession: bridge.cancelSession.bind(bridge),
   };
+
+  if (bridge.respondToPermission) {
+    facade.respondToPermission = bridge.respondToPermission.bind(bridge);
+  }
 
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
@@ -343,6 +348,7 @@ export async function runChannelDaemonWorker(
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
     for (const [name, channel] of channels) {

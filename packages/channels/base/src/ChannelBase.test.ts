@@ -23,6 +23,7 @@ class TestChannel extends ChannelBase {
   proactive: Array<{ chatId: string; text: string }> = [];
   proactiveSupported = false;
   proactiveTargetSupported: boolean | undefined;
+  sendMessageError?: Error;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
   taskEvents: ChannelTaskLifecycleEvent[] = [];
@@ -43,6 +44,9 @@ class TestChannel extends ChannelBase {
     this.connected = true;
   }
   async sendMessage(chatId: string, text: string) {
+    if (this.sendMessageError) {
+      throw this.sendMessageError;
+    }
     this.sent.push({ chatId, text });
   }
   disconnect() {
@@ -133,6 +137,7 @@ function createBridge(): ChannelAgentBridge {
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
+    respondToPermission: vi.fn().mockResolvedValue(true),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       channelLoopToolHandler = handler;
     }),
@@ -225,6 +230,258 @@ describe('ChannelBase', () => {
       });
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+  });
+
+  describe('permission relay', () => {
+    function respondToPermissionMock(): ReturnType<typeof vi.fn> {
+      return (
+        bridge as unknown as {
+          respondToPermission: ReturnType<typeof vi.fn>;
+        }
+      ).respondToPermission;
+    }
+
+    function emitPermission(
+      sessionId: string,
+      requestId: string,
+      options = [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ],
+    ): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'shell',
+            title: `Run ${requestId}`,
+            rawInput: { command: 'echo secret-token' },
+          },
+          options,
+        },
+      });
+    }
+
+    async function startSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<string> {
+      await ch.handleInbound(envelope({ text: 'run tests', ...env }));
+      const results = (bridge.newSession as ReturnType<typeof vi.fn>).mock
+        .results;
+      return results[results.length - 1]!.value as string;
+    }
+
+    it('sends permission requests to the owning chat and approves with /approve', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toContain('Permission requested');
+      expect(ch.sent.at(-1)?.text).toContain('/approve req-1');
+      expect(ch.sent.at(-1)?.text).toContain('/deny req-1');
+      expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+    });
+
+    it('requires an explicit request id when multiple permissions are pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve' }));
+
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Multiple permission requests are pending',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('req-1');
+      expect(ch.sent.at(-1)?.text).toContain('req-2');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('does not fall back to another pending request when an explicit id is wrong', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      emitPermission(sessionId, 'req-2');
+
+      await ch.handleInbound(envelope({ text: '/approve missing-request' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('does not answer permission requests from another chat', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch, { chatId: 'chat2' });
+      emitPermission(sessionId, 'req-chat2');
+
+      await ch.handleInbound(
+        envelope({ chatId: 'chat1', text: '/approve req-chat2' }),
+      );
+
+      expect(ch.sent.at(-1)?.chatId).toBe('chat1');
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('gates shared-session permission responses to authorized senders', async () => {
+      const ch = createChannel({
+        allowedUsers: ['boss'],
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'boss',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'rando',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain('Only authorized members');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'boss',
+          text: '/approve req-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('uses ACP option kinds for approval and denial', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'once' },
+      });
+
+      emitPermission(sessionId, 'req-2', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-2' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'cancelled' },
+      });
+    });
+
+    it('supports explicit approve-always for persistent permission grants', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'always' },
+      });
+    });
+
+    it('allows approve-always without a request id when one request is pending', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve-always' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+        outcome: { outcome: 'selected', optionId: 'always' },
+      });
+    });
+
+    it('clears pending permission requests when the session is cleared', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('cancels the permission request when the relay message cannot be sent', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      ch.sendMessageError = new Error('send failed');
+
+      emitPermission(sessionId, 'req-1');
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      );
+      ch.sendMessageError = undefined;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
     });
   });
 

@@ -6,6 +6,7 @@ const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
+const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
 const mockLoadSettings = vi.hoisted(() =>
@@ -71,6 +72,7 @@ const mockBridgeNewSession = vi.hoisted(() => vi.fn());
 const mockBridgeLoadSession = vi.hoisted(() => vi.fn());
 const mockBridgePrompt = vi.hoisted(() => vi.fn());
 const mockBridgeCancelSession = vi.hoisted(() => vi.fn());
+const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
 const mockBridgeShellCommand = vi.hoisted(() => vi.fn());
 const mockBridgeGetAvailableCommands = vi.hoisted(() => vi.fn(() => []));
 const mockDaemonChannelBridge = vi.hoisted(() =>
@@ -85,6 +87,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     loadSession: mockBridgeLoadSession,
     prompt: mockBridgePrompt,
     cancelSession: mockBridgeCancelSession,
+    respondToPermission: mockBridgeRespondToPermission,
     shellCommand: mockBridgeShellCommand,
     start: mockBridgeStart,
     stop: mockBridgeStop,
@@ -128,6 +131,7 @@ vi.mock('./runtime.js', () => ({
   loadChannelsConfig: mockLoadChannelsConfig,
   loadChannelsFromExtensions: mockLoadChannelsFromExtensions,
   parseConfiguredChannels: mockParseConfiguredChannels,
+  registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
   selectFirstModel: mockSelectFirstModel,
@@ -402,6 +406,48 @@ describe('createDaemonChannelBridgeFacade', () => {
     expect(listSessions).toHaveBeenCalled();
   });
 
+  it('forwards permission responses when present on bridge', async () => {
+    const respondToPermission = vi.fn().mockResolvedValue(true);
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      respondToPermission,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    const response = { outcome: { outcome: 'cancelled' as const } };
+    await expect(facade.respondToPermission?.('req-1', response)).resolves.toBe(
+      true,
+    );
+    expect(respondToPermission).toHaveBeenCalledWith('req-1', response);
+  });
+
+  it('omits permission responses when absent on bridge', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect('respondToPermission' in facade).toBe(false);
+  });
+
   it('omits listSessions when absent on bridge', () => {
     const bridge = {
       availableCommands: [],
@@ -484,6 +530,11 @@ describe('runChannelDaemonWorker', () => {
         proxy: 'http://settings-proxy:8080',
         router: mockSessionRouter.mock.results[0]!.value,
       }),
+    );
+    expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
+      bridgeFacade,
+      mockSessionRouter.mock.results[0]!.value,
+      expect.any(Map),
     );
     expect(mockResolveProxyUrl).toHaveBeenCalledWith(
       undefined,
