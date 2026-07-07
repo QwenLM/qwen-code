@@ -34,6 +34,32 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       expect.stringContaining('"你记一下以后回复前说 1122"'),
       {},
     );
+    expect(bridge.cancelSession).toHaveBeenCalledWith('classifier-session');
+  });
+
+  it('logs cancelSession cleanup failures without dropping the result', async () => {
+    const bridge = bridgeWithResponse(
+      '{"intent":"remember","memory":"回复前说 1122","confidence":0.93}',
+    );
+    vi.mocked(bridge.cancelSession).mockRejectedValue(
+      new Error('transport closed'),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const classifier = new BridgeChannelMemoryIntentClassifier(bridge, '/tmp');
+
+    await expect(
+      classifier.classifyChannelMemoryIntent('你记一下以后回复前说 1122'),
+    ).resolves.toEqual({
+      intent: 'remember',
+      memory: '回复前说 1122',
+      confidence: 0.93,
+    });
+    expect(stderrSpy).toHaveBeenCalledWith(
+      '[classifier] cancelSession failed: transport closed\n',
+    );
+    stderrSpy.mockRestore();
   });
 
   it('extracts a JSON object from wrapped model output', async () => {

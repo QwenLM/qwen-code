@@ -100,8 +100,14 @@ export class BridgeChannelMemoryIntentClassifier
     } finally {
       try {
         await bridge.cancelSession(sessionId);
-      } catch {
+      } catch (error) {
         // session cleanup must not mask a successful classification
+        process.stderr.write(
+          `[classifier] cancelSession failed: ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            200,
+          )}\n`,
+        );
       }
     }
   }

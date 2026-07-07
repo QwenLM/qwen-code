@@ -878,6 +878,47 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('regex memory intent skips the llm classifier', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue(''),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'none',
+          confidence: 1,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          text: '记住: 回复前必须说 1122',
+          senderId: 'alice',
+        }),
+      );
+
+      expect(
+        memoryIntentClassifier.classifyChannelMemoryIntent,
+      ).not.toHaveBeenCalled();
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        '回复前必须说 1122',
+      );
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('llm memory classifier is skipped when channel memory is not configured', async () => {
       const memoryIntentClassifier = {
         classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
