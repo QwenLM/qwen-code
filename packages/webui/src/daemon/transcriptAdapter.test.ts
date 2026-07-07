@@ -62,6 +62,36 @@ describe('daemonTranscriptToUnifiedMessages', () => {
     });
   });
 
+  it('renders older daemon terminated turn errors with user-facing text', () => {
+    const [message] = daemonTranscriptToUnifiedMessages([
+      {
+        id: 'error-legacy',
+        kind: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(message).toMatchObject({
+      type: 'tool_call',
+      toolCall: {
+        kind: 'system_error',
+        rawOutput: 'Model response stream was interrupted. Please retry.',
+        content: [
+          {
+            content: {
+              text: 'Model response stream was interrupted. Please retry.',
+              error: 'Model response stream was interrupted. Please retry.',
+            },
+          },
+        ],
+      },
+    });
+  });
+
   it('maps daemon tool statuses without leaving terminal states spinning', () => {
     const messages = daemonTranscriptToUnifiedMessages([
       createToolBlock('cancelled-tool', 'cancelled'),
