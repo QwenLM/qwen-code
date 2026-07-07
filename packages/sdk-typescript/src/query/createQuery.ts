@@ -70,6 +70,10 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    sandbox: options.sandbox,
+    safeMode: options.safeMode,
+    insecure: options.insecure,
+    worktree: options.worktree,
   });
 
   const queryOptions: QueryOptions = {

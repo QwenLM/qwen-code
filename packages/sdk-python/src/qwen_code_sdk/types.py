@@ -114,6 +114,10 @@ class QueryOptionsDict(TypedDict, total=False):
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
     stderr: Callable[[str], None]
+    sandbox: bool
+    safe_mode: bool
+    insecure: bool
+    worktree: bool
 
 
 @dataclass
@@ -139,6 +143,10 @@ class QueryOptions:
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
     stderr: Callable[[str], None] | None = None
+    sandbox: bool = False
+    safe_mode: bool = False
+    insecure: bool = False
+    worktree: bool = False
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> QueryOptions:
@@ -183,6 +191,10 @@ class QueryOptions:
                 Callable[[str], None] | None,
                 _as_optional_callable(data, "stderr"),
             ),
+            sandbox=_as_optional_bool(data, "sandbox") or False,
+            safe_mode=_as_optional_bool(data, "safe_mode") or False,
+            insecure=_as_optional_bool(data, "insecure") or False,
+            worktree=_as_optional_bool(data, "worktree") or False,
         )
 
 

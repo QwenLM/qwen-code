@@ -181,6 +181,10 @@ export const QueryOptionsSchema = z
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    sandbox: z.boolean().optional(),
+    safeMode: z.boolean().optional(),
+    insecure: z.boolean().optional(),
+    worktree: z.boolean().optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

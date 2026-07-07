@@ -46,6 +46,10 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  sandbox?: boolean;
+  safeMode?: boolean;
+  insecure?: boolean;
+  worktree?: boolean;
 };
 
 export interface QuerySystemPromptPreset {
@@ -464,6 +468,36 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Run in sandbox mode.
+   * Equivalent to CLI's `--sandbox` flag.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Disable all customizations (context files, hooks, extensions, skills, MCP servers)
+   * for troubleshooting.
+   * Equivalent to CLI's `--safe-mode` flag.
+   * @default false
+   */
+  safeMode?: boolean;
+
+  /**
+   * Skip TLS certificate verification for API connections.
+   * Equivalent to CLI's `--insecure` flag.
+   * WARNING: Removes protection against man-in-the-middle attacks.
+   * @default false
+   */
+  insecure?: boolean;
+
+  /**
+   * Enable Git worktree mode.
+   * Equivalent to CLI's `--worktree` flag.
+   * @default false
+   */
+  worktree?: boolean;
 
   /**
    * Timeout configuration for various SDK operations.

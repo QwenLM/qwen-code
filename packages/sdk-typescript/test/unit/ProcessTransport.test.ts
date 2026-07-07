@@ -352,6 +352,63 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should include boolean flags when set to true', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        sandbox: true,
+        safeMode: true,
+        insecure: true,
+        worktree: true,
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--sandbox',
+          '--safe-mode',
+          '--insecure',
+          '--worktree',
+        ]),
+        expect.any(Object),
+      );
+    });
+
+    it('should omit boolean flags when set to false', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        sandbox: false,
+        safeMode: false,
+        insecure: false,
+        worktree: false,
+      };
+
+      new ProcessTransport(options);
+
+      const spawnCall = mockSpawn.mock.calls[0]?.[1] as string[];
+      expect(spawnCall).not.toContain('--sandbox');
+      expect(spawnCall).not.toContain('--safe-mode');
+      expect(spawnCall).not.toContain('--insecure');
+      expect(spawnCall).not.toContain('--worktree');
+    });
+
     it('should throw if aborted before initialization', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

@@ -240,4 +240,16 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     elif options.session_id:
         args.extend(["--session-id", options.session_id])
 
+    if options.sandbox:
+        args.append("--sandbox")
+
+    if options.safe_mode:
+        args.append("--safe-mode")
+
+    if options.insecure:
+        args.append("--insecure")
+
+    if options.worktree:
+        args.append("--worktree")
+
     return args

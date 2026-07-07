@@ -335,6 +335,22 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    if (this.options.sandbox) {
+      args.push('--sandbox');
+    }
+
+    if (this.options.safeMode) {
+      args.push('--safe-mode');
+    }
+
+    if (this.options.insecure) {
+      args.push('--insecure');
+    }
+
+    if (this.options.worktree) {
+      args.push('--worktree');
+    }
+
     return args;
   }
 

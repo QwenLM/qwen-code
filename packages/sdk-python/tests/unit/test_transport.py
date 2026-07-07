@@ -82,6 +82,38 @@ def test_cli_argument_precedence_prefers_resume_then_continue_then_session_id() 
     assert "--session-id" not in args
 
 
+def test_build_cli_arguments_includes_boolean_flags() -> None:
+    args = build_cli_arguments(
+        QueryOptions(
+            sandbox=True,
+            safe_mode=True,
+            insecure=True,
+            worktree=True,
+        )
+    )
+
+    assert "--sandbox" in args
+    assert "--safe-mode" in args
+    assert "--insecure" in args
+    assert "--worktree" in args
+
+
+def test_build_cli_arguments_omits_false_boolean_flags() -> None:
+    args = build_cli_arguments(
+        QueryOptions(
+            sandbox=False,
+            safe_mode=False,
+            insecure=False,
+            worktree=False,
+        )
+    )
+
+    assert "--sandbox" not in args
+    assert "--safe-mode" not in args
+    assert "--insecure" not in args
+    assert "--worktree" not in args
+
+
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:
     script_path = tmp_path / "fake-qwen.py"
     script_path.write_text("print('ok')\n", encoding="utf-8")
