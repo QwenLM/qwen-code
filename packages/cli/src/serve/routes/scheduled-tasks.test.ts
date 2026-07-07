@@ -962,4 +962,23 @@ describe('scheduledTaskSessionName', () => {
     }
     expect(name.endsWith('…')).toBe(true);
   });
+
+  it('strips Unicode bidi override/isolate chars (Trojan-Source reordering defense)', () => {
+    // The bridge's title guard only rejects C0/DEL, so bidi controls (all
+    // > 0x9f) slip through and would visually reorder the label in renderers
+    // that honor bidi. Inputs are built from code points so this test file
+    // itself carries no reordering controls.
+    const RLO = String.fromCodePoint(0x202e); // right-to-left override
+    expect(scheduledTaskSessionName(`inv${RLO}fdp.exe`)).toBe('⏰ invfdp.exe');
+    // Every isolate (U+2066 LRI, U+2067 RLI, U+2068 FSI, U+2069 PDI) too.
+    const isolates = [0x2066, 0x2067, 0x2068, 0x2069]
+      .map((c) => String.fromCodePoint(c))
+      .join('');
+    expect(scheduledTaskSessionName(`a${isolates}b`)).toBe('⏰ ab');
+    // And the remaining embedding/override chars (U+202A-U+202D).
+    const embeds = [0x202a, 0x202b, 0x202c, 0x202d]
+      .map((c) => String.fromCodePoint(c))
+      .join('');
+    expect(scheduledTaskSessionName(`x${embeds}y`)).toBe('⏰ xy');
+  });
 });
