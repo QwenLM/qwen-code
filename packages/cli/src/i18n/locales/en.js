@@ -474,6 +474,8 @@ export default {
     'Manage existing subagents (view, edit, delete).',
   'Create a new subagent with guided setup.':
     'Create a new subagent with guided setup.',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
 
   // ============================================================================
   // Agents - Management Dialog
