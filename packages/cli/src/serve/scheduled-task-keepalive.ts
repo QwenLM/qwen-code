@@ -119,8 +119,11 @@ async function bindAndNameSessions(
   tasks: readonly DurableCronTask[],
   renamed: Set<string>,
   spawnTimeoutMs: number,
+  binding: Set<string>,
 ): Promise<void> {
-  const unbound = tasks.filter((t) => !t.sessionId && t.enabled !== false);
+  const unbound = tasks.filter(
+    (t) => !t.sessionId && t.enabled !== false && !binding.has(t.id),
+  );
   const needsName = tasks.filter(
     (t) => t.sessionId && t.enabled !== false && !renamed.has(t.sessionId),
   );
@@ -128,13 +131,15 @@ async function bindAndNameSessions(
   for (const task of unbound) {
     let spawnedSessionId: string | undefined;
     try {
+      binding.add(task.id);
       const rawSpawn = bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread',
       });
       // spawnOrAttach is not abortable — if the timeout fires first, the
       // raw promise may still resolve later with a live session. Attach a
-      // background handler to clean up that orphan immediately.
+      // background handler to clean up that orphan immediately. Clear the
+      // binding guard on TRUE settlement so retries are possible.
       let timedOut = false;
       rawSpawn
         .then(({ sessionId }) => {
@@ -150,7 +155,10 @@ async function bindAndNameSessions(
               .catch(() => {});
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          binding.delete(task.id);
+        });
       const { sessionId } = await withTimeout(
         rawSpawn,
         spawnTimeoutMs,
@@ -170,10 +178,23 @@ async function bindAndNameSessions(
       }
       let matched = false;
       await updateCronTasks(boundWorkspace, (list) => {
+        // Another process may have bound or disabled this task between our
+        // read and this write-lock acquisition — only attach when the task is
+        // still unbound and enabled. Otherwise return unchanged so the
+        // orphan spawn is rolled back below.
+        if (
+          !list.some(
+            (t) => t.id === task.id && !t.sessionId && t.enabled !== false,
+          )
+        ) {
+          return list;
+        }
         const result = list.map((t) =>
-          t.id === task.id ? { ...t, sessionId } : t,
+          t.id === task.id && !t.sessionId && t.enabled !== false
+            ? { ...t, sessionId }
+            : t,
         );
-        matched = result.some((t) => t.sessionId === sessionId);
+        matched = true;
         return result;
       });
       if (!matched) {
@@ -247,6 +268,11 @@ export function startScheduledTaskKeepalive(
   // the load's TRUE settlement, not the timeout.
   const reviving = new Set<string>();
 
+  // Tasks with a spawn in flight. After withTimeout rejects, the raw
+  // spawnOrAttach may still be running — skip the task in subsequent ticks
+  // until the raw spawn settles.
+  const binding = new Set<string>();
+
   // Tracks sessions the keepalive has already named with ⏰ prefix,
   // so updateSessionMetadata isn't called every tick.
   const renamed = new Set<string>();
@@ -318,11 +344,14 @@ export function startScheduledTaskKeepalive(
         }
       }
     }
-    // Drop backoff state for sessions no longer bound to any task.
-    if (reviveState.size > 0) {
+    // Drop backoff state and renamed entries for sessions no longer bound to any task.
+    if (reviveState.size > 0 || renamed.size > 0) {
       const live = new Set(tasks.map((t) => t.sessionId));
       for (const id of reviveState.keys()) {
         if (!live.has(id)) reviveState.delete(id);
+      }
+      for (const id of renamed) {
+        if (!live.has(id)) renamed.delete(id);
       }
     }
 
@@ -332,6 +361,7 @@ export function startScheduledTaskKeepalive(
       tasks,
       renamed,
       spawnTimeoutMs,
+      binding,
     );
   };
 
@@ -364,7 +394,9 @@ export function startScheduledTaskKeepalive(
       cronDir,
       { persistent: false },
       (_event, filename) => {
-        if (filename && filename !== cronFileName) return;
+        // On Linux fs.watch delivers null as filename — treat it as a match
+        // (could be our file); non-matching filenames are skipped.
+        if (filename !== null && filename !== cronFileName) return;
         if (bindDebounce) clearTimeout(bindDebounce);
         bindDebounce = setTimeout(() => {
           if (running) return;

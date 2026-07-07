@@ -458,6 +458,51 @@ describe('scheduled-task keepalive', () => {
     expect(names[0]![1].displayName).toContain('⏰');
   });
 
+  it('does not bind disabled unbound tasks', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'disabled-unbound', enabled: false }),
+    ]);
+    let spawnCount = 0;
+    const noSpawn = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        spawnCount++;
+        return { sessionId: 'should-not-spawn' };
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: noSpawn,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(spawnCount).toBe(0);
+  });
+
+  it('still binds a task when updateSessionMetadata fails', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'name-fail', prompt: 'test prompt' }),
+    ]);
+    const naming = {
+      ...bridge,
+      spawnOrAttach: async () => ({ sessionId: 'bound-despite-naming-fail' }),
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('metadata service down');
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBe('bound-despite-naming-fail');
+  });
+
   it('rolls back the spawned session when the task vanishes before write', async () => {
     // Seed an unbound task, then replace it with a different task between the
     // keepalive's read and the updateCronTasks callback — simulating a
@@ -466,7 +511,7 @@ describe('scheduled-task keepalive', () => {
     const closed: string[] = [];
     const removeSpy = vi
       .spyOn(SessionService.prototype, 'removeSession')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
     const rollbackBridge = {
       ...bridge,
       spawnOrAttach: async () => {
@@ -492,6 +537,46 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(closed).toContain('orphan-sess');
     expect(removeSpy).toHaveBeenCalledWith('orphan-sess');
+    removeSpy.mockRestore();
+  });
+
+  it('rolls back when another process binds the task before write', async () => {
+    // Another keepalive/process binds the same task between our spawn and
+    // our updateCronTasks lock. Our spawned session must be rolled back.
+    const closed: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const raceBridge = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        // Simulate another process binding the task.
+        await updateCronTasks(workspace, (list) =>
+          list.map((t) =>
+            t.id === 'raced' ? { ...t, sessionId: 'other-sess' } : t,
+          ),
+        );
+        return { sessionId: 'our-orphan' };
+      },
+      closeSession: async (id: string) => {
+        closed.push(id);
+      },
+      updateSessionMetadata: () => {},
+    };
+    await updateCronTasks(workspace, () => [
+      task({ id: 'raced', prompt: 'contested' }),
+    ]);
+    const ka = startScheduledTaskKeepalive({
+      bridge: raceBridge,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(closed).toContain('our-orphan');
+    // The other process's sessionId is preserved.
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBe('other-sess');
     removeSpy.mockRestore();
   });
 
