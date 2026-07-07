@@ -87,7 +87,11 @@ import {
   profileCheckpoint,
   finalizeStartupProfile,
 } from '../utils/startupProfiler.js';
-import { appEvents } from '../utils/events.js';
+import {
+  AppEvent,
+  appEvents,
+  type StartupIdeConnectionStatus,
+} from '../utils/events.js';
 import process from 'node:process';
 
 /**
@@ -2580,6 +2584,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
+  const [startupIdeConnectionStatus, setStartupIdeConnectionStatus] =
+    useState<StartupIdeConnectionStatus>({ state: 'idle' });
 
   useEffect(() => {
     const getIde = async () => {
@@ -2829,6 +2835,16 @@ export const AppContainer = (props: AppContainerProps) => {
     const unsubscribe = ideContextStore.subscribe(setIdeContextState);
     setIdeContextState(ideContextStore.get());
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const listener = (status: StartupIdeConnectionStatus) => {
+      setStartupIdeConnectionStatus(status);
+    };
+    appEvents.on(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    return () => {
+      appEvents.off(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    };
   }, []);
 
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
@@ -3823,6 +3839,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalHeight,
       mainControlsRef,
       currentIDE,
+      startupIdeConnectionStatus,
       updateInfo,
       showIdeRestartPrompt,
       ideTrustRestartReason,
@@ -3962,6 +3979,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalHeight,
       mainControlsRef,
       currentIDE,
+      startupIdeConnectionStatus,
       updateInfo,
       showIdeRestartPrompt,
       ideTrustRestartReason,

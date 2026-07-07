@@ -196,6 +196,16 @@ describe('initializeApp', () => {
     expect(mockLogIdeConnection).toHaveBeenCalled();
   });
 
+  it('should not connect to IDE through startup helper when not in IDE mode', async () => {
+    mockConfig.getIdeMode.mockReturnValue(false);
+
+    await connectIdeForStartup(mockConfig as never);
+
+    expect(mockGetInstance).not.toHaveBeenCalled();
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(mockLogIdeConnection).not.toHaveBeenCalled();
+  });
+
   it('should not connect to IDE when not in IDE mode', async () => {
     mockConfig.getIdeMode.mockReturnValue(false);
 

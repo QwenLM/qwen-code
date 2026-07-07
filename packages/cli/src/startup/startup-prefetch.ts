@@ -11,6 +11,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { preconnectApi } from '../utils/apiPreconnect.js';
+import { AppEvent, appEvents } from '../utils/events.js';
 import { recordStartupEvent } from '../utils/startupProfiler.js';
 
 const debugLogger = createDebugLogger('STARTUP_PREFETCH');
@@ -26,11 +27,19 @@ function withTimeout<T>(
   timeoutMs: number,
 ): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
+      timedOut = true;
       reject(new Error(`${name} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     timeoutId.unref?.();
+  });
+
+  promise.catch((err) => {
+    if (timedOut) {
+      debugLogger.debug(`${name} underlying error after timeout:`, err);
+    }
   });
 
   return Promise.race([promise, timeout]).finally(() => {
@@ -111,12 +120,26 @@ export function startPostRenderPrefetches(
 
   if (options.connectIde && config.getIdeMode()) {
     runDeferredTask('ide_connect', async () => {
-      const { connectIdeForStartup } = await import('../core/initializer.js');
-      await withTimeout(
-        connectIdeForStartup(config),
-        'ide_connect',
-        DEFERRED_IDE_CONNECT_TIMEOUT_MS,
-      );
+      appEvents.emit(AppEvent.StartupIdeConnectionStatusChanged, {
+        state: 'connecting',
+      });
+      try {
+        const { connectIdeForStartup } = await import('../core/initializer.js');
+        await withTimeout(
+          connectIdeForStartup(config),
+          'ide_connect',
+          DEFERRED_IDE_CONNECT_TIMEOUT_MS,
+        );
+        appEvents.emit(AppEvent.StartupIdeConnectionStatusChanged, {
+          state: 'connected',
+        });
+      } catch (err) {
+        appEvents.emit(AppEvent.StartupIdeConnectionStatusChanged, {
+          state: 'failed',
+          message: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
     });
   }
 

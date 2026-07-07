@@ -8,6 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  AppEvent,
+  appEvents,
+  type StartupIdeConnectionStatus,
+} from '../utils/events.js';
+import {
   startEarlyStartupPrefetches,
   startPostRenderPrefetches,
 } from './startup-prefetch.js';
@@ -92,6 +97,20 @@ describe('startupPrefetch', () => {
     vi.useRealTimers();
   });
 
+  function captureIdeConnectionStatuses() {
+    const statuses: StartupIdeConnectionStatus[] = [];
+    const listener = (status: StartupIdeConnectionStatus) => {
+      statuses.push(status);
+    };
+    appEvents.on(AppEvent.StartupIdeConnectionStatusChanged, listener);
+    return {
+      statuses,
+      stop: () => {
+        appEvents.off(AppEvent.StartupIdeConnectionStatusChanged, listener);
+      },
+    };
+  }
+
   it('starts API preconnect with resolved auth config', () => {
     const config = makeConfig();
 
@@ -135,6 +154,31 @@ describe('startupPrefetch', () => {
     expect(mockDebug).toHaveBeenCalled();
   });
 
+  it('records completed profiler lifecycle events for successful deferred tasks', async () => {
+    const config = makeConfig({
+      isInteractive: () => false,
+    } as Partial<Config>);
+
+    startPostRenderPrefetches(config, makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockHandleAutoUpdate).toHaveBeenCalledWith(
+      null,
+      expect.any(Object),
+      '/repo',
+    );
+    expect(mockRecordStartupEvent).toHaveBeenCalledWith(
+      'startup_prefetch_started',
+      { name: 'update_check' },
+    );
+    expect(mockRecordStartupEvent).toHaveBeenCalledWith(
+      'startup_prefetch_completed',
+      { name: 'update_check' },
+    );
+  });
+
   it('starts post-render tasks without awaiting completion', async () => {
     const config = makeConfig();
     const updatePromise = new Promise<null>(() => {});
@@ -167,22 +211,52 @@ describe('startupPrefetch', () => {
 
   it('requires connectIde option before connecting IDE', async () => {
     const config = makeConfig();
+    const { statuses, stop } = captureIdeConnectionStatuses();
 
-    startPostRenderPrefetches(config, makeSettings());
+    try {
+      startPostRenderPrefetches(config, makeSettings());
 
-    await vi.dynamicImportSettled();
+      await vi.dynamicImportSettled();
 
-    expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
+      expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
+      expect(statuses).toEqual([]);
+    } finally {
+      stop();
+    }
   });
 
   it('does not connect IDE when IDE mode is disabled', async () => {
     const config = makeConfig({ getIdeMode: () => false } as Partial<Config>);
+    const { statuses, stop } = captureIdeConnectionStatuses();
 
-    startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
+    try {
+      startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
-    await vi.dynamicImportSettled();
+      await vi.dynamicImportSettled();
 
-    expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
+      expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
+      expect(statuses).toEqual([]);
+    } finally {
+      stop();
+    }
+  });
+
+  it('emits IDE connecting and connected statuses for deferred IDE startup', async () => {
+    const config = makeConfig();
+    const { statuses, stop } = captureIdeConnectionStatuses();
+
+    try {
+      startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
+
+      await vi.dynamicImportSettled();
+
+      expect(statuses).toEqual([
+        { state: 'connecting' },
+        { state: 'connected' },
+      ]);
+    } finally {
+      stop();
+    }
   });
 
   it('fails deferred IDE connection when the startup connect hangs', async () => {
@@ -190,21 +264,63 @@ describe('startupPrefetch', () => {
     const config = makeConfig();
     const hangingConnect = new Promise<void>(() => {});
     mockConnectIdeForStartup.mockReturnValue(hangingConnect);
+    const { statuses, stop } = captureIdeConnectionStatuses();
+
+    try {
+      startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
+
+      await vi.dynamicImportSettled();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(statuses).toEqual([
+        { state: 'connecting' },
+        {
+          state: 'failed',
+          message: 'ide_connect timed out after 10000ms',
+        },
+      ]);
+      expect(mockRecordStartupEvent).toHaveBeenCalledWith(
+        'startup_prefetch_failed',
+        { name: 'ide_connect' },
+      );
+      expect(mockWarn).toHaveBeenCalledWith(
+        'ide_connect failed:',
+        expect.objectContaining({
+          message: 'ide_connect timed out after 10000ms',
+        }),
+      );
+    } finally {
+      stop();
+    }
+  });
+
+  it('logs the underlying IDE connection error after timeout', async () => {
+    vi.useFakeTimers();
+    const config = makeConfig();
+    let rejectConnect!: (error: Error) => void;
+    const delayedFailure = new Promise<void>((_, reject) => {
+      rejectConnect = reject;
+    });
+    mockConnectIdeForStartup.mockReturnValue(delayedFailure);
 
     startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
     await vi.dynamicImportSettled();
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(mockRecordStartupEvent).toHaveBeenCalledWith(
-      'startup_prefetch_failed',
-      { name: 'ide_connect' },
-    );
+    const underlyingError = new Error('socket closed');
+    rejectConnect(underlyingError);
+    await vi.dynamicImportSettled();
+
     expect(mockWarn).toHaveBeenCalledWith(
       'ide_connect failed:',
       expect.objectContaining({
         message: 'ide_connect timed out after 10000ms',
       }),
+    );
+    expect(mockDebug).toHaveBeenCalledWith(
+      'ide_connect underlying error after timeout:',
+      underlyingError,
     );
   });
 
