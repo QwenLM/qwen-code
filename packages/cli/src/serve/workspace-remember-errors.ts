@@ -108,6 +108,15 @@ function replaceControlChars(details: string): string {
     .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
 
+function replaceStackControlChars(stack: string): string {
+  return stack
+    .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
+    .replace(REMEMBER_ERROR_INVISIBLE_RE, '')
+    .replace(REMEMBER_ERROR_CONTROL_RE, (char) =>
+      char === '\n' || char === '\t' ? char : ' ',
+    );
+}
+
 function isHighSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
 }
@@ -128,19 +137,28 @@ function truncateBeforeDanglingSurrogate(
   return cutPoint;
 }
 
-function sanitizeRememberErrorDetails(details: string): string | undefined {
-  const normalized = replaceControlChars(details);
-  const redacted = redactLogCredentials(normalized).trim();
-  if (!redacted) return undefined;
-  if (redacted.length <= MAX_REMEMBER_ERROR_DETAILS_CHARS) {
-    return redacted;
-  }
+function capRememberErrorText(redacted: string): string {
+  if (redacted.length <= MAX_REMEMBER_ERROR_DETAILS_CHARS) return redacted;
   const truncationSuffix = '... [truncated]';
   const cutPoint = truncateBeforeDanglingSurrogate(
     redacted,
     MAX_REMEMBER_ERROR_DETAILS_CHARS - truncationSuffix.length,
   );
   return `${redacted.slice(0, cutPoint)}${truncationSuffix}`;
+}
+
+function redactAndCapRememberErrorText(normalized: string): string | undefined {
+  const redacted = redactLogCredentials(normalized).trim();
+  if (!redacted) return undefined;
+  return capRememberErrorText(redacted);
+}
+
+function sanitizeRememberErrorDetails(details: string): string | undefined {
+  return redactAndCapRememberErrorText(replaceControlChars(details));
+}
+
+function sanitizeRememberErrorStack(stack: string): string | undefined {
+  return redactAndCapRememberErrorText(replaceStackControlChars(stack));
 }
 
 export function extractRememberErrorDetails(err: unknown): string | undefined {
@@ -151,5 +169,5 @@ export function extractRememberErrorDetails(err: unknown): string | undefined {
 
 export function extractRememberErrorStack(err: unknown): string | undefined {
   if (!(err instanceof Error) || !err.stack) return undefined;
-  return sanitizeRememberErrorDetails(err.stack);
+  return sanitizeRememberErrorStack(err.stack);
 }

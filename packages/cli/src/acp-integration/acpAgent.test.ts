@@ -3434,6 +3434,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects workspace memory remember when the bridge reports managed memory unavailable', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    let rejection: unknown;
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      });
+    } catch (err) {
+      rejection = err;
+    }
+
+    expect(rejection).toMatchObject({
+      code: -32009,
+      message: 'Managed memory is unavailable for this daemon workspace',
+      data: { errorKind: 'managed_memory_unavailable' },
+    });
+    expect(
+      (rejection as { data: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      expect.objectContaining({
+        code: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('includes details for workspace memory remember failures', async () => {
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),

@@ -240,11 +240,12 @@ describe('extractRememberErrorDetails', () => {
 describe('extractRememberErrorStack', () => {
   it('redacts and caps error stacks before logging', () => {
     const err = new Error('Authorization: Bearer secret-token-value');
-    err.stack = `${err.stack}\n${'x'.repeat(1100)}`;
+    err.stack = `Error: Authorization: Bearer secret-token-value\n\tat handler (/workspace/file.ts:1:1)\n${'x'.repeat(1100)}`;
 
     const stack = extractRememberErrorStack(err);
 
     expect(stack).toContain('Authorization: <redacted>');
+    expect(stack).toContain('\n\tat handler');
     expect(stack).not.toContain('secret-token-value');
     expect(stack).toHaveLength(1000);
   });
