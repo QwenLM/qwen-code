@@ -40,6 +40,7 @@ export type SpecifierKind = 'command' | 'path' | 'domain' | 'literal';
  *   "Read(./secrets/**)"       → file reads matching path pattern
  *   "Edit(/src/**\/*.ts)"       → file edits matching path pattern
  *   "WebFetch(domain:x.com)"   → web fetch matching domain
+ *   "Agent(model:opus)"        → subagent with model param matching
  *   "mcp__server__tool"        → specific MCP tool
  */
 export interface PermissionRule {
@@ -52,6 +53,7 @@ export interface PermissionRule {
    * For shell tools: a command pattern (e.g. "git *").
    * For file tools: a path pattern (e.g. "./secrets/**").
    * For WebFetch: a domain pattern (e.g. "domain:example.com").
+   * For tool param matching: the plain (non-key:value) part of the specifier.
    */
   specifier?: string;
   /**
@@ -59,6 +61,15 @@ export interface PermissionRule {
    * Set automatically during parsing based on the tool name/category.
    */
   specifierKind?: SpecifierKind;
+  /**
+   * Parsed `key:value` parameter matchers extracted from the specifier.
+   * When set, `matchesRule` also requires every listed key to be present
+   * in the tool's actual input params with a value matching the pattern
+   * (supports `*` glob wildcards).
+   *
+   * Example: rule `Agent(model:opus)` → `[{ key: 'model', valuePattern: 'opus' }]`
+   */
+  toolParamMatchers?: Array<{ key: string; valuePattern: string }>;
   /** True if the raw rule was malformed (e.g. unbalanced parens) and should never match. */
   invalid?: boolean;
 }
@@ -106,6 +117,11 @@ export interface PermissionCheckContext {
    * specifier that doesn't fall into command/path/domain categories.
    */
   specifier?: string;
+  /**
+   * Raw tool input parameters, used for `Tool(param:value)` rule matching.
+   * Populated by `buildPermissionCheckContext` from the tool invocation args.
+   */
+  toolParams?: Record<string, unknown>;
 }
 
 /** A rule with its type and source scope, used for listing rules. */

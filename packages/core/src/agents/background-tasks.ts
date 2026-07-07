@@ -229,6 +229,25 @@ export interface AgentTask extends TaskBase {
   agentId: string;
   subagentType?: string;
   /**
+   * AgentId of the sub-agent that spawned this one; null when launched
+   * from the top-level session. Drives the nested-agent tree display in
+   * the LiveAgentPanel and BackgroundTasksDialog. Mirrors
+   * `AgentMeta.parentAgentId`.
+   */
+  parentAgentId?: string | null;
+  /**
+   * Display name (`subagentType`) of the spawning sub-agent, captured at
+   * registration time. Display-only: lets the orphan annotation
+   * ("· from <parent>") survive the parent's eviction from the registry.
+   */
+  parentName?: string;
+  /**
+   * Launch depth (0-based; 0 = spawned by the top-level session). Same
+   * value as `AgentMeta.depth` / `childLaunchDepth()`. User-facing level
+   * = depth + 1.
+   */
+  depth?: number;
+  /**
    * True if the task is running asynchronously (parent has moved on, the
    * task persists across turns and emits a terminal XML notification).
    * False if the parent's tool-call is synchronously awaiting it; the
@@ -305,6 +324,7 @@ export type AgentTaskRegistration = TaskRegistration<AgentTask>;
 export interface BackgroundTaskRegisterOptions {
   suppressRegisterCallback?: boolean;
   preserveNotificationState?: boolean;
+  slotReservation?: BackgroundSlotReservation;
 }
 
 export interface NotificationMeta {
@@ -370,9 +390,25 @@ export interface BackgroundTaskRegistryOptions {
   maxConcurrentBackgroundAgents?: number;
 }
 
+export interface BackgroundSlotReservation {
+  readonly id: symbol;
+}
+
+interface BackgroundSlotWaiter {
+  readonly signal?: AbortSignal;
+  readonly resolve: (reservation: BackgroundSlotReservation) => void;
+  readonly reject: (error: Error) => void;
+  readonly onAbort: () => void;
+}
+
+const BACKGROUND_SLOT_WAIT_CANCELLED =
+  'Agent launch cancelled while waiting for a background slot.';
+
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
+  private readonly waitQueue: BackgroundSlotWaiter[] = [];
+  private readonly reservedBackgroundSlots = new Set<symbol>();
   private readonly maxConcurrentBackgroundAgents: number;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
@@ -389,12 +425,18 @@ export class BackgroundTaskRegistry {
         : MAX_CONCURRENT_BACKGROUND_AGENTS;
   }
 
+  canStartBackgroundAgent(): boolean {
+    return (
+      this.getClaimedBackgroundSlotCount() < this.maxConcurrentBackgroundAgents
+    );
+  }
+
   assertCanStartBackgroundAgent(): void {
-    const running = this.getRunningBackgroundCount();
-    if (running >= this.maxConcurrentBackgroundAgents) {
+    const claimed = this.getClaimedBackgroundSlotCount();
+    if (claimed >= this.maxConcurrentBackgroundAgents) {
       debugLogger.warn(
         `Background agent concurrency cap reached: ` +
-          `${running}/${this.maxConcurrentBackgroundAgents}. ` +
+          `${claimed}/${this.maxConcurrentBackgroundAgents}. ` +
           `Refusing new background agent.`,
       );
       throw new Error(
@@ -405,16 +447,68 @@ export class BackgroundTaskRegistry {
     }
   }
 
+  async waitForBackgroundSlot(
+    signal?: AbortSignal,
+  ): Promise<BackgroundSlotReservation> {
+    if (signal?.aborted) {
+      throw new Error(BACKGROUND_SLOT_WAIT_CANCELLED);
+    }
+    const reservation = this.tryReserveBackgroundSlot();
+    if (reservation) {
+      return reservation;
+    }
+
+    return new Promise<BackgroundSlotReservation>((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.waitQueue.indexOf(waiter);
+        if (index !== -1) {
+          this.waitQueue.splice(index, 1);
+        }
+        reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+      };
+      const waiter: BackgroundSlotWaiter = {
+        signal,
+        resolve,
+        reject,
+        onAbort,
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waitQueue.push(waiter);
+    });
+  }
+
+  tryReserveBackgroundSlot(): BackgroundSlotReservation | undefined {
+    if (!this.canStartBackgroundAgent()) {
+      return undefined;
+    }
+    return this.reserveBackgroundSlot();
+  }
+
+  getQueuedCount(): number {
+    return this.waitQueue.length;
+  }
+
+  releaseBackgroundSlot(reservation: BackgroundSlotReservation): void {
+    if (this.reservedBackgroundSlots.delete(reservation.id)) {
+      this.drainWaitQueue();
+    }
+  }
+
   register(
     registration: AgentTaskRegistration,
     options: BackgroundTaskRegisterOptions = {},
   ): AgentTask {
-    if (registration.isBackgrounded && registration.status === 'running') {
-      const existing = this.agents.get(registration.agentId);
-      const isReplacingRunning =
-        existing?.isBackgrounded === true && existing.status === 'running';
+    const existing = this.agents.get(registration.agentId);
+    const wasRunningBackground =
+      existing?.isBackgrounded === true && existing.status === 'running';
+    if (registration.status === 'running' && registration.isBackgrounded) {
+      const isReplacingRunning = existing?.status === 'running';
       if (!isReplacingRunning) {
-        this.assertCanStartBackgroundAgent();
+        if (options.slotReservation) {
+          this.consumeBackgroundSlot(options.slotReservation);
+        } else {
+          this.assertCanStartBackgroundAgent();
+        }
       }
     }
 
@@ -432,8 +526,22 @@ export class BackgroundTaskRegistry {
       ? ((registration as AgentTask).notified ?? false)
       : false;
     entry.pendingMessages = registration.pendingMessages ?? [];
+    // Resolve the parent's display name at registration time — before the
+    // parent can evict — so the UI's orphan annotation survives it. Owned
+    // here rather than at call sites so every registration path that
+    // carries a parentAgentId (spawn, resume, future flavors) gets it
+    // without remembering to. A caller-provided name wins.
+    if (entry.parentName === undefined && entry.parentAgentId != null) {
+      entry.parentName = this.agents.get(entry.parentAgentId)?.subagentType;
+    }
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
+    if (
+      wasRunningBackground &&
+      (!entry.isBackgrounded || entry.status !== 'running')
+    ) {
+      this.drainWaitQueue();
+    }
 
     // Foreground entries are paired with a synchronous tool-call result on
     // the parent's response and never emit a terminal `task_notification`
@@ -483,6 +591,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.drainWaitQueue();
   }
 
   /**
@@ -515,6 +624,7 @@ export class BackgroundTaskRegistry {
     this.agents.delete(agentId);
     this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
+    this.drainWaitQueue();
   }
 
   // See complete() for the cancelled → terminal path rationale.
@@ -533,6 +643,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.drainWaitQueue();
   }
 
   // Cancellation aborts the signal and marks the entry as cancelled, but
@@ -577,6 +688,7 @@ export class BackgroundTaskRegistry {
     }
     debugLogger.info(`Background agent cancelled: ${agentId}`);
     this.emitStatusChange(entry);
+    this.drainWaitQueue();
 
     // Foreground entries don't emit XML notifications and unregister
     // themselves in the tool-call's finally path, so the grace timer
@@ -587,6 +699,7 @@ export class BackgroundTaskRegistry {
       // Session reset paths intentionally suppress the old task's terminal
       // notification so it cannot leak into a new conversation.
       entry.notified = true;
+      this.drainWaitQueue();
       return;
     }
 
@@ -611,6 +724,7 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
     this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
+    this.drainWaitQueue();
   }
 
   // Emit the terminal cancelled notification once the agent's natural
@@ -635,6 +749,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.drainWaitQueue();
   }
 
   // Emit the terminal cancelled notification for entries that were cancelled
@@ -653,6 +768,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.drainWaitQueue();
   }
 
   /**
@@ -825,8 +941,50 @@ export class BackgroundTaskRegistry {
 
   private getRunningBackgroundCount(): number {
     return Array.from(this.agents.values()).filter(
-      (entry) => entry.isBackgrounded && entry.status === 'running',
+      (entry) =>
+        entry.isBackgrounded &&
+        (entry.status === 'running' ||
+          (entry.status === 'cancelled' && !entry.notified)),
     ).length;
+  }
+
+  private getClaimedBackgroundSlotCount(): number {
+    return this.getRunningBackgroundCount() + this.reservedBackgroundSlots.size;
+  }
+
+  private reserveBackgroundSlot(): BackgroundSlotReservation {
+    const reservation = { id: Symbol('background-slot') };
+    this.reservedBackgroundSlots.add(reservation.id);
+    return reservation;
+  }
+
+  private consumeBackgroundSlot(reservation: BackgroundSlotReservation): void {
+    if (!this.reservedBackgroundSlots.delete(reservation.id)) {
+      throw new Error(
+        'Invalid background agent slot reservation; it may have been invalidated by session reset.',
+      );
+    }
+  }
+
+  private drainWaitQueue(): void {
+    while (this.waitQueue.length > 0 && this.canStartBackgroundAgent()) {
+      const waiter = this.waitQueue.shift()!;
+      waiter.signal?.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal?.aborted) {
+        waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+        continue;
+      }
+      waiter.resolve(this.reserveBackgroundSlot());
+    }
+  }
+
+  private rejectWaitQueue(): void {
+    const waiters = this.waitQueue.splice(0);
+    for (const waiter of waiters) {
+      waiter.signal?.removeEventListener('abort', waiter.onAbort);
+      waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
+    }
+    this.reservedBackgroundSlots.clear();
   }
 
   /**
@@ -862,7 +1020,10 @@ export class BackgroundTaskRegistry {
     const firstEntry = this.agents.values().next().value as
       | AgentTask
       | undefined;
-    if (!firstEntry) return;
+    if (!firstEntry) {
+      this.rejectWaitQueue();
+      return;
+    }
     for (const entry of this.agents.values()) {
       // Defensive: callers (session switch via /resume, /clear) gate on
       // hasBlockingBackgroundWork() and so only reach reset() once every
@@ -872,6 +1033,7 @@ export class BackgroundTaskRegistry {
       this.rejectPendingApprovals(entry);
       this.wakeMessageWaiters(entry.agentId);
     }
+    this.rejectWaitQueue();
     this.agents.clear();
     this.emitStatusChange(firstEntry);
   }

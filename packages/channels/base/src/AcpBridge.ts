@@ -15,16 +15,32 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   AvailableCommand,
+  ChannelLoopToolHandler,
   ChannelAgentBridge,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import {
+  CHANNEL_LOOP_MCP_SERVER_NAME,
+  CLIENT_MCP_MESSAGE_METHOD,
+  CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  ChannelLoopMcpServer,
+  WORKSPACE_MCP_RUNTIME_ADD_METHOD,
+  type JsonRpcMessage,
+} from './ChannelLoopTools.js';
+import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
+
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
   cwd: string;
   model?: string;
 }
+
+export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+const ACP_EVENT_LOOP_STALL_RE =
+  /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
 
 /**
  * Read a command's aliases off a raw wire `available_commands_update` entry. ACP
@@ -57,6 +73,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;
   private _availableCommands: AvailableCommand[] = [];
+  private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
+  private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private channelLoopMcpRegistered = false;
+  private channelLoopMcpRegistration: Promise<void> | null = null;
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -82,7 +102,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, QWEN_CODE_DISABLE_CRON: '1' },
       shell: false,
     });
 
@@ -90,6 +110,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       const msg = data.toString().trim();
       if (msg) {
         process.stderr.write(`[AcpBridge] ${msg}\n`);
+        this.maybeKillOnEventLoopStall(msg);
       }
     });
 
@@ -136,6 +157,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           return { outcome: { outcome: 'selected', optionId } };
         },
 
+        extMethod: async (
+          method: string,
+          params: Record<string, unknown>,
+        ): Promise<Record<string, unknown>> =>
+          this.handleExtMethod(method, params),
+
         extNotification: async (): Promise<void> => {},
       }),
       stream,
@@ -145,16 +172,34 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
     });
+    await this.registerChannelLoopMcpServer();
+  }
+
+  registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
+    if (!this.channelLoopToolHandlers.includes(handler)) {
+      this.channelLoopToolHandlers.push(handler);
+    }
+    this.channelLoopMcpServer ??= new ChannelLoopMcpServer({
+      create: (sessionId, input) =>
+        this.resolveChannelLoopToolHandler(sessionId).create(sessionId, input),
+      list: (sessionId) =>
+        this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
+      cancel: (sessionId, id) =>
+        this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
+    });
+    void this.registerChannelLoopMcpServer();
   }
 
   async newSession(cwd: string): Promise<string> {
     const conn = this.ensureConnection();
+    await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
     return response.sessionId;
   }
 
   async loadSession(sessionId: string, cwd: string): Promise<string> {
     const conn = this.ensureConnection();
+    await this.registerChannelLoopMcpServer();
     const response = await conn.loadSession({
       sessionId,
       cwd,
@@ -273,4 +318,144 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
     return this.connection;
   }
+
+  private maybeKillOnEventLoopStall(stderr: string): void {
+    const match = ACP_EVENT_LOOP_STALL_RE.exec(stderr);
+    if (!match) return;
+
+    const maxMs = Number(match[1]);
+    if (!Number.isFinite(maxMs) || maxMs < ACP_EVENT_LOOP_STALL_RESTART_MS) {
+      return;
+    }
+
+    const child = this.child;
+    if (!child || child.killed || child.exitCode !== null) {
+      return;
+    }
+
+    process.stderr.write(
+      `[AcpBridge] ACP agent event loop stalled for ${Math.round(maxMs)}ms; killing child process to trigger restart\n`,
+    );
+    child.kill('SIGKILL');
+  }
+
+  private async registerChannelLoopMcpServer(): Promise<void> {
+    if (
+      !this.connection ||
+      !this.channelLoopMcpServer ||
+      this.channelLoopMcpRegistered
+    ) {
+      return;
+    }
+    if (this.channelLoopMcpRegistration) {
+      await this.channelLoopMcpRegistration;
+      return;
+    }
+    this.channelLoopMcpRegistration = this.connection
+      .extMethod(WORKSPACE_MCP_RUNTIME_ADD_METHOD, {
+        name: CHANNEL_LOOP_MCP_SERVER_NAME,
+        originatorClientId: 'channel',
+        config: {
+          type: 'sdk',
+          [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+        },
+      })
+      .then((result: unknown) => {
+        if (isSkippedMcpRegistration(result)) {
+          this.channelLoopMcpRegistered = false;
+          process.stderr.write(
+            `[AcpBridge] Channel loop MCP server registration skipped${formatSkippedRegistrationReason(result)}\n`,
+          );
+          return;
+        }
+        this.channelLoopMcpRegistered = true;
+      })
+      .catch((error: unknown) => {
+        this.channelLoopMcpRegistered = false;
+        process.stderr.write(
+          `[AcpBridge] Failed to register channel loop MCP server: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      })
+      .finally(() => {
+        this.channelLoopMcpRegistration = null;
+      });
+    await this.channelLoopMcpRegistration;
+  }
+
+  private async handleExtMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (method === CLIENT_MCP_MESSAGE_METHOD) {
+      return this.handleClientMcpMessage(params);
+    }
+    if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
+      return { messages: [] };
+    }
+    throw new Error(`Method not found: ${method}`);
+  }
+
+  private async handleClientMcpMessage(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.channelLoopMcpServer) {
+      throw new Error('Channel loop MCP server is not registered.');
+    }
+    const server = params['server'];
+    if (server !== CHANNEL_LOOP_MCP_SERVER_NAME) {
+      throw new Error(`Unknown client MCP server: ${String(server)}`);
+    }
+    const payload = params['payload'];
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('Invalid client MCP payload.');
+    }
+    const sessionId =
+      typeof params['sessionId'] === 'string'
+        ? (params['sessionId'] as string)
+        : undefined;
+    const response = await this.channelLoopMcpServer.handleMessage(
+      payload as JsonRpcMessage,
+      { sessionId },
+    );
+    if (!response) {
+      return { payload: { jsonrpc: '2.0', id: 0, result: {} } };
+    }
+    return { payload: response };
+  }
+
+  private resolveChannelLoopToolHandler(
+    sessionId: string,
+  ): ChannelLoopToolHandler {
+    if (
+      this.channelLoopToolHandlers.length === 1 &&
+      !this.channelLoopToolHandlers[0]!.canHandle
+    ) {
+      return this.channelLoopToolHandlers[0]!;
+    }
+    const handler = this.channelLoopToolHandlers.find(
+      (candidate) => candidate.canHandle?.(sessionId) === true,
+    );
+    if (handler) return handler;
+    throw new Error(
+      this.channelLoopToolHandlers.length === 0
+        ? 'No channel loop tool handler is registered.'
+        : `No channel loop handler matched session ${sessionId}.`,
+    );
+  }
+}
+
+function isSkippedMcpRegistration(result: unknown): boolean {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    (result as { skipped?: unknown }).skipped === true
+  );
+}
+
+function formatSkippedRegistrationReason(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return '.';
+  const reason = (result as { reason?: unknown }).reason;
+  return typeof reason === 'string' && reason.length > 0
+    ? `: ${sanitizeLogText(reason, 256)}`
+    : '.';
 }

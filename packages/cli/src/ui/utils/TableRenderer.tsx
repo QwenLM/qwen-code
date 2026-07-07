@@ -63,6 +63,21 @@ interface TableRendererProps {
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
+  /**
+   * True while THIS table is still streaming its rows (the frontier). The
+   * horizontal-vs-vertical decision is then anchored to the first row so the
+   * format cannot flip as later rows arrive; a completed table (false/undefined)
+   * — committed, or a mid-content table already closed by following text —
+   * measures every row for the most readable layout.
+   */
+  isStreaming?: boolean;
+  /**
+   * Maximum rendered text lines the table may occupy. When set (streaming
+   * preview) and the fully rendered table exceeds it, output is clipped to
+   * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
+   * overflowing the viewport and triggering the scroll-to-top lock.
+   */
+  maxHeight?: number;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -428,6 +443,8 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
+  isStreaming = false,
+  maxHeight,
 }) => {
   const colCount = headers.length;
 
@@ -435,6 +452,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (colCount === 0) {
     return <Box />;
   }
+
+  // Clip the fully-rendered table to `maxHeight` text lines (streaming preview
+  // backstop). Operates on the final joined string so it is exact for wrapped
+  // rows and the vertical fallback alike.
+  const clampToMaxHeight = (text: string): string => {
+    if (maxHeight === undefined) return text;
+    const all = text.split('\n');
+    if (all.length <= maxHeight) return text;
+    const kept = all.slice(0, Math.max(1, maxHeight - 1));
+    kept.push(applyColor('… more rows streaming …', theme.text.secondary));
+    return kept.join('\n');
+  };
 
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
   const computeMetrics = (text: string) => {
@@ -531,20 +560,35 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
+  // While STREAMING (isStreaming), measure only the header + the FIRST data row.
+  // Using every row lets a later, taller row push maxRowLines over the threshold
+  // and flip an already-horizontal table to vertical mid-stream — a visible
+  // format change. The first row is representative for the common case, so
+  // anchoring to it keeps the format stable as rows stream in. A COMPLETED table
+  // (committed, or a mid-content table already closed by text) has all its rows
+  // and no flip concern, so it measures EVERY row for the most readable layout (a
+  // short first row followed by tall rows still goes vertical). Column WIDTHS
+  // always track all rows (redraw-on-wider is unchanged); only the
+  // horizontal-vs-vertical CHOICE is anchored to the first row while streaming.
   function calculateMaxRowLines(): number {
     let maxLines = 1;
+    const rowsToMeasure = isStreaming ? rowMetrics.slice(0, 1) : rowMetrics;
     for (let i = 0; i < colCount; i++) {
-      const wrapped = wrapText(headerMetrics[i]!.rendered, columnWidths[i]!, {
-        hard: needsHardWrap,
-      });
-      maxLines = Math.max(maxLines, wrapped.length);
+      const headerWrapped = wrapText(
+        headerMetrics[i]!.rendered,
+        columnWidths[i]!,
+        {
+          hard: needsHardWrap,
+        },
+      );
+      maxLines = Math.max(maxLines, headerWrapped.length);
     }
-    for (const row of rowMetrics) {
+    for (const row of rowsToMeasure) {
       for (let i = 0; i < colCount; i++) {
-        const wrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
+        const cellWrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
           hard: needsHardWrap,
         });
-        maxLines = Math.max(maxLines, wrapped.length);
+        maxLines = Math.max(maxLines, cellWrapped.length);
       }
     }
     return maxLines;
@@ -561,8 +605,20 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
     colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
   );
+  // The horizontal-vs-vertical decision is the SAME while streaming and once
+  // committed, so a table never flips format mid-stream (which reads as a jump).
+  // A zero-row table is the live streaming header box: never vertical — the
+  // vertical fallback iterates the rows and with none would render an empty
+  // string (a blank box) on a narrow terminal where the width trigger fires.
+  //
+  // The vertical trigger is anchored to the header + first row (see
+  // calculateMaxRowLines) so appending rows does not flip the format. Residual
+  // corner: a very wide later row can force a proportional column shrink that
+  // re-wraps the first row taller; that is rare and only for genuinely
+  // overflowing tables, where vertical is the right call anyway.
   const useVerticalFormat =
-    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
+    rowMetrics.length > 0 &&
+    (contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES);
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>
@@ -690,7 +746,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (useVerticalFormat) {
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -700,29 +756,38 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   const tableLines: string[] = [];
   tableLines.push(renderBorderLine('top'));
   tableLines.push(...renderRowLines(headerRendered, true));
-  tableLines.push(renderBorderLine('middle'));
-  rowMetrics.forEach((row, rowIndex) => {
-    tableLines.push(
-      ...renderRowLines(
-        row.map((m) => m.rendered),
-        false,
-      ),
-    );
-    if (rowIndex < rows.length - 1) {
-      tableLines.push(renderBorderLine('middle'));
-    }
-  });
+  // With no data rows yet (a live table whose first row is still streaming),
+  // skip the header/body divider so the box reads as a clean header — otherwise
+  // the divider stacked directly on the bottom border looks like an empty row.
+  if (rowMetrics.length > 0) {
+    tableLines.push(renderBorderLine('middle'));
+    rowMetrics.forEach((row, rowIndex) => {
+      tableLines.push(
+        ...renderRowLines(
+          row.map((m) => m.rendered),
+          false,
+        ),
+      );
+      if (rowIndex < rows.length - 1) {
+        tableLines.push(renderBorderLine('middle'));
+      }
+    });
+  }
   tableLines.push(renderBorderLine('bottom'));
 
   // ── Safety check: verify no line exceeds content width ──
   const maxLineWidth = Math.max(
     ...tableLines.map((line) => getCachedStringWidth(stripAnsi(line))),
   );
-  if (maxLineWidth > contentWidth - SAFETY_MARGIN) {
-    // Fallback to vertical format to prevent terminal resize flicker
+  if (rowMetrics.length > 0 && maxLineWidth > contentWidth - SAFETY_MARGIN) {
+    // Fallback to vertical format to prevent terminal resize flicker. Skipped
+    // for a zero-row streaming header box: the vertical format iterates the
+    // rows and would render an empty string (a blank box). Better to keep the
+    // horizontal header — even if it slightly overflows a very narrow terminal
+    // — than to make the box the PR draws immediately vanish.
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -730,7 +795,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // Render as a single Text block to prevent Ink wrapping mid-row
   return (
     <Box flexDirection="column" marginY={1}>
-      <Text>{tableLines.join('\n')}</Text>
+      <Text>{clampToMaxHeight(tableLines.join('\n'))}</Text>
     </Box>
   );
 };

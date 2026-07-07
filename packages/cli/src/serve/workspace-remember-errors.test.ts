@@ -26,5 +26,8 @@ describe('extractRememberErrorCode', () => {
       }),
     ).toBe('remember_timeout');
     expect(extractRememberErrorCode(new Error('boom'))).toBe('remember_failed');
+    expect(extractRememberErrorCode(new Error('boom'), 'forget_failed')).toBe(
+      'forget_failed',
+    );
   });
 });

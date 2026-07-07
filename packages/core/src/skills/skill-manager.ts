@@ -541,7 +541,7 @@ export class SkillManager {
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
-      for (const name of registry.matchAndConsume(filePath)) {
+      for (const name of await registry.matchAndConsume(filePath)) {
         newlyAcrossPaths.add(name);
       }
     }

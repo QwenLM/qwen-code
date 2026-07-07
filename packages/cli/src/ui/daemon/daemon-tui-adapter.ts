@@ -572,6 +572,28 @@ export function reduceDaemonEventToTuiUpdates(
       ];
     }
 
+    case 'model_fallback': {
+      if (
+        !isRecord(event.data) ||
+        typeof event.data['fromModel'] !== 'string' ||
+        typeof event.data['toModel'] !== 'string'
+      ) {
+        return [];
+      }
+      const fromModel = sanitizeDisplayText(event.data['fromModel']);
+      const toModel = sanitizeDisplayText(event.data['toModel']);
+      return [
+        {
+          type: 'history',
+          item: {
+            type: 'notification',
+            text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+          },
+          daemonEventId: event.id,
+        },
+      ];
+    }
+
     case 'session_died': {
       const reason =
         isRecord(event.data) && typeof event.data['reason'] === 'string'

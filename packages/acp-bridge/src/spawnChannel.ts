@@ -8,9 +8,9 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
-import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
+import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 
 let cachedMemoryArgs: string[] | undefined;
@@ -103,6 +103,7 @@ export function createStderrForwarder(opts: StderrForwarderOptions): {
 export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
+  pipeHooks?: NdJsonStreamHooks;
 }
 
 /**
@@ -189,7 +190,7 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(writable, readable);
+    const stream = ndJsonStream(writable, readable, options.pipeHooks);
 
     return {
       stream,

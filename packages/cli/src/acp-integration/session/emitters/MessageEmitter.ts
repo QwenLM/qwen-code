@@ -90,12 +90,17 @@ export class MessageEmitter extends BaseEmitter {
   async emitUserMessage(
     text: string,
     timestamp?: string | number,
+    options: { source?: string } = {},
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
+    const _meta = {
+      ...(epochMs != null ? { timestamp: epochMs } : {}),
+      ...(options.source ? { source: options.source } : {}),
+    };
     await this.sendUpdate({
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
+      ...(Object.keys(_meta).length > 0 ? { _meta } : {}),
     });
   }
 

@@ -27,6 +27,7 @@ package-lock.json
 .claude
 .codex
 .worktrees/
+.atlarix/
 
 # Qwen Code Configs
 .qwen/*
@@ -126,4 +127,6 @@ tmp/
 .venv
 .codegraph
 .qwen/computer-use/installed.json
+# Auto-generated computer-use marker can also appear under nested packages.
+**/.qwen/computer-use/
 .playwright-mcp/

@@ -1397,7 +1397,11 @@ export class MemoryManager {
   selectForgetCandidates(
     projectRoot: string,
     query: string,
-    options: { config?: Config; limit?: number } = {},
+    options: {
+      config?: Config;
+      limit?: number;
+      abortSignal?: AbortSignal;
+    } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
     return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
   }
@@ -1407,15 +1411,16 @@ export class MemoryManager {
     projectRoot: string,
     matches: AutoMemoryForgetMatch[],
     now?: Date,
+    options: { abortSignal?: AbortSignal } = {},
   ): Promise<AutoMemoryForgetResult> {
-    return forgetManagedAutoMemoryMatches(projectRoot, matches, now);
+    return forgetManagedAutoMemoryMatches(projectRoot, matches, now, options);
   }
 
   /** Convenience: select + remove in a single call. */
   forget(
     projectRoot: string,
     query: string,
-    options: { config?: Config } = {},
+    options: { config?: Config; abortSignal?: AbortSignal } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryEntries(projectRoot, query, options, now);

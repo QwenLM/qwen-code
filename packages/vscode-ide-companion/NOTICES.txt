@@ -1665,7 +1665,7 @@ SOFTWARE.
 
 
 ============================================================
-hasown@2.0.2
+hasown@2.0.4
 (git+https://github.com/inspect-js/hasOwn.git)
 
 MIT License

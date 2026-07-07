@@ -19,7 +19,10 @@ function errorCodeFromRecord(
   return undefined;
 }
 
-export function extractRememberErrorCode(err: unknown): string {
+export function extractRememberErrorCode(
+  err: unknown,
+  fallback = 'remember_failed',
+): string {
   if (err && typeof err === 'object') {
     const record = err as Record<string, unknown>;
     const direct = errorCodeFromRecord(record);
@@ -30,5 +33,5 @@ export function extractRememberErrorCode(err: unknown): string {
       if (causedBy) return causedBy;
     }
   }
-  return 'remember_failed';
+  return fallback;
 }

@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
@@ -77,9 +77,9 @@ export class DefaultOpenAICompatibleProvider
     const {
       apiKey,
       baseUrl,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the

@@ -13,7 +13,38 @@ import {
   getReplayTokenCount,
   getReplayTokenUsage,
   mapWorkspaceSkills,
+  updateConnectionFromDaemonEvent,
 } from './mappers.js';
+import type { DaemonConnectionState } from './types.js';
+
+function availableCommandsEvent(
+  availableCommands: Array<Record<string, unknown>>,
+  availableSkills: string[],
+): DaemonEvent {
+  return {
+    id: 1,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        availableSkills,
+      },
+    },
+  } as DaemonEvent;
+}
+
+function applyEvent(
+  current: DaemonConnectionState,
+  event: DaemonEvent,
+): DaemonConnectionState {
+  let next = current;
+  updateConnectionFromDaemonEvent(event, (update) => {
+    next = typeof update === 'function' ? update(next) : update;
+  });
+  return next;
+}
 
 function usageEvent(
   id: number,
@@ -176,6 +207,14 @@ describe('mapWorkspaceSkills', () => {
           name: 'deep-research',
           description: '',
           level: 'bundled',
+          modelInvocable: false,
+        },
+        {
+          kind: 'skill',
+          status: 'disabled',
+          name: 'disabled-skill',
+          description: 'Disabled in settings',
+          level: 'project',
           modelInvocable: true,
         },
       ],
@@ -207,5 +246,44 @@ describe('mapWorkspaceSkills', () => {
         },
       },
     ]);
+  });
+});
+
+describe('updateConnectionFromDaemonEvent', () => {
+  it('replaces commands and skills from an available_commands_update', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      availableCommandsEvent(
+        [{ name: 'review', description: 'Review a PR', input: null }],
+        ['review'],
+      ),
+    );
+
+    expect(next.commands?.map((command) => command.name)).toEqual(['review']);
+    expect(next.skills).toEqual(['review']);
+  });
+
+  it('clears stale commands when the update reports an empty list', () => {
+    // The daemon snapshot is authoritative: a list that shrank to empty must
+    // not leave the previous commands autocompleting. Keying on length would
+    // preserve the stale entries.
+    const next = applyEvent(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [
+          {
+            name: 'review',
+            description: '',
+            raw: { name: 'review', description: '', input: null },
+          },
+        ],
+        skills: ['review'],
+      },
+      availableCommandsEvent([], []),
+    );
+
+    expect(next.commands).toEqual([]);
+    expect(next.skills).toEqual([]);
   });
 });

@@ -157,6 +157,22 @@ export class InProcessBackend implements Backend {
     this.agents.set(config.agentId, interactive);
     this.agentOrder.push(config.agentId);
 
+    // Route owned monitor notifications into this agent's message queue.
+    // AgentInteractive frames every tool body under the agent identity, so a
+    // `monitor` started by this agent is stamped with its ownerAgentId — and
+    // MonitorRegistry.dispatchNotification routes owned monitors ONLY
+    // through agentNotificationCallbacks, with no session fallback. Without
+    // this registration (the in-process analogue of AgentTool's
+    // registerOwnedMonitorNotifications) those notifications are silently
+    // dropped and a start-only Monitor can never report back to the agent.
+    // enqueueMessage self-wakes the message pump, so no lifecycle callback
+    // is needed. Unregistered in releaseAgentResources.
+    this.runtimeContext
+      .getMonitorRegistry()
+      .setAgentNotificationCallback(config.agentId, (_displayText, modelText) =>
+        interactive.enqueueMessage(modelText),
+      );
+
     // Set first agent as active
     if (this.activeAgentId === null) {
       this.activeAgentId = config.agentId;
@@ -402,6 +418,13 @@ export class InProcessBackend implements Backend {
     agentId: string,
     registry = this.agentRegistries.get(agentId),
   ): void {
+    // Tear down monitor routing registered in spawnAgent: stop any monitors
+    // the agent left running and drop its notification callback. Safe to
+    // run twice (the terminal watcher and stopAgent both funnel here).
+    const monitorRegistry = this.runtimeContext.getMonitorRegistry();
+    monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
+    monitorRegistry.setAgentNotificationCallback(agentId, undefined);
+
     const cleanup = this.agentApprovalCleanups.get(agentId);
     if (cleanup) {
       this.agentApprovalCleanups.delete(agentId);

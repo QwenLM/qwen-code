@@ -61,7 +61,7 @@ describe('createBridgeFileSystemAdapter', () => {
     trusted: boolean;
   }): WorkspaceFileSystemFactory {
     return createWorkspaceFileSystemFactory({
-      boundWorkspace: tmpDir,
+      boundWorkspaces: [tmpDir],
       trusted: opts.trusted,
       emit: (ev) => auditEmits.push(ev),
     });
