@@ -90,6 +90,7 @@ describe('HookSystem', () => {
       fireInstructionsLoadedEvent: vi.fn(),
       fireUserPromptExpansionEvent: vi.fn(),
       fireStopEvent: vi.fn(),
+      fireMessageDisplayEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
       firePreToolUseEvent: vi.fn(),
@@ -367,6 +368,57 @@ describe('HookSystem', () => {
       );
 
       const result = await hookSystem.fireStopEvent();
+
+      expect(result).toEqual(mockResult);
+      expect(result.finalOutput).toBeUndefined();
+    });
+  });
+
+  describe('fireMessageDisplayEvent', () => {
+    it('should fire message display event and return AggregatedHookResult', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 5,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireMessageDisplayEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireMessageDisplayEvent(
+        'msg-1',
+        'Hello',
+        false,
+      );
+
+      expect(mockHookEventHandler.fireMessageDisplayEvent).toHaveBeenCalledWith(
+        'msg-1',
+        'Hello',
+        false,
+        undefined,
+      );
+      expect(result).toEqual(mockResult);
+    });
+
+    it('should return AggregatedHookResult even when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireMessageDisplayEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireMessageDisplayEvent(
+        'msg-1',
+        'Hello, world.',
+        true,
+      );
 
       expect(result).toEqual(mockResult);
       expect(result.finalOutput).toBeUndefined();

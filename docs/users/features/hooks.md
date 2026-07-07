@@ -243,6 +243,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                       |
 | `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)          |
 | `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)     |
+| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                       |
 | `Stop`               | When Claude prepares to conclude response | None (always fires)                                       |
 | `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)             |
 | `SubagentStop`       | When subagent stops                       | Agent type                                                |
@@ -267,6 +268,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Todo Events         | `TodoCreated`, `TodoCompleted`                                         | ❌ No           | N/A                                                      |
 | Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                      |
 | Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                      |
+| Message Display     | `MessageDisplay`                                                       | ❌ No           | N/A                                                      |
 
 **Matcher Syntax:**
 
@@ -562,6 +564,24 @@ The `permissionDecision` value controls whether the tool runs:
 **Output Options**:
 
 - Standard hook output fields (typically not used for blocking)
+
+#### MessageDisplay
+
+**Purpose**: Fires repeatedly as the assistant's reply streams — before `Stop`, which fires once at the end of the turn. Useful for live narration, incremental logging, or any consumer that wants to react to the reply as it's written rather than after the fact. This is a **fire-and-forget** event - hook output and exit codes are ignored.
+
+**Event-specific fields**:
+
+```json
+{
+  "message_id": "stable id for the whole streamed message",
+  "displayed_text": "the CUMULATIVE text streamed so far for this message (not a delta)",
+  "is_final": "true on the last firing for this message, false otherwise"
+}
+```
+
+`displayed_text` is cumulative rather than a delta so hook scripts never need to reassemble chunks themselves — each firing carries the full text so far. Firing is debounced (at most every ~200ms) except for the final firing (`is_final: true`), which always fires immediately once the message ends, so the reply's tail is never dropped waiting on the debounce window.
+
+**Note**: Fires in both the terminal UI and ACP (IDE/editor) sessions — they share the same underlying streaming event loop.
 
 #### Stop
 

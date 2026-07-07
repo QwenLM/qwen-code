@@ -936,6 +936,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
   },
+  MessageDisplay: {
+    description: 'Repeatedly, as the assistant reply streams',
+  },
   Stop: { description: 'Right before Qwen Code concludes its response' },
   SubagentStart: {
     description: 'When a subagent is started',

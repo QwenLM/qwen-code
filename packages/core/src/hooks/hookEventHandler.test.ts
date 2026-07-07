@@ -412,6 +412,81 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireMessageDisplayEvent', () => {
+    it('should execute hooks for MessageDisplay event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireMessageDisplayEvent(
+        'msg-1',
+        'Hello',
+        false,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.MessageDisplay,
+        undefined,
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include message_id, displayed_text, and is_final in hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireMessageDisplayEvent(
+        'msg-42',
+        'Hello, world.',
+        true,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        message_id: string;
+        displayed_text: string;
+        is_final: boolean;
+      };
+      expect(input.message_id).toBe('msg-42');
+      expect(input.displayed_text).toBe('Hello, world.');
+      expect(input.is_final).toBe(true);
+    });
+
+    it('should handle missing finalOutput gracefully', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true, undefined),
+      );
+
+      const result = await hookEventHandler.fireMessageDisplayEvent(
+        'msg-1',
+        '',
+        false,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput).toBeUndefined();
+    });
+  });
+
   describe('fireSessionStartEvent', () => {
     it('should execute hooks for SessionStart event', async () => {
       const mockPlan = createMockExecutionPlan([]);

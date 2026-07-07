@@ -215,6 +215,23 @@ export class HookSystem {
     );
   }
 
+  /**
+   * Fire a MessageDisplay event - called repeatedly as the assistant's reply streams
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireMessageDisplayEvent(
+      messageId,
+      displayedText,
+      isFinal,
+      signal,
+    );
+  }
+
   async fireSessionStartEvent(
     source: SessionStartSource,
     model: string,

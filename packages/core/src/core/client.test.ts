@@ -7544,6 +7544,73 @@ Other open files:
         expect(mockMessageBus.request).not.toHaveBeenCalled();
       });
 
+      it('should skip messageBus.request for MessageDisplay when hasHooksForEvent returns false', async () => {
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-message-display-off',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('fires MessageDisplay with the cumulative streamed text, exactly once, when is_final on turn end', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({}),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'MessageDisplay',
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'Hello, ' };
+            yield { type: GeminiEventType.Content, value: 'world.' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-message-display',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // A fast-running test never crosses the debounce window between the two
+        // Content chunks, so the only firing is the unconditional final flush —
+        // this also pins that mid-stream chunks don't each spawn their own call.
+        expect(mockMessageBus.request).toHaveBeenCalledTimes(1);
+        const [request] = mockMessageBus.request.mock.calls[0];
+        expect(request).toMatchObject({
+          eventName: 'MessageDisplay',
+          input: {
+            displayed_text: 'Hello, world.',
+            is_final: true,
+          },
+        });
+        expect(request.input.message_id).toEqual(expect.any(String));
+        expect(request.input.message_id.length).toBeGreaterThan(0);
+      });
+
       it('ends the Stop hook loop when the blocking cap is reached', async () => {
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({

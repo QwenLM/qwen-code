@@ -18,6 +18,7 @@ import type {
   UserPromptSubmitInput,
   UserPromptExpansionInput,
   StopInput,
+  MessageDisplayInput,
   ContextUsageData,
   SessionStartInput,
   SessionEndInput,
@@ -200,6 +201,33 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.Stop, input, undefined, signal);
+  }
+
+  /**
+   * Fire a MessageDisplay event
+   * Called repeatedly as the assistant's reply streams (before Stop). Fire-and-forget:
+   * callers should not await this on the critical streaming path — see client.ts, which
+   * fires it without blocking the next chunk's display.
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: MessageDisplayInput = {
+      ...this.createBaseInput(HookEventName.MessageDisplay),
+      message_id: messageId,
+      displayed_text: displayedText,
+      is_final: isFinal,
+    };
+
+    return this.executeHooks(
+      HookEventName.MessageDisplay,
+      input,
+      undefined,
+      signal,
+    );
   }
 
   /**

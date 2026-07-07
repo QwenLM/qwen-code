@@ -135,6 +135,13 @@ import {
 import { partToString } from '../utils/partUtils.js';
 import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 import fsPromises from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import {
+  createInitialMessageDisplayState,
+  stepMessageDisplay,
+  MESSAGE_DISPLAY_DEBOUNCE_MS,
+  type MessageDisplayState,
+} from './message-display-buffer.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
@@ -1219,6 +1226,41 @@ export class GeminiClient {
       this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       return undefined;
     }
+  }
+
+  /**
+   * Fire one MessageDisplay batch through MessageBus, WITHOUT being awaited by the
+   * caller — the streaming loop calls this and immediately continues to the next
+   * event, so a slow or hung hook command never stalls the reply's display. Errors
+   * are caught and logged here since there is no caller left to observe them.
+   */
+  private fireMessageDisplayHook(
+    messageBus: ReturnType<Config['getMessageBus']>,
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal: AbortSignal,
+  ): void {
+    if (!messageBus) {
+      return;
+    }
+    messageBus
+      .request<HookExecutionRequest, HookExecutionResponse>(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {
+            message_id: messageId,
+            displayed_text: displayedText,
+            is_final: isFinal,
+          },
+          signal,
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      )
+      .catch((err) => {
+        this.config.getDebugLogger().warn(`MessageDisplay hook failed: ${err}`);
+      });
   }
 
   async startChat(
@@ -2366,9 +2408,40 @@ export class GeminiClient {
         };
       };
 
+      // MessageDisplay hook: fires repeatedly as this turn's reply streams (before
+      // Stop, which fires once at the end). One id/buffer per turn.run() call —
+      // recursion into sendMessageStream (hook-forced continuations) naturally
+      // gets its own id since these locals are re-declared on each invocation.
+      const messageDisplayEnabled =
+        hooksEnabled &&
+        !!messageBus &&
+        this.config.hasHooksForEvent('MessageDisplay');
+      const messageDisplayId = messageDisplayEnabled ? randomUUID() : '';
+      let messageDisplayState: MessageDisplayState =
+        createInitialMessageDisplayState(Date.now());
+
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
+        if (messageDisplayEnabled && event.type === GeminiEventType.Content) {
+          const step = stepMessageDisplay(
+            messageDisplayState,
+            event.value,
+            Date.now(),
+            MESSAGE_DISPLAY_DEBOUNCE_MS,
+            false,
+          );
+          messageDisplayState = step.next;
+          if (step.flush) {
+            this.fireMessageDisplayHook(
+              messageBus,
+              messageDisplayId,
+              step.flush.displayedText,
+              step.flush.isFinal,
+              signal,
+            );
+          }
+        }
         if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
           this.lastSentIdeContext = nextIdeContext;
           this.forceFullIdeContext = false;
@@ -2497,6 +2570,23 @@ export class GeminiClient {
           this.cancelPendingMemoryPrefetch();
           return turn;
         }
+      }
+
+      // Final MessageDisplay flush: this turn.run() stream is exhausted, so this
+      // message is done, regardless of whether pending tool calls will trigger a
+      // continuation (that continuation is its own message.run() call and gets its
+      // own message_id — see the const declarations above the loop). Unconditional,
+      // same as the debounced mid-stream flushes: not gated on !turn.pendingToolCalls
+      // the way the Stop hook below is, since a message boundary and a Stop-worthy
+      // end-of-turn are different things here.
+      if (messageDisplayEnabled) {
+        this.fireMessageDisplayHook(
+          messageBus,
+          messageDisplayId,
+          messageDisplayState.displayedText,
+          true,
+          signal,
+        );
       }
 
       // Track API completion time for thinking block idle cleanup
