@@ -40,11 +40,10 @@ function makeConfigWithRegistry(): {
   const config = new Config(baseConfigParams);
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
-  // Stub out the chat client reference ToolSearch tries to refresh; we don't
-  // need end-to-end chat behaviour, just to confirm the call is tolerated.
+  // Stub out the chat client reference so ToolSearch can sync newly
+  // revealed tools via setTools() without a real GeminiClient.
   vi.spyOn(config, 'getGeminiClient').mockReturnValue({
     setTools: vi.fn().mockResolvedValue(undefined),
-    refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
 }
@@ -848,17 +847,12 @@ describe('ToolSearchTool', () => {
     // First search uses keyword path (which calls loadAndReturnSchemas →
     // revealDeferredTool); confirm registry agrees.
     expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
-    const geminiClient = config.getGeminiClient() as unknown as {
-      refreshStartupContextReminder: ReturnType<typeof vi.fn>;
-    };
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
 
     // Second: same keyword search now finds nothing (tool excluded).
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('No tools found matching');
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
   });
 
   it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {
