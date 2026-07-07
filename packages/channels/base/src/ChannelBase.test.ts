@@ -1446,6 +1446,50 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('keeps legacy channel memory slash commands as hidden aliases', async () => {
+      const channelMemory = {
+        readChannelMemory: vi.fn().mockResolvedValue('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+
+      await ch.handleInbound(
+        envelope({ text: '/remember-channel Use staging.', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/channel-memory', senderId: 'alice' }),
+      );
+      await ch.handleInbound(
+        envelope({ text: '/forget-channel confirm', senderId: 'alice' }),
+      );
+
+      expect(channelMemory.appendChannelMemory).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        'Use staging.',
+      );
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(channelMemory.clearChannelMemory).toHaveBeenCalledWith({
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        threadId: undefined,
+      });
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Channel memory updated.' },
+        { chatId: 'chat1', text: 'Use staging.' },
+        { chatId: 'chat1', text: 'Channel memory cleared.' },
+      ]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('/help does not expose channel memory commands', async () => {
       const ch = createChannel();
 

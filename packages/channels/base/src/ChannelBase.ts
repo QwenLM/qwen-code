@@ -1197,6 +1197,53 @@ export abstract class ChannelBase {
     this.registerCommand('reset', clearHandler);
     this.registerCommand('new', clearHandler);
 
+    this.registerCommand('remember-channel', async (envelope, args) => {
+      const text = args.trim();
+      if (text === '') {
+        await this.sendMessage(
+          envelope.chatId,
+          'Usage: /remember-channel <text>',
+        );
+        return true;
+      }
+      await this.handleChannelMemoryIntent(envelope, {
+        kind: 'remember',
+        text,
+      });
+      return true;
+    });
+
+    this.registerCommand('channel-memory', async (envelope) => {
+      await this.handleChannelMemoryIntent(envelope, { kind: 'list' });
+      return true;
+    });
+
+    this.registerCommand('forget-channel', async (envelope, args) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be changed in group chats.',
+        );
+        return true;
+      }
+      if (args.toLowerCase() !== 'confirm') {
+        await this.sendMessage(
+          envelope.chatId,
+          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
+        );
+        return true;
+      }
+      await this.handleChannelMemoryIntent(
+        envelope,
+        { kind: 'clear_confirm' },
+        { skipPendingClear: true },
+      );
+      return true;
+    });
+
     // Read-only: report the current (possibly group-shared) session and workspace.
     // For a shared session, gate it to authorized senders like /clear — /who
     // leaks the workspace basename, so non-members shouldn't see it either.
@@ -1265,6 +1312,9 @@ export abstract class ChannelBase {
         'clear',
         'reset',
         'new',
+        'remember-channel',
+        'channel-memory',
+        'forget-channel',
         'who',
         'status',
       ]);
@@ -1852,6 +1902,7 @@ export abstract class ChannelBase {
   private async handleChannelMemoryIntent(
     envelope: Envelope,
     intent: ChannelMemoryIntent,
+    options: { skipPendingClear?: boolean } = {},
   ): Promise<void> {
     if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
       return;
@@ -1924,15 +1975,17 @@ export abstract class ChannelBase {
     }
 
     if (intent.kind === 'clear_confirm') {
-      const pendingKey = this.clearPendingKey(envelope);
-      const expiresAt = this.pendingClears.get(pendingKey);
-      this.pendingClears.delete(pendingKey);
-      if (expiresAt === undefined || expiresAt < Date.now()) {
-        await this.sendMessage(
-          envelope.chatId,
-          'No pending clear request. Say "清空记忆" first.',
-        );
-        return;
+      if (!options.skipPendingClear) {
+        const pendingKey = this.clearPendingKey(envelope);
+        const expiresAt = this.pendingClears.get(pendingKey);
+        this.pendingClears.delete(pendingKey);
+        if (expiresAt === undefined || expiresAt < Date.now()) {
+          await this.sendMessage(
+            envelope.chatId,
+            'No pending clear request. Say "清空记忆" first.',
+          );
+          return;
+        }
       }
 
       let result: { changed: boolean };
