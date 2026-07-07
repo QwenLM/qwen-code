@@ -39,6 +39,23 @@ export const reloadEnvCommand: SlashCommand = {
 
     const result = reloadEnvironment(settings.merged, cwd);
 
+    // If env keys changed, refresh auth so the ContentGenerator picks up the
+    // new API key immediately. Without this, process.env is updated but the
+    // cached ContentGenerator still holds the old key.
+    let authRefreshed = false;
+    if (result.updatedKeys.length > 0 && services.config) {
+      const cgConfig = services.config.getContentGeneratorConfig?.();
+      if (cgConfig?.authType) {
+        try {
+          await services.config.refreshAuth(cgConfig.authType);
+          authRefreshed = true;
+        } catch {
+          // refreshAuth failure is non-fatal — env vars are still updated,
+          // the user can restart to pick up the new key.
+        }
+      }
+    }
+
     const parts: string[] = [];
 
     if (result.updatedKeys.length > 0) {
@@ -67,11 +84,17 @@ export const reloadEnvCommand: SlashCommand = {
     }
 
     parts.push('');
-    parts.push(
-      t(
-        'Environment reloaded. New API keys will take effect on the next request.',
-      ),
-    );
+    if (authRefreshed) {
+      parts.push(
+        t('Environment reloaded and API client refreshed. New keys are live.'),
+      );
+    } else {
+      parts.push(
+        t(
+          'Environment reloaded. New API keys will take effect on the next request.',
+        ),
+      );
+    }
 
     return {
       type: 'message' as const,
