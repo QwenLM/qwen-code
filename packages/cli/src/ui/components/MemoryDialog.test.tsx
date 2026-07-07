@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -76,6 +77,7 @@ const mockedUseSettings = vi.mocked(useSettings);
 const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 const mockedUseKeypress = vi.mocked(useKeypress);
 const mockedSpawn = vi.mocked(spawn);
+const mockedFs = vi.mocked(fs);
 const originalPlatform = process.platform;
 
 type MockSpawnChild = EventEmitter & { unref: ReturnType<typeof vi.fn> };
@@ -173,6 +175,10 @@ describe('MemoryDialog', () => {
       expect.any(String),
       [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
       expect.objectContaining({ detached: true, stdio: 'ignore' }),
+    );
+    expect(mockedFs.mkdir).toHaveBeenCalledWith(
+      path.join(os.homedir(), '.qwen-memory-test', 'memories'),
+      { recursive: true },
     );
     expect(
       (mockedSpawn.mock.results[0]?.value as MockSpawnChild).unref,
@@ -278,6 +284,14 @@ describe('MemoryDialog', () => {
     });
 
     expect(mockedSpawn).not.toHaveBeenCalled();
+    expect(mockedFs.access).toHaveBeenCalledWith(
+      path.join(
+        os.homedir(),
+        '.qwen-memory-test',
+        'memories',
+        AUTO_MEMORY_INDEX_FILENAME,
+      ),
+    );
     expect(launchEditor).toHaveBeenCalledWith(
       path.join(
         os.homedir(),
