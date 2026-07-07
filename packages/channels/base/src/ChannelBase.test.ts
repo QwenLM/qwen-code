@@ -16,6 +16,14 @@ import type {
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
+import {
+  buildChannelWebhookPrompt,
+  resolveChannelWebhookTarget,
+} from './ChannelWebhookTask.js';
+import type {
+  ChannelWebhookConfig,
+  ChannelWebhookTask,
+} from './ChannelWebhookTask.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -8410,6 +8418,75 @@ describe('ChannelBase', () => {
   });
 
   describe('loop prompts', () => {
+    describe('webhook task helpers', () => {
+      const config: ChannelWebhookConfig = {
+        sources: {
+          'github-ci': {
+            targets: {
+              default: {
+                chatId: 'chat-1',
+                senderId: 'webhook:github-ci',
+                isGroup: true,
+              },
+            },
+          },
+        },
+      };
+
+      it('resolves configured webhook targets', () => {
+        expect(
+          resolveChannelWebhookTarget(
+            'dingtalk-main',
+            config,
+            'github-ci',
+            'default',
+          ),
+        ).toEqual({
+          channelName: 'dingtalk-main',
+          chatId: 'chat-1',
+          senderId: 'webhook:github-ci',
+          isGroup: true,
+        });
+      });
+
+      it('rejects unknown webhook target refs', () => {
+        expect(() =>
+          resolveChannelWebhookTarget(
+            'dingtalk-main',
+            config,
+            'github-ci',
+            'random',
+          ),
+        ).toThrow('Unknown webhook target "random" for source "github-ci".');
+      });
+
+      it('builds a bounded unattended webhook prompt', () => {
+        const target = resolveChannelWebhookTarget(
+          'dingtalk-main',
+          config,
+          'github-ci',
+          'default',
+        );
+        const task: ChannelWebhookTask = {
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed on main',
+          summary: 'Unit tests failed',
+          payload: { log: 'x'.repeat(20_000) },
+        };
+
+        const prompt = buildChannelWebhookPrompt(task, target);
+
+        expect(prompt).toContain('[External event "ci_failed" from github-ci]');
+        expect(prompt).toContain('No human is present.');
+        expect(prompt).toContain('CI failed on main');
+        expect(prompt).toContain('Unit tests failed');
+        expect(Array.from(prompt).length).toBeLessThanOrEqual(8_500);
+      });
+    });
+
     it('runs a loop prompt as a follow-up and pushes the result proactively', async () => {
       let resolveFirstPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)

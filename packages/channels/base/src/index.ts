@@ -34,6 +34,17 @@ export type {
   ChannelLoopSchedulerOptions,
   ChannelLoopRunner,
 } from './ChannelLoopScheduler.js';
+export {
+  buildChannelWebhookPrompt,
+  resolveChannelWebhookTarget,
+} from './ChannelWebhookTask.js';
+export type {
+  ChannelWebhookConfig,
+  ChannelWebhookRunOptions,
+  ChannelWebhookSourceConfig,
+  ChannelWebhookTargetConfig,
+  ChannelWebhookTask,
+} from './ChannelWebhookTask.js';
 export { ChannelLoopStore } from './ChannelLoopStore.js';
 export type {
   ChannelLoop,
