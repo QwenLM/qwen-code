@@ -39,6 +39,7 @@ export interface AcpBridgeOptions {
 }
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
 
@@ -83,6 +84,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     {
       sessionId: string;
       resolve: (response: RequestPermissionResponse) => void;
+      timeout: ReturnType<typeof setTimeout>;
     }
   >();
 
@@ -261,6 +263,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     if (!pending) {
       return false;
     }
+    clearTimeout(pending.timeout);
     this.pendingPermissions.delete(requestId);
     pending.resolve(response);
     this.emit('permissionResolved', {
@@ -352,7 +355,23 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         : request.toolCall.toolCallId;
 
     return new Promise<RequestPermissionResponse>((resolve) => {
-      this.pendingPermissions.set(requestId, { sessionId, resolve });
+      const timeout = setTimeout(() => {
+        const pending = this.pendingPermissions.get(requestId);
+        if (!pending) {
+          return;
+        }
+        this.pendingPermissions.delete(requestId);
+        const response: RequestPermissionResponse = {
+          outcome: { outcome: 'cancelled' },
+        };
+        pending.resolve(response);
+        this.emit('permissionResolved', {
+          requestId,
+          outcome: response.outcome,
+        });
+      }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
+      timeout.unref?.();
+      this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
       this.emit('permissionRequest', {
         requestId,
         sessionId,
@@ -369,6 +388,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       if (sessionId !== undefined && pending.sessionId !== sessionId) {
         continue;
       }
+      clearTimeout(pending.timeout);
       this.pendingPermissions.delete(requestId);
       pending.resolve(response);
       this.emit('permissionResolved', {

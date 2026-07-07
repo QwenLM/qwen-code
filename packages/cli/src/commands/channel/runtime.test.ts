@@ -118,4 +118,26 @@ describe('registerPermissionRelay', () => {
       }),
     );
   });
+
+  it('broadcasts resolved permission requests to channels', () => {
+    const bridge = createBridge();
+    const channel = {
+      dispatchPermissionResolved: vi.fn(),
+    };
+
+    registerPermissionRelay(
+      bridge,
+      { getTarget: vi.fn() } as never,
+      new Map([['telegram', channel as never]]),
+    );
+    bridge.emit('permissionResolved', {
+      requestId: 'req-1',
+      outcome: { outcome: 'cancelled' },
+    });
+
+    expect(channel.dispatchPermissionResolved).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      outcome: { outcome: 'cancelled' },
+    });
+  });
 });

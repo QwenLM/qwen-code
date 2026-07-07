@@ -1197,17 +1197,17 @@ export abstract class ChannelBase {
     const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
     const alwaysOption = this.approvalAlwaysOption(pending);
     const replies = [
-      '/approve        本次允许',
+      '/approve        allow once',
       ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      '/deny           拒绝',
+      '/deny           deny',
     ];
     const lines = [
-      '需要授权执行命令',
+      'Permission required to run a tool',
       '',
-      '命令：',
+      'Command:',
       title,
       '',
-      '可回复：',
+      'Reply with:',
       ...replies,
     ];
     return lines.join('\n');
@@ -1260,15 +1260,15 @@ export abstract class ChannelBase {
       option.optionId === 'proceed_always_project' ||
       option.optionId.endsWith('_project')
     ) {
-      return '总是允许（当前项目）';
+      return 'always allow for this project';
     }
     if (
       option.optionId === 'proceed_always_user' ||
       option.optionId.endsWith('_user')
     ) {
-      return '总是允许（当前用户）';
+      return 'always allow for this user';
     }
-    return '总是允许';
+    return 'always allow';
   }
 
   private denialResponse(pending: PendingPermission): {
@@ -1368,6 +1368,7 @@ export abstract class ChannelBase {
         response,
       );
     } catch (err) {
+      this.removePendingPermission(pending.requestId);
       process.stderr.write(
         `[${this.name}] permission response failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
       );

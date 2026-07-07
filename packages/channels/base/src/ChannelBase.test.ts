@@ -286,12 +286,14 @@ describe('ChannelBase', () => {
       emitPermission(sessionId, 'req-1');
 
       expect(ch.sent.at(-1)?.chatId).toBe('chat1');
-      expect(ch.sent.at(-1)?.text).toContain('需要授权执行命令');
-      expect(ch.sent.at(-1)?.text).toContain('命令：');
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).toContain('Command:');
       expect(ch.sent.at(-1)?.text).toContain('Run req-1');
-      expect(ch.sent.at(-1)?.text).toContain('/approve        本次允许');
-      expect(ch.sent.at(-1)?.text).toContain('/approve-always 总是允许');
-      expect(ch.sent.at(-1)?.text).toContain('/deny           拒绝');
+      expect(ch.sent.at(-1)?.text).toContain('/approve        allow once');
+      expect(ch.sent.at(-1)?.text).toContain('/approve-always always allow');
+      expect(ch.sent.at(-1)?.text).toContain('/deny           deny');
       expect(ch.sent.at(-1)?.text).not.toContain('Request: req-1');
       expect(ch.sent.at(-1)?.text).not.toContain('proceed_once');
       expect(ch.sent.at(-1)?.text).not.toContain('secret-token');
@@ -421,15 +423,64 @@ describe('ChannelBase', () => {
       });
 
       emitPermission(sessionId, 'req-2', [
-        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
-        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
       ]);
 
       await ch.handleInbound(envelope({ text: '/deny req-2' }));
 
       expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+
+      emitPermission(sessionId, 'req-3', [
+        { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
+        { optionId: 'never', kind: 'reject_always', name: 'Deny always' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/deny req-3' }));
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
+        outcome: { outcome: 'selected', optionId: 'reject' },
+      });
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-3', {
         outcome: { outcome: 'cancelled' },
       });
+    });
+
+    it('reports permission requests that lack requested approval options', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1', [
+        { optionId: 'reject', kind: 'reject_once', name: 'Deny once' },
+      ]);
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no approvable option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'This permission request has no always-allow option.',
+      );
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+    });
+
+    it('clears pending permission requests when response dispatch fails', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      respondToPermissionMock().mockRejectedValueOnce(new Error('send failed'));
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
     });
 
     it('supports explicit approve-always for persistent permission grants', async () => {
@@ -450,7 +501,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always 总是允许（当前项目）',
+        '/approve-always always allow for this project',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));
@@ -473,7 +524,7 @@ describe('ChannelBase', () => {
       ]);
 
       expect(ch.sent.at(-1)?.text).toContain(
-        '/approve-always 总是允许（当前用户）',
+        '/approve-always always allow for this user',
       );
 
       await ch.handleInbound(envelope({ text: '/approve-always req-1' }));

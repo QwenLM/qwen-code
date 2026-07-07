@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
-import { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+import {
+  ACP_EVENT_LOOP_STALL_RESTART_MS,
+  ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
+  AcpBridge,
+} from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
 
@@ -543,6 +547,43 @@ describe('AcpBridge', () => {
       bridge.respondToPermission(secondEvent.requestId, response),
     ).resolves.toBe(true);
     await expect(second).resolves.toEqual(response);
+  });
+
+  it('resolves pending permissions as cancelled after the response timeout', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionResolved = vi.fn();
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+
+    vi.useFakeTimers();
+    try {
+      const pending = child.clients[0]!.requestPermission({
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'shell',
+          title: 'Run command',
+        },
+        options: [{ optionId: 'cancel', name: 'Deny' }],
+      });
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
+
+      await expect(pending).resolves.toEqual({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(permissionResolved).toHaveBeenCalledWith({
+        requestId: 'acp-permission-1',
+        outcome: { outcome: 'cancelled' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('resolves pending permissions as cancelled when the ACP child exits', async () => {
