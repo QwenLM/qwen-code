@@ -1,5 +1,6 @@
 import {
   memo,
+  useMemo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -7,6 +8,7 @@ import {
   useState,
 } from 'react';
 import { isSafeImageSrc } from './Markdown';
+import { useWebShellCustomization } from '../../customization';
 import { useI18n } from '../../i18n';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
@@ -28,14 +30,19 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const { renderUserMessageContent } = useWebShellCustomization();
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
+  const [heightOverflowing, setHeightOverflowing] = useState(false);
+  const renderedContent = useMemo(
+    () => renderUserMessageContent?.({ content, images }) ?? content,
+    [content, images, renderUserMessageContent],
+  );
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;
     if (!el) return;
-    setOverflowing(el.scrollHeight > 400);
+    setHeightOverflowing(el.scrollHeight > 400);
   }, []);
 
   useLayoutEffect(() => {
@@ -61,7 +68,7 @@ export const UserMessage = memo(function UserMessage({
         <div
           ref={contentRef}
           className={`${styles.chatContent} ${
-            overflowing && !expanded ? styles.chatContentCollapsed : ''
+            heightOverflowing && !expanded ? styles.chatContentCollapsed : ''
           }`}
         >
           {images && images.length > 0 && (
@@ -83,9 +90,9 @@ export const UserMessage = memo(function UserMessage({
               })}
             </div>
           )}
-          {content}
+          {renderedContent}
         </div>
-        {overflowing && (
+        {heightOverflowing && (
           <button
             type="button"
             className={styles.toggleButton}
