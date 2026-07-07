@@ -702,15 +702,80 @@ export async function getQwenOAuthClient(
 }
 
 /**
+ * Check whether stderr's terminal supports OSC 8 hyperlinks. A minimal but
+ * safe subset of the detection logic in `packages/cli/src/ui/utils/osc8.ts` —
+ * enough to cover the common terminals (iTerm2, WezTerm, Kitty, VS Code,
+ * Windows Terminal, GNOME Terminal/VTE) while refusing for multiplexers
+ * (tmux/screen) and non-TTY contexts unless `FORCE_HYPERLINK` is set.
+ */
+function supportsOsc8Hyperlinks(): boolean {
+  const env = process.env;
+  if (env['QWEN_DISABLE_HYPERLINKS'] === '1') return false;
+  if (!process.stderr?.isTTY) return false;
+  const force = env['FORCE_HYPERLINK'];
+  if (force !== undefined) return force !== '0';
+  if (env['CI']) return false;
+  if (env['TMUX'] || env['STY']) return false;
+  if (env['WT_SESSION']) return true;
+  if (env['KITTY_WINDOW_ID'] || env['TERM'] === 'xterm-kitty') return true;
+  if (env['DOMTERM']) return true;
+  if (env['GHOSTTY_RESOURCES_DIR'] || env['TERM'] === 'xterm-ghostty') {
+    return true;
+  }
+  if (env['TERMINAL_EMULATOR'] === 'JetBrains-JediTerm') return true;
+  if (env['TERM_PROGRAM']) {
+    switch (env['TERM_PROGRAM']) {
+      case 'iTerm.app':
+      case 'WezTerm':
+      case 'vscode':
+      case 'ghostty':
+      case 'mintty':
+        return true;
+      default:
+        break;
+    }
+  }
+  if (env['VTE_VERSION']) {
+    const v = parseInt(env['VTE_VERSION'], 10);
+    if (Number.isFinite(v) && v >= 5000 && v !== 5000) return true;
+  }
+  if (
+    env['TERM'] === 'alacritty' ||
+    env['ALACRITTY_LOG'] !== undefined ||
+    env['ALACRITTY_WINDOW_ID'] !== undefined
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Wrap a URL in an OSC 8 hyperlink escape sequence. BEL (\x07) terminates
+ * the OSC — more broadly supported than ST (ESC \\). Control characters
+ * are stripped from the URL to prevent breaking the OSC envelope.
+ */
+function osc8Hyperlink(url: string): string {
+  // eslint-disable-next-line no-control-regex
+  const safeUrl = url.replace(/[\x00-\x1f\x7f\x80-\x9f]/g, '');
+  return `\x1b]8;;${safeUrl}\x07${safeUrl}\x1b]8;;\x07`;
+}
+
+/**
  * Displays a formatted box with OAuth device authorization URL.
  * Uses process.stderr.write() to ensure the auth URL is always visible to users,
  * especially in non-interactive mode. Using stderr prevents corruption of
  * structured JSON output (which goes to stdout) and follows the standard Unix
  * convention of user-facing messages to stderr.
+ *
+ * When the terminal supports OSC 8 hyperlinks, the URL is emitted as a single
+ * clickable link instead of being hard-wrapped across multiple lines. This is
+ * especially important over SSH, where wrapped URLs are impossible to
+ * copy-paste as a single link.
  */
-function showFallbackMessage(verificationUriComplete: string): void {
+export function showFallbackMessage(verificationUriComplete: string): void {
   const title = 'Qwen OAuth Device Authorization';
   const url = verificationUriComplete;
+  const useOsc8 = supportsOsc8Hyperlinks();
   const minWidth = 70;
   const maxWidth = 80;
   const boxWidth = Math.min(Math.max(title.length + 4, minWidth), maxWidth);
@@ -786,11 +851,16 @@ function showFallbackMessage(verificationUriComplete: string): void {
 
   process.stderr.write(emptyLine + '\n');
 
-  // Write URL
-  for (const line of urlLines) {
-    process.stderr.write(
-      '| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n',
-    );
+  // Write URL — as a single OSC 8 clickable hyperlink when supported,
+  // or hard-wrapped across lines as a fallback.
+  if (useOsc8) {
+    process.stderr.write('| ' + osc8Hyperlink(url) + ' |\n');
+  } else {
+    for (const line of urlLines) {
+      process.stderr.write(
+        '| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n',
+      );
+    }
   }
 
   process.stderr.write(emptyLine + '\n');

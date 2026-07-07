@@ -18,6 +18,7 @@ import {
   qwenOAuth2Events,
   QwenOAuth2Event,
   QwenOAuth2Client,
+  showFallbackMessage,
   type DeviceAuthorizationResponse,
   type DeviceTokenResponse,
   type ErrorData,
@@ -2385,5 +2386,174 @@ describe('Constants and Configuration', () => {
     expect(options?.body).toContain(
       'scope=openid%20profile%20email%20model.completion',
     );
+  });
+});
+
+describe('showFallbackMessage', () => {
+  const ORIGINAL_ENV = { ...process.env };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let stderrWriteSpy: any;
+  let originalIsTTY: boolean;
+
+  beforeEach(() => {
+    originalIsTTY = process.stderr.isTTY ?? false;
+    stderrWriteSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // Reset env
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  afterEach(() => {
+    stderrWriteSpy.mockRestore();
+    process.env = ORIGINAL_ENV;
+    // Restore isTTY
+    if (originalIsTTY) {
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+    } else {
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+    }
+  });
+
+  function getOutput(): string {
+    return stderrWriteSpy.mock.calls.map((c: [string]) => c[0]).join('');
+  }
+
+  it('emits OSC 8 hyperlink when terminal supports it (iTerm.app)', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain(
+      '\x1b]8;;https://chat.qwen.ai/device?code=ABC123\x07',
+    );
+    expect(output).toContain('\x1b]8;;\x07');
+    // URL appears as a single line within the OSC 8 envelope
+    expect(output).toContain(
+      'https://chat.qwen.ai/device?code=ABC123\x1b]8;;\x07',
+    );
+  });
+
+  it('hard-wraps URL when terminal does not support OSC 8 (non-TTY)', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    delete process.env['TERM_PROGRAM'];
+    delete process.env['FORCE_HYPERLINK'];
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+    // URL is present as plain text
+    expect(output).toContain('https://chat.qwen.ai/device?code=ABC123');
+  });
+
+  it('does not emit OSC 8 when QWEN_DISABLE_HYPERLINKS=1', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('respects FORCE_HYPERLINK=1 even in tmux', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
+    process.env['FORCE_HYPERLINK'] = '1';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('\x1b]8;;');
+  });
+
+  it('refuses OSC 8 in tmux without FORCE_HYPERLINK', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
+    delete process.env['FORCE_HYPERLINK'];
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('detects Windows Terminal via WT_SESSION', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['WT_SESSION'] = 'xxx';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('\x1b]8;;');
+  });
+
+  it('detects Kitty via TERM=xterm-kitty', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM'] = 'xterm-kitty';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('\x1b]8;;');
+  });
+
+  it('detects VS Code via TERM_PROGRAM=vscode', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'vscode';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('\x1b]8;;');
+  });
+
+  it('still renders the ASCII box with title and instructions', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('Qwen OAuth Device Authorization');
+    expect(output).toContain('Please visit the following URL');
+    expect(output).toContain('Waiting for authorization');
   });
 });
