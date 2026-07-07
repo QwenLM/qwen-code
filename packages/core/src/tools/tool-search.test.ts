@@ -601,7 +601,6 @@ describe('ToolSearchTool', () => {
     const setToolsSpy = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(config, 'getGeminiClient').mockReturnValue({
       setTools: setToolsSpy,
-      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     const tool = new ToolSearchTool(config);
@@ -646,7 +645,6 @@ describe('ToolSearchTool', () => {
       const setToolsSpy = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(config, 'getGeminiClient').mockReturnValue({
         setTools: setToolsSpy,
-        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
       } as never);
 
       const tool = new ToolSearchTool(config);
