@@ -190,13 +190,39 @@ export function isCollapsibleTool(toolName: string): boolean {
 }
 
 /**
+ * Strip ANSI control sequences and reject JSON-looking error fallbacks.
+ *
+ * When a tool call errors, `useReactToolScheduler` sets description to
+ * `JSON.stringify(request.args)` which produces `{...}` blobs. Return
+ * `undefined` for those so the caller falls back to count format.
+ */
+function safeDescription(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+
+  // Strip ANSI escape sequences
+  // eslint-disable-next-line no-control-regex
+  const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+  // Reject control characters (except tab/newline)
+  // eslint-disable-next-line no-control-regex
+  const cleaned = stripped.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+
+  // Reject JSON-looking blobs (error fallback from args)
+  if (cleaned.startsWith('{') || cleaned.startsWith('[')) return undefined;
+
+  return cleaned || undefined;
+}
+
+/**
  * Build a semantic summary line from a batch of tool calls.
  *
- * Single tool  → "Read 1 file" / "Ran 1 command"
- * Multi  same  → "Read 3 files"
- * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
+ * Single tool (with description) → "Read a.ts" / "Ran ls -la"
+ * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
+ * Multi  same                    → "Read 3 files"
+ * Multi mixed                    → "Read a.ts, ran npm test, edited b.ts"
  *
  * Uses past tense when all tools are done, present progressive when active.
+ * Falls back to count format when description is empty, contains control
+ * characters, or looks like a JSON blob (e.g. error fallback from args).
  */
 export function buildToolSummary(
   toolCalls: IndividualToolCallDisplay[],
@@ -224,10 +250,13 @@ export function buildToolSummary(
     const lower = parts.length > 0;
     const v = lower ? verb.toLowerCase() : verb;
 
-    if (tools.length === 1 && tools[0].description) {
-      parts.push(`${v} ${tools[0].description}`);
-    } else if (tools.length === 1) {
-      parts.push(`${v} 1 ${template.singular}`);
+    if (tools.length === 1) {
+      const safeDesc = safeDescription(tools[0].description);
+      if (safeDesc !== undefined) {
+        parts.push(`${v} ${safeDesc}`);
+      } else {
+        parts.push(`${v} 1 ${template.singular}`);
+      }
     } else {
       parts.push(`${v} ${tools.length} ${template.plural}`);
     }

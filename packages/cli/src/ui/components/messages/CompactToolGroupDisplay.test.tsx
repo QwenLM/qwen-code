@@ -227,6 +227,35 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe('Read 1 file');
   });
 
+  it('falls back to count format when description is JSON (error args)', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'ReadFile',
+        description: '{"file_path":"/tmp/test.txt"}',
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read 1 file');
+  });
+
+  it('falls back to count format when description starts with array bracket', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'Shell', description: '["ls", "-la"]' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran 1 command');
+  });
+
+  it('strips ANSI escape sequences from description', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'ReadFile',
+        description: '\x1b[32ma.ts\x1b[0m',
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Read a.ts');
+  });
+
   it('mixed group with count per category', () => {
     const tools = [
       make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
