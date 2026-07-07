@@ -169,8 +169,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('max-total-sessions', {
         type: 'number',
         description:
-          'Cap on concurrent live sessions across all workspace runtimes. ' +
-          'Set to 0 to disable.',
+          'Non-negative integer cap on concurrent live sessions across all ' +
+          'workspace runtimes. Set to 0 to disable.',
       })
       .option('max-pending-prompts-per-session', {
         type: 'number',

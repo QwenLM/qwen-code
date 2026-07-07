@@ -1781,9 +1781,9 @@ export async function runQwenServe(
     }
   }
   if (opts.maxTotalSessions !== undefined) {
-    if (Number.isNaN(opts.maxTotalSessions) || opts.maxTotalSessions < 0) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxTotalSessions)) {
       throw new TypeError(
-        `Invalid maxTotalSessions: ${opts.maxTotalSessions}. Must be a number >= 0 ` +
+        `Invalid maxTotalSessions: ${opts.maxTotalSessions}. Must be a non-negative integer ` +
           `(0 / Infinity = unlimited).`,
       );
     }
