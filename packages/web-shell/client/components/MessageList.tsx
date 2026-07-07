@@ -48,7 +48,6 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
-  shellOutputMaxLines: number;
   activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
@@ -1712,7 +1711,6 @@ export const MessageList = memo(
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
       autoScrollTailIntoView = false,
       hideSessionTimeline = false,
       showRetryHint = false,
@@ -2646,7 +2644,6 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 displayItem.message.id === lastCompletedAssistantId
               }
-              shellOutputMaxLines={shellOutputMaxLines}
             />
           );
         };
@@ -2681,7 +2678,6 @@ export const MessageList = memo(
         showRetryHint,
         onRetryClick,
         onBranchSession,
-        shellOutputMaxLines,
         handleToggleCollapse,
       ],
     );
@@ -2741,10 +2737,9 @@ export const MessageList = memo(
         />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -2752,15 +2747,18 @@ export const MessageList = memo(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    String(virtualRow.key),
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
                 )}
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >

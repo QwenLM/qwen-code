@@ -106,8 +106,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
 
-    // SYNC: Keep these roots and the auto-memory check below aligned with
-    // AcpAgent.setupFileSystem's localReadRoots.
+    // SYNC: Keep these base roots and the auto-memory check below aligned with
+    // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
+    // append fallback-only roots after that group.
     const allowedRoots = [
       this.config.storage.getProjectTempDir(),
       // Background subagent transcripts live under <projectDir>/subagents/ and
@@ -405,12 +406,12 @@ export class ReadFileTool extends BaseDeclarativeTool<
           offset: {
             description:
               "Optional: For text files, the 0-based line number to start reading from. Requires 'limit' to be set. Use for paginating through large files.",
-            type: 'number',
+            type: 'integer',
           },
           limit: {
             description:
               "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit).",
-            type: 'number',
+            type: 'integer',
           },
           pages: {
             description:
@@ -440,11 +441,17 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
-    if (params.offset !== undefined && params.offset < 0) {
-      return 'Offset must be a non-negative number';
+    if (
+      params.offset !== undefined &&
+      (!Number.isInteger(params.offset) || params.offset < 0)
+    ) {
+      return 'Offset must be a non-negative integer';
     }
-    if (params.limit !== undefined && params.limit <= 0) {
-      return 'Limit must be a positive number';
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'Limit must be a positive integer';
     }
 
     if (params.pages !== undefined) {
