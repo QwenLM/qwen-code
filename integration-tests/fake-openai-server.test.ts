@@ -190,6 +190,23 @@ describe('fake OpenAI server', () => {
     expect(response.status).toBe(400);
   });
 
+  it('rejects oversized request bodies', async () => {
+    let handled = false;
+    server = await startFakeOpenAIServer(() => {
+      handled = true;
+      return { content: 'unused' };
+    });
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'x'.repeat(10 * 1024 * 1024 + 1),
+    });
+
+    expect(response.status).toBe(413);
+    expect(handled).toBe(false);
+  });
+
   it('returns 500 without exposing handler error details', async () => {
     server = await startFakeOpenAIServer(() => {
       throw new Error('secret stack detail');

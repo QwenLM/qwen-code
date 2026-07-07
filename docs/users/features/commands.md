@@ -76,40 +76,42 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command          | Description                                          | Usage Examples                                                                                            |
-| ---------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/mcp`           | List configured MCP servers and tools                | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
-| `/import-config` | Import MCP servers from Claude configs               | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
-| `/tools`         | Display currently available tool list                | `/tools`, `/tools desc`                                                                                   |
-| `/skills`        | List and run available skills                        | `/skills`, `/skills <name>`                                                                               |
-| `/plan`          | Switch to plan mode or exit plan mode                | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
-| `/approval-mode` | Change the tool-approval mode (current session only) | `/approval-mode`, `/approval-mode auto-edit`                                                              |
-| → `plan`         | Analysis only, no execution (secure review)          | `/approval-mode plan`                                                                                     |
-| → `default`      | Require approval for edits (daily use)               | `/approval-mode default`                                                                                  |
-| → `auto-edit`    | Auto-approve edits (trusted environment)             | `/approval-mode auto-edit`                                                                                |
-| → `auto`         | Classifier-evaluated approval (autonomous)           | `/approval-mode auto`                                                                                     |
-| → `yolo`         | Auto-approve everything (quick prototyping)          | `/approval-mode yolo`                                                                                     |
-| `/model`         | Switch model used in current session                 | `/model`, `/model <model-id>` (switch immediately)                                                        |
-| `/model --fast`  | Set a lighter model for prompt suggestions           | `/model --fast qwen3-coder-flash`                                                                         |
-| `/model --voice` | Set the model used for voice transcription           | `/model --voice <model-id>`                                                                               |
-| `/extensions`    | Manage extensions                                    | `/extensions list`, `/extensions manage`                                                                  |
-| → `list`         | List installed extensions                            | `/extensions list`                                                                                        |
-| → `manage`       | Manage installed extensions (interactive)            | `/extensions manage`                                                                                      |
-| → `explore`      | Open extensions page in browser                      | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
-| → `install`      | Install an extension from a git repo or path         | `/extensions install <repo-or-path>`                                                                      |
-| `/memory`        | Open the Memory Manager dialog                       | `/memory`                                                                                                 |
-| `/remember`      | Save a durable memory                                | `/remember Prefer terse responses`                                                                        |
-| `/forget`        | Remove matching entries from auto-memory             | `/forget <query>`                                                                                         |
-| `/dream`         | Manually run auto-memory consolidation               | `/dream`                                                                                                  |
-| `/hooks`         | Manage Qwen Code hooks                               | `/hooks`, `/hooks list`                                                                                   |
-| `/permissions`   | Manage permission rules                              | `/permissions`                                                                                            |
-| `/agents`        | Manage subagents                                     | `/agents manage`, `/agents create`                                                                        |
-| `/arena`         | Manage Arena sessions                                | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
-| `/goal`          | Set a goal — keep working until condition met        | `/goal <condition>`, `/goal clear`                                                                        |
-| `/tasks`         | List background tasks                                | `/tasks`                                                                                                  |
-| `/workflows`     | Inspect workflow runs                                | `/workflows`, `/workflows <runId>`                                                                        |
-| `/lsp`           | Show LSP server status                               | `/lsp`                                                                                                    |
-| `/trust`         | Manage folder trust settings                         | `/trust`                                                                                                  |
+| Command           | Description                                                                      | Usage Examples                                                                                            |
+| ----------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/mcp`            | List configured MCP servers and tools                                            | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
+| `/import-config`  | Import MCP servers from Claude configs                                           | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
+| `/tools`          | Display currently available tool list                                            | `/tools`, `/tools desc`                                                                                   |
+| `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills               | `/skills`, `/<skill-name>`                                                                                |
+| `/plan`           | Switch to plan mode or exit plan mode                                            | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
+| `/approval-mode`  | Change the tool-approval mode (current session only)                             | `/approval-mode`, `/approval-mode auto-edit`                                                              |
+| → `plan`          | Analysis only, no execution (secure review)                                      | `/approval-mode plan`                                                                                     |
+| → `default`       | Require approval for edits (daily use)                                           | `/approval-mode default`                                                                                  |
+| → `auto-edit`     | Auto-approve edits (trusted environment)                                         | `/approval-mode auto-edit`                                                                                |
+| → `auto`          | Classifier-evaluated approval (autonomous)                                       | `/approval-mode auto`                                                                                     |
+| → `yolo`          | Auto-approve everything (quick prototyping)                                      | `/approval-mode yolo`                                                                                     |
+| `/model`          | Switch model used in current session                                             | `/model`, `/model <model-id>` (switch immediately)                                                        |
+| `/model --fast`   | Set a lighter model for prompt suggestions                                       | `/model --fast qwen3-coder-flash`                                                                         |
+| `/model --voice`  | Set the model used for voice transcription                                       | `/model --voice <model-id>`                                                                               |
+| `/model --vision` | Set the vision-bridge model used to transcribe images for a text-only main model | `/model --vision <model-id>`                                                                              |
+| `/effort`         | Set reasoning effort for thinking-capable models                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
+| `/extensions`     | Manage extensions                                                                | `/extensions list`, `/extensions manage`                                                                  |
+| → `list`          | List installed extensions                                                        | `/extensions list`                                                                                        |
+| → `manage`        | Manage installed extensions (interactive)                                        | `/extensions manage`                                                                                      |
+| → `explore`       | Open extensions page in browser                                                  | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
+| → `install`       | Install an extension from a git repo or path                                     | `/extensions install <repo-or-path>`                                                                      |
+| `/memory`         | Open the Memory Manager dialog                                                   | `/memory`                                                                                                 |
+| `/remember`       | Save a durable memory                                                            | `/remember Prefer terse responses`                                                                        |
+| `/forget`         | Remove matching entries from auto-memory                                         | `/forget <query>`                                                                                         |
+| `/dream`          | Manually run auto-memory consolidation                                           | `/dream`                                                                                                  |
+| `/hooks`          | Manage Qwen Code hooks                                                           | `/hooks`, `/hooks list`                                                                                   |
+| `/permissions`    | Manage permission rules                                                          | `/permissions`                                                                                            |
+| `/agents`         | Manage subagents                                                                 | `/agents manage`, `/agents create`                                                                        |
+| `/arena`          | Manage Arena sessions                                                            | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
+| `/goal`           | Set a goal — keep working until condition met                                    | `/goal <condition>`, `/goal clear`                                                                        |
+| `/tasks`          | List background tasks                                                            | `/tasks`                                                                                                  |
+| `/workflows`      | Inspect workflow runs                                                            | `/workflows`, `/workflows <runId>`                                                                        |
+| `/lsp`            | Show LSP server status                                                           | `/lsp`                                                                                                    |
+| `/trust`          | Manage folder trust settings                                                     | `/trust`                                                                                                  |
 
 > [!warning]
 >
@@ -127,12 +129,12 @@ Commands for managing AI tools and models.
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command      | Description                                                         | Usage Examples                                    |
-| ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
-| `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
-| `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
-| `/simplify`  | Review recent changes and apply safe cleanup edits directly         | `/simplify`, `/simplify focus on duplication`     |
-| `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
+| Command      | Description                                                 | Usage Examples                                    |
+| ------------ | ----------------------------------------------------------- | ------------------------------------------------- |
+| `/review`    | Review code changes with 9 parallel review agents           | `/review`, `/review 123`, `/review 123 --comment` |
+| `/loop`      | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                        |
+| `/simplify`  | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`     |
+| `/qc-helper` | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`              |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 
@@ -324,6 +326,7 @@ Commands for obtaining information and performing system settings.
 | `/stats monthly` | Show monthly token usage statistics                                                                                            | `/stats monthly` (alias `month`), `/stats month [YYYY-MM]`                          |
 | `/stats export`  | Export usage statistics to CSV or JSON                                                                                         | `/stats export <daily\|monthly> [date\|month] [--format csv\|json] [--output path]` |
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
+| `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                              | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
 | `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
 | `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
 | → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
@@ -340,6 +343,10 @@ Commands for obtaining information and performing system settings.
 > [!warning]
 >
 > `/doctor memory --snapshot` writes a V8 heap snapshot that may contain prompts, file contents, API keys, and tool results from the current session. Review the file before sharing it.
+
+> [!note]
+>
+> `/config` reads and writes individual settings by dot-path key (e.g. `general.vimMode`), complementing the interactive `/settings` editor. Running `/config` with no argument (or `--help`) lists every settable key with its type and current value. `/config <key>` prints the current value — except for boolean keys, where it toggles the value. `/config <key>=<value>` sets the value. Changes are written to user settings (`~/.qwen/settings.json`). Only `boolean`, `string`, `number`, and `enum` settings can be changed this way — `array` and `object` settings must be edited in `settings.json` directly. Sensitive values (API keys, tokens, base URLs) are masked in output, and setting `tools.approvalMode` to `yolo` is blocked.
 
 ### 1.10 Common Shortcuts
 

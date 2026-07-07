@@ -149,6 +149,7 @@ describe('computeDelta', () => {
         topTools: [],
       },
       files: { linesAdded: 100, linesRemoved: 30 },
+      skills: { totalCalls: 0, topSkills: [] },
       projects: [],
       ...overrides,
     };

@@ -178,6 +178,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     }
 
     // Publish (idempotent per source path → stable URL).
+    let managedId: string;
     let url: string;
     let filePath: string | undefined;
     try {
@@ -185,6 +186,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
         { id: artifactIdFromPath(file_path), title, html },
         signal,
       );
+      managedId = published.id;
       url = published.url;
       filePath = published.filePath;
     } catch (err) {
@@ -223,8 +225,19 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     const llmContent = `Published artifact "${title}" to ${url}. Share or open this URL to view the interactive page. Re-run Artifact with the same file path to update it.`;
     return {
       llmContent,
-      returnDisplay: `📄 Published artifact **${title}**\n\n${url}`,
+      returnDisplay: `Published artifact **${title}**\n\n${url}`,
       resultFilePaths: filePath ? [filePath] : undefined,
+      artifacts: [
+        {
+          kind: 'html',
+          storage: 'published',
+          title,
+          url,
+          managedId,
+          mimeType: 'text/html',
+          sizeBytes: bytes,
+        },
+      ],
     };
   }
 }

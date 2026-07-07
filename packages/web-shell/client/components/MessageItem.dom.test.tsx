@@ -84,7 +84,7 @@ const assistantMsg = (id: string, content: string): Message =>
   ({ id, role: 'assistant', content, timestamp: 0 }) as Message;
 
 function item(message: Message) {
-  return <MessageItem message={message} shellOutputMaxLines={50} />;
+  return <MessageItem message={message} />;
 }
 
 describe('MessageItem error isolation', () => {
@@ -139,5 +139,28 @@ describe('MessageItem error isolation', () => {
     const alert = container.querySelector('[role="alert"]') as HTMLElement;
     expect(alert).not.toBeNull();
     expect(alert.style.justifyContent).toBe('flex-start');
+  });
+});
+
+describe('MessageItem selectable wrapper', () => {
+  it('keeps the user-selectable wrapper out of layout via display: contents', () => {
+    // The wrapper only exists to carry the `data-user-selectable` CSS marker
+    // (standalone.css re-enables text selection through it). It must NOT
+    // generate a layout box: several parents are flex containers whose item
+    // used to be the message body itself — a plain div here becomes the flex
+    // item instead and shrinks to content width, squeezing the user chat
+    // bubble (max-width: 80% of the shrunken wrapper) so even short messages
+    // wrap mid-word.
+    const container = render(
+      <I18nProvider language="en">{item(userMsg('1', 'hello'))}</I18nProvider>,
+    );
+    const wrapper = container.querySelector(
+      '[data-user-selectable]',
+    ) as HTMLElement;
+    expect(wrapper).not.toBeNull();
+    expect(wrapper.style.display).toBe('contents');
+    // The message body renders inside the wrapper, so the CSS descendant
+    // selector `[data-user-selectable] *` still re-enables selection.
+    expect(wrapper.querySelector('[data-testid="user-ok"]')).not.toBeNull();
   });
 });

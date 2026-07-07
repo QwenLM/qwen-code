@@ -15,8 +15,11 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   TrustGateError,
+  matchesServerPattern,
+  matchesAnyServerPattern,
 } from './config.js';
 import { Storage } from './storage.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -41,6 +44,7 @@ import {
   createContentGeneratorConfig,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
@@ -344,6 +348,92 @@ vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
 }));
 
+describe('matchesServerPattern', () => {
+  it('exact match when no glob characters', () => {
+    expect(matchesServerPattern('puppeteer', 'puppeteer')).toBe(true);
+    expect(matchesServerPattern('puppeteer', 'playwright')).toBe(false);
+  });
+
+  it('* matches any sequence including empty', () => {
+    expect(matchesServerPattern('puppeteer', '*puppeteer*')).toBe(true);
+    expect(matchesServerPattern('my-puppeteer-server', '*puppeteer*')).toBe(
+      true,
+    );
+    expect(matchesServerPattern('playwright', '*puppeteer*')).toBe(false);
+    expect(matchesServerPattern('anything', '*')).toBe(true);
+    expect(matchesServerPattern('prefix-suffix', 'prefix*')).toBe(true);
+    expect(matchesServerPattern('prefix-suffix', '*suffix')).toBe(true);
+  });
+
+  it('? matches exactly one character', () => {
+    expect(matchesServerPattern('abc', 'a?c')).toBe(true);
+    expect(matchesServerPattern('ac', 'a?c')).toBe(false);
+    expect(matchesServerPattern('axc', 'a?c')).toBe(true);
+  });
+
+  it('escapes regex special characters', () => {
+    expect(matchesServerPattern('my.server', 'my.server')).toBe(true);
+    expect(matchesServerPattern('myXserver', 'my.server')).toBe(false);
+    expect(matchesServerPattern('a+b', 'a+b')).toBe(true);
+    expect(matchesServerPattern('a^b', 'a^b')).toBe(true);
+    expect(matchesServerPattern('a$b', 'a$b')).toBe(true);
+    expect(matchesServerPattern('aXb', 'a$b')).toBe(false);
+  });
+
+  it('combines glob with exact segments', () => {
+    expect(matchesServerPattern('foo-bar-baz', 'foo-*-baz')).toBe(true);
+    expect(matchesServerPattern('foo-bar-qux', 'foo-*-baz')).toBe(false);
+  });
+
+  it('handles empty name', () => {
+    expect(matchesServerPattern('', '*')).toBe(true);
+    expect(matchesServerPattern('', '?')).toBe(false);
+    expect(matchesServerPattern('', '')).toBe(true);
+  });
+
+  it('handles consecutive * in pattern', () => {
+    expect(matchesServerPattern('puppeteer', '**puppeteer**')).toBe(true);
+    expect(matchesServerPattern('abc', 'a**c')).toBe(true);
+  });
+
+  it('handles ? at pattern boundaries', () => {
+    expect(matchesServerPattern('abc', '?bc')).toBe(true);
+    expect(matchesServerPattern('abc', 'ab?')).toBe(true);
+    expect(matchesServerPattern('abc', '???')).toBe(true);
+    expect(matchesServerPattern('ab', '???')).toBe(false);
+  });
+
+  it('rejects when pattern is longer than name', () => {
+    expect(matchesServerPattern('ab', 'a*b*c')).toBe(false);
+    expect(matchesServerPattern('abc', 'a*b*c')).toBe(true);
+  });
+});
+
+describe('matchesAnyServerPattern', () => {
+  it('returns false for undefined or empty list', () => {
+    expect(matchesAnyServerPattern('puppeteer', undefined)).toBe(false);
+    expect(matchesAnyServerPattern('puppeteer', [])).toBe(false);
+  });
+
+  it('matches if any pattern matches', () => {
+    expect(
+      matchesAnyServerPattern('puppeteer', ['playwright', '*puppeteer*']),
+    ).toBe(true);
+    expect(
+      matchesAnyServerPattern('chrome', ['playwright', '*puppeteer*']),
+    ).toBe(false);
+  });
+
+  it('works with mixed exact and glob patterns', () => {
+    expect(
+      matchesAnyServerPattern('playwright', ['playwright', '*puppeteer*']),
+    ).toBe(true);
+    expect(
+      matchesAnyServerPattern('my-puppeteer', ['playwright', '*puppeteer*']),
+    ).toBe(true);
+  });
+});
+
 describe('Server Config (config.ts)', () => {
   const MODEL = 'qwen3-coder-plus';
 
@@ -412,6 +502,127 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('shell execution config', () => {
+    it('allows explicitly clearing the configured pager', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ pager: undefined });
+      expect(config.getShellExecutionConfig().pager).toBeUndefined();
+    });
+
+    it('preserves the existing pager when an update omits the pager key', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ terminalWidth: 120 });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
+  describe('getMaxSubagentDepth', () => {
+    it('defaults to 5 when unset', () => {
+      expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
+    });
+
+    it('respects an explicit value', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('clamps values below 1 up to 1 (never disables sub-agents)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 0,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: -4,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+    });
+
+    it('floors fractional values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3.9,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('falls back to the default on non-finite values', () => {
+      // JSON `1e309` parses to Infinity — must not disable the recursion cap.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: Infinity,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+      // NaN comparisons are always false — must not silently block nesting.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: NaN,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+    });
+
+    it('caps absurdly large values at 100', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 5000,
+        }).getMaxSubagentDepth(),
+      ).toBe(100);
+    });
+  });
+
+  describe('agents.maxParallelAgents', () => {
+    it('configures the background task registry concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgents: 1,
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('maximum concurrent background agents (1) reached');
+    });
+  });
+
   describe('getTeamMemoryEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
     afterEach(() => {
@@ -454,6 +665,91 @@ describe('Server Config (config.ts)', () => {
           enableTeamMemory: true,
         }).getTeamMemoryEnabled(),
       ).toBe(false);
+    });
+  });
+
+  describe('getCronRecurringMaxAgeDays', () => {
+    const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      } else {
+        process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = prevEnv;
+      }
+    });
+
+    it('defaults to 7 days and follows the setting', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(30);
+    });
+
+    it('maps 0 to Infinity (no expiry)', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 0,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(Infinity);
+    });
+
+    it('QWEN_CODE_CRON_MAX_AGE_DAYS overrides the setting', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(90);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '0';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(
+        Infinity,
+      );
+    });
+
+    it('falls back to the default on invalid values', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: -3,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(7);
+    });
+
+    it('warns on the console once at construction for an invalid value', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = new Config(baseParams);
+        // The warning fires during construction, before any getter call,
+        // and repeated getter calls do not re-emit it.
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        const cronWarnings = warnSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('QWEN_CODE_CRON_MAX_AGE_DAYS'),
+        );
+        expect(cronWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('resolves once at construction, ignoring later env changes (requiresRestart)', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      const config = new Config(baseParams);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '3';
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
     });
   });
 
@@ -612,6 +908,62 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('uses the visionModel selector baseUrl to disambiguate duplicate same-provider vision models', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus\0https://token-plan.example.com/v1',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'openai:qwen3.7-plus',
+        baseUrl: 'https://token-plan.example.com/v1',
+      });
+    });
+
+    it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
     it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
       // 'openai:' is a known authType with no model id — resolveModelId throws,
       // and the guard must swallow it rather than take down every image request.
@@ -629,6 +981,30 @@ describe('Server Config (config.ts)', () => {
         id: 'vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
+    });
+
+    it('falls back to auto-select on a visionModel with no selector before the baseUrl delimiter', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: '\0https://example.com/v1',
+      });
+      const warn = vi.spyOn(config.getDebugLogger(), 'warn');
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("'\\0https://example.com/v1'"),
+      );
     });
 
     it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {
@@ -692,6 +1068,118 @@ describe('Server Config (config.ts)', () => {
         id: 'vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
+    });
+  });
+
+  describe('getModelFallbacks', () => {
+    it('returns empty array by default when unset', () => {
+      expect(new Config(baseParams).getModelFallbacks()).toEqual([]);
+    });
+
+    it('returns empty array when set to undefined', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: undefined,
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('returns empty array when set to empty array', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [],
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('accepts an array of model IDs', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('caps at 3 entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            'model-a',
+            'model-b',
+            'model-c',
+            'model-d',
+            'model-e',
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+
+    it('deduplicates entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo', 'qwen-plus'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('trims whitespace from entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['  qwen-plus  ', ' qwen-turbo '],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('removes blank entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['', '  ', 'qwen-plus', '', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('deduplicates after trimming', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', ' qwen-plus ', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('returns a readonly array', () => {
+      const config = new Config({
+        ...baseParams,
+        modelFallbacks: ['qwen-plus'],
+      });
+      const fallbacks = config.getModelFallbacks();
+      // The returned array should be readonly (TypeScript enforces this,
+      // but verify the reference is stable)
+      expect(fallbacks).toEqual(['qwen-plus']);
+    });
+
+    it('caps at 3 after deduplication and blank removal', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            '',
+            'model-a',
+            'model-a', // duplicate
+            '',
+            'model-b',
+            'model-c',
+            'model-d', // 4th unique, should be dropped
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
     });
   });
 
@@ -1060,6 +1548,125 @@ describe('Server Config (config.ts)', () => {
       });
       expect(config.getAllowedMcpServers()).toEqual(['y']);
     });
+
+    it('getMcpServers filters by glob pattern in allowedMcpServers', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer-server': srvB,
+          playwright: srvA,
+        },
+      });
+      config.setAllowedMcpServers(['*puppeteer*']);
+      const result = config.getMcpServers();
+      expect(Object.keys(result!)).toEqual([
+        'puppeteer',
+        'my-puppeteer-server',
+      ]);
+      expect(Object.keys(result!)).not.toContain('playwright');
+    });
+
+    it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer': srvA,
+          playwright: srvB,
+        },
+      });
+      config.setExcludedMcpServers(['*puppeteer*']);
+      expect(config.isMcpServerDisabled('puppeteer')).toBe(true);
+      expect(config.isMcpServerDisabled('my-puppeteer')).toBe(true);
+      expect(config.isMcpServerDisabled('playwright')).toBe(false);
+      expect(config.getMcpServers()!['puppeteer']).toBeDefined();
+      expect(config.getMcpServers()!['my-puppeteer']).toBeDefined();
+    });
+
+    it('getMcpServerUnavailableReason classifies by glob match', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          playwright: srvB,
+          chrome: srvA,
+        },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+        chrome: srvA,
+      });
+
+      config.setAllowedMcpServers(['play*']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'not_allowed',
+      );
+      expect(
+        config.getMcpServerUnavailableReason('playwright'),
+      ).toBeUndefined();
+
+      // Clear allow-list so the excluded check is reached.
+      config.setAllowedMcpServers(undefined);
+      config.setExcludedMcpServers(['*chrome*']);
+      expect(config.getMcpServerUnavailableReason('chrome')).toBe('excluded');
+    });
+
+    it('exclude takes precedence over allow with glob patterns', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { puppeteer: srvA, playwright: srvB },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+      });
+
+      config.setAllowedMcpServers(['*']);
+      config.setExcludedMcpServers(['puppeteer']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'excluded',
+      );
+      expect(
+        config.getMcpServerUnavailableReason('playwright'),
+      ).toBeUndefined();
+    });
+
+    it('exclude takes precedence when both lists use globs', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { puppeteer: srvA, playwright: srvB },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+      });
+
+      config.setAllowedMcpServers(['*puppeteer*']);
+      config.setExcludedMcpServers(['puppeteer']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'excluded',
+      );
+      expect(config.isMcpServerDisabled('puppeteer')).toBe(true);
+    });
+
+    it('getBlockedMcpServers returns servers not matching allowed glob', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer': srvA,
+          playwright: srvB,
+        },
+      });
+      config.setAllowedMcpServers(['*puppeteer*']);
+      const blocked = config.getBlockedMcpServers();
+      const blockedNames = blocked.map((s) => s.name);
+      expect(blockedNames).toContain('playwright');
+      expect(blockedNames).not.toContain('puppeteer');
+      expect(blockedNames).not.toContain('my-puppeteer');
+    });
   });
 
   describe('MemoryPressureMonitor isolation', () => {
@@ -1415,6 +2022,158 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  it('should no-op LSP reinitialize when disabled or unavailable', async () => {
+    const disabledConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: false },
+    });
+    await expect(disabledConfig.reinitializeLsp()).resolves.toBeUndefined();
+
+    const noClientConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+    await expect(noClientConfig.reinitializeLsp()).resolves.toBeUndefined();
+  });
+
+  it('should delegate LSP reinitialize to the configured client', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi.fn().mockResolvedValue(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(reinitialize).toHaveBeenCalledOnce();
+  });
+
+  it('should surface partial LSP reinitialize failures in status snapshot', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockResolvedValue(result),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+  });
+
+  it('should surface LSP reinitialize failures in status snapshot', async () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockRejectedValue(new Error('invalid lsp json')),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+  });
+
+  it('should clear previous LSP reinitialize failures after recovery', async () => {
+    const result = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['tsserver'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('invalid lsp json'))
+      .mockResolvedValueOnce(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
+  it('should clear partial LSP reinitialize failures after full recovery', async () => {
+    const partialFailure = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const success = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['clangd'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockResolvedValueOnce(partialFailure)
+      .mockResolvedValueOnce(success);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(partialFailure);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(success);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
   describe('initialize', () => {
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
@@ -1486,6 +2245,49 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it('does not register artifact tools when artifacts are disabled', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers both artifact tools when artifacts are enabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: true,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers only record_artifact for daemon artifact metadata', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -1549,7 +2351,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(false);
       });
 
-      it('stays disabled outside interactive mode even when force-enabled', () => {
+      it('keeps the Artifact tool disabled for daemon CLI env enablement', () => {
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({
@@ -1559,6 +2361,19 @@ describe('Server Config (config.ts)', () => {
         });
 
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
+      });
+
+      it('lets daemon sessions record metadata from settings without publishing', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
       it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
@@ -1799,6 +2614,92 @@ describe('Server Config (config.ts)', () => {
       // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(GeminiClient).toHaveBeenCalledWith(config);
+    });
+
+    it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
+      // Regression: the provider sync (applyResolvedModelDefaults) overwrites
+      // `reasoning` with the provider preset's undefined value, dropping the
+      // user-global effort on every restart. refreshAuth must re-apply it.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'max' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // The rebuilt config comes back WITHOUT reasoning (simulating the wipe).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'max',
+      });
+    });
+
+    it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
+      // Regression for the model-switch path: switchModel() runs
+      // applyResolvedModelDefaults() (which overwrites modelsConfig's
+      // `reasoning` with the new model's preset) BEFORE onModelChange ->
+      // handleModelChange fires. So by the time the full-refresh path calls
+      // refreshAuth, refreshAuth's own capture reads undefined and cannot
+      // restore the tier. handleModelChange must re-apply it from the live
+      // contentGeneratorConfig captured before the rebuild.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'high' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // Initial auth seeds the live config with the effort.
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-a',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+      expect(config.getReasoningEffort()).toBe('high');
+
+      // Simulate switchModel()'s pre-callback wipe of modelsConfig's reasoning.
+      const genConfig = (
+        config as unknown as {
+          modelsConfig: { getGenerationConfig(): { reasoning?: unknown } };
+        }
+      ).modelsConfig.getGenerationConfig();
+      delete genConfig.reasoning;
+
+      // The new model resolves with no reasoning preset (the common case).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-b',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(authType, true);
+
+      // Effort survives the switch (previously silently dropped to undefined).
+      expect(config.getContentGeneratorConfig().model).toBe('gemini-b');
+      expect(config.getReasoningEffort()).toBe('high');
     });
 
     it('should fire auth_success notification hook when hooks are enabled', async () => {
@@ -2630,14 +3531,17 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const warningThresholdTokens = Math.floor(DEFAULT_TOKEN_LIMIT * 0.15);
     const config = new Config({
       ...baseParams,
       model: 'unknown-model-for-context-warning-test',
-      userMemory: 'a'.repeat(100_000),
+      userMemory: 'a'.repeat((warningThresholdTokens + 1) * 4),
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining("model's 131,072 token context window"),
+      expect.stringContaining(
+        `model's ${DEFAULT_TOKEN_LIMIT.toLocaleString()} token context window`,
+      ),
     );
   });
 
@@ -4096,6 +5000,31 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getMaxToolCallsPerTurn', () => {
+    it('should return the default cap when unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getMaxToolCallsPerTurn()).toBe(
+        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+      );
+    });
+
+    it('should use a custom maxToolCallsPerTurn if provided', () => {
+      const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
+      expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it.each([0, -1])(
+      'should return infinity (cap disabled) when set to %d',
+      (capValue) => {
+        const config = new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: capValue,
+        });
+        expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
+  });
+
   describe('getClearContextOnIdle', () => {
     it('should default the cumulative tool result threshold to 500000 chars', () => {
       const config = new Config(baseParams);
@@ -5130,6 +6059,52 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
     });
     config.setDisabledTools(new Set());
     expect(config.getDisabledTools()).toEqual(new Set());
+  });
+});
+
+describe('visibleTools', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `visibleTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['Foo', 'Bar'],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `visibleTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getVisibleTools()).toEqual(new Set());
+  });
+
+  it('filters out non-string entries', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: [
+        'tool_a',
+        42 as unknown as string,
+        null as unknown as string,
+        'tool_b',
+      ],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['tool_a', 'tool_b']));
+  });
+
+  it('is readonly — returned set preserves config state', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['web_fetch'],
+    });
+    const set = config.getVisibleTools();
+    expect(set.has('web_fetch')).toBe(true);
+    // always returns the same reference
+    expect(config.getVisibleTools()).toBe(set);
   });
 });
 

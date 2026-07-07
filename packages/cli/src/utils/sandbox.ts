@@ -8,7 +8,6 @@ import { exec, execSync, spawn, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { quote, parse } from 'shell-quote';
 import {
   getUserSettingsDir,
@@ -20,6 +19,7 @@ import {
   FatalSandboxError,
   Storage,
   isSubpath,
+  resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
@@ -60,6 +60,20 @@ const BUILTIN_SEATBELT_PROFILES = [
   'restrictive-closed',
   'restrictive-proxied',
 ];
+
+export function resolveSeatbeltProfileFile(
+  profile: string,
+  importMetaUrl = import.meta.url,
+): string {
+  if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
+    return path.join(SETTINGS_DIRECTORY_NAME, `sandbox-macos-${profile}.sb`);
+  }
+
+  return path.join(
+    resolveBundleDir(importMetaUrl),
+    `sandbox-macos-${profile}.sb`,
+  );
+}
 
 /**
  * Determines whether the sandbox container should be run with the current user's UID and GID.
@@ -194,16 +208,7 @@ export async function start_sandbox(
     }
 
     const profile = (process.env['SEATBELT_PROFILE'] ??= 'permissive-open');
-    let profileFile = fileURLToPath(
-      new URL(`sandbox-macos-${profile}.sb`, import.meta.url),
-    );
-    // if profile name is not recognized, then look for file under project settings directory
-    if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
-      profileFile = path.join(
-        SETTINGS_DIRECTORY_NAME,
-        `sandbox-macos-${profile}.sb`,
-      );
-    }
+    const profileFile = resolveSeatbeltProfileFile(profile);
     if (!fs.existsSync(profileFile)) {
       throw new FatalSandboxError(
         `Missing macos seatbelt profile file '${profileFile}'`,

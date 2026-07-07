@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render, cleanup } from '@testing-library/react';
+import { render, cleanup, act } from '@testing-library/react';
 import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
@@ -149,6 +149,151 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('caps visible model options to the available dialog height', () => {
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.items).toHaveLength(12);
+    expect(props.maxItemsToShow).toBe(6);
+    // The picker deliberately leaves the ▲/▼ scroll indicators off: they are
+    // two always-rendered chrome rows better spent on two more entries.
+    expect(props.showScrollArrows).toBeUndefined();
+  });
+
+  it('floors visible model options to 1 when the terminal is very short', () => {
+    renderComponent(
+      { availableTerminalHeight: 5 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(1);
+  });
+
+  it('accounts for the taller two-row option height when descriptions are present', () => {
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: `Description ${i + 1}`,
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(3);
+  });
+
+  it('falls back to the default max item count when no terminal height is given', () => {
+    renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(10);
+  });
+
+  it('clamps visible model options to the default max when the terminal is tall', () => {
+    renderComponent(
+      { availableTerminalHeight: 100 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    // floor((100 - 14) / 1) = 86 rows of budget, clamped to the 10-item max.
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(10);
+  });
+
+  it('shrinks visible model options to leave room for a displayed error message', async () => {
+    const switchModel = vi.fn().mockRejectedValue(new Error('network down'));
+
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const initialProps = mockedSelect.mock.calls[0][0];
+    expect(initialProps.maxItemsToShow).toBe(6);
+
+    await act(async () => {
+      await initialProps.onSelect(initialProps.items[0].value);
+    });
+
+    const propsAfterError =
+      mockedSelect.mock.calls[mockedSelect.mock.calls.length - 1][0];
+    // errorMessage = "Failed to switch model to 'model-1'.\n\nnetwork down"
+    // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
+    // max(1, floor((20 - 14 - 5) / 1)) = 1.
+    expect(propsAfterError.maxItemsToShow).toBe(1);
   });
 
   it('hides discontinued qwen-oauth models for other auth types', () => {
@@ -626,6 +771,59 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
+    const switchModel = vi.fn();
+    const setVisionModel = vi.fn();
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const { props, mockSettings } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3.7-plus',
+            label: '[ModelStudio Standard] qwen3.7-plus',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            modalities: { image: true, video: true },
+          },
+          {
+            id: 'qwen3.7-plus',
+            label: '[ModelStudio Token Plan] qwen3.7-plus',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: selectedBaseUrl,
+            modalities: { image: true, video: true },
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        })),
+        isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen3.7-max',
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'visionModel',
+      `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+    expect(setVisionModel).toHaveBeenCalledWith(
+      `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('warns in the history when a pinned vision model is not image-capable', async () => {
     // qwen-plus is text-only by name default, so the pin is honored but flagged.
     // The primary is a different model so the pin isn't rejected as the primary.
@@ -869,6 +1067,77 @@ describe('<ModelDialog />', () => {
     const items = mockedSelect.mock.calls[0][0].items;
     const visionIndex = items.findIndex((item) =>
       String(item.value).includes('qwen-vl-max'),
+    );
+    expect(visionIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
+  });
+
+  it('highlights the matching baseUrl for duplicate vision-model settings', () => {
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        visionModel: `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Standard] qwen3.7-plus',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Token Plan] qwen3.7-plus',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: selectedBaseUrl,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'qwen3.7-max'),
+              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_OPENAI,
+                model: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({
+                  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isVisionModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const visionIndex = items.findIndex(
+      (item) =>
+        String(item.value).includes('qwen3.7-plus') &&
+        String(item.value).includes(selectedBaseUrl),
     );
     expect(visionIndex).toBeGreaterThanOrEqual(0);
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);

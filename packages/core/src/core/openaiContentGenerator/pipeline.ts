@@ -56,7 +56,10 @@ export class StreamInactivityTimeoutError extends Error {
     readonly streamLifetimeMs: number,
   ) {
     super(
-      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks (stream lifetime: ${streamLifetimeMs}ms)`,
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
     );
     this.name = 'StreamInactivityTimeoutError';
   }
@@ -581,13 +584,39 @@ export class ContentGenerationPipeline {
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
       const model = (context.model ?? '').toLowerCase();
-      if (
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-          this.contentGeneratorConfig,
-        ) &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
-        typed['enable_thinking'] = false;
+      if (model.startsWith('qwen') || model === 'coder-model') {
+        if (
+          DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+            this.contentGeneratorConfig,
+          )
+        ) {
+          typed['enable_thinking'] = false;
+        } else {
+          // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
+          // the model's chat template server-side and read the thinking switch
+          // from `chat_template_kwargs`, not a top-level `enable_thinking`
+          // (which they silently ignore). Send it there so hybrid qwen models
+          // actually stop emitting <think> when reasoning is disabled — e.g.
+          // the auto-mode permission classifier's short structured-output
+          // calls, which otherwise spend their small token budget on thinking
+          // and fail closed. Servers that don't recognise `chat_template_kwargs`
+          // ignore the unknown field, so the switch is a harmless no-op there.
+          //
+          // Drop any top-level `enable_thinking` a provider preset injected via
+          // extra_body (provider-config.ts emits it for models configured with
+          // `enableThinking: true`): leaving it would contradict the
+          // `chat_template_kwargs` opt-out on servers that honour both, and
+          // keeps this path from leaking the qwen-specific field top-level.
+          delete typed['enable_thinking'];
+          const existing = (typed['chat_template_kwargs'] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          typed['chat_template_kwargs'] = {
+            ...existing,
+            enable_thinking: false,
+          };
+        }
       }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.

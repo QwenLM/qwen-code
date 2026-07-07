@@ -12,6 +12,10 @@ import type {
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  DEFAULT_TIMEOUT,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../openaiContentGenerator/constants.js';
 
 // Mock the request tokenizer module BEFORE importing the class that uses it.
 const mockTokenizer = {
@@ -195,6 +199,45 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBeUndefined();
     expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+  });
+
+  it('disables the request timeout when configured to 0', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        timeout: 0,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    expect(anthropicState.constructorOptions?.['timeout']).toBe(
+      DISABLED_REQUEST_TIMEOUT_MS,
+    );
+  });
+
+  it('falls back to the default request timeout when unset', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    expect(anthropicState.constructorOptions?.['timeout']).toBe(
+      DEFAULT_TIMEOUT,
+    );
   });
 
   it('treats *.anthropic.com subdomains as Anthropic-native', async () => {
@@ -1315,6 +1358,45 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    // DeepSeek's anthropic-compatible output_config.effort accepts only
+    // high/max, so low/medium must lift to high (mirroring the DeepSeek OpenAI
+    // adapter) instead of passing through verbatim, which the endpoint 400s on.
+    it("lifts effort: 'low'/'medium' to 'high' on the DeepSeek anthropic path", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      for (const effort of ['low', 'medium'] as const) {
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'deepseek-v4-pro',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'deepseek-v4-pro',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.deepseek.com/anthropic',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            reasoning: { effort },
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ output_config: { effort: 'high' } }),
+        );
+      }
+    });
+
     it("still clamps effort: 'max' when model name says 'deepseek' but hostname is api.anthropic.com", async () => {
       // The broader `isDeepSeekAnthropicProvider` falls back to model-name
       // matching to cover sglang/vllm self-hosted DeepSeek deployments,
@@ -1394,6 +1476,301 @@ describe('AnthropicContentGenerator', () => {
           output_config: { effort: 'high' },
           thinking: { type: 'enabled', budget_tokens: 64_000 },
         }),
+      );
+    });
+
+    // Per-model gating: Opus 4.7/4.8 and the 5.x families accept xhigh/max
+    // natively, so those tiers must pass through to output_config.effort
+    // instead of being clamped to 'high'.
+    it("passes effort: 'max' through on Opus 4.8 (native support)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-8',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'max' },
+          // 4.6+ uses adaptive thinking; the server controls the budget.
+          thinking: { type: 'adaptive' },
+        }),
+      );
+    });
+
+    it("passes effort: 'xhigh' through on Opus 4.8 (native support)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-8',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'xhigh' },
+          thinking: { type: 'adaptive' },
+        }),
+      );
+    });
+
+    it("clamps effort: 'xhigh' to 'max' on Opus 4.6 (has max, lacks xhigh)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'max' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on Opus 4.5 (lacks xhigh/max)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-5',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on dated Opus 4.0 (date suffix is not a minor version)", async () => {
+      // Regression: `claude-opus-4-20250514` is Opus 4.0, which lacks
+      // xhigh/max. The 8-digit date suffix must not be parsed as the minor
+      // version (which would make atLeast(4, 6)/atLeast(4, 7) true and wrongly
+      // grant max/xhigh, yielding a server 400).
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-20250514',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-20250514',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
+    it("passes effort: 'xhigh' through on a reseller-prefixed Opus 4.7 (bedrock/…)", async () => {
+      // The version regex is intentionally unanchored so reseller-prefixed ids
+      // gate identically to bare Anthropic ids. If it ever gets anchored, this
+      // model would fall back to low/medium/high and silently clamp xhigh away.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'bedrock/claude-opus-4-7',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'bedrock/claude-opus-4-7',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'xhigh' } }),
+      );
+    });
+
+    it("passes effort: 'max' through on a 5.x family model (claude-sonnet-5-0)", async () => {
+      // Every 5.x family grants xhigh/max via the `major >= 5` branch,
+      // regardless of family. Locks in that the 5.x gating isn't accidentally
+      // narrowed to specific families.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-sonnet-5-0',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-sonnet-5-0',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'max' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on claude-haiku-4-6 (haiku 4.x lacks max)", async () => {
+      // The `max` tier on 4.x is documented as opus/sonnet only; the family
+      // guard keeps haiku 4.x off `max` (which would 400) even though it is
+      // >= 4.6. (5.x haiku still gets max via the major>=5 branch.)
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-haiku-4-6',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-haiku-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
       );
     });
 
@@ -1517,17 +1894,42 @@ describe('AnthropicContentGenerator', () => {
         });
       });
 
-      it('honors explicit reasoning.budget_tokens before falling back to adaptive', async () => {
-        // Explicit budget_tokens is a user escape hatch — adaptive thinking
-        // would otherwise silently drop the user-supplied value because the
-        // adaptive shape carries no budget field. The explicit branch must
-        // run first.
+      it('keeps the budget path for dated Opus 4.0 (claude-opus-4-20250514, date suffix is not a minor)', async () => {
+        // Regression: the 8-digit date suffix must not be parsed as the minor
+        // version. Opus 4.0 lacks adaptive thinking, so it must fall to the
+        // budget path rather than emitting `{ type: 'adaptive' }` (server 400).
+        expect(await thinkingFor('claude-opus-4-20250514')).toEqual({
+          type: 'enabled',
+          budget_tokens: 32_000,
+        });
+      });
+
+      it('honors explicit reasoning.budget_tokens on models that still accept manual thinking (e.g. claude-opus-4-6)', async () => {
+        // Explicit budget_tokens is a user escape hatch on models that still
+        // accept the manual `{ type: 'enabled', budget_tokens }` shape (Opus
+        // 4.5/4.6, Sonnet 4.6): adaptive thinking would otherwise silently drop
+        // the user-supplied value because the adaptive shape carries no budget
+        // field. The explicit branch must run first for these models.
+        expect(
+          await thinkingFor('claude-opus-4-6', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+      });
+
+      it('drops manual budget_tokens for adaptive-only models that reject it (e.g. claude-opus-4-7)', async () => {
+        // Opus 4.7+ and every 5.x family reject the manual
+        // `{ type: 'enabled', budget_tokens }` shape with a 400 and require
+        // adaptive thinking, so an explicit budget must be dropped in favor of
+        // adaptive thinking + output_config.effort rather than shipped verbatim
+        // (https://platform.claude.com/docs/en/build-with-claude/effort).
         expect(
           await thinkingFor('claude-opus-4-7', {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+        ).toEqual({ type: 'adaptive' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {

@@ -41,6 +41,14 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/spawnChannel.ts',
       ),
+      '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
+        __dirname,
+        '../acp-bridge/src/ndJsonStream.ts',
+      ),
+      '@qwen-code/acp-bridge/logRedaction': path.resolve(
+        __dirname,
+        '../acp-bridge/src/logRedaction.ts',
+      ),
       '@qwen-code/acp-bridge/bridgeClient': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeClient.ts',
@@ -56,6 +64,10 @@ export default defineConfig({
       '@qwen-code/acp-bridge/bridgeFileSystem': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeFileSystem.ts',
+      ),
+      '@qwen-code/acp-bridge/eventBus': path.resolve(
+        __dirname,
+        '../acp-bridge/src/eventBus.ts',
       ),
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,

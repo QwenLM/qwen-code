@@ -119,6 +119,7 @@ import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useEffortCommand } from './hooks/use-effort-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -274,6 +275,54 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
     }
     return false;
   });
+}
+
+function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
+  return pendingHistoryItems.some(
+    (item) =>
+      item.type === MessageType.COMPRESSION && item.compression.isPending,
+  );
+}
+
+export function isInputActiveForState({
+  initError,
+  isProcessing,
+  hasPendingCompression,
+  streamingState,
+}: {
+  initError: unknown;
+  isProcessing: boolean;
+  hasPendingCompression: boolean;
+  streamingState: StreamingState;
+}) {
+  return (
+    !initError &&
+    (!isProcessing || hasPendingCompression) &&
+    (streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.Responding)
+  );
+}
+
+export function shouldDrainMessageQueue({
+  isConfigInitialized,
+  streamingState,
+  isProcessing,
+  dialogsVisible,
+  messageQueueLength,
+}: {
+  isConfigInitialized: boolean;
+  streamingState: StreamingState;
+  isProcessing: boolean;
+  dialogsVisible: boolean;
+  messageQueueLength: number;
+}) {
+  return (
+    isConfigInitialized &&
+    streamingState === StreamingState.Idle &&
+    !isProcessing &&
+    !dialogsVisible &&
+    messageQueueLength > 0
+  );
 }
 
 function getResponseCandidateTokens(
@@ -629,10 +678,13 @@ export const AppContainer = (props: AppContainerProps) => {
         const rawItems = buildResumedHistoryItems(resumedSessionData, config);
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
+        const collapsePreviewCount =
+          settings.merged.ui?.history?.collapsePreviewCount ?? 0;
 
         const historyItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
+          collapsePreviewCount,
         );
         historyManager.loadHistory(historyItems);
 
@@ -871,6 +923,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  // Live content-area height, kept in a ref so useGeminiStream (called above the
+  // point where availableTerminalHeight is computed) can read the current value
+  // when bounding the pending item's rendered height. terminalWidthRef pairs
+  // with it so the commit loop reads width and height consistently (both live).
+  const availableTerminalHeightRef = useRef(0);
+  const terminalWidthRef = useRef(0);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1017,6 +1075,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
 
+  const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
+    useEffortCommand(settings, config, historyManager.addItem);
+
   const auth = useAuthCommand(
     settings,
     config,
@@ -1097,6 +1158,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFastModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    modelDialogPersistScope,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1317,6 +1379,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
@@ -1360,6 +1423,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openTrustDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -1534,6 +1598,24 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const performMemoryRefresh = useCallback(async () => {
+    // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
+    if (config.isSafeMode()) {
+      config.setUserMemory('');
+      config.setGeminiMdFileCount(0);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry([], config.getWorkingDir()),
+      );
+      setGeminiMdFileCount(0);
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Safe mode active — skipping context file refresh.',
+        },
+        Date.now(),
+      );
+      return;
+    }
+
     historyManager.addItem(
       {
         type: MessageType.INFO,
@@ -1637,6 +1719,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
     logger,
+    availableTerminalHeightRef,
+    terminalWidthRef,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -2058,6 +2142,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
       if (
         streamingState === StreamingState.Idle &&
+        !isProcessing &&
         isSlashCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
@@ -2070,6 +2155,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addMessage,
       agentViewState,
       streamingState,
+      isProcessing,
       submitQuery,
       handleSlashCommand,
       config,
@@ -2107,6 +2193,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
   const hasExecutingTool = isToolExecuting(pendingHistoryItems);
+  const hasPendingCompression = isCompressionPending(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, hasExecutingTool);
@@ -2300,15 +2387,16 @@ export const AppContainer = (props: AppContainerProps) => {
    * Determines if the input prompt should be active and accept user input.
    * Input is disabled during:
    * - Initialization errors
-   * - Slash command processing
+   * - Slash command processing, except pending compression where input can queue
    * - Tool confirmations (WaitingForConfirmation state)
    * - Any future streaming states not explicitly allowed
    */
-  const isInputActive =
-    !initError &&
-    !isProcessing &&
-    (streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.Responding);
+  const isInputActive = isInputActiveForState({
+    initError,
+    isProcessing,
+    hasPendingCompression,
+    streamingState,
+  });
 
   const isFocused = useFocus();
   useBracketedPaste();
@@ -2621,6 +2709,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
+    isEffortDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
@@ -2685,14 +2774,28 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // *inline* streaming/pending message may grow before it commits to <Static>;
+  // they do NOT reserve blank rows under the composer. In legacy mode completed
+  // history lives in <Static> (terminal scrollback) and the composer flows to
+  // the very bottom of the output. VP mode owns the whole viewport in the React
+  // tree, so to match that bottom spacing the composer must reach the bottom
+  // too — reserve nothing. (controlsHeight is measured one frame late, so a
+  // composer that grows can briefly overshoot by a row before the re-measure
+  // corrects, the same way legacy mode lets the terminal scroll on growth.)
+  const mainContentHeightReservation = useTerminalBuffer
+    ? 0
+    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
       controlsHeight -
-      staticExtraHeight -
-      MAIN_CONTENT_HEIGHT_RESERVATION -
+      mainContentHeightReservation -
       tabBarHeight,
   );
+  // Expose to useGeminiStream (called earlier) for rendered-height-aware commit.
+  availableTerminalHeightRef.current = availableTerminalHeight;
+  terminalWidthRef.current = terminalWidth;
 
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
@@ -3061,7 +3164,7 @@ export const AppContainer = (props: AppContainerProps) => {
           historyManager.addItem(
             {
               type: MessageType.ERROR,
-              text: `❌ Migration failed: ${getErrorMessage(error)}`,
+              text: `✗ Migration failed: ${getErrorMessage(error)}`,
             },
             Date.now(),
           );
@@ -3127,6 +3230,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleThemeSelect,
     isApprovalModeDialogOpen,
     handleApprovalModeSelect,
+    isEffortDialogOpen,
+    handleEffortSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -3583,10 +3688,17 @@ export const AppContainer = (props: AppContainerProps) => {
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
     if (queueDrainingRef.current) return;
-    if (!isConfigInitialized) return;
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisible) return;
-    if (messageQueue.length === 0) return;
+    if (
+      !shouldDrainMessageQueue({
+        isConfigInitialized,
+        streamingState,
+        isProcessing,
+        dialogsVisible,
+        messageQueueLength: messageQueue.length,
+      })
+    ) {
+      return;
+    }
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
     const plainPrompts = drainQueue();
@@ -3602,6 +3714,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [
     isConfigInitialized,
     streamingState,
+    isProcessing,
     dialogsVisible,
     messageQueue,
     drainQueue,
@@ -3635,10 +3748,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      modelDialogPersistScope,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3774,10 +3889,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      modelDialogPersistScope,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3908,6 +4025,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -3998,6 +4116,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,

@@ -1143,4 +1143,150 @@ describe('<ToolGroupMessage />', () => {
       expect(frame).not.toContain('Delegate task to subagent');
     });
   });
+
+  describe('Pure parallel agent group: LiveAgentPanel hand-off (dedup)', () => {
+    // Regression for the non-VP scroll snap-back (#5798): during the live
+    // phase the pure-parallel inline panel used the UNFILTERED toolCalls,
+    // so running subagents were rendered inline AND in LiveAgentPanel below
+    // the composer. Two full rosters inflate the non-`<Static>` live frame
+    // past the terminal height, at which point ink clears the whole screen
+    // (incl. scrollback) on every repaint. The branch now routes through the
+    // same `inlineToolCalls` hand-off as every other group.
+    // InlineParallelAgentsDisplay reads the registry off config; give it a
+    // real stub (the bare `{}` mockConfig would make `getBackgroundTaskRegistry`
+    // throw). Empty registry → rows fall back to the tool-result data.
+    const registryConfig = {
+      getBackgroundTaskRegistry: () => ({ get: () => undefined }),
+    } as unknown as Config;
+    const renderParallel = (component: React.ReactElement) =>
+      render(
+        <ConfigContext.Provider value={registryConfig}>
+          {component}
+        </ConfigContext.Provider>,
+      );
+
+    const parallelAgent = (
+      callId: string,
+      taskDescription: string,
+      status: AgentResultDisplay['status'],
+    ): IndividualToolCallDisplay =>
+      createToolCall({
+        callId,
+        name: 'task',
+        description: taskDescription,
+        status:
+          status === 'running'
+            ? ToolCallStatus.Executing
+            : status === 'completed'
+              ? ToolCallStatus.Success
+              : ToolCallStatus.Error,
+        resultDisplay: {
+          type: 'task_execution',
+          subagentName: 'reviewer',
+          taskDescription,
+          taskPrompt: 'review',
+          status,
+        } as AgentResultDisplay,
+      });
+
+    it('live phase: an all-running parallel group renders nothing inline (panel owns the roster)', () => {
+      const { lastFrame } = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          toolCalls={[
+            parallelAgent('a1', 'RUNALPHA', 'running'),
+            parallelAgent('a2', 'RUNBETA', 'running'),
+          ]}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      // No duplicate inline roster: header absent, neither running agent shown.
+      expect(frame).not.toContain('Parallel agents');
+      expect(frame).not.toContain('RUNALPHA');
+      expect(frame).not.toContain('RUNBETA');
+    });
+
+    it('live phase: a mixed group shows only terminal agents inline, hides panel-owned running ones, keeps the full total', () => {
+      const { lastFrame } = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          toolCalls={[
+            parallelAgent('a1', 'DONEONE', 'completed'),
+            parallelAgent('a2', 'RUNTWO', 'running'),
+            parallelAgent('a3', 'RUNTHREE', 'running'),
+          ]}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Parallel agents');
+      // The completed agent surfaces inline (en route to scrollback).
+      expect(frame).toContain('DONEONE');
+      // Running agents are owned by the panel — NOT duplicated inline.
+      expect(frame).not.toContain('RUNTWO');
+      expect(frame).not.toContain('RUNTHREE');
+      // Header total stays honest (3 agents, 1 done) even though 1 row renders.
+      expect(frame).toContain('1/3 done');
+    });
+
+    it('committed phase: renders every agent inline (the persistent record)', () => {
+      const { lastFrame } = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={false}
+          toolCalls={[
+            parallelAgent('a1', 'COMMITA', 'completed'),
+            parallelAgent('a2', 'COMMITB', 'completed'),
+          ]}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Parallel agents');
+      expect(frame).toContain('COMMITA');
+      expect(frame).toContain('COMMITB');
+      expect(frame).toContain('2/2 done');
+    });
+
+    it('forwards the height cap only in the live phase (committed phase = no cap)', () => {
+      // The InlineParallelAgentsDisplay height backstop guards ONLY the live,
+      // non-`<Static>` frame. ToolGroupMessage forwards
+      // `isPending ? availableTerminalHeight : undefined`, so a tight budget
+      // windows the live phase but never the committed scrollback record (where
+      // MainContent passes staticAreaMaxItemHeight >= 100). Without the
+      // conditional, completed agents would be permanently hidden behind a
+      // static "+N more" in scrollback. The contrast pins that load-bearing
+      // conditional — a regression that always forwards (or always drops) the
+      // budget breaks exactly one of these two assertions.
+      const manyCompleted = Array.from({ length: 8 }, (_, i) =>
+        parallelAgent(`cap-${i}`, `CAPAGENT${i}`, 'completed'),
+      );
+
+      // Live phase + tight budget → windowing kicks in, overflow indicator shows.
+      const live = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={true}
+          availableTerminalHeight={5}
+          toolCalls={manyCompleted}
+        />,
+      );
+      expect(live.lastFrame() ?? '').toContain('more agent');
+
+      // Committed phase, SAME tight budget → cap suppressed, every agent renders.
+      const committed = renderParallel(
+        <ToolGroupMessage
+          {...baseProps}
+          isPending={false}
+          availableTerminalHeight={5}
+          toolCalls={manyCompleted}
+        />,
+      );
+      const committedFrame = committed.lastFrame() ?? '';
+      expect(committedFrame).not.toContain('more agent');
+      expect(committedFrame).toContain('CAPAGENT0');
+      expect(committedFrame).toContain('CAPAGENT7');
+      expect(committedFrame).toContain('8/8 done');
+    });
+  });
 });

@@ -50,14 +50,15 @@ const TARGET_PREBUILD_DIR = new Map([
 
 const DIST_REQUIRED_PATHS = [
   'cli.js',
+  'cli-entry.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
-  // bin wrapper emitted by prepare-package.js that re-spawns `node --expose-gc
-  // cli.js`; ships in dist/ as the package `bin` entry (#4914).
+  // bin wrapper emitted by prepare-package.js. Standalone shims use it for
+  // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
@@ -79,6 +80,9 @@ const DIST_ALLOWED_ENTRIES = new Set([
 const DIST_ALLOWED_ENTRY_PATTERNS = [
   /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
 ];
+// Emitted into dist/ by prepare-package.js for npm publishing only;
+// standalone archives must not copy them into lib/.
+const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set(['postinstall.js', 'patches']);
 const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
 
 if (isMainModule()) {
@@ -240,7 +244,10 @@ function assertRequiredInputs() {
   for (const relativePath of DIST_REQUIRED_PATHS) {
     const fullPath = path.join(distDir, relativePath);
     if (!fs.existsSync(fullPath)) {
-      fail(`Required dist asset missing: ${fullPath}`);
+      fail(
+        `Required dist asset missing: ${fullPath}. ` +
+          'Run "npm run bundle" and "npm run prepare:package" first.',
+      );
     }
   }
 
@@ -271,7 +278,8 @@ function copyRuntimeAssets(packageRoot, outDir) {
     if (
       entry === skippedDistEntry ||
       entry === '.DS_Store' ||
-      entry === 'node_modules'
+      entry === 'node_modules' ||
+      DIST_NPM_PACKAGE_ONLY_ENTRIES.has(entry)
     ) {
       continue;
     }
@@ -599,6 +607,9 @@ function writeShims(packageRoot) {
   const unixShim = `#!/usr/bin/env sh
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+if [ "\${1:-}" = "serve" ]; then
+  exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"
+fi
 exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
 `;
   const unixShimPath = path.join(binDir, 'qwen');
@@ -608,7 +619,13 @@ exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"
   const windowsShim = `@echo off
 setlocal
 set "ROOT=%~dp0.."
+if "%~1"=="serve" goto serve
 "%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*
+exit /b %ERRORLEVEL%
+
+:serve
+"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*
+exit /b %ERRORLEVEL%
 `;
   fs.writeFileSync(path.join(binDir, 'qwen.cmd'), windowsShim);
 }

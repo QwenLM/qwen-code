@@ -195,11 +195,16 @@ export function transcriptBlocksToDaemonMessages(
         currentThinkingIdx = null;
         needsNewContentMessage = false;
         const textBlock = block as DaemonTextTranscriptBlock;
+        const meta = getRecord(
+          (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
+        );
+        const source = getString(meta, 'source');
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
           content: textBlock.text,
           timestamp: blockTime,
+          ...(source ? { source } : {}),
         };
         // Attach images if present
         if (textBlock.images && textBlock.images.length > 0) {

@@ -21,6 +21,34 @@ const debugLogger = createDebugLogger('RUNTIME_FETCH');
 export type Runtime = 'node' | 'bun' | 'unknown';
 
 /**
+ * Determine whether TLS certificate verification should be disabled for
+ * outbound API connections.
+ *
+ * This is an opt-in escape hatch for self-hosted / lab environments that use
+ * self-signed certificates. Because Qwen Code installs its own undici
+ * dispatcher (to control timeouts), Node's global `NODE_TLS_REJECT_UNAUTHORIZED`
+ * is not automatically honored by that dispatcher — this helper feeds the
+ * setting back into the dispatcher's TLS connect options.
+ *
+ * Sources (any one enables it):
+ * - `QWEN_TLS_INSECURE` env var (`1`/`true`/`yes`/`on`, case-insensitive).
+ *   The `--insecure` CLI flag sets this.
+ * - `NODE_TLS_REJECT_UNAUTHORIZED=0` (Node convention, for parity)
+ *
+ * WARNING: disabling verification removes protection against
+ * man-in-the-middle attacks. Only use it for trusted, private endpoints.
+ *
+ * @returns true when certificate verification should be skipped
+ */
+export function isTlsVerificationDisabled(): boolean {
+  const flag = process.env['QWEN_TLS_INSECURE'];
+  if (flag !== undefined && /^(1|true|yes|on)$/i.test(flag.trim())) {
+    return true;
+  }
+  return process.env['NODE_TLS_REJECT_UNAUTHORIZED'] === '0';
+}
+
+/**
  * Detect the current JavaScript runtime
  */
 export function detectRuntime(): Runtime {
@@ -178,8 +206,15 @@ const NO_DISPATCHER_FALLBACK = {
  * @param proxyUrl - Proxy URL used to create a cached ProxyAgent
  * @returns A cached undici ProxyAgent dispatcher
  */
-export function getOrCreateSharedDispatcher(proxyUrl: string): Dispatcher {
-  const cached = dispatcherCache.get(proxyUrl);
+export function getOrCreateSharedDispatcher(
+  proxyUrl: string,
+  insecure: boolean = isTlsVerificationDisabled(),
+): Dispatcher {
+  // Secure and insecure dispatchers must not share a cache entry, otherwise a
+  // preconnect warmed without the flag could hand a verifying dispatcher to a
+  // client that expects verification disabled (or vice versa).
+  const cacheKey = insecure ? `${proxyUrl}#insecure` : proxyUrl;
+  const cached = dispatcherCache.get(cacheKey);
   if (cached) {
     return cached;
   }
@@ -189,9 +224,18 @@ export function getOrCreateSharedDispatcher(proxyUrl: string): Dispatcher {
     headersTimeout: 0,
     bodyTimeout: 0,
     keepAliveTimeout: 60_000,
+    // For a ProxyAgent the upstream (origin) TLS handshake is governed by
+    // `requestTls`, not `connect`; `proxyTls` covers an HTTPS proxy whose own
+    // certificate is self-signed. Disable verification on both when opted in.
+    ...(insecure
+      ? {
+          requestTls: { rejectUnauthorized: false },
+          proxyTls: { rejectUnauthorized: false },
+        }
+      : {}),
   });
 
-  dispatcherCache.set(proxyUrl, dispatcher);
+  dispatcherCache.set(cacheKey, dispatcher);
   return dispatcher;
 }
 
@@ -597,19 +641,23 @@ function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+  const insecure = isTlsVerificationDisabled();
   // When no proxy is configured, use a cached plain undici Agent with disabled
   // timeouts (headersTimeout: 0, bodyTimeout: 0). This prevents undici's 300s
   // default bodyTimeout from aborting long-running requests to local LLM
   // backends (LM Studio, Ollama, llama.cpp, MLX). The Agent is cached for
   // connection pool reuse, matching the proxy path's caching behavior.
   if (!proxyUrl) {
-    const NO_PROXY_KEY = '__no_proxy__';
+    const NO_PROXY_KEY = insecure ? '__no_proxy__#insecure' : '__no_proxy__';
     let dispatcher = dispatcherCache.get(NO_PROXY_KEY);
     if (!dispatcher) {
       dispatcher = new Agent({
         headersTimeout: 0,
         bodyTimeout: 0,
         keepAliveTimeout: 60_000,
+        // For a direct (non-proxy) Agent, `connect` options flow straight to
+        // the TLS connector, so this disables upstream cert verification.
+        ...(insecure ? { connect: { rejectUnauthorized: false } } : {}),
       });
       dispatcherCache.set(NO_PROXY_KEY, dispatcher);
     }
@@ -617,7 +665,7 @@ function buildFetchOptionsWithDispatcher(
   }
 
   try {
-    const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
+    const dispatcher = getOrCreateSharedDispatcher(proxyUrl, insecure);
     // Pin fetch to undici's own implementation so the dispatcher and fetch
     // come from the same undici version. Node's bundled undici may differ in
     // major version from the project's bundled one (e.g. v8 vs v6), which

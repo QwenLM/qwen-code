@@ -11,7 +11,7 @@ import {
   clearCacheSafeParams,
   runForkedAgent,
 } from './forkedAgent.js';
-import type { GenerateContentConfig } from '@google/genai';
+import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
@@ -86,6 +86,45 @@ describe('CacheSafeParams', () => {
         functionDeclarations: unknown[];
       }>;
       expect(savedTools[0].functionDeclarations).toHaveLength(1);
+
+      savedTools[0].functionDeclarations.push({ name: 'tool3' });
+      const rereadParams = getCacheSafeParams();
+      const rereadTools = rereadParams!.generationConfig.tools as Array<{
+        functionDeclarations: unknown[];
+      }>;
+      expect(rereadTools[0].functionDeclarations).toHaveLength(1);
+    });
+
+    it('copies history containers without cloning part payloads', () => {
+      const historyPart = { text: 'large history entry' };
+      const historyEntry: Content = {
+        role: 'user',
+        parts: [historyPart],
+      };
+      const historyEntryWithoutParts: Content = { role: 'model' };
+      const history: Content[] = [historyEntry, historyEntryWithoutParts];
+
+      saveCacheSafeParams({}, history, 'model');
+      history.push({ role: 'model', parts: [{ text: 'late mutation' }] });
+      historyEntry.parts!.push({ text: 'late part mutation' });
+
+      const params = getCacheSafeParams();
+      expect(params!.history).toHaveLength(2);
+      expect(params!.history).not.toBe(history);
+      expect(params!.history[0]).not.toBe(historyEntry);
+      expect(params!.history[0]!.parts).toHaveLength(1);
+      expect(params!.history[0]!.parts).not.toBe(historyEntry.parts);
+      expect(params!.history[0]!.parts![0]).toBe(historyPart);
+      expect(params!.history[1]).not.toBe(historyEntryWithoutParts);
+      expect('parts' in params!.history[1]!).toBe(false);
+
+      params!.history.push({
+        role: 'model',
+        parts: [{ text: 'returned mutation' }],
+      });
+      params!.history[0]!.parts!.push({ text: 'returned part mutation' });
+      expect(getCacheSafeParams()!.history).toHaveLength(2);
+      expect(getCacheSafeParams()!.history[0]!.parts).toHaveLength(1);
     });
   });
 
@@ -238,7 +277,6 @@ describe('runForkedAgent (cache path)', () => {
     expect(ctorArgs[4]).toBeUndefined(); // telemetryService
 
     // Verify sendMessageStream was called
-    expect(mockSendMessageStream).toHaveBeenCalledOnce();
     expect(capturedParams).not.toBeNull();
 
     // KEY ASSERTION: per-request config must have tools: [] to prevent
@@ -248,7 +286,7 @@ describe('runForkedAgent (cache path)', () => {
     expect(sendParams.config!.tools).toEqual([]);
 
     // Verify prompt_id is 'forked_query' and message is passed correctly
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
+    expect(mockSendMessageStream).toHaveBeenCalledExactlyOnceWith(
       'test-model',
       expect.objectContaining({
         message: [{ text: 'suggest something' }],
@@ -572,6 +610,340 @@ describe('runForkedAgent (cache path)', () => {
 
     expect(capturedModel).toBe('parent-model');
     expect(createRuntimeContentGeneratorView).not.toHaveBeenCalled();
+  });
+
+  it('does not strip tools when preserveTools is true', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+              { name: 'shell', description: 'Run a command' },
+            ],
+          },
+        ],
+      },
+      [{ role: 'user', parts: [{ text: 'hello' }] }],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+              },
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: true,
+    });
+
+    const sendParams = capturedParams as {
+      config?: { tools?: unknown };
+    };
+    expect(sendParams.config!.tools).toBeUndefined();
+  });
+
+  it('strips tools when preserveTools is explicitly false', async () => {
+    saveCacheSafeParams(
+      {
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'ok' }],
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: false,
+    });
+
+    const sendParams = capturedParams as {
+      config?: { tools?: unknown };
+    };
+    expect(sendParams.config!.tools).toEqual([]);
+  });
+
+  it('filters out functionCall parts when preserveTools is true', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, _params: unknown, _promptId: string) => {
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      { text: 'some text' },
+                      {
+                        functionCall: {
+                          name: 'edit',
+                          args: { file: 'a.ts' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+                totalTokenCount: 15,
+              },
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: true,
+    });
+
+    expect(result.text).toBe('some text');
+  });
+
+  it('returns null text when response contains only functionCall parts', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, _params: unknown, _promptId: string) => {
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      {
+                        functionCall: {
+                          name: 'edit',
+                          args: { file: 'a.ts' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+                totalTokenCount: 15,
+              },
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: true,
+    });
+
+    expect(result.text).toBeNull();
+  });
+
+  it('preserves tools and includes jsonSchema fields when both preserveTools and jsonSchema are set', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+              { name: 'shell', description: 'Run a command' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+              },
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    const schema = {
+      type: 'object',
+      properties: { suggestion: { type: 'string' } },
+    };
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: true,
+      jsonSchema: schema,
+    });
+
+    const sendParams = capturedParams as {
+      config?: {
+        tools?: unknown;
+        responseMimeType?: string;
+        responseJsonSchema?: unknown;
+      };
+    };
+    expect(sendParams.config!.tools).toBeUndefined();
+    expect(sendParams.config!.responseMimeType).toBe('application/json');
+    expect(sendParams.config!.responseJsonSchema).toBe(schema);
   });
 
   it('throws when CacheSafeParams are not available', async () => {
