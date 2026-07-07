@@ -965,6 +965,8 @@ describe('runQwenServe pre-listen bridge option validation', () => {
   it.each([
     ['maxSessions', Number.NaN, /maxSessions/],
     ['maxSessions', -1, /maxSessions/],
+    ['maxTotalSessions', Number.NaN, /maxTotalSessions/],
+    ['maxTotalSessions', -1, /maxTotalSessions/],
     ['eventRingSize', 0, /eventRingSize/],
     ['eventRingSize', 1.5, /eventRingSize/],
     ['eventRingSize', Number.POSITIVE_INFINITY, /eventRingSize/],

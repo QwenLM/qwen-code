@@ -68,6 +68,7 @@ function encodeWav(pcm: Uint8Array): Uint8Array {
 /** Injection seams for unit tests; production uses the reused CLI pipeline. */
 export interface VoiceWsDeps {
   loadContext?: (workspaceCwd: string) => DaemonVoiceContext;
+  env?: Record<string, string | undefined>;
   openStream?: (
     ctx: DaemonVoiceContext,
     callbacks: VoiceStreamCallbacks,
@@ -171,7 +172,10 @@ export function createVoiceWsConnectionHandler(
   boundWorkspace: string,
   deps: VoiceWsDeps = {},
 ): (ws: WebSocket, req: IncomingMessage) => void {
-  const loadContext = deps.loadContext ?? loadDaemonVoiceContext;
+  const loadContext =
+    deps.loadContext ??
+    ((workspaceCwd: string) =>
+      loadDaemonVoiceContext(workspaceCwd, { env: deps.env }));
   const openStream = deps.openStream ?? defaultOpenStream;
   const transcribe = deps.transcribe ?? defaultTranscribe;
   // Shared across all connections from this daemon (factory closure).

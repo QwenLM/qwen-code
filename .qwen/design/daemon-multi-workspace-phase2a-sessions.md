@@ -2,17 +2,17 @@
 
 ## Summary
 
-This document records the Phase 2a foundation contract for issue #6378 after
-the Phase 1 `WorkspaceRegistry` PR. The current implementation batch combines
-the Phase 1 repeated `--workspace` follow-up, the Phase 2a prep guardrails, and
-the first internal registry/runtime contract needed by later multi-workspace
-session work.
+This document records the Phase 2a contract for issue #6378 after the Phase 1
+`WorkspaceRegistry` PR and the Phase 2a foundation PR. Phase 2a is now split
+into two implementation PRs: PR 1 lands env isolation and total-admission
+guardrails while multi-workspace remains gated; PR 2 will wire non-primary live
+session dispatch and publish the additive capabilities/status schema.
 
 Phase 2a remains sessions-only. It does not add plural routes, a
 `WorkspaceDaemonClient`, workspace-qualified ACP/WebSocket, file, memory, MCP,
-settings, voice, channel-worker migration, env overlays, total-session
-admission, capabilities `workspaces[]`, `multi_workspace_sessions`, route
-dispatch, or non-primary runtime construction in this foundation batch.
+settings, voice, or channel-worker migration. PR 1 does not add capabilities
+`workspaces[]`, `multi_workspace_sessions`, route dispatch, or non-primary
+runtime construction.
 
 ## Foundation Contract
 
@@ -38,8 +38,10 @@ Phase 2a work:
 - `primary`: true for the primary runtime.
 - `trusted`: boot-time trust metadata; direct `createServeApp` fallback remains
   false unless production passes an explicit trusted value.
-- `env`: metadata only. This foundation batch records parent-process mode and
-  empty overlay keys; it does not compute runtime-local env overlays.
+- `env`: runtime-local env source metadata. In single-workspace production,
+  the primary runtime now receives a computed effective env snapshot and a
+  mutable env source that can be refreshed after daemon env reload. Direct
+  `createServeApp` fallback remains parent-process metadata.
 
 The internal `WorkspaceRegistry` supports exact cwd lookup, exact id lookup,
 `resolveWorkspaceCwd(undefined)` primary fallback, and live session owner
@@ -94,13 +96,34 @@ after tests prove they depend solely on the owning live bridge.
 - Fail closed if more than one runtime reports the same live session id.
 - Keep non-primary session listing live-only unless persisted entries are
   explicitly marked non-resumable.
-- Add runtime-local env overlays before non-primary child spawn.
-- Add `maxTotalSessions` at the bridge fresh-creation seam so REST and primary
-  `/acp` cannot bypass it, while attach still bypasses admission.
-- Publish `workspaces[]`, total limits, and `multi_workspace_sessions` only in
-  the final ungate PR.
+- Reuse PR 1 runtime-local env overlays before non-primary child spawn.
+- Reuse PR 1 `maxTotalSessions` admission at every future fresh-creation seam
+  so REST and primary `/acp` cannot bypass it, while attach still bypasses
+  admission.
+- Publish `workspaces[]` and `multi_workspace_sessions` only in PR 2 when the
+  live session dispatch loop is complete.
 - Update SDK capability types when the additive capabilities schema ships, but
   do not add a workspace client in Phase 2a.
+
+## PR 1 Guardrails
+
+- Runtime env is computed from daemon base env plus workspace `.env`, settings
+  env, and Cloud Shell defaults without mutating parent `process.env` during
+  runtime initialization.
+- The env helper intentionally does not virtualize `QWEN_HOME`, Storage, or
+  global config routing. Those remain daemon boot/base-env responsibilities.
+- ACP child spawn accepts an explicit `sourceEnv`, and low-cost
+  workspace-scoped status/config readers use injected env instead of direct
+  `process.env` reads.
+- `maxTotalSessions` is an optional daemon-wide fresh-session cap. It covers
+  spawn, persisted load/resume restore, and branch/fork session creation;
+  attach bypasses it.
+- The bridge admission seam is a synchronous reservation hook. Failed fresh
+  creation releases the reservation, preventing concurrent oversell across
+  runtimes once non-primary bridges exist.
+- `/daemon/status.limits.maxTotalSessions` is additive. `/capabilities` and SDK
+  capability types remain unchanged until PR 2 ungates multi-workspace
+  sessions.
 
 ## Audit Decisions
 

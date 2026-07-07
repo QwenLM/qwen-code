@@ -487,6 +487,7 @@ export interface RunHandle {
 type CoreRuntime = typeof import('@qwen-code/qwen-code-core');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
+type EnvironmentRuntime = typeof import('../config/environment.js');
 type LoadedSettingsAdapterRuntime =
   typeof import('../config/loadedSettingsAdapter.js');
 type TrustedFoldersRuntime = typeof import('../config/trustedFolders.js');
@@ -707,21 +708,25 @@ async function resolveDaemonLogBaseDirForRun(input: {
 let settingsRuntimePromise:
   | Promise<{
       settings: SettingsRuntime;
+      environment: EnvironmentRuntime;
       loadedSettingsAdapter: LoadedSettingsAdapterRuntime;
       trustedFolders: TrustedFoldersRuntime;
     }>
   | undefined;
 function loadSettingsRuntimeModules(): Promise<{
   settings: SettingsRuntime;
+  environment: EnvironmentRuntime;
   loadedSettingsAdapter: LoadedSettingsAdapterRuntime;
   trustedFolders: TrustedFoldersRuntime;
 }> {
   settingsRuntimePromise ??= Promise.all([
     import('../config/settings.js'),
+    import('../config/environment.js'),
     import('../config/loadedSettingsAdapter.js'),
     import('../config/trustedFolders.js'),
-  ]).then(([settings, loadedSettingsAdapter, trustedFolders]) => ({
+  ]).then(([settings, environment, loadedSettingsAdapter, trustedFolders]) => ({
     settings,
+    environment,
     loadedSettingsAdapter,
     trustedFolders,
   }));
@@ -738,6 +743,7 @@ async function loadServeRuntimeModules() {
     daemonStatusProviderModule,
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
+    totalSessionAdmissionModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -747,6 +753,7 @@ async function loadServeRuntimeModules() {
     import('./daemon-status-provider.js'),
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
+    import('./total-session-admission.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -765,6 +772,8 @@ async function loadServeRuntimeModules() {
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
     createWorkspaceSkillsStatusProvider:
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
+    createTotalSessionAdmissionController:
+      totalSessionAdmissionModule.createTotalSessionAdmissionController,
   };
 }
 
@@ -1138,6 +1147,7 @@ function createBootstrapServeApp(input: {
       },
       limits: {
         maxSessions: advertisedMaxSessions(opts.maxSessions),
+        maxTotalSessions: positiveFiniteOrNull(opts.maxTotalSessions),
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           opts.maxPendingPromptsPerSession,
         ),
@@ -1770,6 +1780,14 @@ export async function runQwenServe(
       );
     }
   }
+  if (opts.maxTotalSessions !== undefined) {
+    if (Number.isNaN(opts.maxTotalSessions) || opts.maxTotalSessions < 0) {
+      throw new TypeError(
+        `Invalid maxTotalSessions: ${opts.maxTotalSessions}. Must be a number >= 0 ` +
+          `(0 / Infinity = unlimited).`,
+      );
+    }
+  }
   if (opts.maxPendingPromptsPerSession !== undefined) {
     if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
       throw new TypeError(
@@ -2014,6 +2032,34 @@ export async function runQwenServe(
         { workspace: boundWorkspace },
       );
     }
+    const runtimeEnvSnapshot = runtimeBootSettings
+      ? settingsRuntime.environment.buildRuntimeEnvironment(
+          runtimeBootSettings.merged,
+          boundWorkspace,
+          process.env,
+        )
+      : {
+          effectiveEnv: Object.freeze({ ...process.env }),
+          overlayKeys: Object.freeze([] as string[]),
+          envFilePaths: Object.freeze([] as string[]),
+        };
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
+      ...runtimeEnvSnapshot.effectiveEnv,
+    };
+    const replaceRuntimeEffectiveEnv = (
+      nextEnv: Readonly<NodeJS.ProcessEnv>,
+    ): void => {
+      for (const key of Object.keys(runtimeEffectiveEnv)) {
+        delete runtimeEffectiveEnv[key];
+      }
+      Object.assign(runtimeEffectiveEnv, nextEnv);
+    };
+    const primaryRuntimeEnv = {
+      mode: 'runtime-overlay' as const,
+      overlayKeys: runtimeEnvSnapshot.overlayKeys,
+      effectiveEnv: runtimeEffectiveEnv,
+      envFilePaths: runtimeEnvSnapshot.envFilePaths,
+    };
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
     let daemonTelemetrySettings: TelemetrySettings;
     try {
@@ -2203,6 +2249,7 @@ export async function runQwenServe(
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
+      sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
@@ -2218,9 +2265,13 @@ export async function runQwenServe(
         ? { extraArgs: ['--experimental-lsp'] }
         : {}),
     });
-    const statusProvider = runtime.createDaemonStatusProvider();
+    const statusProvider = runtime.createDaemonStatusProvider({
+      env: runtimeEffectiveEnv,
+    });
     const workspaceProvidersStatusProvider =
-      runtime.createWorkspaceProvidersStatusProvider();
+      runtime.createWorkspaceProvidersStatusProvider({
+        env: runtimeEffectiveEnv,
+      });
     const workspaceSkillsStatusProvider =
       runtime.createWorkspaceSkillsStatusProvider();
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
@@ -2229,6 +2280,12 @@ export async function runQwenServe(
     // (which registers a per-connection `ClientMcpRegistrar`'s sender on
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    const freshSessionAdmission = runtime.createTotalSessionAdmissionController(
+      {
+        maxTotalSessions: opts.maxTotalSessions,
+        getBridges: () => (bridgeRef ? [bridgeRef] : []),
+      },
+    );
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -2308,6 +2365,7 @@ export async function runQwenServe(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
+        freshSessionAdmission,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2363,10 +2421,20 @@ export async function runQwenServe(
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
             skipLoadEnvironment: true,
           });
-          return settingsRuntime.settings.reloadEnvironment(
+          const result = settingsRuntime.settings.reloadEnvironment(
             fresh.merged,
             workspace,
           );
+          const refreshedRuntimeEnv =
+            settingsRuntime.environment.buildRuntimeEnvironment(
+              fresh.merged,
+              workspace,
+              process.env,
+            );
+          replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
+          primaryRuntimeEnv.overlayKeys = refreshedRuntimeEnv.overlayKeys;
+          primaryRuntimeEnv.envFilePaths = refreshedRuntimeEnv.envFilePaths;
+          return result;
         }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
@@ -2533,6 +2601,7 @@ export async function runQwenServe(
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       }),
       primaryWorkspaceTrusted: trustedWorkspace,
+      primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({

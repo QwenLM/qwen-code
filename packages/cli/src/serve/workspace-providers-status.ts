@@ -32,6 +32,7 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
@@ -60,10 +61,9 @@ function buildWorkspaceProvidersStatus(
   try {
     const loaded = loadSettings(workspaceCwd);
     const settings = loaded.merged;
-    const env =
-      options.env ?? (process.env as Record<string, string | undefined>);
+    const env = options.env ?? snapshotProcessEnv();
     const selectedAuthType =
-      settings.security?.auth?.selectedType ?? getAuthTypeFromEnv();
+      settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
     const argv: CliGenerationConfigInputs['argv'] = {
       model: options.argv?.model,
       openaiApiKey: options.argv?.openaiApiKey,

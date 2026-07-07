@@ -140,6 +140,7 @@ interface DaemonStatusSecurity {
 
 interface DaemonStatusLimits {
   maxSessions: number | null;
+  maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
   eventRingSize: number;
@@ -335,6 +336,7 @@ export async function buildDaemonStatusResponse(
     },
     limits: {
       maxSessions: bridgeSnapshot.limits.maxSessions,
+      maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),

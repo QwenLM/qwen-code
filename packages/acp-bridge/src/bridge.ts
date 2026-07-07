@@ -100,7 +100,12 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './bridgeTypes.js';
-import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
+import type {
+  BridgeFreshSessionAdmissionContext,
+  BridgeFreshSessionReservation,
+  BridgeOptions,
+  BridgeTelemetry,
+} from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
@@ -1065,6 +1070,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   } else {
     maxSessions = opts.maxSessions;
   }
+  const reserveFreshSession = (
+    context: BridgeFreshSessionAdmissionContext,
+  ): BridgeFreshSessionReservation | undefined =>
+    opts.freshSessionAdmission?.(context);
+  const releaseFreshSessionReservation = (
+    reservation: BridgeFreshSessionReservation | undefined,
+  ): void => {
+    if (!reservation) return;
+    try {
+      reservation.release();
+    } catch (err) {
+      opts.onDiagnosticLine?.(
+        `qwen serve: fresh session admission release failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        'warn',
+      );
+    }
+  };
   if (defaultSessionScope !== 'single' && defaultSessionScope !== 'thread') {
     throw new TypeError(
       `Invalid sessionScope: ${JSON.stringify(defaultSessionScope)}. ` +
@@ -2748,6 +2772,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
+    options: { skipFreshSessionAdmission?: boolean } = {},
   ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
@@ -2845,6 +2870,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // doc comment). Mutated synchronously by the coalesce branch above
     // and read once by the IIFE when seeding `entry.attachCount`.
     const coalesceState = { count: 0 };
+    const admission =
+      options.skipFreshSessionAdmission === true
+        ? undefined
+        : reserveFreshSession({
+            operation: action,
+            workspaceCwd: workspaceKey,
+            sessionId: req.sessionId,
+          });
     const promise = (async (): Promise<BridgeRestoredSession> => {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       ci = await ensureChannel();
@@ -3018,6 +3051,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...replayFieldsFor(entry, action),
       };
     })().finally(async () => {
+      releaseFreshSessionReservation(admission);
       ci?.pendingRestoreIds.delete(req.sessionId);
       // Pair with `markRestoreInFlight`. Once the IIFE settles, either
       // `createSessionEntry` ran (`drainEarlyEvents` already cleared
@@ -3433,6 +3467,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new SessionLimitExceededError(maxSessions);
       }
 
+      const admission = reserveFreshSession({
+        operation: 'spawn',
+        workspaceCwd: workspaceKey,
+      });
       const promise = doSpawn(req.modelServiceId, effectiveScope, req.clientId);
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -3454,6 +3492,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       try {
         return await promise;
       } finally {
+        releaseFreshSessionReservation(admission);
         // Always clear the in-flight slot whether the spawn resolved
         // or rejected — leaving a rejected promise behind would
         // poison every future coalescing-path call for this
@@ -4166,77 +4205,92 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new SessionLimitExceededError(maxSessions);
         }
 
-        const ci = await ensureChannel();
-        const result = (await withTimeout(
-          ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
-            sessionId,
-            cwd: boundWorkspace,
-            name: req.name,
-          }),
-          initTimeoutMs,
-          'branchSession',
-        )) as { newSessionId: string; title?: string; displayName?: string };
-
-        if (!result || typeof result.newSessionId !== 'string') {
-          throw new Error(
-            `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
-          );
-        }
-        const rawBranchName = result.displayName ?? result.title;
-        const branchDisplayName =
-          typeof rawBranchName === 'string'
-            ? rawBranchName
-            : result.newSessionId.slice(0, 8);
-
-        let restored;
+        const admission = reserveFreshSession({
+          operation: 'branch',
+          workspaceCwd: boundWorkspace,
+          sourceSessionId: sessionId,
+        });
         try {
-          restored = await restoreSession('load', {
-            sessionId: result.newSessionId,
-            workspaceCwd: boundWorkspace,
-            clientId: context?.clientId,
-          });
-        } catch (restoreErr) {
-          writeStderrLine(
-            `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
-          );
-          try {
-            await ci.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.sessionClose,
-              { sessionId: result.newSessionId, cwd: boundWorkspace },
-            );
-          } catch (cleanupErr) {
-            writeStderrLine(
-              `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+          const ci = await ensureChannel();
+          const result = (await withTimeout(
+            ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+              sessionId,
+              cwd: boundWorkspace,
+              name: req.name,
+            }),
+            initTimeoutMs,
+            'branchSession',
+          )) as { newSessionId: string; title?: string; displayName?: string };
+
+          if (!result || typeof result.newSessionId !== 'string') {
+            throw new Error(
+              `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
             );
           }
-          throw restoreErr;
+          const rawBranchName = result.displayName ?? result.title;
+          const branchDisplayName =
+            typeof rawBranchName === 'string'
+              ? rawBranchName
+              : result.newSessionId.slice(0, 8);
+
+          let restored;
+          try {
+            restored = await restoreSession(
+              'load',
+              {
+                sessionId: result.newSessionId,
+                workspaceCwd: boundWorkspace,
+                clientId: context?.clientId,
+              },
+              {
+                skipFreshSessionAdmission: true,
+              },
+            );
+          } catch (restoreErr) {
+            writeStderrLine(
+              `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
+            );
+            try {
+              await ci.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionClose,
+                { sessionId: result.newSessionId, cwd: boundWorkspace },
+              );
+            } catch (cleanupErr) {
+              writeStderrLine(
+                `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+              );
+            }
+            throw restoreErr;
+          }
+
+          const newEntry = byId.get(result.newSessionId);
+          if (newEntry) newEntry.displayName = branchDisplayName;
+
+          const eventData = {
+            sourceSessionId: sessionId,
+            newSessionId: result.newSessionId,
+            displayName: branchDisplayName,
+          };
+          const branchEnvelope = {
+            type: 'session_branched' as const,
+            data: eventData,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          };
+          // The branch announcement belongs to the new session only. Publishing
+          // it on the source session would persist in that session's replay ring.
+          newEntry?.events.publish(branchEnvelope);
+
+          return {
+            ...restored,
+            displayName: branchDisplayName,
+            forkedFrom: {
+              sessionId,
+              displayName: entry.displayName ?? sessionId.slice(0, 8),
+            },
+          };
+        } finally {
+          releaseFreshSessionReservation(admission);
         }
-
-        const newEntry = byId.get(result.newSessionId);
-        if (newEntry) newEntry.displayName = branchDisplayName;
-
-        const eventData = {
-          sourceSessionId: sessionId,
-          newSessionId: result.newSessionId,
-          displayName: branchDisplayName,
-        };
-        const branchEnvelope = {
-          type: 'session_branched' as const,
-          data: eventData,
-          ...(originatorClientId ? { originatorClientId } : {}),
-        };
-        // The branch announcement belongs to the new session only. Publishing
-        // it on the source session would persist in that session's replay ring.
-        newEntry?.events.publish(branchEnvelope);
-
-        return {
-          ...restored,
-          displayName: branchDisplayName,
-          forkedFrom: {
-            sessionId,
-            displayName: entry.displayName ?? sessionId.slice(0, 8),
-          },
-        };
       });
       entry.promptQueue = branchResult.then(
         () => undefined,

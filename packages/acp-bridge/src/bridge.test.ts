@@ -37,6 +37,7 @@ import {
   SessionShellDisabledError,
   SessionBusyError,
   SessionNotFoundError,
+  TotalSessionLimitExceededError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
@@ -9425,6 +9426,116 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(5);
       // ...but only ONE channelFactory call (= one child process).
       expect(factoryCalls).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('calls freshSessionAdmission for fresh spawns and releases after registration', async () => {
+      const releases: string[] = [];
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'thread',
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(contexts).toMatchObject([
+        { operation: 'spawn', workspaceCwd: WS_A },
+      ]);
+      expect(releases).toEqual(['spawn']);
+      await bridge.shutdown();
+    });
+
+    it('does not call freshSessionAdmission for single-scope attaches', async () => {
+      const freshSessionAdmission = vi.fn(() => ({
+        release: vi.fn(),
+      }));
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'single',
+        freshSessionAdmission,
+      });
+
+      const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      freshSessionAdmission.mockClear();
+      const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(attached.sessionId).toBe(spawned.sessionId);
+      expect(attached.attached).toBe(true);
+      expect(freshSessionAdmission).not.toHaveBeenCalled();
+      await bridge.shutdown();
+    });
+
+    it('fails fresh spawns closed when freshSessionAdmission rejects', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'thread',
+        freshSessionAdmission: () => {
+          throw new TotalSessionLimitExceededError(1);
+        },
+      });
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({
+        name: 'TotalSessionLimitExceededError',
+        limit: 1,
+        scope: 'total',
+      });
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('reserves branchSession before branch extMethod and skips a second restore reservation', async () => {
+      const contexts: Array<{
+        operation: string;
+        workspaceCwd: string;
+        sourceSessionId?: string;
+      }> = [];
+      const releases: string[] = [];
+      let branchExtMethodSawReservation = false;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) => {
+              if (method !== 'qwen/control/session/branch') return {};
+              branchExtMethodSawReservation =
+                contexts.at(-1)?.operation === 'branch';
+              return { newSessionId: 'branch-1', title: 'Branch 1' };
+            },
+            loadSessionImpl: () => ({}),
+          }).channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      contexts.length = 0;
+      releases.length = 0;
+
+      const branch = await bridge.branchSession(session.sessionId, {
+        name: 'Branch 1',
+      });
+
+      expect(branchExtMethodSawReservation).toBe(true);
+      expect(branch).toMatchObject({ sessionId: 'branch-1' });
+      expect(contexts).toEqual([
+        {
+          operation: 'branch',
+          workspaceCwd: WS_A,
+          sourceSessionId: session.sessionId,
+        },
+      ]);
+      expect(releases).toEqual(['branch']);
       await bridge.shutdown();
     });
 

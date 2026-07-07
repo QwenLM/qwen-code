@@ -43,6 +43,14 @@ afterEach(() => {
 });
 
 describe('buildDaemonStatusResponse', () => {
+  it('includes maxTotalSessions in daemon status limits', async () => {
+    const options = makeOptions();
+    options.opts.maxTotalSessions = 50;
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.maxTotalSessions).toBe(50);
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',

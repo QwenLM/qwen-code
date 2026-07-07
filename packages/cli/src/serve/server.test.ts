@@ -71,6 +71,7 @@ import {
   SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  TotalSessionLimitExceededError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -12057,6 +12058,26 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         code: 'session_limit_exceeded',
         limit: 20,
+      });
+    });
+
+    it('503 + Retry-After + total scope when bridge throws TotalSessionLimitExceededError', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new TotalSessionLimitExceededError(10);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toMatchObject({
+        code: 'session_limit_exceeded',
+        limit: 10,
+        scope: 'total',
       });
     });
   });

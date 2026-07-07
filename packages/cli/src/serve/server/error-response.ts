@@ -40,6 +40,7 @@ import {
   WorkspaceInitRaceError,
   WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
+  TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 
@@ -368,6 +369,16 @@ export function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof TotalSessionLimitExceededError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'session_limit_exceeded',
+      limit: err.limit,
+      scope: err.scope,
     });
     return;
   }

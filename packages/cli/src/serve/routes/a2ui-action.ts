@@ -34,6 +34,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { snapshotProcessEnv } from '../env-snapshot.js';
 
 const A2UI_MIME = 'application/a2ui+json';
 // Standard action-tool name from the official A2UI-over-MCP guide
@@ -86,6 +87,7 @@ interface RegisterA2uiActionRoutesOptions {
     cfg: McpServerConfigLike,
     args: A2uiActionArgs,
   ) => Promise<A2uiActionResult>;
+  env?: Record<string, string | undefined>;
 }
 
 /** Exported for unit testing. */
@@ -129,7 +131,10 @@ export async function findFromSettingsFile(
 }
 
 /** Build a one-shot transport from the config shape: stdio (command) or streamable HTTP (httpUrl). */
-export function buildTransport(cfg: McpServerConfigLike): Transport {
+export function buildTransport(
+  cfg: McpServerConfigLike,
+  baseEnv: Record<string, string | undefined> = snapshotProcessEnv(),
+): Transport {
   if (typeof cfg.httpUrl === 'string') {
     return new StreamableHTTPClientTransport(new URL(cfg.httpUrl));
   }
@@ -138,10 +143,10 @@ export function buildTransport(cfg: McpServerConfigLike): Transport {
     args: cfg.args ?? [],
     // spawn() treats `env` as a complete replacement, not a merge — a partial
     // env (e.g. {API_KEY}) would strip PATH/HOME and break the child. Merge
-    // over process.env like packages/core/src/tools/mcp-client.ts does; when
+    // over the runtime base env like packages/core/src/tools/mcp-client.ts does; when
     // unset, let the SDK apply its safe default environment.
     ...(cfg.env
-      ? { env: { ...process.env, ...cfg.env } as Record<string, string> }
+      ? { env: { ...baseEnv, ...cfg.env } as Record<string, string> }
       : {}),
     cwd: cfg.cwd,
   });
@@ -192,8 +197,9 @@ export function extractA2uiActionResult(
 export async function callA2uiAction(
   cfg: McpServerConfigLike,
   args: A2uiActionArgs,
+  env?: Record<string, string | undefined>,
 ): Promise<A2uiActionResult> {
-  const transport = buildTransport(cfg);
+  const transport = buildTransport(cfg, env);
   const client = new Client({ name: 'qwen-serve-a2ui', version: '0.0.1' });
   try {
     await client.connect(transport, { timeout: CALL_TIMEOUT_MS });
@@ -216,7 +222,10 @@ export function registerA2uiActionRoutes(
   opts: RegisterA2uiActionRoutesOptions,
 ): void {
   const { boundWorkspace, mutate, safeBody, getMcpServers } = opts;
-  const callAction = opts.callAction ?? callA2uiAction;
+  const callAction =
+    opts.callAction ??
+    ((cfg: McpServerConfigLike, args: A2uiActionArgs) =>
+      callA2uiAction(cfg, args, opts.env));
 
   app.post(
     '/session/:id/a2ui-action',

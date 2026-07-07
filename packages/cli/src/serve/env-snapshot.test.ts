@@ -10,6 +10,7 @@ import {
   ENV_NONSECRET_VARS,
   ENV_PROXY_VARS,
   ENV_SECRET_VARS,
+  buildEnvStatusFromEnv,
   buildEnvStatusFromProcess,
   readProxyVar,
 } from './env-snapshot.js';
@@ -44,6 +45,23 @@ afterEach(() => {
 });
 
 describe('buildEnvStatusFromProcess', () => {
+  it('can build a snapshot from an injected runtime env without reading process.env', () => {
+    const status = buildEnvStatusFromEnv('/ws', false, {
+      DASHSCOPE_API_KEY: 'sk-runtime',
+      HTTPS_PROXY: 'http://user:pass@runtime-proxy.local:8080',
+    });
+
+    const key = status.cells.find(
+      (c) => c.kind === 'env_var' && c.name === 'DASHSCOPE_API_KEY',
+    );
+    expect(key).toMatchObject({ present: true, status: 'ok' });
+    const proxy = status.cells.find(
+      (c) => c.kind === 'proxy' && c.name === 'HTTPS_PROXY',
+    );
+    expect(proxy!.value).toBe('runtime-proxy.local:8080');
+    expect(process.env['DASHSCOPE_API_KEY']).toBeUndefined();
+  });
+
   it('emits a runtime cell whose value matches the actual runtime version', () => {
     const status = buildEnvStatusFromProcess('/ws', false);
     const runtime = status.cells.find((c) => c.kind === 'runtime');

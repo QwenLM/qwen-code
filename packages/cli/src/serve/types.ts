@@ -58,6 +58,11 @@ export interface ServeOptions {
    */
   maxSessions?: number;
   /**
+   * Cap on concurrent live sessions across all workspace runtimes. Defaults to
+   * unlimited until multi-workspace sessions are ungated.
+   */
+  maxTotalSessions?: number;
+  /**
    * Per-session cap on accepted prompts that have not settled yet.
    * Defaults to 5. `0` or `Infinity` disables the cap.
    */

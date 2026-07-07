@@ -306,6 +306,25 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
   }
 }
 
+function setUpCloudShellEnvironmentInEnv(
+  env: NodeJS.ProcessEnv,
+  envFilePaths: readonly string[],
+): void {
+  for (const envFilePath of envFilePaths) {
+    if (!fs.existsSync(envFilePath)) {
+      continue;
+    }
+    const envFileContent = fs.readFileSync(envFilePath);
+    const parsedEnv = dotenv.parse(envFileContent);
+    if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
+      env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
+      return;
+    }
+  }
+
+  env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
+}
+
 function setUpCloudShellEnvironmentFromFiles(envFilePaths: string[]): void {
   for (const envFilePath of envFilePaths) {
     if (!fs.existsSync(envFilePath)) {
@@ -320,6 +339,89 @@ function setUpCloudShellEnvironmentFromFiles(envFilePaths: string[]): void {
   }
 
   process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
+}
+
+export interface RuntimeEnvironmentSnapshot {
+  readonly effectiveEnv: Readonly<NodeJS.ProcessEnv>;
+  readonly overlayKeys: readonly string[];
+  readonly envFilePaths: readonly string[];
+}
+
+function isEffectivelyUnset(env: NodeJS.ProcessEnv, key: string): boolean {
+  const existingValue = env[key];
+  return !Object.hasOwn(env, key) || existingValue === '';
+}
+
+function setRuntimeEnvIfUnset(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  value: string,
+): void {
+  if (isEffectivelyUnset(env, key)) {
+    env[key] = value;
+  }
+}
+
+export function buildRuntimeEnvironment(
+  settings: Settings,
+  startDir: string = process.cwd(),
+  baseEnv: Readonly<NodeJS.ProcessEnv> = process.env,
+): RuntimeEnvironmentSnapshot {
+  const userLevelPaths = getUserLevelEnvPaths();
+  const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
+  const effectiveEnv: NodeJS.ProcessEnv = { ...baseEnv };
+
+  if (baseEnv['CLOUD_SHELL'] === 'true') {
+    setUpCloudShellEnvironmentInEnv(effectiveEnv, envFilePaths);
+  }
+
+  for (const envFilePath of envFilePaths) {
+    try {
+      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+      const parsedEnv = dotenv.parse(envFileContent);
+
+      const excludedVars =
+        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isQwenScopedEnvFile =
+        isHomeScopedEnvFile ||
+        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
+
+      for (const key in parsedEnv) {
+        if (!Object.hasOwn(parsedEnv, key)) continue;
+        if (
+          !isHomeScopedEnvFile &&
+          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
+        ) {
+          continue;
+        }
+        if (!isQwenScopedEnvFile && excludedVars.includes(key)) {
+          continue;
+        }
+        setRuntimeEnvIfUnset(effectiveEnv, key, parsedEnv[key]!);
+      }
+    } catch {
+      // Match loadEnvironment(): dotenv read errors are ignored.
+    }
+  }
+
+  if (settings.env) {
+    for (const [key, value] of Object.entries(settings.env)) {
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (typeof value !== 'string') continue;
+      setRuntimeEnvIfUnset(effectiveEnv, key, value);
+    }
+  }
+
+  const overlayKeys = Object.keys(effectiveEnv)
+    .filter((key) => effectiveEnv[key] !== baseEnv[key])
+    .sort();
+  return {
+    effectiveEnv: Object.freeze({ ...effectiveEnv }),
+    overlayKeys: Object.freeze(overlayKeys),
+    envFilePaths: Object.freeze([...envFilePaths]),
+  };
 }
 
 /**
