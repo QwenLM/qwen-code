@@ -167,8 +167,7 @@ def test_timeout_rejects_boolean_value() -> None:
         TimeoutOptions.from_mapping({"stream_close": True})
 
 
-def test_rejects_mcp_servers() -> None:
-    with pytest.raises(ValidationError, match="mcp_servers is not supported"):
-        validate_query_options(
-            QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
-        )
+def test_accepts_mcp_servers() -> None:
+    validate_query_options(
+        QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
+    )
