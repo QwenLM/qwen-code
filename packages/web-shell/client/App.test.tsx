@@ -1078,6 +1078,87 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('surfaces the outer approval as a split notice and returns to chat when clicked', async () => {
+    // The overlay is suppressed under the split, so the outer approval would be
+    // invisible; a notice banner (with a way back) is the only signal.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    const notice = container.querySelector(
+      '[data-testid="split-approval-notice"]',
+    );
+    expect(notice).not.toBeNull();
+    // Its button leaves the split (mainView -> 'chat') so the approval overlay,
+    // which only renders in chat, becomes visible and actionable.
+    await act(async () => {
+      notice!
+        .querySelector('button')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+  });
+
+  it('auto-closes the split view when the screen shrinks below the breakpoint', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    // Shrinking below the large-screen breakpoint folds the split back to chat.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
   it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
     // Drive isLargeScreen through a controllable media query: open the panel on
     // a large screen, then flip below the breakpoint and confirm it closes.

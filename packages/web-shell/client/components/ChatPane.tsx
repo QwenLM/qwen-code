@@ -72,6 +72,18 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
 
+  // Anchor the streaming timer to the turn's own start (the last user message's
+  // timestamp) rather than letting StreamingStatus fall back to "now" — so a
+  // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
+  const activeTurnStartedAt = useMemo(() => {
+    if (!isResponding) return undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message?.role === 'user') return message.timestamp;
+    }
+    return undefined;
+  }, [messages, isResponding]);
+
   const handleSubmit = useCallback(
     (
       text: string,
@@ -151,6 +163,14 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
         )}
       </header>
 
+      {connection.error && (
+        <div className={styles.connectionError} role="alert">
+          <span className={styles.connectionErrorText}>
+            {t('splitView.paneConnectionError')}: {connection.error}
+          </span>
+        </div>
+      )}
+
       <div className={styles.body}>
         <MessageList
           messages={messages}
@@ -186,7 +206,7 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
             />
           </div>
         )}
-        <StreamingStatus startedAt={undefined} />
+        <StreamingStatus startedAt={activeTurnStartedAt} />
         <ChatEditor
           onSubmit={handleSubmit}
           onCancel={handleCancel}

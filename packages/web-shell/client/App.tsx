@@ -1245,6 +1245,13 @@ export function App({
     setSplitSessionIds(sessionIds ?? []);
     setMainView('split');
   }, []);
+  // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
+  // close) doesn't re-fire on every App re-render. Back from the split returns
+  // to the Session Overview — the hub the split is launched from.
+  const handleSplitExit = useCallback(
+    () => openPanel('sessions'),
+    [openPanel],
+  );
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -1260,14 +1267,26 @@ export function App({
   // Overview panel and the split view — both are large-screen-only surfaces
   // whose entry points are hidden on small screens, so leaving them up would
   // strand the user in a view they can no longer re-enter.
+  // When a shrink closes the split, its panes unmount and take keyboard focus
+  // with them; flag the composer to be refocused once the chat is shown again.
+  const focusComposerAfterSplitCloseRef = useRef(false);
   useEffect(() => {
     if (!isLargeScreen && activePanel === 'sessions') {
       setActivePanel(null);
     }
     if (!isLargeScreen && mainView === 'split') {
       setMainView('chat');
+      focusComposerAfterSplitCloseRef.current = true;
     }
   }, [isLargeScreen, activePanel, mainView]);
+  // Land focus on the composer after a shrink-driven split close so keyboard
+  // users aren't dropped onto <body> — but not when the chat now shows an
+  // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).
+  useEffect(() => {
+    if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
+    focusComposerAfterSplitCloseRef.current = false;
+    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
+  }, [mainView, activePanel, approvalOverlayActive]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus to the Back button when a panel
   // opens (or when switching directly between panels) and back to the composer
@@ -4560,7 +4579,7 @@ export function App({
                         initialSessionIds={splitSessionIds}
                         // Back returns to the Session Overview (the hub the split
                         // is launched from), not the single-session chat.
-                        onExit={() => openPanel('sessions')}
+                        onExit={handleSplitExit}
                         onError={reportError}
                       />
                     </CompactModeContext.Provider>

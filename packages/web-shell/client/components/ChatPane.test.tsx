@@ -32,8 +32,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useTranscriptBlocks: () => [],
 }));
 
+let messagesState: any[];
 vi.mock('../hooks/useMessages', () => ({
-  useMessages: () => [{ id: 'm1', role: 'user', content: 'hi' }],
+  useMessages: () => messagesState,
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -50,7 +51,14 @@ vi.mock('./MessageList', () => ({
     </div>
   ),
 }));
-vi.mock('./StreamingStatus', () => ({ StreamingStatus: () => <div /> }));
+vi.mock('./StreamingStatus', () => ({
+  StreamingStatus: (props: any) => (
+    <div
+      data-testid="pane-streaming"
+      data-started-at={props.startedAt === undefined ? 'none' : String(props.startedAt)}
+    />
+  ),
+}));
 vi.mock('./ChatEditor', () => ({
   ChatEditor: (props: any) => {
     latestOnSubmit = props.onSubmit;
@@ -108,6 +116,7 @@ beforeEach(() => {
   };
   streamingStateValue = 'idle';
   pendingPermission = null;
+  messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   sendPrompt.mockReset();
   // Each sendPrompt returns a promise the test controls, so we can assert the
@@ -275,5 +284,39 @@ describe('ChatPane', () => {
       await Promise.resolve();
     });
     expect(onError).toHaveBeenCalled();
+  });
+
+  it('surfaces a connection-loss banner when the pane connection drops', () => {
+    connectionState.error = 'socket closed';
+    render();
+    expect(container!.textContent).toContain('Connection lost');
+    expect(container!.textContent).toContain('socket closed');
+  });
+
+  it('shows no connection banner when the connection is healthy', () => {
+    render();
+    expect(container!.textContent).not.toContain('Connection lost');
+  });
+
+  it('anchors the streaming timer to the active turn (last user message time)', () => {
+    streamingStateValue = 'responding';
+    messagesState = [
+      { id: 'u1', role: 'user', content: 'first', timestamp: 1000 },
+      { id: 'a1', role: 'assistant', content: '…', timestamp: 1500 },
+      { id: 'u2', role: 'user', content: 'second', timestamp: 2000 },
+    ];
+    render();
+    // The most recent user turn (2000), not "now" or an earlier one.
+    expect(testid('pane-streaming')?.getAttribute('data-started-at')).toBe(
+      '2000',
+    );
+  });
+
+  it('passes no explicit start time while idle', () => {
+    streamingStateValue = 'idle';
+    render();
+    expect(testid('pane-streaming')?.getAttribute('data-started-at')).toBe(
+      'none',
+    );
   });
 });

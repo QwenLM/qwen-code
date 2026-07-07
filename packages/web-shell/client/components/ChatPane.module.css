@@ -24,6 +24,23 @@
   flex: 0 0 auto;
 }
 
+/* Per-pane connection-loss indicator: each pane has its own daemon connection,
+   so a drop on one shouldn't silently leave stale messages with no signal. */
+.connectionError {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
+  color: var(--warning-color);
+  font-size: 12px;
+}
+.connectionErrorText {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .title {
   flex: 1 1 auto;
   min-width: 0;
