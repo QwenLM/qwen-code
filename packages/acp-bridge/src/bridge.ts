@@ -912,6 +912,14 @@ export function extractErrorCode(err: unknown): string | undefined {
   return undefined;
 }
 
+export function classifyTurnErrorKind(
+  message: string,
+): 'model_stream_interrupted' | undefined {
+  return message.trim().toLowerCase() === 'terminated'
+    ? 'model_stream_interrupted'
+    : undefined;
+}
+
 function broadcastTurnError(
   entry: SessionEntry,
   sessionId: string,
@@ -921,6 +929,16 @@ function broadcastTurnError(
 ): void {
   const message = extractErrorMessage(err);
   const code = extractErrorCode(err);
+  const errorKind = classifyTurnErrorKind(message);
+  if (errorKind) {
+    writeServeDebugLine(
+      `turn_error classified session=${JSON.stringify(sessionId)} ` +
+        `message=${JSON.stringify(message)} ` +
+        `errorKind=${JSON.stringify(errorKind)}` +
+        (code ? ` code=${JSON.stringify(code)}` : '') +
+        (promptId ? ` promptId=${JSON.stringify(promptId)}` : ''),
+    );
+  }
   entry.retryAllowed = true;
   try {
     entry.events.publish({
@@ -929,6 +947,7 @@ function broadcastTurnError(
         sessionId,
         message,
         ...(code ? { code } : {}),
+        ...(errorKind ? { errorKind } : {}),
         ...(promptId ? { promptId } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
