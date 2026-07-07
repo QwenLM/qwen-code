@@ -7,10 +7,11 @@
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   Storage,
   readCronTasks,
+  SessionService,
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -422,6 +423,10 @@ describe('scheduled-task keepalive', () => {
     await ka.tick();
     ka.stop();
     expect(spawns).toHaveLength(1);
+    expect(spawns[0]).toEqual({
+      workspaceCwd: workspace,
+      sessionScope: 'thread',
+    });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
     expect(names[0]![1].displayName).toContain('⏰');
@@ -456,8 +461,12 @@ describe('scheduled-task keepalive', () => {
   it('rolls back the spawned session when the task vanishes before write', async () => {
     // Seed an unbound task, then replace it with a different task between the
     // keepalive's read and the updateCronTasks callback — simulating a
-    // concurrent delete. The spawned session must be closed.
+    // concurrent delete. The spawned session must be closed AND its persisted
+    // transcript removed.
     const closed: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(undefined);
     const rollbackBridge = {
       ...bridge,
       spawnOrAttach: async () => {
@@ -482,5 +491,40 @@ describe('scheduled-task keepalive', () => {
     await ka.tick();
     ka.stop();
     expect(closed).toContain('orphan-sess');
+    expect(removeSpy).toHaveBeenCalledWith('orphan-sess');
+    removeSpy.mockRestore();
+  });
+
+  it('a hung spawnOrAttach does not stall subsequent ticks', async () => {
+    // spawnOrAttach is not abortable — if it hangs, the keepalive must time
+    // out and move on so later ticks can still heartbeat/revive other
+    // sessions. Use a tiny interval so the backoff expires fast.
+    await updateCronTasks(workspace, () => [
+      task({ id: 'hung', prompt: 'will hang' }),
+      task({ id: 'ok', sessionId: 'healthy-sess', prompt: 'fine' }),
+    ]);
+    let releaseSpawn: (() => void) | undefined;
+    const hungBridge = {
+      ...bridge,
+      spawnOrAttach: () =>
+        new Promise<{ sessionId: string }>((resolve) => {
+          releaseSpawn = () => resolve({ sessionId: 'late-sess' });
+        }),
+      closeSession: async () => {},
+      updateSessionMetadata: () => {},
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: hungBridge,
+      boundWorkspace: workspace,
+      intervalMs: 50,
+      spawnTimeoutMs: 50,
+    });
+    // First tick: spawn hangs → timeout fires → tick completes.
+    await ka.tick();
+    // healthy-sess should still get heartbeated despite the hung spawn.
+    expect(beats).toContain('healthy-sess');
+    ka.stop();
+    // Clean up the hung spawn.
+    releaseSpawn?.();
   });
 });

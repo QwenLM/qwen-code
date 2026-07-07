@@ -92,6 +92,8 @@ export interface KeepaliveBridge {
 
 /** Per-session revive-load timeout: a hung reload must not stall the sweep. */
 const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
+/** Per-task spawn timeout: a hung spawnOrAttach must not stall the sweep. */
+const KEEPALIVE_SPAWN_TIMEOUT_MS = 30_000;
 /** Upper bound on the per-session revive backoff, so a permanently-gone session
  * (transcript deleted out-of-band) is retried at most this often rather than
  * every interval forever. */
@@ -116,6 +118,7 @@ async function bindAndNameSessions(
   boundWorkspace: string,
   tasks: readonly DurableCronTask[],
   renamed: Set<string>,
+  spawnTimeoutMs: number,
 ): Promise<void> {
   const unbound = tasks.filter((t) => !t.sessionId && t.enabled !== false);
   const needsName = tasks.filter(
@@ -125,9 +128,36 @@ async function bindAndNameSessions(
   for (const task of unbound) {
     let spawnedSessionId: string | undefined;
     try {
-      const { sessionId } = await bridge.spawnOrAttach({
+      const rawSpawn = bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread',
+      });
+      // spawnOrAttach is not abortable — if the timeout fires first, the
+      // raw promise may still resolve later with a live session. Attach a
+      // background handler to clean up that orphan immediately.
+      let timedOut = false;
+      rawSpawn
+        .then(({ sessionId }) => {
+          if (timedOut) {
+            log.debug(
+              'keepalive: late spawn resolved, cleaning up',
+              task.id,
+              sessionId,
+            );
+            bridge.closeSession(sessionId).catch(() => {});
+            new SessionService(boundWorkspace)
+              .removeSession(sessionId)
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+      const { sessionId } = await withTimeout(
+        rawSpawn,
+        spawnTimeoutMs,
+        `spawnOrAttach(${task.id})`,
+      ).catch((err) => {
+        timedOut = true; // raw spawn may still resolve — background handler will clean up
+        throw err;
       });
       spawnedSessionId = sessionId;
       try {
@@ -194,6 +224,8 @@ export interface StartScheduledTaskKeepaliveOptions {
   intervalMs: number;
   /** Per-session revive timeout; defaults to KEEPALIVE_REVIVE_TIMEOUT_MS. */
   reviveTimeoutMs?: number;
+  /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
+  spawnTimeoutMs?: number;
 }
 
 export function startScheduledTaskKeepalive(
@@ -201,6 +233,7 @@ export function startScheduledTaskKeepalive(
 ): ScheduledTaskKeepalive {
   const { bridge, boundWorkspace, intervalMs } = opts;
   const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
+  const spawnTimeoutMs = opts.spawnTimeoutMs ?? KEEPALIVE_SPAWN_TIMEOUT_MS;
 
   // Per-session revive state: `nextAttemptAt` gates retries after failures so a
   // permanently-gone session isn't reloaded every interval; cleared on success.
@@ -261,7 +294,7 @@ export function startScheduledTaskKeepalive(
             reviving.delete(sessionId);
           });
         try {
-          await withTimeout(load, reviveTimeoutMs, sessionId);
+          await withTimeout(load, reviveTimeoutMs, `loadSession(${sessionId})`);
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
@@ -293,7 +326,13 @@ export function startScheduledTaskKeepalive(
       }
     }
 
-    await bindAndNameSessions(bridge, boundWorkspace, tasks, renamed);
+    await bindAndNameSessions(
+      bridge,
+      boundWorkspace,
+      tasks,
+      renamed,
+      spawnTimeoutMs,
+    );
   };
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
@@ -422,7 +461,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
     // raise an unhandled rejection once we've stopped awaiting it below.
     void load.catch(() => {});
     try {
-      await withTimeout(load, timeoutMs, sessionId);
+      await withTimeout(load, timeoutMs, `loadSession(${sessionId})`);
       loaded.push(sessionId);
     } catch (err) {
       // Timed out (or the load rejected). Do NOT await the raw `load` here: a
@@ -471,7 +510,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(`loadSession(${label}) timed out after ${ms}ms`));
+      reject(new Error(`${label} timed out after ${ms}ms`));
     }, ms);
     if (typeof timer.unref === 'function') timer.unref();
     p.then(
