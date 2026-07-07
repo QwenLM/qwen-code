@@ -49,7 +49,7 @@ export const ConsentPrompt = (props: ConsentPromptProps) => {
       height={constrainedHeight}
       overflow="hidden"
     >
-      <Box flexShrink={1} overflow="hidden">
+      <Box flexDirection="column" flexShrink={1} overflow="hidden">
         {typeof prompt === 'string' ? (
           <MarkdownDisplay
             isPending={true}

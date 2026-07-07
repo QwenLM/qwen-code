@@ -24,12 +24,18 @@ import {
   resolveActiveTeamName,
 } from '../agents/team/identity.js';
 import {
+  getPlanRequiredTeammatePreApprovalMessage,
+  isPlanRequiredTeammatePreApprovalAllowedTool,
+  isPlanRequiredTeammateAwaitingApproval,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
+import {
   updateTask,
   deleteTask,
   assertValidTaskId,
   getTask,
   listTasks,
   TaskOwnershipError,
+  RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
 import type { SwarmTask } from '../agents/team/types.js';
 import { truncateForConfirmation } from './task-create.js';
@@ -165,6 +171,26 @@ class TaskUpdateInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    const awaitingPlanApproval = isPlanRequiredTeammateAwaitingApproval(
+      this.config,
+    );
+    if (
+      awaitingPlanApproval &&
+      !isPlanRequiredTeammatePreApprovalAllowedTool(
+        ToolNames.TASK_UPDATE,
+        this.params,
+      )
+    ) {
+      const msg = getPlanRequiredTeammatePreApprovalMessage(
+        ToolNames.TASK_UPDATE,
+      );
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     const teamName = resolveActiveTeamName(
       this.config.getTeamContext()?.teamName,
     );
@@ -201,6 +227,20 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         returnDisplay: msg,
         error: { message: msg },
       };
+    }
+
+    if (awaitingPlanApproval) {
+      const existing = await getTask(teamName, taskId);
+      if (existing && (existing.status !== 'pending' || existing.owner)) {
+        const msg =
+          'task_update can only claim an unowned pending task while this ' +
+          'plan-required teammate is waiting for leader approval.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
     }
 
     // Ownership guard for non-leader callers is now enforced inside
@@ -403,12 +443,23 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // would leave the dependent permanently blocked by an already-
     // completed task (verified repro: task_update({status:'completed',
     // addBlocks:['X']}) left X blockedBy the just-completed task).
+    // The reciprocal mirror must bypass the ownership guard (a teammate
+    // editing its own task's edges has to touch the neighbor it points
+    // at, which it may not own). Pass the RECIPROCAL_CALLER sentinel
+    // rather than an empty callerName so the intentional bypass is
+    // greppable in logs; it can never collide with a real teammate
+    // identity (agent names are sanitized to [a-z0-9-]).
     const reciprocalUpdates: Array<Promise<unknown>> = [];
     if (this.params.addBlocks?.length && this.params.status !== 'completed') {
       for (const blockedId of this.params.addBlocks) {
         if (blockedId === taskId) continue;
         reciprocalUpdates.push(
-          updateTask(teamName, blockedId, { addBlockedBy: [taskId] }),
+          updateTask(
+            teamName,
+            blockedId,
+            { addBlockedBy: [taskId] },
+            { callerName: RECIPROCAL_CALLER },
+          ),
         );
       }
     }
@@ -416,7 +467,12 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       for (const blockerId of this.params.addBlockedBy) {
         if (blockerId === taskId) continue;
         reciprocalUpdates.push(
-          updateTask(teamName, blockerId, { addBlocks: [taskId] }),
+          updateTask(
+            teamName,
+            blockerId,
+            { addBlocks: [taskId] },
+            { callerName: RECIPROCAL_CALLER },
+          ),
         );
       }
     }

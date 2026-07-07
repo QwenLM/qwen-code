@@ -1646,6 +1646,36 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('requires the standalone cli-entry wrapper in dist', () => {
+    const createdDist = ensureMinimalDist({ includeCliEntry: false });
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'win-x64',
+            '--node-archive',
+            createFakeWindowsNodeArchive(tmpDir),
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          { stdio: 'pipe' },
+        ),
+      ).toThrow(
+        /Required dist asset missing: .*cli-entry\.js[\s\S]*npm run prepare:package/,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
   it('packages a win-x64 standalone archive', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -1678,8 +1708,22 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
       ).toBe(true);
       expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
         existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
       ).toBe(true);
+      const shim = readScript(
+        path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
+      );
+      expect(shim).toContain('if "%~1"=="serve" goto serve');
+      expect(shim).toContain(
+        '"%ROOT%\\node\\node.exe" --expose-gc "%ROOT%\\lib\\cli.js" %*',
+      );
+      expect(shim).toContain(
+        '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
+      );
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(2);
       expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
         'qwen-code-win-x64.zip',
       );
@@ -1688,6 +1732,235 @@ describe('standalone release packaging', () => {
       restoreMinimalDist(createdDist);
     }
   }, 30_000);
+
+  it('skips npm-only artifacts staged in dist', () => {
+    const createdDist = ensureMinimalDist({
+      includeNpmPackageArtifacts: true,
+    });
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
+
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(path.join(outDir, 'qwen-code-win-x64.zip'), extractDir);
+
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js')),
+      ).toBe(false);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
+      ).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  }, 30_000);
+
+  it('requires the native audio prebuild when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
+
+    try {
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            target,
+            '--node-archive',
+            fakeRuntimeArchive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  it('requires a native audio prebuild file when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      prebuildDirName,
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            target,
+            '--node-archive',
+            fakeRuntimeArchive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
+    } finally {
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  itOnUnix(
+    'packages a Unix standalone archive with a serve fast path shim',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+          stdio: 'ignore',
+        });
+
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+        ).toBe(true);
+        const shim = readScript(
+          path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
+        );
+        expect(shim).toContain('if [ "${1:-}" = "serve" ]; then');
+        expect(shim).toContain(
+          'exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
+        );
+        expect(shim).toContain(
+          'exec "$ROOT/node/bin/node" --expose-gc "$ROOT/lib/cli.js" "$@"',
+        );
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix('does not package audio-capture test artifacts', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      'linux-x64',
+    );
+    const prebuildFile = path.join(
+      prebuildDir,
+      '@qwen-code+audio-capture.node',
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+    const createdPrebuild = !existsSync(prebuildFile);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+      if (createdPrebuild) {
+        writeFileSync(prebuildFile, 'fake native addon\n');
+      }
+
+      const archive = packageFakeStandalone(tmpDir);
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      const addonDist = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@qwen-code',
+        'audio-capture',
+        'dist',
+      );
+      expect(existsSync(path.join(addonDist, 'index.js'))).toBe(true);
+      expect(existsSync(path.join(addonDist, 'platform.test.js'))).toBe(false);
+      expect(existsSync(path.join(addonDist, 'platform.test.d.ts'))).toBe(
+        false,
+      );
+      expect(existsSync(path.join(addonDist, 'platform.test.js.map'))).toBe(
+        false,
+      );
+    } finally {
+      if (createdPrebuild) {
+        rmSync(prebuildFile, { force: true });
+      }
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
     const createdDist = ensureMinimalDist();
@@ -1812,6 +2085,9 @@ describe('standalone release packaging', () => {
 
     // release.yml builds standalone archives, verifies them, and creates GitHub Release
     expect(releaseWorkflow).toContain('npm run package:standalone:release --');
+    expect(releaseWorkflow).toContain(
+      'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
+    );
     expect(releaseWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
@@ -1960,6 +2236,25 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       '(cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)',
     );
+  });
+
+  it('automatically publishes the VSCode companion after stable CLI releases', () => {
+    const workflow = readScript(
+      '.github/workflows/release-vscode-companion.yml',
+    );
+
+    expect(workflow).toContain("release:\n    types: ['published']");
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toContain("github.event_name != 'release'");
+    expect(workflow).toContain(
+      "startsWith(github.event.release.tag_name, 'v')",
+    );
+    expect(workflow).toContain('github.event.release.prerelease == false');
+    expect(
+      workflow.match(
+        /github\.event\.release\.tag_name \|\| github\.event\.inputs\.ref \|\| github\.sha/g,
+      ) || [],
+    ).toHaveLength(3);
   });
 
   it('does not whitelist internal planning documents in gitignore', () => {
@@ -2583,6 +2878,11 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         const bashrc = readScript(path.join(home, '.bashrc'));
 
         expect(output).toContain('installed successfully, to start:');
+        expect(output).toContain(
+          'Other qwen executables were found and may shadow the new install',
+        );
+        expect(output).toContain(existingQwen);
+        expect(output).toContain('source ~/.bashrc');
         expect(bashrc).toContain('# Qwen Code PATH block begin');
         expect(bashrc).toContain(
           `export PATH='${path.join(installRoot, 'bin')}':$PATH`,
@@ -2603,6 +2903,78 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
           .toString()
           .trim();
         expect(resolvedQwen).toBe(installedBin);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'prints a shell reload hint when the install dir is not on PATH yet',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          // Minimal PATH keeps the fresh install dir off the invoking
+          // shell's PATH so the reload hint is always printed. The shadow
+          // warning is NOT asserted on either way: PRE_INSTALL_QWENS also
+          // scans well-known absolute paths (/usr/local/bin etc.), so its
+          // output depends on the host machine.
+          { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
+        ).toString();
+
+        expect(output).toContain('source ~/.bashrc');
+        expect(output).toContain('Load new PATH');
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'points the reload hint at ~/.bash_profile when it is the rc file written',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        const bashProfile = path.join(home, '.bash_profile');
+
+        // Default macOS bash setup: ~/.bash_profile exists, ~/.bashrc does
+        // not, so maybe_update_shell_path falls back to ~/.bash_profile.
+        mkdirSync(home, { recursive: true });
+        writeFileSync(bashProfile, '# existing profile\n');
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
+        ).toString();
+
+        expect(readFileSync(bashProfile, 'utf8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        // An ANSI reset sits between "in" and the rc name, so match the
+        // success message and the reload hint on the rc name alone.
+        expect(output).toContain('source ~/.bash_profile');
+        expect(output).not.toContain('~/.bashrc');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);
@@ -3357,7 +3729,13 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
       const fakeBin = path.join(tmpDir, 'bin');
       mkdirSync(fakeBin, { recursive: true });
       writeFileSync(path.join(fakeBin, 'curl'), '#!/usr/bin/env sh\nexit 22\n');
+      // Shadow any system Node on PATH (e.g. /usr/bin/node on self-hosted
+      // runners) with a stub that fails version detection, so the npm fallback
+      // deterministically fails with "Unable to determine Node.js version"
+      // regardless of whether the host has Node installed in /usr/bin.
+      writeFileSync(path.join(fakeBin, 'node'), '#!/usr/bin/env sh\nexit 1\n');
       chmodSync(path.join(fakeBin, 'curl'), 0o755);
+      chmodSync(path.join(fakeBin, 'node'), 0o755);
 
       let failureMessage = '';
       try {
@@ -3722,7 +4100,10 @@ describe('Windows PowerShell uninstaller end-to-end', () => {
   });
 });
 
-function ensureMinimalDist() {
+function ensureMinimalDist({
+  includeCliEntry = true,
+  includeNpmPackageArtifacts = false,
+} = {}) {
   const distPath = path.resolve('dist');
   const backupPath = existsSync(distPath)
     ? path.join(
@@ -3742,6 +4123,20 @@ function ensureMinimalDist() {
     recursive: true,
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
+  if (includeCliEntry) {
+    writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
+  }
+  if (includeNpmPackageArtifacts) {
+    writeFileSync(
+      path.join(distPath, 'postinstall.js'),
+      'console.log("postinstall");\n',
+    );
+    mkdirSync(path.join(distPath, 'patches'), { recursive: true });
+    writeFileSync(
+      path.join(distPath, 'patches', 'dependency.patch'),
+      'patch\n',
+    );
+  }
   writeFileSync(path.join(distPath, 'chunks/index.js'), 'export {};\n');
   writeFileSync(
     path.join(distPath, 'package.json'),

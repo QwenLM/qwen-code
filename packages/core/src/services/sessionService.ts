@@ -15,16 +15,27 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
+import {
+  deserializeSnapshots,
+  FILE_HISTORY_DIR,
+  MAX_SNAPSHOTS,
+  serializeSnapshot,
+} from './fileHistoryService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
+import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import { SessionOrganizationService } from './session-organization-service.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -65,7 +76,13 @@ export interface SessionListItem {
    * chose.
    */
   titleSource?: TitleSource;
+  /** True when the item was read from the archive directory. */
+  isArchived?: boolean;
 }
+
+export type SessionArchiveState = 'active' | 'archived';
+
+export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
 
 /**
  * Pagination options for listing sessions.
@@ -82,6 +99,11 @@ export interface ListSessionsOptions {
    * @default 20
    */
   size?: number;
+  /**
+   * Which session directory to list.
+   * @default 'active'
+   */
+  archiveState?: SessionArchiveState;
 }
 
 /**
@@ -108,6 +130,32 @@ export interface RemoveSessionsResult {
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
+export interface ArchiveSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface ArchiveSessionsOptions {
+  knownLocation?: 'active';
+}
+
+export interface UnarchiveSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+export interface UnarchiveSessionsOptions {
+  knownLocation?: 'archived';
+}
+
+export interface SessionServiceOptions {
+  onWarning?: (message: string) => void;
+}
+
 /**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
@@ -129,6 +177,8 @@ export interface ResumedSessionData {
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
   lastCompletedUuid: string | null;
+  /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
+  fileHistorySnapshots?: FileHistorySnapshot[];
 }
 
 /**
@@ -157,6 +207,57 @@ const MAX_PROMPT_SCAN_LINES = 10;
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
+async function copyFileHistoryBackups(
+  sourceSessionId: string,
+  targetSessionId: string,
+): Promise<void> {
+  const fsPromises = await import('node:fs/promises');
+  const sourceDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    sourceSessionId,
+  );
+  const targetDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    targetSessionId,
+  );
+
+  let entries: string[];
+  try {
+    entries = await fsPromises.readdir(sourceDir);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    debugLogger.warn(`copyFileHistoryBackups: readdir failed: ${e}`);
+    return;
+  }
+  if (entries.length === 0) return;
+
+  try {
+    await fsPromises.mkdir(targetDir, { recursive: true });
+  } catch (e) {
+    debugLogger.warn(`copyFileHistoryBackups: mkdir failed: ${e}`);
+    return;
+  }
+  await Promise.all(
+    entries.map(async (name) => {
+      const src = path.join(sourceDir, name);
+      const dst = path.join(targetDir, name);
+      try {
+        await fsPromises.link(src, dst);
+      } catch {
+        try {
+          await fsPromises.copyFile(src, dst);
+        } catch (copyErr) {
+          debugLogger.warn(
+            `copyFileHistoryBackups: failed to copy ${name}: ${copyErr}`,
+          );
+        }
+      }
+    }),
+  );
+}
+
 /**
  * Service for managing chat sessions.
  *
@@ -171,14 +272,75 @@ const TAIL_READ_SIZE = 64 * 1024;
 export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
+  private readonly projectRoot: string;
+  private readonly onWarning: ((message: string) => void) | undefined;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd);
+    this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
+    this.onWarning = options.onWarning;
+  }
+
+  /** The workspace root this service is bound to (the cwd it was constructed
+   * with). Lets callers that already hold a service — e.g. the session
+   * archive/delete choke points — reach per-project state such as the durable
+   * scheduled-tasks file without re-plumbing the workspace path. */
+  getProjectRoot(): string {
+    return this.projectRoot;
+  }
+
+  private warn(message: string): void {
+    debugLogger.warn(message);
+    this.onWarning?.(message);
   }
 
   private getChatsDir(): string {
     return path.join(this.storage.getProjectDir(), 'chats');
+  }
+
+  private getArchiveChatsDir(): string {
+    return path.join(this.getChatsDir(), 'archive');
+  }
+
+  private getChatsDirForState(state: SessionArchiveState): string {
+    return state === 'archived'
+      ? this.getArchiveChatsDir()
+      : this.getChatsDir();
+  }
+
+  private getSessionFilePath(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.jsonl`);
+  }
+
+  private getWorktreeSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(
+      this.getChatsDirForState(state),
+      `${sessionId}.worktree.json`,
+    );
+  }
+
+  private async sessionBelongsToCurrentProject(
+    sessionId: string,
+    recordCwd: string,
+  ): Promise<boolean> {
+    if (getProjectHash(recordCwd) === this.projectHash) {
+      return true;
+    }
+
+    const status = await readRuntimeStatus(
+      this.storage.getRuntimeStatusPath(sessionId),
+    );
+    return (
+      status?.sessionId === sessionId &&
+      getProjectHash(status.workDir) === this.projectHash
+    );
   }
 
   /**
@@ -187,7 +349,122 @@ export class SessionService {
    * exist yet — consumers must handle ENOENT as "no active worktree".
    */
   getWorktreeSessionPath(sessionId: string): string {
-    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
+    return this.getWorktreeSessionPathForState(sessionId, 'active');
+  }
+
+  private async readProjectSessionHead(
+    sessionId: string,
+    filePath: string,
+  ): Promise<ChatRecord | undefined> {
+    try {
+      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      if (records.length === 0) {
+        return undefined;
+      }
+      const firstRecord = records[0];
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, firstRecord.cwd))
+      ) {
+        return undefined;
+      }
+      return firstRecord;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      this.warn(`readProjectSessionHead: failed to read ${filePath}: ${error}`);
+      throw error;
+    }
+  }
+
+  async getSessionLocation(sessionId: string): Promise<SessionLocation> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+
+    const [active, archived] = await Promise.all([
+      this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, 'active'),
+      ),
+      this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, 'archived'),
+      ),
+    ]);
+
+    if (active && archived) return 'conflict';
+    if (active) return 'active';
+    if (archived) return 'archived';
+    return undefined;
+  }
+
+  private removeFileIfExists(filePath: string): void {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+  }
+
+  private removeWorktreeSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
+  private async removeSessionOrganization(sessionId: string): Promise<void> {
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSession(sessionId);
+    } catch (error) {
+      this.warn(
+        `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
+      );
+    }
+  }
+
+  private async removeSessionOrganizations(
+    sessionIds: string[],
+  ): Promise<void> {
+    if (sessionIds.length === 0) return;
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSessions(sessionIds);
+    } catch (error) {
+      this.warn(
+        `removeSessions: failed to clear session organization for ${sessionIds.join(
+          ', ',
+        )}: ${error}`,
+      );
+    }
+  }
+
+  private moveOptionalFile(sourcePath: string, targetPath: string): boolean {
+    if (!fs.existsSync(sourcePath)) {
+      return false;
+    }
+    if (fs.existsSync(targetPath)) {
+      throw new Error('Archive sidecar conflict: destination already exists');
+    }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.renameSync(sourcePath, targetPath);
+    return true;
+  }
+
+  private sessionFileMoveError(
+    action: 'archive' | 'unarchive',
+    error: unknown,
+  ): Error {
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown error';
+    return new Error(`Failed to ${action} session file: ${code}`);
   }
 
   /**
@@ -254,6 +531,9 @@ export class SessionService {
    * Public accessor: returns both the current custom title and its source
    * for a given session. Used by `ChatRecordingService` on resume to
    * preserve the persisted `titleSource` rather than defaulting to manual.
+   *
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   getSessionTitleInfo(sessionId: string): {
     title?: string;
@@ -391,6 +671,9 @@ export class SessionService {
    * of multi-MB sessions. Call this lazily, only when a specific
    * session's message count is about to be displayed (e.g., from a
    * preview panel) or computed from a resumed conversation.
+   *
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async countSessionMessages(sessionId: string): Promise<number> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -402,7 +685,14 @@ export class SessionService {
     try {
       const firstRecords = await jsonl.readLines<ChatRecord>(filePath, 1);
       if (firstRecords.length === 0) return 0;
-      if (getProjectHash(firstRecords[0].cwd) !== this.projectHash) return 0;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          sessionId,
+          firstRecords[0].cwd,
+        ))
+      ) {
+        return 0;
+      }
     } catch {
       return 0;
     }
@@ -455,8 +745,9 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20 } = options;
-    const chatsDir = this.getChatsDir();
+    const { cursor, size = 20, archiveState = 'active' } = options;
+    const chatsDir = this.getChatsDirForState(archiveState);
+    const isArchived = archiveState === 'archived';
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
@@ -529,10 +820,14 @@ export class SessionService {
       if (records.length === 0) continue;
       const firstRecord = records[0];
 
-      // Skip if not matching current project
-      // We use cwd comparison since first record doesn't have projectHash
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          firstRecord.sessionId,
+          firstRecord.cwd,
+        ))
+      ) {
+        continue;
+      }
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -549,6 +844,7 @@ export class SessionService {
         // and `countSessionMessages` for the rationale.
         customTitle: titleInfo.title,
         titleSource: titleInfo.source,
+        isArchived,
       });
     }
 
@@ -679,7 +975,9 @@ export class SessionService {
    * Reconstructs the full conversation from tree-structured records.
    *
    * @param sessionId The session ID to load
-   * @returns Session data for resumption, or null if not found
+   * @returns Session data for resumption, or undefined if not found
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async loadSession(
     sessionId: string,
@@ -692,10 +990,13 @@ export class SessionService {
       return;
     }
 
-    // Verify this session belongs to the current project
     const firstRecord = records[0];
-    const recordProjectHash = getProjectHash(firstRecord.cwd);
-    if (recordProjectHash !== this.projectHash) {
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      ))
+    ) {
       return;
     }
 
@@ -716,10 +1017,48 @@ export class SessionService {
       messages,
     };
 
+    // Extract file history snapshots for /rewind across resume
+    const fileHistorySnapshots: FileHistorySnapshot[] = [];
+    const seenPromptIds = new Map<string, number>();
+    for (const msg of messages) {
+      if (
+        msg.type === 'system' &&
+        msg.subtype === 'file_history_snapshot' &&
+        msg.systemPayload
+      ) {
+        const payload = msg.systemPayload as FileHistorySnapshotRecordPayload;
+        if (!Array.isArray(payload?.snapshots)) continue;
+        let deserialized: FileHistorySnapshot[];
+        try {
+          deserialized = deserializeSnapshots(payload.snapshots);
+        } catch (e) {
+          debugLogger.warn(
+            `loadSession: skipping malformed file_history_snapshot: ${e}`,
+          );
+          continue;
+        }
+        for (const s of deserialized) {
+          const existingIdx = seenPromptIds.get(s.promptId);
+          if (existingIdx !== undefined) {
+            fileHistorySnapshots[existingIdx] = s;
+          } else {
+            seenPromptIds.set(s.promptId, fileHistorySnapshots.length);
+            fileHistorySnapshots.push(s);
+          }
+        }
+      }
+    }
+    const cappedSnapshots =
+      fileHistorySnapshots.length > MAX_SNAPSHOTS
+        ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
+        : fileHistorySnapshots;
+
     return {
       conversation,
       filePath,
       lastCompletedUuid: lastMessage.uuid,
+      fileHistorySnapshots:
+        cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
     };
   }
 
@@ -730,25 +1069,40 @@ export class SessionService {
    * @returns true if removed, false if not found
    */
   async removeSession(sessionId: string): Promise<boolean> {
+    const removed = await this.removeSessionFiles(sessionId);
+    if (removed) {
+      await this.removeSessionOrganization(sessionId);
+    }
+    return removed;
+  }
+
+  private async removeSessionFiles(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      // Verify the file exists and belongs to this project
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
-      if (records.length === 0) {
+      const activePath = this.getSessionFilePath(sessionId, 'active');
+      const active = await this.readProjectSessionHead(sessionId, activePath);
+      if (active) {
+        this.removeFileIfExists(activePath);
+        const archivedPath = this.getSessionFilePath(sessionId, 'archived');
+        if (fs.existsSync(archivedPath)) {
+          this.removeFileIfExists(archivedPath);
+        }
+        this.removeWorktreeSidecars(sessionId);
+        return true;
+      }
+      const archivedPath = this.getSessionFilePath(sessionId, 'archived');
+      const archived = await this.readProjectSessionHead(
+        sessionId,
+        archivedPath,
+      );
+      if (!archived) {
         return false;
       }
-
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
-        return false;
-      }
-
-      fs.unlinkSync(filePath);
+      this.removeFileIfExists(archivedPath);
+      this.removeWorktreeSidecars(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -756,6 +1110,140 @@ export class SessionService {
       }
       throw error;
     }
+  }
+
+  async archiveSessions(
+    sessionIds: string[],
+    options: ArchiveSessionsOptions = {},
+  ): Promise<ArchiveSessionsResult> {
+    const archived: string[] = [];
+    const alreadyArchived: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    for (const sessionId of [...new Set(sessionIds)]) {
+      try {
+        if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+          notFound.push(sessionId);
+          continue;
+        }
+        if (options.knownLocation !== 'active') {
+          const location = await this.getSessionLocation(sessionId);
+          if (location === undefined) {
+            notFound.push(sessionId);
+            continue;
+          }
+          if (location === 'archived') {
+            alreadyArchived.push(sessionId);
+            continue;
+          }
+          if (location === 'conflict') {
+            throw new Error(`Session archive conflict: ${sessionId}`);
+          }
+        }
+
+        const sourcePath = this.getSessionFilePath(sessionId, 'active');
+        const targetPath = this.getSessionFilePath(sessionId, 'archived');
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
+        const activeSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'active',
+        );
+        const archivedSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'archived',
+        );
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          throw this.sessionFileMoveError('archive', error);
+        }
+        try {
+          this.moveOptionalFile(activeSidecar, archivedSidecar);
+        } catch (sidecarError) {
+          this.warn(
+            `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
+          );
+        }
+        archived.push(sessionId);
+      } catch (error) {
+        errors.push({
+          sessionId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
+    return { archived, alreadyArchived, notFound, errors };
+  }
+
+  async unarchiveSessions(
+    sessionIds: string[],
+    options: UnarchiveSessionsOptions = {},
+  ): Promise<UnarchiveSessionsResult> {
+    const unarchived: string[] = [];
+    const alreadyActive: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    for (const sessionId of [...new Set(sessionIds)]) {
+      try {
+        if (options.knownLocation !== 'archived') {
+          const location = await this.getSessionLocation(sessionId);
+          if (location === undefined) {
+            notFound.push(sessionId);
+            continue;
+          }
+          if (location === 'active') {
+            alreadyActive.push(sessionId);
+            continue;
+          }
+          if (location === 'conflict') {
+            throw new Error(`Session archive conflict: ${sessionId}`);
+          }
+        }
+
+        const sourcePath = this.getSessionFilePath(sessionId, 'archived');
+        const targetPath = this.getSessionFilePath(sessionId, 'active');
+        if (fs.existsSync(targetPath)) {
+          throw new Error(`Session archive conflict: ${sessionId}`);
+        }
+
+        const archivedSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'archived',
+        );
+        const activeSidecar = this.getWorktreeSessionPathForState(
+          sessionId,
+          'active',
+        );
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          throw this.sessionFileMoveError('unarchive', error);
+        }
+        try {
+          this.moveOptionalFile(archivedSidecar, activeSidecar);
+        } catch (sidecarError) {
+          this.warn(
+            `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
+        }
+        unarchived.push(sessionId);
+      } catch (error) {
+        errors.push({
+          sessionId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+
+    return { unarchived, alreadyActive, notFound, errors };
   }
 
   /**
@@ -778,7 +1266,7 @@ export class SessionService {
 
     const uniqueSessionIds = [...new Set(sessionIds)];
     const results = await Promise.allSettled(
-      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+      uniqueSessionIds.map((sessionId) => this.removeSessionFiles(sessionId)),
     );
 
     for (let i = 0; i < results.length; i++) {
@@ -797,6 +1285,8 @@ export class SessionService {
       }
     }
 
+    await this.removeSessionOrganizations(removed);
+
     return { removed, notFound, errors };
   }
 
@@ -809,6 +1299,8 @@ export class SessionService {
    *   existing callers are unchanged — pass `'auto'` only for titles produced
    *   by the auto-title generator.
    * @returns true if renamed successfully, false if session not found
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async renameSession(
     sessionId: string,
@@ -828,8 +1320,9 @@ export class SessionService {
         return false;
       }
 
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
+      ) {
         return false;
       }
 
@@ -868,10 +1361,11 @@ export class SessionService {
   /**
    * Forks a session to a new sessionId.
    *
-   * Reads the source JSONL into memory, rewrites every record's `sessionId`
-   * to `newSessionId`, rebuilds the `parentUuid` chain in write order so the
-   * fork is a linear continuation, stamps `forkedFrom: { sessionId, messageUuid }`
-   * on every copied record for audit, and writes the result to `<newId>.jsonl`.
+   * Reads the source JSONL into memory, reconstructs the active record chain,
+   * rewrites every record's `sessionId` to `newSessionId`, stamps `cwd` to this
+   * service's project root, rebuilds the `parentUuid` chain so the fork is a
+   * linear continuation, stamps `forkedFrom: { sessionId, messageUuid }` on
+   * every copied record for audit, and writes the result to `<newId>.jsonl`.
    *
    * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
    * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
@@ -880,6 +1374,8 @@ export class SessionService {
    *
    * @throws If source does not exist, source is empty, source belongs to a
    *   different project, or the target file already exists.
+   * @remarks Only checks active source sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async forkSession(
     sourceSessionId: string,
@@ -902,20 +1398,42 @@ export class SessionService {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
 
-    // Verify project ownership via the first record's cwd.
-    if (getProjectHash(records[0].cwd) !== this.projectHash) {
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        sourceSessionId,
+        records[0].cwd,
+      ))
+    ) {
       throw new Error(
         `Source session does not belong to current project: ${sourceSessionId}`,
       );
     }
 
-    // Rebuild the parentUuid chain in write order so the fork is a clean
-    // linear descendant. `forkedFrom` captures the origin of each message.
+    // Copy only the active branch. Rewind leaves old records in the JSONL as
+    // abandoned parentUuid branches; copying raw records would resurrect them.
+    const sourceRecords = this.reconstructHistory(records);
+    if (sourceRecords.length === 0) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+
+    // Rebuild the parentUuid chain in active-history order so the fork is a
+    // clean linear descendant. `forkedFrom` captures the origin of each
+    // message.
     let prevUuid: string | null = null;
-    const forked: ChatRecord[] = records.map((record) => {
+    const forked: ChatRecord[] = sourceRecords.map((record) => {
+      const systemPayload =
+        record.type === 'system' && record.subtype === 'file_history_snapshot'
+          ? remapFileHistorySnapshotPayload(
+              record.systemPayload,
+              sourceSessionId,
+              newSessionId,
+            )
+          : record.systemPayload;
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
+        cwd: this.projectRoot,
+        systemPayload,
         parentUuid: prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,
@@ -925,6 +1443,36 @@ export class SessionService {
       prevUuid = record.uuid;
       return next;
     });
+
+    // File-history snapshots are side-channel system records used by /rewind.
+    // They may not sit on the active message leaf copied above, and copied
+    // records may still point at the source session's prompt ids. Remap and
+    // top up snapshots explicitly so /branch sessions expose /rewind/snapshots
+    // immediately after they become live.
+    const sourceSession = await this.loadSession(sourceSessionId);
+    const existingSnapshotPromptIds =
+      collectFileHistorySnapshotPromptIds(forked);
+    const remappedSnapshots = sourceSession?.fileHistorySnapshots
+      ?.map((snapshot) =>
+        remapSnapshotPromptId(snapshot, sourceSessionId, newSessionId),
+      )
+      .filter((snapshot) => !existingSnapshotPromptIds.has(snapshot.promptId));
+    if (remappedSnapshots?.length) {
+      const snapshotRecord: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid: prevUuid,
+        sessionId: newSessionId,
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        timestamp: new Date().toISOString(),
+        cwd: this.projectRoot,
+        version: records[0].version,
+        systemPayload: {
+          snapshots: remappedSnapshots.map(serializeSnapshot),
+        },
+      };
+      forked.push(snapshotRecord);
+    }
 
     fs.mkdirSync(chatsDir, { recursive: true });
     const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
@@ -948,6 +1496,8 @@ export class SessionService {
       fs.closeSync(fd);
     }
 
+    await copyFileHistoryBackups(sourceSessionId, newSessionId);
+
     return { filePath: targetPath, copiedCount: forked.length };
   }
 
@@ -956,6 +1506,8 @@ export class SessionService {
    *
    * @param sessionId The session ID to look up
    * @returns The custom title, or undefined if none set
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   getSessionTitle(sessionId: string): string | undefined {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -972,6 +1524,8 @@ export class SessionService {
    *
    * @param title The custom title to search for (case-insensitive exact match)
    * @returns Array of matching session list items
+   * @remarks Only searches active sessions. Archived title search is not
+   * supported.
    */
   async findSessionsByTitle(title: string): Promise<SessionListItem[]> {
     const normalizedTitle = title.toLowerCase().trim();
@@ -1032,8 +1586,14 @@ export class SessionService {
       if (records.length === 0) continue;
       const firstRecord = records[0];
 
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          firstRecord.sessionId,
+          firstRecord.cwd,
+        ))
+      ) {
+        continue;
+      }
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -1105,7 +1665,14 @@ export class SessionService {
       try {
         const records = await jsonl.readLines<ChatRecord>(filePath, 1);
         if (records.length === 0) continue;
-        if (getProjectHash(records[0].cwd) !== this.projectHash) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
       } catch {
         continue;
       }
@@ -1135,6 +1702,8 @@ export class SessionService {
    *
    * @param sessionId The session ID to check
    * @returns true if session exists and belongs to current project
+   * @remarks Only checks active sessions. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` for archive-aware lookups.
    */
   async sessionExists(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -1148,10 +1717,18 @@ export class SessionService {
       if (records.length === 0) {
         return false;
       }
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      return recordProjectHash === this.projectHash;
+      return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
     } catch {
       return false;
+    }
+  }
+
+  async sessionExistsInAnyState(sessionId: string): Promise<boolean> {
+    try {
+      const location = await this.getSessionLocation(sessionId);
+      return location !== undefined;
+    } catch {
+      return true;
     }
   }
 }
@@ -1301,14 +1878,80 @@ export function buildApiHistoryFromConversation(
   return result;
 }
 
+function remapSnapshotPromptId(
+  snapshot: FileHistorySnapshot,
+  sourceSessionId: string,
+  newSessionId: string,
+): FileHistorySnapshot {
+  const sourcePrefix = `${sourceSessionId}########`;
+  if (!snapshot.promptId.startsWith(sourcePrefix)) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    promptId: `${newSessionId}########${snapshot.promptId.slice(sourcePrefix.length)}`,
+  };
+}
+
+function remapFileHistorySnapshotPayload(
+  payload: ChatRecord['systemPayload'],
+  sourceSessionId: string,
+  newSessionId: string,
+): ChatRecord['systemPayload'] {
+  const filePayload = payload as FileHistorySnapshotRecordPayload | undefined;
+  if (!Array.isArray(filePayload?.snapshots)) return payload;
+
+  try {
+    const snapshots = deserializeSnapshots(filePayload.snapshots).map(
+      (snapshot) =>
+        serializeSnapshot(
+          remapSnapshotPromptId(snapshot, sourceSessionId, newSessionId),
+        ),
+    );
+    return { snapshots };
+  } catch {
+    return payload;
+  }
+}
+
+function collectFileHistorySnapshotPromptIds(
+  records: ChatRecord[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const record of records) {
+    if (
+      record.type !== 'system' ||
+      record.subtype !== 'file_history_snapshot' ||
+      !record.systemPayload
+    ) {
+      continue;
+    }
+    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
+    if (!Array.isArray(payload.snapshots)) continue;
+    try {
+      for (const snapshot of deserializeSnapshots(payload.snapshots)) {
+        ids.add(snapshot.promptId);
+      }
+    } catch {
+      // Malformed snapshot records are ignored the same way loadSession does.
+    }
+  }
+  return ids;
+}
+
 /**
  * Replays stored UI telemetry events to rebuild metrics when resuming a session.
  * Also restores the last prompt token count from the best available source.
  */
 export function replayUiTelemetryFromConversation(
   conversation: ConversationRecord,
-): void {
-  uiTelemetryService.reset();
+  sessionId?: string,
+): ResumeTokenCounts | undefined {
+  if (sessionId) {
+    uiTelemetryService.resetSession(sessionId);
+  } else {
+    uiTelemetryService.reset();
+  }
 
   for (const record of conversation.messages) {
     if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
@@ -1319,14 +1962,22 @@ export function replayUiTelemetryFromConversation(
       | undefined;
     const uiEvent = payload?.uiEvent;
     if (uiEvent) {
-      uiTelemetryService.addEvent(uiEvent);
+      uiTelemetryService.addEvent(uiEvent, sessionId);
     }
   }
 
-  const resumePromptTokens = getResumePromptTokenCount(conversation);
-  if (resumePromptTokens !== undefined) {
-    uiTelemetryService.setLastPromptTokenCount(resumePromptTokens);
+  const resumeTokenCounts = getResumeTokenCounts(conversation);
+  if (resumeTokenCounts !== undefined) {
+    uiTelemetryService.setLastPromptTokenCount(
+      resumeTokenCounts.promptTokenCount,
+    );
   }
+  return resumeTokenCounts;
+}
+
+export interface ResumeTokenCounts {
+  promptTokenCount: number;
+  outputTokenCount: number;
 }
 
 /**
@@ -1338,6 +1989,18 @@ export function replayUiTelemetryFromConversation(
 export function getResumePromptTokenCount(
   conversation: ConversationRecord,
 ): number | undefined {
+  return getResumeTokenCounts(conversation)?.promptTokenCount;
+}
+
+/**
+ * Returns the prompt and previous-response output token counts used to seed a
+ * resumed chat. The prompt count restores the context anchor; the output
+ * count preserves the output tokens appended after that prompt count was
+ * reported, matching steady-state prompt estimation on the next send.
+ */
+export function getResumeTokenCounts(
+  conversation: ConversationRecord,
+): ResumeTokenCounts | undefined {
   for (let i = conversation.messages.length - 1; i >= 0; i--) {
     const record = conversation.messages[i];
 
@@ -1345,7 +2008,10 @@ export function getResumePromptTokenCount(
       const usage = record.usageMetadata;
       const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
       if (candidate) {
-        return candidate;
+        return {
+          promptTokenCount: candidate,
+          outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
+        };
       }
     }
 
@@ -1354,10 +2020,37 @@ export function getResumePromptTokenCount(
         | ChatCompressionRecordPayload
         | undefined;
       if (payload?.info) {
-        return payload.info.newTokenCount;
+        return {
+          promptTokenCount: payload.info.newTokenCount,
+          outputTokenCount: 0,
+        };
       }
     }
   }
 
   return undefined;
+}
+
+const MAX_BRANCH_COLLISION_SCAN = 99;
+
+export async function computeUniqueBranchTitle(
+  baseName: string,
+  sessionService: SessionService,
+): Promise<string> {
+  const maxSuffixLen = ' (Branch 1234567890123)'.length;
+  const trimmed = baseName
+    .trim()
+    .slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
+  const taken = new Set(
+    (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
+      (t) => t.toLowerCase().trim(),
+    ),
+  );
+  const first = `${trimmed} (Branch)`;
+  if (!taken.has(first.toLowerCase())) return first;
+  for (let n = 2; n <= MAX_BRANCH_COLLISION_SCAN; n++) {
+    const candidate = `${trimmed} (Branch ${n})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${trimmed} (Branch ${Date.now()})`;
 }

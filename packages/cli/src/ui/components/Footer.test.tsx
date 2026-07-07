@@ -5,6 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
@@ -53,6 +54,7 @@ const createMockConfig = (overrides = {}) => ({
   getProjectRoot: vi.fn(() => '/test/project'),
   getSessionId: vi.fn(() => 'test-session'),
   getMemoryManager: vi.fn(createMockMemoryManager),
+  isSafeMode: vi.fn(() => false),
   ...overrides,
 });
 
@@ -93,12 +95,18 @@ const createMockSettings = (): LoadedSettings =>
     },
   }) as LoadedSettings;
 
-const renderWithWidth = (width: number, uiState: UIState) => {
+const renderWithWidth = (
+  width: number,
+  uiState: UIState,
+  configOverrides = {},
+) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
   const mockSettings = createMockSettings();
   return render(
     <SettingsContext.Provider value={mockSettings}>
-      <ConfigContext.Provider value={createMockConfig() as never}>
+      <ConfigContext.Provider
+        value={createMockConfig(configOverrides) as never}
+      >
         <KeypressProvider kittyProtocolEnabled={false}>
           <VimModeProvider settings={mockSettings}>
             <UIStateContext.Provider value={uiState}>
@@ -124,6 +132,62 @@ describe('<Footer />', () => {
   it('renders the component', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).toBeDefined();
+  });
+
+  it('shows the "workflow active" indicator when the keyword trigger is armed', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({ workflowKeywordActive: true }),
+    );
+    expect(lastFrame()).toContain('▷ workflow active');
+  });
+
+  it('hides the "workflow active" indicator by default', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    expect(lastFrame()).not.toContain('workflow active');
+  });
+
+  it('shows the active scheduled task count', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState(), {
+      isCronEnabled: vi.fn(() => true),
+      getCronScheduler: vi.fn(() => ({ size: 2 })),
+    });
+    expect(lastFrame()).toContain('◎ 2 scheduled tasks');
+  });
+
+  it('refreshes the scheduled task count after mount', async () => {
+    vi.useFakeTimers();
+    let schedulerSize = 0;
+    let unmount: (() => void) | undefined;
+    const scheduler = {
+      get size() {
+        return schedulerSize;
+      },
+    };
+    try {
+      const renderResult = renderWithWidth(120, createMockUIState(), {
+        isCronEnabled: vi.fn(() => true),
+        getCronScheduler: vi.fn(() => scheduler),
+      });
+      unmount = renderResult.unmount;
+      const { lastFrame } = renderResult;
+      expect(lastFrame()).not.toContain('scheduled task');
+
+      schedulerSize = 1;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).toContain('◎ 1 scheduled task');
+
+      schedulerSize = 0;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(lastFrame()).not.toContain('scheduled task');
+    } finally {
+      unmount?.();
+      vi.useRealTimers();
+    }
   });
 
   it('does not display the working directory or branch name', () => {
@@ -153,6 +217,46 @@ describe('<Footer />', () => {
       const frame = lastFrame()!;
       expect(frame).toContain('model-name (main) ctx:34%');
       expect(frame).toContain('████░░░░ 34% context');
+    });
+
+    it('wraps long status line output without growing past two lines', () => {
+      const longLine = [
+        'visible-start',
+        ...Array.from({ length: 40 }, (_, index) => `chunk-${index}`),
+        'hidden-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('visible-start');
+      expect(frame).toContain('chunk-10');
+      expect(frame).not.toContain('hidden-tail');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('clips later status line entries after wrapped output reaches two lines', () => {
+      const longLine = [
+        'first-line-start',
+        ...Array.from({ length: 40 }, (_, index) => `part-${index}`),
+        'first-line-tail',
+      ].join(' ');
+      useStatusLineMock.mockReturnValue({
+        lines: [longLine, 'second-status-line'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(16, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('first-line-start');
+      expect(frame).not.toContain('first-line-tail');
+      expect(frame).not.toContain('second-status-line');
+      expect(frame).not.toContain('? for shortcuts');
     });
 
     it('suppresses hint when status line is active', () => {

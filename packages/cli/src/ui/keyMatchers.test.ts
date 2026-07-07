@@ -36,19 +36,22 @@ describe('keyMatchers', () => {
     [Command.CLEAR_SCREEN]: (key: Key) => key.ctrl && key.name === 'l',
     [Command.HISTORY_UP]: (key: Key) => key.ctrl && key.name === 'p',
     [Command.HISTORY_DOWN]: (key: Key) => key.ctrl && key.name === 'n',
-    [Command.NAVIGATION_UP]: (key: Key) => key.name === 'up',
-    [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down',
+    [Command.NAVIGATION_UP]: (key: Key) => key.name === 'up' && !key.shift,
+    [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down' && !key.shift,
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
       key.name === 'tab' || (key.name === 'return' && !key.ctrl),
-    // Completion navigation only uses arrow keys (not Ctrl+P/N)
-    // to allow Ctrl+P/N to always navigate history
-    [Command.COMPLETION_UP]: (key: Key) => key.name === 'up',
-    [Command.COMPLETION_DOWN]: (key: Key) => key.name === 'down',
+    // Completion navigation uses arrows plus readline/Vim-style Ctrl+P/N.
+    [Command.COMPLETION_UP]: (key: Key) =>
+      (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
+    [Command.COMPLETION_DOWN]: (key: Key) =>
+      (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
     [Command.NEWLINE]: (key: Key) =>
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
+    [Command.VOICE_PUSH_TO_TALK]: (key: Key) =>
+      key.name === 'space' && !key.ctrl && !key.meta,
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
@@ -76,11 +79,11 @@ describe('keyMatchers', () => {
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
     // Selection list navigation: up/k (ctrl=false)/Ctrl+P move up; down/j (ctrl=false)/Ctrl+N move down
     [Command.SELECTION_UP]: (key: Key) =>
-      key.name === 'up' ||
+      (key.name === 'up' && !key.shift) ||
       (key.name === 'k' && !key.ctrl) ||
       (key.ctrl && key.name === 'p'),
     [Command.SELECTION_DOWN]: (key: Key) =>
-      key.name === 'down' ||
+      (key.name === 'down' && !key.shift) ||
       (key.name === 'j' && !key.ctrl) ||
       (key.ctrl && key.name === 'n'),
     [Command.SCROLL_UP]: (key: Key) => key.shift && key.name === 'up',
@@ -89,6 +92,8 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
+    [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
+      key.meta && key.name === 't',
   };
 
   // Test data for each command with positive and negative test cases
@@ -175,12 +180,22 @@ describe('keyMatchers', () => {
     {
       command: Command.NAVIGATION_UP,
       positive: [createKey('up'), createKey('up', { ctrl: true })],
-      negative: [createKey('p'), createKey('u')],
+      negative: [
+        createKey('p'),
+        createKey('u'),
+        // shift: false — Shift+Up must NOT match (reserved for SCROLL_UP)
+        createKey('up', { shift: true }),
+      ],
     },
     {
       command: Command.NAVIGATION_DOWN,
       positive: [createKey('down'), createKey('down', { ctrl: true })],
-      negative: [createKey('n'), createKey('d')],
+      negative: [
+        createKey('n'),
+        createKey('d'),
+        // shift: false — Shift+Down must NOT match (reserved for SCROLL_DOWN)
+        createKey('down', { shift: true }),
+      ],
     },
 
     // Auto-completion
@@ -190,25 +205,25 @@ describe('keyMatchers', () => {
       negative: [createKey('return', { ctrl: true }), createKey('space')],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+P.
       command: Command.COMPLETION_UP,
-      positive: [createKey('up')],
+      positive: [createKey('up'), createKey('p', { ctrl: true })],
       negative: [
         createKey('p'),
         createKey('down'),
-        createKey('p', { ctrl: true }),
+        createKey('n', { ctrl: true }),
+        createKey('up', { shift: true }),
       ],
     },
     {
-      // Completion navigation only uses arrow keys (not Ctrl+P/N)
-      // to allow Ctrl+P/N to always navigate history
+      // Completion navigation uses arrows plus readline/Vim-style Ctrl+N.
       command: Command.COMPLETION_DOWN,
-      positive: [createKey('down')],
+      positive: [createKey('down'), createKey('n', { ctrl: true })],
       negative: [
         createKey('n'),
         createKey('up'),
-        createKey('n', { ctrl: true }),
+        createKey('p', { ctrl: true }),
+        createKey('down', { shift: true }),
       ],
     },
 
@@ -302,6 +317,8 @@ describe('keyMatchers', () => {
         createKey('u'),
         // ctrl: false on k — Ctrl+K must NOT match (would conflict with KILL_LINE_RIGHT)
         createKey('k', { ctrl: true }),
+        // shift: false on up — Shift+Up must NOT match (reserved for SCROLL_UP)
+        createKey('up', { shift: true }),
       ],
     },
     {
@@ -317,6 +334,8 @@ describe('keyMatchers', () => {
         createKey('d'),
         // ctrl: false on j — Ctrl+J must NOT match (preserves Ctrl+J = newline in some terminals)
         createKey('j', { ctrl: true }),
+        // shift: false on down — Shift+Down must NOT match (reserved for SCROLL_DOWN)
+        createKey('down', { shift: true }),
       ],
     },
 
@@ -393,6 +412,11 @@ describe('keyMatchers', () => {
       command: Command.SCROLL_END,
       positive: [createKey('end', { ctrl: true })],
       negative: [createKey('end'), createKey('end', { shift: true })],
+    },
+    {
+      command: Command.TOGGLE_THINKING_EXPANDED,
+      positive: [createKey('t', { meta: true })],
+      negative: [createKey('t'), createKey('t', { ctrl: true })],
     },
   ];
 

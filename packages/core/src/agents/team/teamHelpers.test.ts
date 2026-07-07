@@ -19,6 +19,7 @@ import {
   setMemberActive,
   findMemberById,
   findMemberByName,
+  classifyShutdownResponse,
   readTeamFile,
   writeTeamFile,
   deleteTeamDirs,
@@ -249,6 +250,45 @@ describe('findMemberByName', () => {
 
   it('returns undefined for unknown name', () => {
     expect(findMemberByName([], 'nope')).toBeUndefined();
+  });
+});
+
+describe('classifyShutdownResponse', () => {
+  it('classifies a reply that leads with the approve token', () => {
+    expect(classifyShutdownResponse('shutdown_approved')).toBe(
+      'shutdown_approved',
+    );
+    // Verbose lead-in form an exact-string match would miss.
+    expect(classifyShutdownResponse('shutdown_approved, work finished')).toBe(
+      'shutdown_approved',
+    );
+    expect(classifyShutdownResponse('  shutdown_approved\nbye')).toBe(
+      'shutdown_approved',
+    );
+  });
+
+  it('classifies a reply that leads with the reject token', () => {
+    expect(classifyShutdownResponse('shutdown_rejected: still mid-task')).toBe(
+      'shutdown_rejected',
+    );
+  });
+
+  it('does not classify a mid-prose mention of the token', () => {
+    // The false-abort bug: a token mentioned mid-report is not a
+    // response.
+    expect(
+      classifyShutdownResponse(
+        'I reviewed the shutdown_approved handler and it looks correct.',
+      ),
+    ).toBeUndefined();
+    expect(
+      classifyShutdownResponse('I will send shutdown_approved when done.'),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined for an unrelated message', () => {
+    expect(classifyShutdownResponse('task complete')).toBeUndefined();
+    expect(classifyShutdownResponse('')).toBeUndefined();
   });
 });
 

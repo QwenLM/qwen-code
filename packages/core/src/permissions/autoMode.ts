@@ -39,6 +39,10 @@ import {
   type AutoModeDenialState,
   type DenialFallbackReason,
 } from './denialTracking.js';
+import {
+  isDestructiveCommand,
+  extractLastUserPrompt,
+} from './destructive-commands.js';
 import type { PermissionCheckContext } from './types.js';
 
 const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
@@ -69,6 +73,7 @@ export const SAFE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set<string>([
   // Inverse tools — hand control back to the user
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
+  ToolNames.ENTER_PLAN_MODE,
   // Background task coordination (peers' permission checks still apply)
   ToolNames.CRON_LIST,
   ToolNames.TASK_STOP,
@@ -119,6 +124,7 @@ export function shouldRunAutoModeForCall(
   if (approvalMode !== ApprovalMode.AUTO) return false;
   if (toolName === ToolNames.ASK_USER_QUESTION) return false;
   if (toolName === ToolNames.EXIT_PLAN_MODE) return false;
+  if (toolName === ToolNames.ENTER_PLAN_MODE) return false;
   return true;
 }
 
@@ -259,6 +265,19 @@ export function isAutoModeProtectedWritePath(filePath: string): boolean {
       )
     );
   });
+}
+
+/**
+ * Returns true when `classifyAllShell` is enabled and the tool is a
+ * shell-like tool (Bash/Monitor). Used to force all shell commands
+ * through the classifier even when their default permission is 'allow'.
+ */
+export function shouldClassifyAllShellForAutoMode(
+  toolName: string,
+  config: Config,
+): boolean {
+  if (!SHELL_LIKE_TOOL_NAMES.has(toolName)) return false;
+  return config.getAutoModeSettings()?.classifyAllShell === true;
 }
 
 /**
@@ -466,6 +485,7 @@ export function passesAcceptEditsFastPath(
 export type AutoModeDecision =
   | { via: 'fast-path:accept-edits' }
   | { via: 'fast-path:allowlist' }
+  | { via: 'blocked:destructive-command'; reason: string }
   | {
       via: 'classifier';
       shouldBlock: boolean;
@@ -520,6 +540,13 @@ export function applyAutoModeDecision(
     case 'fast-path:allowlist':
       config.setAutoModeDenialState(recordAllow(denialState));
       return { kind: 'approved' };
+    case 'blocked:destructive-command':
+      config.setAutoModeDenialState(recordBlock(denialState));
+      return {
+        kind: 'blocked',
+        errorMessage: `${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`,
+        reason: 'classifier_blocked',
+      };
     case 'classifier':
       if (decision.shouldBlock) {
         config.setAutoModeDenialState(
@@ -647,6 +674,29 @@ export async function evaluateAutoMode(
   // L5.2: hardcoded safe-tool allowlist. Same gate as L5.1.
   if (!input.pmForcedAsk && isInSafeToolAllowlist(input.ctx.toolName)) {
     return { via: 'fast-path:allowlist' };
+  }
+
+  // L5.2.5: deterministic destructive command guard.
+  // Regex-based hard blocks that run BEFORE the LLM classifier, so API
+  // failures or classifier misjudgment cannot allow destructive git/IaC
+  // commands through. Only applies to shell-like tools.
+  if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
+    const command =
+      input.ctx.toolName === ToolNames.MONITOR
+        ? normalizeMonitorCommand(input.ctx.command).safetyCommand
+        : input.ctx.command;
+    const userPrompt = extractLastUserPrompt(input.messages) ?? '';
+    const destructiveResult = isDestructiveCommand(
+      command,
+      userPrompt,
+      input.ctx.cwd,
+    );
+    if (destructiveResult?.blocked) {
+      return {
+        via: 'blocked:destructive-command',
+        reason: destructiveResult.reason,
+      };
+    }
   }
 
   // User `ask` rules require manual confirmation.

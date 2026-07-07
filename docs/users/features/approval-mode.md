@@ -56,6 +56,8 @@ If you are in Normal Mode, **Shift+Tab** (or **Tab** on Windows) first switches 
 
 The `/plan` command provides a quick shortcut for entering and exiting Plan Mode:
 
+Regular planning requests do not switch modes by themselves. If you want the read-only Plan Mode workflow, use `/plan`, the keyboard shortcut, or set the approval mode to `plan` explicitly.
+
 ```bash
 /plan                          # Enter plan mode
 /plan refactor the auth module # Enter plan mode and start planning
@@ -98,8 +100,8 @@ How should we handle database migration?
 ```json
 // .qwen/settings.json
 {
-  "permissions": {
-    "defaultMode": "plan"
+  "tools": {
+    "approvalMode": "plan"
   }
 }
 ```
@@ -161,8 +163,8 @@ You can review each proposed change and approve or reject it individually.
 ```bash
 // .qwen/settings.json
 {
-  "permissions": {
-"defaultMode": "default"
+  "tools": {
+    "approvalMode": "default"
   }
 }
 ```
@@ -302,6 +304,9 @@ reason inline and decide whether to switch to Ask Permissions Mode for that step
         "deny": ["Any network call to intranet.example.com"],
       },
       "environment": ["Open-source monorepo; commits are signed"],
+      // Optional: route ALL shell commands (including read-only ones like
+      // ls, cat) through the classifier for defense-in-depth.
+      // "classifyAllShell": true,
     },
   },
 }
@@ -344,10 +349,8 @@ YOLO Mode grants Qwen Code the highest permissions, automatically approving all 
 ```bash
 // .qwen/settings.json
 {
-  "permissions": {
-"defaultMode": "yolo",
-"confirmShellCommands": false,
-"confirmFileEdits": false
+  "tools": {
+    "approvalMode": "yolo"
   }
 }
 ```
@@ -368,10 +371,10 @@ qwen --prompt "Run the test suite, fix all failing tests, then commit changes"
 
 ### Keyboard Shortcut Switching
 
-During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the four modes:
+During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the five modes:
 
 ```
-Ask Permissions Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Ask Permissions Mode
+Plan Mode → Ask Permissions Mode → Auto-Edit Mode → Auto Mode → YOLO Mode → Plan Mode
 ```
 
 ### Persistent Configuration
@@ -380,10 +383,8 @@ Ask Permissions Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Ask Perm
 // Project-level: ./.qwen/settings.json
 // User-level: ~/.qwen/settings.json
 {
-  "permissions": {
-"defaultMode": "auto-edit",  // or "plan" or "yolo"
-"confirmShellCommands": true,
-"confirmFileEdits": true
+  "tools": {
+    "approvalMode": "auto-edit"  // or "plan", "default", "auto", "yolo"
   }
 }
 ```

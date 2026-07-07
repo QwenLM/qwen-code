@@ -186,7 +186,11 @@ export const ToolConfirmationMessage: React.FC<
         key: 'Yes, allow always',
       });
     }
-    if ((!config.getIdeMode() || !isDiffingEnabled) && preferredEditor) {
+    if (
+      !confirmationDetails.hideModify &&
+      (!config.getIdeMode() || !isDiffingEnabled) &&
+      preferredEditor
+    ) {
       options.push({
         label: t('Modify with external editor'),
         value: ToolConfirmationOutcome.ModifyWithEditor,
@@ -508,11 +512,15 @@ export const ToolConfirmationMessage: React.FC<
             label: t('Yes, allow once'),
             value: ToolConfirmationOutcome.ProceedOnce,
           },
-          {
-            key: 'proceed-always',
-            label: t('Allow always'),
-            value: ToolConfirmationOutcome.ProceedAlways,
-          },
+          ...(!confirmationDetails.hideAlwaysAllow
+            ? [
+                {
+                  key: 'proceed-always',
+                  label: t('Allow always'),
+                  value: ToolConfirmationOutcome.ProceedAlways,
+                },
+              ]
+            : []),
           {
             key: 'cancel',
             label: t('No'),

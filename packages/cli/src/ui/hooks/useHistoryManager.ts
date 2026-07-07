@@ -16,7 +16,7 @@ type HistoryItemUpdater = (
   prevItem: HistoryItem,
 ) => Partial<HistoryItemWithoutId>;
 
-const UI_COMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
+export const UI_COMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 const UI_COMPACT_KEEP_RECENT = 20;
 
 export interface UseHistoryManagerReturn {

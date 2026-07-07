@@ -49,6 +49,13 @@ export interface UsageSummaryRecord {
     linesAdded: number;
     linesRemoved: number;
   };
+  /** Optional — older records (written before skills were tracked) omit it. */
+  skills?: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, { count: number; success: number; fail: number }>;
+  };
 }
 
 export type TimeRange = 'today' | 'week' | 'month' | 'all';
@@ -88,6 +95,15 @@ export interface AggregatedReport {
   files: {
     linesAdded: number;
     linesRemoved: number;
+  };
+  skills: {
+    totalCalls: number;
+    topSkills: Array<{
+      name: string;
+      count: number;
+      success: number;
+      fail: number;
+    }>;
   };
   projects: Array<{
     path: string;
@@ -170,10 +186,28 @@ export function metricsToUsageRecord(
       linesAdded: metrics.files.totalLinesAdded,
       linesRemoved: metrics.files.totalLinesRemoved,
     },
+    ...(metrics.skills
+      ? {
+          skills: {
+            totalCalls: metrics.skills.totalCalls,
+            totalSuccess: metrics.skills.totalSuccess,
+            totalFail: metrics.skills.totalFail,
+            byName: Object.fromEntries(
+              Object.entries(metrics.skills.byName).map(([name, s]) => [
+                name,
+                { count: s.count, success: s.success, fail: s.fail },
+              ]),
+            ),
+          },
+        }
+      : {}),
   };
 }
 
-async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
+async function rebuildFromSessionJsonl(
+  skipSessionInRebuild?: string,
+  persist = true,
+): Promise<UsageSummaryRecord[]> {
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
     if (!fs.existsSync(projectsDir)) return [];
@@ -258,9 +292,17 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
     }
   }
 
-  if (results.length > 0) {
+  // Persist rebuilt records as a one-time migration so later reads are fast.
+  // Read-only callers (e.g. the daemon dashboard, which serves a GET) pass
+  // `persist: false` so opening the dashboard never writes to `~/.qwen`.
+  if (persist && results.length > 0) {
     const usagePath = getUsageHistoryPath();
     for (const record of results) {
+      // Skip the in-progress current session: persistSessionUsage() will write
+      // its authoritative record on /clear or exit. Writing here would create
+      // a permanent duplicate in usage_record.jsonl (issue #4994).
+      if (skipSessionInRebuild && record.sessionId === skipSessionInRebuild)
+        continue;
       jsonl.writeLineSync(usagePath, record);
     }
   }
@@ -268,16 +310,38 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
   return results;
 }
 
-export async function loadUsageHistory(): Promise<UsageSummaryRecord[]> {
+function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
+  // Last-wins by sessionId. Protects existing users whose usage_record.jsonl
+  // already contains duplicates produced by the bug fixed in this change
+  // (issue #4994) — without this, every aggregate stays inflated forever.
+  const map = new Map<string, UsageSummaryRecord>();
+  for (const r of records) map.set(r.sessionId, r);
+  if (map.size < records.length) {
+    debugLogger.debug(
+      `dedupBySessionId: removed ${records.length - map.size} duplicate record(s)`,
+    );
+  }
+  return [...map.values()];
+}
+
+export async function loadUsageHistory(
+  skipSessionInRebuild?: string,
+  options?: { persistRebuild?: boolean },
+): Promise<UsageSummaryRecord[]> {
   try {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
     const filtered = records.filter((r) => r.version === 1);
-    if (filtered.length > 0) return filtered;
+    if (filtered.length > 0) return dedupBySessionId(filtered);
   } catch (e) {
     debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
 
-  return rebuildFromSessionJsonl();
+  return dedupBySessionId(
+    await rebuildFromSessionJsonl(
+      skipSessionInRebuild,
+      options?.persistRebuild ?? true,
+    ),
+  );
 }
 
 export function getTimeRangeBounds(range: TimeRange): {
@@ -333,6 +397,11 @@ export function aggregateUsage(
     string,
     { count: number; success: number; fail: number; totalDurationMs: number }
   >();
+  const skillCounts = new Map<
+    string,
+    { count: number; success: number; fail: number }
+  >();
+  let totalSkillCalls = 0;
   const projectMap = new Map<
     string,
     {
@@ -385,6 +454,24 @@ export function aggregateUsage(
       }
     }
 
+    if (r.skills) {
+      totalSkillCalls += r.skills.totalCalls;
+      for (const [name, s] of Object.entries(r.skills.byName)) {
+        const existing = skillCounts.get(name);
+        if (existing) {
+          existing.count += s.count;
+          existing.success += s.success;
+          existing.fail += s.fail;
+        } else {
+          skillCounts.set(name, {
+            count: s.count,
+            success: s.success,
+            fail: s.fail,
+          });
+        }
+      }
+    }
+
     let sessionTokens = 0;
     for (const m of Object.values(r.models)) {
       sessionTokens += m.totalTokens;
@@ -408,6 +495,13 @@ export function aggregateUsage(
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
+  // Cap like topTools so the aggregate (and the dashboard payload) stays
+  // bounded when a range spans many distinct skills.
+  const topSkills = [...skillCounts.entries()]
+    .map(([name, s]) => ({ name, ...s }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 25);
+
   const projects = [...projectMap.entries()]
     .map(([p, stats]) => ({ path: p, ...stats }))
     .sort((a, b) => b.totalTokens - a.totalTokens);
@@ -423,6 +517,7 @@ export function aggregateUsage(
     models,
     tools: { totalCalls, totalSuccess, totalFail, topTools },
     files: { linesAdded, linesRemoved },
+    skills: { totalCalls: totalSkillCalls, topSkills },
     projects,
   };
 }

@@ -15,10 +15,13 @@ import type {
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
   OutputFormat,
   ToolErrorType,
   createDebugLogger,
+  getArenaSystemReminder,
   getMCPServerStatus,
+  getPlanModeSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -97,67 +100,6 @@ export function extractPartsFromUserMessage(
 }
 
 /**
- * Extracts usage metadata from the Gemini client's debug responses.
- *
- * @param geminiClient - The Gemini client instance
- * @returns Usage information or undefined if not available
- */
-export function extractUsageFromGeminiClient(
-  geminiClient: unknown,
-): Usage | undefined {
-  if (
-    !geminiClient ||
-    typeof geminiClient !== 'object' ||
-    typeof (geminiClient as { getChat?: unknown }).getChat !== 'function'
-  ) {
-    return undefined;
-  }
-
-  try {
-    const chat = (geminiClient as { getChat: () => unknown }).getChat();
-    if (
-      !chat ||
-      typeof chat !== 'object' ||
-      typeof (chat as { getDebugResponses?: unknown }).getDebugResponses !==
-        'function'
-    ) {
-      return undefined;
-    }
-
-    const responses = (
-      chat as {
-        getDebugResponses: () => Array<Record<string, unknown>>;
-      }
-    ).getDebugResponses();
-    for (let i = responses.length - 1; i >= 0; i--) {
-      const metadata = responses[i]?.['usageMetadata'] as
-        | Record<string, unknown>
-        | undefined;
-      if (metadata) {
-        const promptTokens = metadata['promptTokenCount'];
-        const completionTokens = metadata['candidatesTokenCount'];
-        const totalTokens = metadata['totalTokenCount'];
-        const cachedTokens = metadata['cachedContentTokenCount'];
-
-        return {
-          input_tokens: typeof promptTokens === 'number' ? promptTokens : 0,
-          output_tokens:
-            typeof completionTokens === 'number' ? completionTokens : 0,
-          total_tokens:
-            typeof totalTokens === 'number' ? totalTokens : undefined,
-          cache_read_input_tokens:
-            typeof cachedTokens === 'number' ? cachedTokens : undefined,
-        };
-      }
-    }
-  } catch (error) {
-    debugLogger.debug('Failed to extract usage metadata:', error);
-  }
-
-  return undefined;
-}
-
-/**
  * Computes Usage information from SessionMetrics using computeSessionStats.
  * Aggregates token usage across all models in the session.
  *
@@ -190,6 +132,39 @@ export function computeUsageFromMetrics(metrics: SessionMetrics): Usage {
   }
 
   return usage;
+}
+
+export function buildInitialSystemReminders(config: Config): Part[] {
+  const reminders: Part[] = [];
+
+  if (config.getApprovalMode() === ApprovalMode.PLAN) {
+    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+  }
+
+  const arenaManager = config.getArenaManager?.();
+  if (arenaManager) {
+    try {
+      const sessionDir = arenaManager.getArenaSessionDir();
+      const configPath = `${sessionDir}/config.json`;
+      reminders.push({ text: getArenaSystemReminder(configPath) });
+    } catch {
+      // Arena config not yet initialized; match the regular send path.
+    }
+  }
+
+  return reminders;
+}
+
+export function insertAfterFunctionResponses(
+  parts: Part[],
+  additions: Part[],
+): Part[] {
+  const firstNonFunctionResponse = parts.findIndex(
+    (part) => !part.functionResponse,
+  );
+  const insertAt =
+    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
+  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
 }
 
 /**

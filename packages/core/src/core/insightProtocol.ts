@@ -18,6 +18,12 @@ export interface InsightReadyPayload {
   };
 }
 
+export interface InsightErrorPayload {
+  insight_error: {
+    error: string;
+  };
+}
+
 export type ParsedInsightMessage =
   | {
       type: 'insight_progress';
@@ -28,6 +34,10 @@ export type ParsedInsightMessage =
   | {
       type: 'insight_ready';
       path: string;
+    }
+  | {
+      type: 'insight_error';
+      error: string;
     };
 
 export function encodeInsightProgressMessage(
@@ -44,6 +54,13 @@ export function encodeInsightProgressMessage(
 export function encodeInsightReadyMessage(path: string): string {
   const payload: InsightReadyPayload = {
     insight_ready: { path },
+  };
+  return JSON.stringify(payload);
+}
+
+export function encodeInsightErrorMessage(error: string): string {
+  const payload: InsightErrorPayload = {
+    insight_error: { error },
   };
   return JSON.stringify(payload);
 }
@@ -78,6 +95,12 @@ export function parseInsightMessage(
       if (typeof path === 'string') {
         return { type: 'insight_ready', path };
       }
+    }
+
+    const insightError = (parsed as { insight_error?: { error?: unknown } })
+      .insight_error;
+    if (insightError && typeof insightError.error === 'string') {
+      return { type: 'insight_error', error: insightError.error };
     }
   } catch {
     return null;

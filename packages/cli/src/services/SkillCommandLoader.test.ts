@@ -88,6 +88,33 @@ describe('SkillCommandLoader', () => {
     expect(commands[0]?.argumentHint).toBe('[topic]');
   });
 
+  it('should default skills to user-invocable slash commands', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(true);
+  });
+
+  it('should propagate userInvocable from skills to slash commands', async () => {
+    const skill = makeSkill({ userInvocable: false });
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(false);
+    expect(commands[0]?.modelInvocable).toBe(true);
+  });
+
   it('should query user, project, and extension levels', async () => {
     const loader = new SkillCommandLoader(mockConfig);
     await loader.loadCommands(signal);

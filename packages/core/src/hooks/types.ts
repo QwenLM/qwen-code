@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type { ChildProcess } from 'child_process';
+import type { ToolArtifact } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -288,6 +289,49 @@ export interface HookOutput {
   hookSpecificOutput?: Record<string, unknown>;
 }
 
+export function isToolArtifactLike(value: unknown): value is ToolArtifact {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const artifact = value as Record<string, unknown>;
+  return (
+    typeof artifact['title'] === 'string' &&
+    isOptionalString(artifact, 'kind') &&
+    isOptionalString(artifact, 'storage') &&
+    isOptionalString(artifact, 'description') &&
+    isOptionalString(artifact, 'workspacePath') &&
+    isOptionalString(artifact, 'managedId') &&
+    isOptionalString(artifact, 'url') &&
+    isOptionalString(artifact, 'mimeType') &&
+    (artifact['sizeBytes'] === undefined ||
+      (typeof artifact['sizeBytes'] === 'number' &&
+        Number.isSafeInteger(artifact['sizeBytes']) &&
+        artifact['sizeBytes'] >= 0)) &&
+    (artifact['metadata'] === undefined ||
+      isToolArtifactMetadataLike(artifact['metadata']))
+  );
+}
+
+function isToolArtifactMetadataLike(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(
+    (item) =>
+      item === null ||
+      typeof item === 'string' ||
+      typeof item === 'boolean' ||
+      (typeof item === 'number' && Number.isFinite(item)),
+  );
+}
+
+function isOptionalString(
+  value: Record<string, unknown>,
+  key: string,
+): boolean {
+  return value[key] === undefined || typeof value[key] === 'string';
+}
+
 export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
 
 export function sanitizeUserPromptExpansionAdditionalContext(
@@ -396,6 +440,14 @@ export class DefaultHookOutput implements HookOutput {
       return context.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
     return undefined;
+  }
+
+  getArtifacts(): ToolArtifact[] {
+    const artifacts = this.hookSpecificOutput?.['artifacts'];
+    if (!Array.isArray(artifacts)) {
+      return [];
+    }
+    return artifacts.filter(isToolArtifactLike);
   }
 
   /**
@@ -608,6 +660,7 @@ export interface PermissionDeniedInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_use_id: string;
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
   reason: PermissionDeniedReason;
 }
 
@@ -691,7 +744,8 @@ export interface PreToolUseInput extends HookInput {
   permission_mode: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
-  tool_use_id: string; // Unique identifier for this tool use instance
+  tool_use_id: string; // Unique identifier for this tool use instance (internal format, e.g., toolu_xxx)
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
 }
 
 /**
@@ -713,7 +767,8 @@ export interface PostToolUseInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_response: Record<string, unknown>;
-  tool_use_id: string; // Unique identifier for this tool use instance
+  tool_use_id: string; // Unique identifier for this tool use instance (internal format, e.g., toolu_xxx)
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
 }
 
 /**
@@ -725,8 +780,8 @@ export interface PostToolUseOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolUse';
     additionalContext?: string;
+    artifacts?: ToolArtifact[];
   };
-  updatedMCPToolOutput?: Record<string, unknown>;
 }
 
 /**
@@ -735,7 +790,8 @@ export interface PostToolUseOutput extends HookOutput {
  */
 export interface PostToolUseFailureInput extends HookInput {
   permission_mode: PermissionMode;
-  tool_use_id: string; // Unique identifier for the tool use
+  tool_use_id: string; // Unique identifier for the tool use (internal format, e.g., toolu_xxx)
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
   tool_name: string;
   tool_input: Record<string, unknown>;
   error: string; // Error message describing the failure
@@ -750,6 +806,7 @@ export interface PostToolUseFailureOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolUseFailure';
     additionalContext?: string;
+    artifacts?: ToolArtifact[];
   };
 }
 
@@ -760,6 +817,7 @@ export interface PostToolBatchToolCall {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_use_id: string;
+  tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
@@ -784,6 +842,7 @@ export interface PostToolBatchOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolBatch';
     additionalContext?: string;
+    artifacts?: ToolArtifact[];
   };
 }
 
@@ -856,9 +915,18 @@ export interface NotificationOutput extends HookOutput {
 }
 
 /**
+ * Context usage data included in Stop hook stdin payload
+ */
+export interface ContextUsageData {
+  context_usage: number;
+  context_limit: number;
+  input_tokens: number;
+}
+
+/**
  * Stop hook input
  */
-export interface StopInput extends HookInput {
+export interface StopInput extends HookInput, Partial<ContextUsageData> {
   stop_hook_active: boolean;
   last_assistant_message: string;
 }

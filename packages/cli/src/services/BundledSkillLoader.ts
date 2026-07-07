@@ -80,6 +80,7 @@ export class BundledSkillLoader implements ICommandLoader {
         kind: CommandKind.SKILL,
         source: 'bundled-skill' as const,
         sourceLabel: t('Skill'),
+        userInvocable: skill.userInvocable ?? true,
         modelInvocable: !skill.disableModelInvocation,
         argumentHint: skill.argumentHint,
         whenToUse: skill.whenToUse,

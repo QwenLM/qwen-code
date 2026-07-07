@@ -15,7 +15,7 @@ Channel plugins are loaded at startup from active extensions. When `qwen channel
 3. Registers the channel type so it can be referenced in `settings.json`
 4. Creates channel instances using the plugin's factory function
 
-Your custom channel gets the full shared pipeline for free: sender gating, group policies, session routing, slash commands, crash recovery, and the ACP bridge to the agent.
+Your custom channel gets the full shared pipeline for free: sender gating, group policies, session routing, slash commands, crash recovery, and an agent bridge. Standalone `qwen channel start` currently supplies `AcpBridge`; plugin adapter code should depend on the adapter-facing `ChannelAgentBridge` contract. Existing TypeScript plugins with an explicit `AcpBridge` bridge parameter should migrate that annotation to `ChannelAgentBridge`; JavaScript plugins are unaffected at runtime.
 
 ## Installing a Custom Channel
 
@@ -88,4 +88,4 @@ Custom channels automatically support everything built-in channels do:
 
 ## Building Your Own Channel Plugin
 
-Want to build a channel plugin for a new platform? See the [Channel Plugin Developer Guide](/developers/channel-plugins) for the `ChannelPlugin` interface, the `Envelope` format, and extension points.
+Want to build a channel plugin for a new platform? See the [Channel Plugin Developer Guide](../../../developers/channel-plugins.md) for the `ChannelPlugin` interface, the `Envelope` format, and extension points.

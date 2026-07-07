@@ -9,6 +9,8 @@ import {
   PERMISSION_MODE_VALUES,
   COLOR_VALUES,
   claudePermissionModeToApprovalMode,
+  parseAgentHooks,
+  parseAgentMcpServers,
   parseMaxTurns,
   isPermissionMode,
   isColor,
@@ -129,6 +131,117 @@ describe('agent-frontmatter-schema', () => {
       expect(isColor('magenta')).toBe(false);
       expect(isColor('white')).toBe(false);
       expect(isColor(undefined)).toBe(false);
+    });
+  });
+
+  describe('parseAgentMcpServers — CC gS8 shallow validation', () => {
+    it('keeps a record-of-records as-is', () => {
+      const input = {
+        filesystem: { type: 'stdio', command: 'node' },
+        github: { type: 'http', url: 'https://example.com' },
+      };
+      expect(parseAgentMcpServers(input)).toEqual(input);
+    });
+
+    it('drops scalar / array entries inside the record', () => {
+      const input = {
+        good: { type: 'stdio', command: 'node' },
+        scalarBad: 'a-string',
+        arrayBad: [1, 2, 3],
+        nullBad: null,
+      };
+      expect(parseAgentMcpServers(input)).toEqual({
+        good: { type: 'stdio', command: 'node' },
+      });
+    });
+
+    it('returns undefined for non-object top-level', () => {
+      expect(parseAgentMcpServers(undefined)).toBeUndefined();
+      expect(parseAgentMcpServers(null)).toBeUndefined();
+      expect(parseAgentMcpServers('a-string')).toBeUndefined();
+      expect(parseAgentMcpServers(['arr'])).toBeUndefined();
+      expect(parseAgentMcpServers(42)).toBeUndefined();
+    });
+
+    it('returns undefined when no entries survive shape filtering', () => {
+      const input = { onlyBad: 'string', alsoBad: [1] };
+      expect(parseAgentMcpServers(input)).toBeUndefined();
+    });
+
+    it('returns undefined for an empty record', () => {
+      expect(parseAgentMcpServers({})).toBeUndefined();
+    });
+
+    it('returns a null-prototype object so a literal __proto__ key cannot pollute the prototype chain', () => {
+      // The repo's yaml-parser wraps parsed objects in `Object.create(null)`
+      // (see `yaml-parser.ts:stripNullValues`), which lets a literal YAML key
+      // of `__proto__` survive as an own property instead of triggering the
+      // `Object.prototype` setter. Reproduce that input shape exactly here —
+      // an object-literal `{ __proto__: X }` invokes the setter instead of
+      // defining an own property, which is NOT what `yaml.parse` produces.
+      const input = Object.create(null) as Record<string, unknown>;
+      input['good'] = { type: 'stdio', command: 'good' };
+      input['__proto__'] = { type: 'stdio', command: 'evil' };
+      const result = parseAgentMcpServers(input);
+      expect(result).toBeDefined();
+      // A plain `{}` result would now have its prototype set to the evil
+      // spec; the null-prototype defense keeps the chain clean.
+      expect(Object.getPrototypeOf(result!)).toBeNull();
+      // The polluted key is preserved as an own property so the caller
+      // sees the attack surface; it just can't reach via prototype walk.
+      expect(Object.hasOwn(result!, '__proto__')).toBe(true);
+      // Object.prototype must remain untouched.
+      expect(({} as Record<string, unknown>)['command']).toBeUndefined();
+    });
+  });
+
+  describe('parseAgentHooks — CC TKO shallow validation', () => {
+    it('keeps a record-of-arrays as-is', () => {
+      const input = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+        PostToolUse: [{ matcher: '*', hooks: [] }],
+      };
+      expect(parseAgentHooks(input)).toEqual(input);
+    });
+
+    it('drops non-array values per event', () => {
+      const input = {
+        PreToolUse: [{ matcher: 'Bash', hooks: [] }],
+        BogusEvent: 'not-an-array',
+        AlsoBad: { not: 'an array' },
+      };
+      expect(parseAgentHooks(input)).toEqual({
+        PreToolUse: [{ matcher: 'Bash', hooks: [] }],
+      });
+    });
+
+    it('returns undefined for non-object top-level', () => {
+      expect(parseAgentHooks(undefined)).toBeUndefined();
+      expect(parseAgentHooks(null)).toBeUndefined();
+      expect(parseAgentHooks('PreToolUse')).toBeUndefined();
+      expect(parseAgentHooks(['x'])).toBeUndefined();
+    });
+
+    it('returns undefined when no events survive shape filtering', () => {
+      const input = { PreToolUse: 'wrong shape' };
+      expect(parseAgentHooks(input)).toBeUndefined();
+    });
+
+    it('returns undefined for an empty record', () => {
+      expect(parseAgentHooks({})).toBeUndefined();
+    });
+
+    it('returns a null-prototype object so a literal __proto__ key cannot pollute the prototype chain', () => {
+      // See parseAgentMcpServers's __proto__ test for the rationale.
+      const input = Object.create(null) as Record<string, unknown>;
+      input['PreToolUse'] = [{ matcher: 'Bash', hooks: [] }];
+      input['__proto__'] = [{ matcher: 'Evil', hooks: [] }];
+      const result = parseAgentHooks(input);
+      expect(result).toBeDefined();
+      expect(Object.getPrototypeOf(result!)).toBeNull();
+      expect(Object.hasOwn(result!, '__proto__')).toBe(true);
     });
   });
 });

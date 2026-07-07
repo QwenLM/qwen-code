@@ -13,11 +13,14 @@ import {
   ModelSlashCommandEvent,
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
+  isImageCapable,
+  parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
   type InputModalities,
 } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
@@ -26,6 +29,10 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatUnsupportedVoiceModelMessage,
+  isSelectableVoiceModel,
+} from '../voice/voice-model.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -77,10 +84,56 @@ function parseModelSelectionKey(key: string): {
   return { authType, modelId: rest };
 }
 
+/**
+ * Encode a dialog selection key into the `authType:modelId` form persisted for
+ * the fast/vision auxiliary models (baseUrl discarded), so duplicate model ids
+ * across providers stay unambiguous. Handles the three selection-key shapes:
+ * `authType::modelId[\0baseUrl]`, `$runtime|authType|modelId`, and a bare id.
+ */
+export function encodeAuxModelSelector(selected: string): string {
+  if (selected.includes('::')) {
+    const parsed = parseModelSelectionKey(selected);
+    return `${parsed.authType}:${parsed.modelId}`;
+  }
+  if (selected.startsWith('$runtime|')) {
+    const parts = selected.split('|');
+    return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
+  }
+  return selected;
+}
+
+function encodeVisionModelSelector(selected: string): string {
+  if (!selected.includes('::')) {
+    return encodeAuxModelSelector(selected);
+  }
+  const parsed = parseModelSelectionKey(selected);
+  const selector = `${parsed.authType}:${parsed.modelId}`;
+  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
+}
+
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
+  isVoiceModelMode?: boolean;
+  isVisionModelMode?: boolean;
+  /** Override which settings scope to persist the selection to. */
+  persistScope?: 'workspace' | 'user';
+  availableTerminalHeight?: number;
 }
+
+const MAX_MODEL_ITEMS_TO_SHOW = 10;
+// Non-list dialog chrome to reserve when capping visible model rows: outer
+// round border (2) + outer padding (2) + title (1) + gap before the list (1)
+// + highlighted-entry detail panel (divider + up to 4 detail rows, ~6) +
+// footer gap and hint text (2). The list intentionally omits the ▲/▼ scroll
+// indicators other list dialogs enable: they are two always-rendered chrome
+// rows, and in a height-capped dialog those rows are better spent on two
+// more entries — the entry numbering already shows where the visible window
+// sits in the list. Adjust this whenever the surrounding layout changes, and
+// re-verify with an E2E height sweep rather than guessing.
+const MODEL_DIALOG_FIXED_ROWS = 14;
+const MODEL_OPTION_ROW_HEIGHT = 1;
+const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
 
 function maskApiKey(apiKey: string | undefined): string {
   if (!apiKey) return `(${t('not set')})`;
@@ -92,19 +145,41 @@ function maskApiKey(apiKey: string | undefined): string {
   return `${head}…${tail}`;
 }
 
+function resolvePersistScope(
+  settings: ReturnType<typeof useSettings>,
+  persistScope: 'workspace' | 'user' | undefined,
+): SettingScope {
+  // Workspace settings are ignored when untrusted, so fall back to user scope.
+  if (persistScope === 'workspace' && !settings.isTrusted) {
+    return SettingScope.User;
+  }
+  if (persistScope === 'workspace') return SettingScope.Workspace;
+  if (persistScope === 'user') return SettingScope.User;
+  return getPersistScopeForModelSelection(settings);
+}
+
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  baseUrl?: string,
+  persistScope?: 'workspace' | 'user',
 ): void {
-  const scope = getPersistScopeForModelSelection(settings);
+  const scope = resolvePersistScope(settings, persistScope);
   settings.setValue(scope, 'model.name', modelId);
+  // Persist the paired baseUrl so the correct provider is restored on next
+  // launch when multiple providers share the same model id. When the selection
+  // has no baseUrl, write an empty-string tombstone (not undefined): undefined
+  // is dropped from JSON, so it would not override a stale model.baseUrl left
+  // in a lower-priority scope, whereas '' is a present value that does.
+  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
 }
 
 function persistAuthTypeSelection(
   settings: ReturnType<typeof useSettings>,
   authType: AuthType,
+  persistScope?: 'workspace' | 'user',
 ): void {
-  const scope = getPersistScopeForModelSelection(settings);
+  const scope = resolvePersistScope(settings, persistScope);
   settings.setValue(scope, 'security.auth.selectedType', authType);
 }
 
@@ -132,7 +207,9 @@ interface HandleModelSwitchSuccessParams {
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
+  effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
+  persistScope?: 'workspace' | 'user';
 }
 
 function handleModelSwitchSuccess({
@@ -141,22 +218,35 @@ function handleModelSwitchSuccess({
   after,
   effectiveAuthType,
   effectiveModelId,
+  effectiveBaseUrl,
   isRuntime,
+  persistScope,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(
+    settings,
+    effectiveModelId,
+    effectiveBaseUrl,
+    persistScope,
+  );
   if (effectiveAuthType) {
-    persistAuthTypeSelection(settings, effectiveAuthType);
+    persistAuthTypeSelection(settings, effectiveAuthType, persistScope);
   }
 
   const baseUrl = after?.baseUrl ?? t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
+  const scopeSuffix =
+    persistScope === 'workspace'
+      ? t(' (this project)')
+      : persistScope === 'user'
+        ? t(' (global)')
+        : '';
   uiState?.historyManager.addItem(
     {
       type: 'info',
       text:
         `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
         `\n` +
-        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}` +
+        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
         `\n` +
         `Base URL: ${baseUrl}` +
         `\n` +
@@ -193,6 +283,10 @@ function DetailRow({
 export function ModelDialog({
   onClose,
   isFastModelMode,
+  isVoiceModelMode,
+  isVisionModelMode,
+  persistScope,
+  availableTerminalHeight,
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
@@ -209,7 +303,14 @@ export function ModelDialog({
 
     // Separate runtime models from registry models
     const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter((m) => !m.isRuntimeModel);
+    const registryModels = allModels.filter(
+      (m) =>
+        !m.isRuntimeModel &&
+        (m.authType !== AuthType.QWEN_OAUTH ||
+          authType === AuthType.QWEN_OAUTH) &&
+        (isFastModelMode || !m.fastOnly) &&
+        (isVoiceModelMode || !m.voiceOnly),
+    );
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -262,7 +363,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [config]);
+  }, [authType, config, isFastModelMode, isVoiceModelMode]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -326,9 +427,42 @@ export function ModelDialog({
       ),
     [availableModelEntries],
   );
+  const modelOptionRowHeight = MODEL_OPTIONS.some(
+    ({ description }) =>
+      typeof description !== 'string' || description.trim().length > 0,
+  )
+    ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
+    : MODEL_OPTION_ROW_HEIGHT;
+  // The error box adds its own marginTop plus one row per line (errorPrefix +
+  // blank line from the "\n\n" join + the underlying error's own lines), plus
+  // a buffer since the error Text wraps and long lines can span extra rows on
+  // narrow terminals.
+  const errorMessageRows = errorMessage
+    ? 2 + errorMessage.split('\n').length
+    : 0;
+  const maxModelItemsToShow =
+    availableTerminalHeight === undefined
+      ? MAX_MODEL_ITEMS_TO_SHOW
+      : Math.max(
+          1,
+          Math.min(
+            MAX_MODEL_ITEMS_TO_SHOW,
+            Math.floor(
+              (availableTerminalHeight -
+                MODEL_DIALOG_FIXED_ROWS -
+                errorMessageRows) /
+                modelOptionRowHeight,
+            ),
+          ),
+        );
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
+  const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
+  const visionModelSetting = settings?.merged?.visionModel as
+    | string
+    | undefined;
+  const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
     try {
@@ -337,15 +471,26 @@ export function ModelDialog({
       return undefined;
     }
   }, [fastModelSetting, isFastModelMode]);
+  const parsedVisionModelSetting = useMemo(() => {
+    if (!isVisionModelMode) return undefined;
+    try {
+      return resolveModelId(parsedVisionModelValue?.selector);
+    } catch {
+      return undefined;
+    }
+  }, [parsedVisionModelValue?.selector, isVisionModelMode]);
   const preferredModelId =
     isFastModelMode && parsedFastModelSetting
       ? parsedFastModelSetting.modelId
-      : config?.getModel() || MAINLINE_CODER_MODEL;
+      : isVisionModelMode && parsedVisionModelSetting
+        ? parsedVisionModelSetting.modelId
+        : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot = isFastModelMode
-    ? undefined // fast model is never a runtime model
-    : config?.getActiveRuntimeModelSnapshot?.();
+  const activeRuntimeSnapshot =
+    isFastModelMode || isVoiceModelMode || isVisionModelMode
+      ? undefined // fast/voice/vision models are never runtime model selections
+      : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
     .getGenerationConfig()?.baseUrl;
@@ -367,21 +512,63 @@ export function ModelDialog({
             ({ model }) => model.id === parsedFastModelSetting.modelId,
           )
       : undefined;
+  const preferredVoiceModelEntry =
+    isVoiceModelMode && voiceModelSetting
+      ? availableModelEntries.find(
+          ({ model }) => model.id === voiceModelSetting,
+        )
+      : undefined;
+  // Like fast mode, the vision setting may persist as a bare id (cross-provider)
+  // or an authType:modelId selector — highlight whichever row owns it.
+  const matchesVisionModelBaseUrl = (model: CoreAvailableModel): boolean =>
+    !parsedVisionModelValue?.baseUrl ||
+    model.baseUrl === parsedVisionModelValue.baseUrl;
+  const preferredVisionModelEntry =
+    isVisionModelMode && parsedVisionModelSetting
+      ? parsedVisionModelSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedVisionModelSetting.authType &&
+              model.id === parsedVisionModelSetting.modelId &&
+              matchesVisionModelBaseUrl(model),
+          )
+        : availableModelEntries.find(
+            ({ model }) =>
+              model.id === parsedVisionModelSetting.modelId &&
+              matchesVisionModelBaseUrl(model),
+          )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
-    : preferredFastModelEntry
+    : preferredVoiceModelEntry
       ? buildModelSelectionKey(
-          preferredFastModelEntry.authType,
-          preferredFastModelEntry.model.id,
-          preferredFastModelEntry.model.baseUrl,
+          preferredVoiceModelEntry.authType,
+          preferredVoiceModelEntry.model.id,
+          preferredVoiceModelEntry.model.baseUrl,
         )
-      : authType
-        ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
-        : '';
+      : preferredVisionModelEntry
+        ? buildModelSelectionKey(
+            preferredVisionModelEntry.authType,
+            preferredVisionModelEntry.model.id,
+            preferredVisionModelEntry.model.baseUrl,
+          )
+        : preferredFastModelEntry
+          ? buildModelSelectionKey(
+              preferredFastModelEntry.authType,
+              preferredFastModelEntry.model.id,
+              preferredFastModelEntry.model.baseUrl,
+            )
+          : authType
+            ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
+            : '';
 
   useKeypress(
     (key) => {
-      if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
+      if (
+        key.name === 'escape' ||
+        (key.name === 'left' &&
+          (isFastModelMode || isVoiceModelMode || isVisionModelMode))
+      ) {
         onClose();
       }
     },
@@ -424,30 +611,118 @@ export function ModelDialog({
           return value === selected;
         },
       );
+
+      if (isVoiceModelMode) {
+        if (!selectedEntry) {
+          setErrorMessage(t('Selected voice model is unavailable.'));
+          return;
+        }
+
+        const voiceModel = selectedEntry.model.id;
+        if (!isSelectableVoiceModel(selectedEntry.model)) {
+          setErrorMessage(formatUnsupportedVoiceModelMessage(voiceModel));
+          return;
+        }
+
+        const matchingEntries = availableModelEntries.filter(
+          ({ model }) => model.id === voiceModel,
+        );
+        if (matchingEntries.length > 1) {
+          setErrorMessage(
+            t(
+              "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
+              { model: voiceModel },
+            ),
+          );
+          return;
+        }
+
+        const scope = resolvePersistScope(settings, persistScope);
+        settings.setValue(scope, 'voiceModel', voiceModel);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
       hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
       if (isFastModelMode) {
-        let fastModel: string;
-        if (selected.includes('::')) {
-          const parsed = parseModelSelectionKey(selected);
-          fastModel = `${parsed.authType}:${parsed.modelId}`;
-        } else if (selected.startsWith('$runtime|')) {
-          const parts = selected.split('|');
-          fastModel =
-            parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
-        } else {
-          fastModel = selected;
-        }
-        const scope = getPersistScopeForModelSelection(settings);
+        const fastModel = encodeAuxModelSelector(selected);
+        const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
         config?.setFastModel(fastModel);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
         uiState?.historyManager.addItem(
           {
             type: 'success',
-            text: `${t('Fast Model')}: ${fastModel}`,
+            text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
+      // Vision model mode: keep the selected row's baseUrl when present so
+      // same-provider OpenAI-compatible endpoints with the same id stay distinct.
+      if (isVisionModelMode) {
+        const visionModel = encodeVisionModelSelector(selected);
+        const visionModelDisplay =
+          parseVisionModelSetting(visionModel)?.selector ?? visionModel;
+        // Pinning the primary itself is ignored by the bridge at runtime, so
+        // reject it here instead of persisting a dead pin and reporting success.
+        if (
+          selectedEntry &&
+          config?.isCurrentPrimaryModel(selectedEntry.model)
+        ) {
+          setErrorMessage(
+            t(
+              "'{{model}}' is the current primary model and cannot be used as the vision bridge.",
+              { model: visionModelDisplay },
+            ),
+          );
+          return;
+        }
+        const scope = resolvePersistScope(settings, persistScope);
+        settings.setValue(scope, 'visionModel', visionModel);
+        // Sync runtime Config so the vision bridge picks it up without a restart.
+        config?.setVisionModel(visionModel);
+        // Honor the pin even if the model isn't image-capable, but warn — the
+        // bridge will send images to it.
+        const visionWarning =
+          selectedEntry && !isImageCapable(selectedEntry.model)
+            ? `\n${t("⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.", { model: visionModelDisplay })}`
+            : '';
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Vision Model')}: ${visionModelDisplay}${scopeSuffix}${visionWarning}`,
           },
           Date.now(),
         );
@@ -548,7 +823,17 @@ export function ModelDialog({
         after,
         effectiveAuthType,
         effectiveModelId,
+        // Persist the selected provider's baseUrl so the right provider is
+        // restored next launch when several share the same id. Pair it with the
+        // same resolved config that effectiveModelId comes from (`after`) so the
+        // persisted (model.name, model.baseUrl) stays consistent even if
+        // switchModel transforms the id; fall back to the picker entry's
+        // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+        effectiveBaseUrl: isRuntime
+          ? undefined
+          : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
         isRuntime,
+        persistScope,
       });
       onClose();
     },
@@ -560,7 +845,10 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      isVoiceModelMode,
+      isVisionModelMode,
       availableModelEntries,
+      persistScope,
     ],
   );
 
@@ -574,7 +862,20 @@ export function ModelDialog({
       padding={1}
       width="100%"
     >
-      <Text bold>{t('Select Model')}</Text>
+      <Text bold>
+        {(isVoiceModelMode
+          ? t('Select Voice Model')
+          : isVisionModelMode
+            ? t('Select Vision Model')
+            : isFastModelMode
+              ? t('Select Fast Model')
+              : t('Select Model')) +
+          (persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '')}
+      </Text>
 
       {!hasModels ? (
         <Box marginTop={1} flexDirection="column">
@@ -602,6 +903,7 @@ export function ModelDialog({
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
+            maxItemsToShow={maxModelItemsToShow}
           />
         </Box>
       )}

@@ -28,17 +28,30 @@ import {
   ToolDisplayNames,
   ToolNames,
   type AgentTask,
+  type BackgroundApproval,
   type MonitorTask,
+  type ToolCallConfirmationDetails,
+  type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { ToolConfirmationMessage } from '../messages/ToolConfirmationMessage.js';
+import { WorkflowSaveOverlay } from './workflow-save-overlay.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
   type DreamDialogEntry,
+  compareActiveThenTerminal,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
-import { t } from '../../../i18n/index.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
+import {
+  ancestorChain,
+  computeAgentTreeInfo,
+  computeUserBlockingIds,
+  statusGlyph,
+  treeRowPrefix,
+} from './agent-forest.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -53,7 +66,7 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
 );
 
 function formatActivityLabel(name: string, description: string | undefined) {
-  const display = TOOL_DISPLAY_BY_NAME[name] ?? name;
+  const display = localizeToolDisplayName(TOOL_DISPLAY_BY_NAME[name] ?? name);
   const singleLineDesc = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
@@ -165,11 +178,21 @@ function terminalStatusPresentation(
 const FOREGROUND_ROW_PREFIX = '[blocking]';
 const SHELL_ROW_PREFIX = '[shell]';
 
-function rowLabel(entry: DialogEntry): string {
+function rowLabel(entry: DialogEntry, userBlocking: boolean): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      return entry.isBackgrounded ? label : `${FOREGROUND_ROW_PREFIX} ${label}`;
+      // `[blocking]` warns that cancelling ends the USER's turn. That is
+      // only true when the whole ancestor chain is foreground — a nested
+      // foreground child awaited by a background parent blocks that
+      // parent, not the user. The caller resolves the verdict via
+      // computeUserBlockingIds.
+      const base = userBlocking ? `${FOREGROUND_ROW_PREFIX} ${label}` : label;
+      // Flag agents with a parked approval so the user can spot which row to
+      // open from the list without entering each detail view.
+      return entry.pendingApprovals?.length
+        ? `${base} ⚠ ${t('needs approval')}`
+        : base;
     }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
@@ -182,6 +205,15 @@ function rowLabel(entry: DialogEntry): string {
       return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
+    case 'workflow': {
+      const label = entry.meta?.name ?? entry.runId;
+      const phase = entry.currentPhase ? ` · ${entry.currentPhase}` : '';
+      const counts =
+        entry.agentsDispatched > 0
+          ? ` (${entry.agentsCompleted}/${entry.agentsDispatched})`
+          : '';
+      return `[workflow] ${label}${phase}${counts}`;
+    }
     case 'dream':
       return formatDreamRowLabel(entry);
     default: {
@@ -191,6 +223,35 @@ function rowLabel(entry: DialogEntry): string {
       );
     }
   }
+}
+
+/**
+ * The detail view's Parent line for a nested agent: a breadcrumb of the
+ * present ancestor chain (`main › researcher — <description>`), rooted at
+ * '…' when the chain breaks before the top level, or the launch-time
+ * `parentName` when the immediate parent is already gone. Undefined for
+ * top-level agents (they get no Parent section).
+ */
+function formatParentBreadcrumb(
+  entry: AgentDialogEntry,
+  lookup: (id: string) => AgentTask | undefined,
+): string | undefined {
+  if (entry.parentAgentId == null) return undefined;
+  const { chain, terminatedBy } = ancestorChain(entry, lookup);
+  if (chain.length === 0) {
+    return `${entry.parentName ?? t('unknown agent')} · ${t('no longer running')}`;
+  }
+  // ancestorChain returns nearest-first; the breadcrumb reads root-first.
+  const rootFirst = [...chain].reverse();
+  const crumbs = [
+    terminatedBy === 'root' ? 'main' : '…',
+    ...rootFirst.map((p) => p.subagentType ?? 'agent'),
+  ].join(' › ');
+  const immediateParent = chain[0];
+  const desc = immediateParent.description
+    ? ` — ${immediateParent.description}`
+    : '';
+  return `${crumbs}${desc}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -274,6 +335,14 @@ const ListBody: React.FC<{
   const hiddenBelow = entries.length - windowEnd;
   const visible = entries.slice(windowStart, windowEnd);
 
+  // Nested-agent affordances, computed over the FULL roster (not the
+  // window) so indent and the [blocking] verdict don't change as the
+  // selection scrolls a parent out of view. The entries arrive already
+  // grouped depth-first (useBackgroundTaskView applies
+  // reorderChildrenUnderParents), so indentation lines up with position.
+  const treeInfo = computeAgentTreeInfo(entries);
+  const blockingIds = computeUserBlockingIds(entries);
+
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
@@ -297,13 +366,25 @@ const ListBody: React.FC<{
             : terminal
               ? terminal.labelColor
               : theme.text.primary;
+          const treePrefix =
+            entry.kind === 'agent'
+              ? treeRowPrefix(entry, treeInfo.get(entry.agentId))
+              : '';
           return (
             <Box key={entryId(entry)} flexDirection="row" paddingX={1}>
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
+              {treePrefix !== '' && (
+                <Text color={theme.text.secondary}>{treePrefix}</Text>
+              )}
               <Text color={labelColor}>
-                {escapeAnsiCtrlCodes(rowLabel(entry))}
+                {escapeAnsiCtrlCodes(
+                  rowLabel(
+                    entry,
+                    entry.kind === 'agent' && blockingIds.has(entry.agentId),
+                  ),
+                )}
               </Text>
             </Box>
           );
@@ -347,6 +428,14 @@ const DetailBody: React.FC<{
     case 'monitor':
       return (
         <MonitorDetailBody
+          entry={entry}
+          maxHeight={maxHeight}
+          maxWidth={maxWidth}
+        />
+      );
+    case 'workflow':
+      return (
+        <WorkflowDetailBody
           entry={entry}
           maxHeight={maxHeight}
           maxWidth={maxWidth}
@@ -559,22 +648,51 @@ const AgentDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
+  const config = useConfig();
   const title = escapeAnsiCtrlCodes(
     `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
   );
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
-  if (entry.stats?.totalTokens) {
+  if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
       t('{{count}} tokens', {
-        count: formatTokenCount(entry.stats.totalTokens),
+        count: formatTokenCount(entry.stats.outputTokens),
       }),
     );
   }
   if (entry.stats?.toolUses !== undefined) {
     dimSubtitleParts.push(formatToolUseCount(entry.stats.toolUses));
   }
+  // Nesting badge: launch depth is 0-based, user-facing levels are 1-based
+  // (a top-level sub-agent is level 1 and gets no badge).
+  if ((entry.depth ?? 0) > 0) {
+    dimSubtitleParts.push(
+      t('nested \u00B7 level {{level}} of {{max}}', {
+        level: String((entry.depth ?? 0) + 1),
+        max: String(config.getMaxSubagentDepth()),
+      }),
+    );
+  }
+
+  // Parent breadcrumb + live children, resolved from the registry at
+  // render time (the detail body re-renders on activity ticks, so both
+  // stay current). Every lookup tolerates eviction: a missing ancestor
+  // truncates the breadcrumb with '\u2026', a fully-gone parent falls back to
+  // the launch-time parentName captured at registration.
+  const registry = config.getBackgroundTaskRegistry();
+  const parentLine = formatParentBreadcrumb(entry, (id) => registry.get(id));
+  // Same active-first / newest-first ordering as the main roster: getAll()
+  // is insertion-ordered, so without the sort a parent with more than five
+  // children would hide its still-running newest child behind its oldest
+  // completed ones.
+  const childAgents = registry
+    .getAll()
+    .filter((task) => task.parentAgentId === entry.agentId)
+    .sort(compareActiveThenTerminal);
+  const visibleChildAgents = childAgents.slice(0, 5);
+  const hiddenChildCount = childAgents.length - visibleChildAgents.length;
 
   // Registry stores activities newest-last; keep that order so the live
   // row sits at the bottom of the Progress block. Cap at 5 in case the
@@ -616,6 +734,52 @@ const AgentDetailBody: React.FC<{
           {dimSubtitleParts.join(' \u00B7 ')}
         </Text>
       </Box>
+
+      {parentLine !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Parent')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {`  ${escapeAnsiCtrlCodes(parentLine)}`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {visibleChildAgents.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Sub-agents')}
+              <Text
+                color={theme.text.secondary}
+              >{` (${childAgents.length})`}</Text>
+            </Text>
+          </Box>
+          {visibleChildAgents.map((child) => (
+            <Box key={child.agentId}>
+              <Text color={theme.text.secondary} wrap="truncate-end">
+                {`  ${statusGlyph(child.status)} ${escapeAnsiCtrlCodes(
+                  `${child.subagentType ?? 'agent'} \u2014 ${child.description}`,
+                )} \u00B7 ${elapsedFor(child)}`}
+              </Text>
+            </Box>
+          ))}
+          {hiddenChildCount > 0 && (
+            <Box>
+              <Text color={theme.text.secondary}>
+                {`  \u2026 ${t('{{count}} more', { count: String(hiddenChildCount) })}`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
 
       {activities.length > 0 && (
         <Fragment>
@@ -864,6 +1028,189 @@ const MonitorDetailBody: React.FC<{
   );
 };
 
+// ─── Workflow detail body ──────────────────────────────────
+//
+// Shows the workflow's declared meta (name + description + whenToUse),
+// the phase tree with truncation, per-phase dispatch counts, and the
+// log tail. Phase tree is capped at MAX_VISIBLE_PHASES with a "+N more
+// above" header so deeply nested fan-outs don't blow the dialog body.
+// Logs are the most recent tail; the registry caps at 100 lines but
+// the body further truncates to fit the available height.
+
+const MAX_VISIBLE_PHASES = 20;
+const MAX_VISIBLE_LOG_LINES = 10;
+
+const WorkflowDetailBody: React.FC<{
+  entry: WorkflowTask;
+  maxHeight: number;
+  maxWidth: number;
+}> = ({ entry, maxHeight, maxWidth }) => {
+  const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
+  const terminal = terminalStatusPresentation(entry.status);
+  const dimSubtitleParts: string[] = [elapsedFor(entry)];
+  if (entry.agentsDispatched > 0) {
+    dimSubtitleParts.push(
+      `${entry.agentsCompleted}/${entry.agentsDispatched} ${t('agents')}`,
+    );
+  }
+  dimSubtitleParts.push(
+    `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
+  );
+  // P5: surface the per-run token usage when there's anything to report
+  // (cap set OR tokens spent). Skipped when both are absent so legacy
+  // / test runs don't show a noisy `0 tokens` chip.
+  // P5 R1 (#7): apply `formatTokenCount` for consistency with
+  // `statusLinePresets` and other token-bearing UI surfaces.
+  if (entry.tokensSpent > 0 || entry.tokenBudgetTotal !== null) {
+    dimSubtitleParts.push(
+      entry.tokenBudgetTotal !== null
+        ? `${formatTokenCount(entry.tokensSpent)}/${formatTokenCount(entry.tokenBudgetTotal)} ${t('tokens')}`
+        : `${formatTokenCount(entry.tokensSpent)} ${t('tokens')}`,
+    );
+  }
+
+  // Phase tree: collapse the head when over the visible cap, keeping
+  // the most recent N entries (the user almost always wants to see the
+  // current state, not the launch sequence).
+  const phaseOverflow = Math.max(0, entry.phases.length - MAX_VISIBLE_PHASES);
+  const visiblePhases = entry.phases.slice(-MAX_VISIBLE_PHASES);
+
+  // Log tail: similar truncation logic; show "+N more above" header if
+  // the registry has more than the visible window.
+  const logOverflow = Math.max(
+    0,
+    entry.recentLogs.length - MAX_VISIBLE_LOG_LINES,
+  );
+  const visibleLogs = entry.recentLogs.slice(-MAX_VISIBLE_LOG_LINES);
+
+  const hasError = Boolean(entry.error);
+
+  return (
+    <MaxSizedBox
+      maxHeight={maxHeight}
+      maxWidth={maxWidth}
+      overflowDirection="bottom"
+    >
+      <Box>
+        <Text bold color={theme.text.accent}>
+          {title}
+        </Text>
+      </Box>
+      <Box>
+        {terminal && (
+          <Text color={terminal.color}>
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
+          </Text>
+        )}
+        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+      </Box>
+
+      {entry.meta?.description && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text wrap="wrap">{entry.meta.description}</Text>
+          </Box>
+        </Fragment>
+      )}
+
+      <Box />
+      <Box>
+        <Text bold dimColor>
+          {t('Phases')}
+        </Text>
+      </Box>
+      {entry.phases.length === 0 ? (
+        <Box>
+          <Text dimColor>{t('(no phase recorded yet)')}</Text>
+        </Box>
+      ) : (
+        <Fragment>
+          {phaseOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${phaseOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visiblePhases.map((phaseTitle, i) => {
+            const isCurrent =
+              entry.status === 'running' &&
+              i === visiblePhases.length - 1 &&
+              entry.currentPhase === phaseTitle;
+            const marker = isCurrent ? '▸' : '·';
+            // P5: per-phase token tally appended to the phase row.
+            // Skipped when no tokens attributed yet so empty phases
+            // (early register, schema-mode-pending) don't render a
+            // misleading `· 0` chip.
+            // P5 R1 (#7): apply `formatTokenCount` for consistency.
+            const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
+            const tokenChip =
+              phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
+            return (
+              <Box key={`${phaseTitle}-${i}`}>
+                <Text color={isCurrent ? theme.status.success : undefined}>
+                  {`  ${marker} ${phaseTitle}${tokenChip}`}
+                </Text>
+              </Box>
+            );
+          })}
+          {/* P5 R1 (#6): surface null-sentinel attribution — tokens
+              spent BEFORE the first `phase()` call accumulate under the
+              `null` key. Without this row the entire pre-phase spend is
+              hidden in the UI. */}
+          {(entry.perPhaseTokens.get(null) ?? 0) > 0 && (
+            <Box>
+              <Text dimColor>
+                {`  · ${t('(no phase)')} · ${formatTokenCount(
+                  entry.perPhaseTokens.get(null) ?? 0,
+                )}t`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
+
+      {entry.recentLogs.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Logs')}
+            </Text>
+          </Box>
+          {logOverflow > 0 && (
+            <Box>
+              <Text dimColor>{`+${logOverflow} ${t('more above')}`}</Text>
+            </Box>
+          )}
+          {visibleLogs.map((line, i) => (
+            <Box key={`log-${i}`}>
+              <Text wrap="truncate-end" dimColor>
+                {line}
+              </Text>
+            </Box>
+          ))}
+        </Fragment>
+      )}
+
+      {hasError && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold color={theme.status.error}>
+              {t('Error')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.status.error} wrap="wrap">
+              {entry.error}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+    </MaxSizedBox>
+  );
+};
+
 // ─── Dialog shell ──────────────────────────────────────────
 
 interface BackgroundTasksDialogProps {
@@ -922,6 +1269,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     string | null
   >(null);
 
+  // P7b-A3: when true, the workflow save overlay owns the keyboard (the main
+  // dialog handler yields). Reset whenever we leave detail mode so an armed
+  // save can't bleed into the list view.
+  const [saveActive, setSaveActive] = useState(false);
+  useEffect(() => {
+    if (!isDetailMode) setSaveActive(false);
+  }, [isDetailMode]);
+
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
     if (!fromSnapshot) return fromSnapshot;
@@ -957,6 +1312,48 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // Activity callback is agent-only — shells don't emit per-tool events.
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
+
+  // Permission bubbling: the oldest tool call this background agent has
+  // parked awaiting user approval. `selectedEntry` is re-read from the
+  // registry above (and useBackgroundTaskView refreshes `entries` on the
+  // registry's approval-change callback), so `pendingApprovals` is current.
+  // When present in detail mode, the dialog renders the shared
+  // ToolConfirmationMessage and yields keyboard focus to it.
+  const selectedApproval: BackgroundApproval | undefined =
+    selectedEntry?.kind === 'agent'
+      ? selectedEntry.pendingApprovals?.[0]
+      : undefined;
+  const approvalActive = isDetailMode && Boolean(selectedApproval);
+  const approvalUsesQuestionDialog =
+    selectedApproval?.confirmationDetails.type === 'ask_user_question';
+
+  // Reconstruct the full confirmation details (the parked approval omits
+  // the runtime-owned `onConfirm`) and route the user's outcome back
+  // through the registry, which invokes the parked call's `respond` to
+  // resume the agent's tool call.
+  const approvalConfirmationDetails: ToolCallConfirmationDetails | undefined =
+    selectedApproval && selectedAgentIdForActivity
+      ? // The spread restores every field except `onConfirm`; the cast is
+        // needed because TS can't prove the discriminated-union shape across
+        // an object spread.
+        ({
+          ...selectedApproval.confirmationDetails,
+          hideAlwaysAllow: true,
+          onConfirm: async (
+            outcome: Parameters<BackgroundApproval['respond']>[0],
+            payload?: Parameters<BackgroundApproval['respond']>[1],
+          ) => {
+            await config
+              .getBackgroundTaskRegistry()
+              .resolvePendingApproval(
+                selectedAgentIdForActivity,
+                selectedApproval.callId,
+                outcome,
+                payload,
+              );
+          },
+        } as ToolCallConfirmationDetails)
+      : undefined;
   useEffect(() => {
     if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity) return;
     const registry = config.getBackgroundTaskRegistry();
@@ -1058,9 +1455,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
-    const isForegroundAgent =
-      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
-    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+    // Two-step confirm only when cancelling would end the USER's turn —
+    // the same chain-aware verdict as the `[blocking]` row prefix. A
+    // foreground child awaited by a *background* parent unblocks that
+    // parent, not the user, so it cancels on the first press like any
+    // background entry.
+    const isUserBlockingAgent =
+      selectedEntry.kind === 'agent' &&
+      computeUserBlockingIds(entries).has(selectedEntry.agentId);
+    if (isUserBlockingAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;
     }
@@ -1071,6 +1474,32 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useKeypress(
     (key) => {
       if (!dialogOpen) return;
+      // P7b-A3: the save overlay owns the keyboard while open — yield every
+      // key to it (its own `useKeypress` handles name input / scope / save).
+      if (saveActive) return;
+      // While a parked approval is shown, the embedded ToolConfirmationMessage
+      // owns the selection keys (↑/↓/numbers/Enter, Esc = deny this call).
+      // Keep two escape hatches for compact approvals that don't have their
+      // own free-text or tab-navigation UI:
+      //   ← : back to the list (the approval stays parked; the pill keeps
+      //       its "needs approval" marker)
+      //   x : stop the agent entirely (also auto-rejects its parked calls)
+      // Everything else yields so the dialog's own Enter/Esc handlers don't
+      // double-fire against the confirmation's.
+      if (approvalActive && !approvalUsesQuestionDialog) {
+        if (key.name === 'left') {
+          exitDetail();
+          return;
+        }
+        if (key.sequence === 'x' && !key.ctrl && !key.meta) {
+          handleCancelKey();
+          return;
+        }
+        return;
+      }
+      if (approvalActive && approvalUsesQuestionDialog) {
+        return;
+      }
 
       if (dialogMode === 'list') {
         if (keyMatchers[Command.SELECTION_UP](key)) {
@@ -1113,6 +1542,21 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       // detail mode
+      // P7b-A3: `s` opens the save overlay for a completed workflow run that
+      // still carries its script source. Gated to terminal workflow entries
+      // so it never collides with a live run's controls.
+      if (
+        key.sequence === 's' &&
+        !key.ctrl &&
+        !key.meta &&
+        config &&
+        selectedEntry?.kind === 'workflow' &&
+        selectedEntry.status !== 'running' &&
+        !!selectedEntry.script
+      ) {
+        setSaveActive(true);
+        return;
+      }
       if (key.name === 'left') {
         // Reset the foreground confirm-step before leaving detail so the
         // armed state can't carry into list mode and turn a stray `x` into
@@ -1152,12 +1596,31 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     selectedEntry.status === 'paused' &&
     !selectedEntry.resumeBlockedReason;
 
+  // P7b-A3: a completed workflow run that still carries its script source can
+  // be saved to `.qwen/workflows/<name>.js` from the detail view.
+  const workflowSaveTarget =
+    config &&
+    selectedEntry?.kind === 'workflow' &&
+    selectedEntry.status !== 'running' &&
+    selectedEntry.script
+      ? selectedEntry
+      : null;
+
   // Hint footer — context-sensitive.
   const selectedEntryKey = selectedEntry ? entryId(selectedEntry) : null;
   const showCancelConfirmHint =
     pendingCancelEntryId !== null && pendingCancelEntryId === selectedEntryKey;
   const hints: string[] = [];
-  if (showCancelConfirmHint) {
+  if (approvalActive) {
+    // The embedded ToolConfirmationMessage renders its own selectable
+    // options; for free-text question dialogs, yield every key to the
+    // embedded dialog so typing and navigation cannot also trigger the
+    // background-task dialog's shortcuts.
+    hints.push(t('Approve or deny the request above'));
+    if (!approvalUsesQuestionDialog) {
+      hints.push('← back', 'x stop');
+    }
+  } else if (showCancelConfirmHint) {
     // Force the confirmation step into the hint row so the user sees
     // exactly what the next `x` will do. Phrasing matches the
     // `[blocking]` row prefix \u2014 "blocking turn" reads as "your input
@@ -1181,6 +1644,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
       hints.push('x abandon');
     }
+    if (workflowSaveTarget) hints.push('s save');
   }
 
   return (
@@ -1198,7 +1662,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           </Text>
         </Box>
       )}
-      <Box marginTop={dialogMode === 'list' ? 1 : 0}>
+      <Box marginTop={dialogMode === 'list' ? 1 : 0} flexDirection="column">
         {dialogMode === 'list' ? (
           <ListBody
             entries={entries}
@@ -1208,7 +1672,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         ) : selectedEntry ? (
           <DetailBody
             entry={selectedEntry}
-            maxHeight={detailContentHeight}
+            // Halve the detail body budget when an approval banner is shown
+            // below so both fit; the body self-caps internally anyway.
+            maxHeight={
+              approvalActive
+                ? Math.max(6, Math.floor(detailContentHeight / 2))
+                : detailContentHeight
+            }
             maxWidth={detailContentWidth}
           />
         ) : (
@@ -1216,10 +1686,38 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
             <Text color={theme.text.secondary}>{t('No entry to show.')}</Text>
           </Box>
         )}
+        {approvalActive && approvalConfirmationDetails && (
+          <Box flexDirection="column" marginTop={1} paddingX={1}>
+            <Text bold color={theme.status.warning}>
+              {t('Background agent needs approval')}
+            </Text>
+            <ToolConfirmationMessage
+              confirmationDetails={approvalConfirmationDetails}
+              config={config}
+              isFocused={approvalActive}
+              contentWidth={detailContentWidth - 2}
+              availableTerminalHeight={Math.max(
+                6,
+                Math.floor(detailContentHeight / 2),
+              )}
+              compactMode
+            />
+          </Box>
+        )}
       </Box>
-      <Box marginTop={1} paddingX={1}>
-        <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
-      </Box>
+      {saveActive && workflowSaveTarget && config ? (
+        <WorkflowSaveOverlay
+          script={workflowSaveTarget.script}
+          initialName={workflowSaveTarget.meta?.name ?? ''}
+          config={config}
+          isActive={saveActive}
+          onClose={() => setSaveActive(false)}
+        />
+      ) : (
+        <Box marginTop={1} paddingX={1}>
+          <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+        </Box>
+      )}
     </Box>
   );
 };

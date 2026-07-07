@@ -67,9 +67,12 @@ export class SkillCommandLoader implements ICommandLoader {
       const visibleSkills = allSkills.filter(
         (skill) => !disabled.has(skill.name.toLowerCase()),
       );
+      const nonUserInvocableCount = visibleSkills.filter(
+        (skill) => skill.userInvocable === false,
+      ).length;
 
       debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled`,
+        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
       return visibleSkills.map((skill) => {
@@ -104,6 +107,7 @@ export class SkillCommandLoader implements ICommandLoader {
             : skill.level === 'project'
               ? 'project'
               : 'user',
+          userInvocable: skill.userInvocable ?? true,
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,

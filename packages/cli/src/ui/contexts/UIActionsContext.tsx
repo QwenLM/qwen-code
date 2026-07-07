@@ -9,7 +9,12 @@ import { type Key } from '../hooks/useKeypress.js';
 import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
-import { type EditorType, type ApprovalMode } from '@qwen-code/qwen-code-core';
+import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import {
+  type EditorType,
+  type ApprovalMode,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
@@ -23,6 +28,10 @@ export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
+  dismissSkillReviewDialog: () => void;
+  closeSkillReviewDialog: () => void;
+  acceptPendingSkill: (skillName: string) => void;
+  rejectPendingSkill: (skillName: string) => void;
   handleThemeSelect: (
     themeName: string | undefined,
     scope: SettingScope,
@@ -32,6 +41,7 @@ export interface UIActions {
     mode: ApprovalMode | undefined,
     scope: SettingScope,
   ) => void;
+  handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
   auth: AuthController['actions'];
   handleEditorSelect: (
     editorType: EditorType | undefined,
@@ -43,7 +53,11 @@ export interface UIActions {
   notifyStatusLineSettingsChanged: (config: StatusLinePresetConfig) => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
-  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openModelDialog: (options?: {
+    fastModelMode?: boolean;
+    voiceModelMode?: boolean;
+    visionModelMode?: boolean;
+  }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -55,6 +69,7 @@ export interface UIActions {
   handleIdePromptComplete: (result: IdeIntegrationNudgeResult) => void;
   handleCommandMigrationComplete: (result: CommandMigrationNudgeResult) => void;
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
+  handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
@@ -98,7 +113,7 @@ export interface UIActions {
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   // Branch (fork) session
   handleBranch: (name?: string) => Promise<void>;
   // Delete session dialog

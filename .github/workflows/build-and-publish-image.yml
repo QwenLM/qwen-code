@@ -47,13 +47,22 @@ jobs:
 
           # Extract major.minor for floating tag (e.g., 1.0.0 -> 1.0)
           MAJOR_MINOR=$(echo "$CLEAN_VERSION" | grep -oE '^[0-9]+\.[0-9]+' || true)
+          if [[ "$CLEAN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            IS_STABLE_SEMVER=true
+          else
+            IS_STABLE_SEMVER=false
+          fi
 
-          echo "raw=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "clean=${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "major_minor=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
+          {
+            echo "raw=${INPUT_VERSION}"
+            echo "clean=${CLEAN_VERSION}"
+            echo "major_minor=${MAJOR_MINOR}"
+            echo "is_stable_semver=${IS_STABLE_SEMVER}"
+          } >> "$GITHUB_OUTPUT"
           echo "Input version: ${INPUT_VERSION}"
           echo "Clean version: ${CLEAN_VERSION}"
           echo "Major.minor: ${MAJOR_MINOR}"
+          echo "Stable semver: ${IS_STABLE_SEMVER}"
 
       - name: 'Debug inputs'
         if: |-
@@ -79,7 +88,8 @@ jobs:
           images: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}'
           tags: |
             type=raw,value=${{ steps.version.outputs.clean }},enable=${{ steps.version.outputs.clean != '' }}
-            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ steps.version.outputs.major_minor != '' }}
+            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ steps.version.outputs.is_stable_semver == 'true' }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.is_stable_semver == 'true' }}
             type=ref,event=branch,enable=${{ steps.version.outputs.clean == '' }}
             type=ref,event=pr,enable=${{ steps.version.outputs.clean == '' }}
             type=semver,pattern={{version}},enable=${{ steps.version.outputs.clean == '' }}

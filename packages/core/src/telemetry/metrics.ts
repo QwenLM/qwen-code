@@ -8,6 +8,7 @@ import type { Attributes, Meter, Counter, Histogram } from '@opentelemetry/api';
 import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
+import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import type { ModelSlashCommandEvent } from './types.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
@@ -62,7 +63,7 @@ const baseMetricDefinition = {
   // can enable QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID or
   // telemetry.metrics.includeSessionId. Spans and logs always carry
   // session.id for trace/log correlation.
-  getCommonAttributes: (config: Config): Attributes => {
+  getCommonAttributes: (config: TelemetryRuntimeConfig): Attributes => {
     const out: Attributes = {};
     if (config.getTelemetryMetricsIncludeSessionId()) {
       out['session.id'] = config.getSessionId();
@@ -410,7 +411,7 @@ export function getMeter(): Meter | undefined {
   return cliMeter;
 }
 
-export function initializeMetrics(config: Config): void {
+export function initializeMetrics(config: TelemetryRuntimeConfig): void {
   if (isMetricsInitialized) return;
 
   const meter = getMeter();
@@ -669,7 +670,9 @@ export function recordModelSlashCommand(
 
 // Performance Monitoring Functions
 
-export function initializePerformanceMonitoring(config: Config): void {
+export function initializePerformanceMonitoring(
+  config: TelemetryRuntimeConfig,
+): void {
   const meter = getMeter();
   if (!meter) return;
 

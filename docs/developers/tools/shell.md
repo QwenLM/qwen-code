@@ -150,7 +150,7 @@ To show color in the shell output, you need to set the `tools.shell.showColor` s
 
 ### Setting the Pager
 
-You can set a custom pager for the shell output by setting the `tools.shell.pager` setting. The default pager is `cat`. **Note: This setting only applies when `tools.shell.enableInteractiveShell` is enabled.**
+You can set a custom pager for the shell output by setting the `tools.shell.pager` setting. The default pager is `cat` on non-Windows platforms. No default is set on Windows. Set `tools.shell.pager` to an empty string to disable pager environment variables. **Note: This setting only applies when `tools.shell.enableInteractiveShell` is enabled.**
 
 **Example `settings.json`:**
 

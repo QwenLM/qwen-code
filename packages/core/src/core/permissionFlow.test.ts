@@ -208,6 +208,18 @@ describe('isPlanModeBlocked', () => {
     ).toBe(false);
   });
 
+  it('should not block enter_plan_mode tool', () => {
+    expect(
+      isPlanModeBlocked(
+        true,
+        false,
+        false,
+        mockConfirmationDetails('exec'),
+        true,
+      ),
+    ).toBe(false);
+  });
+
   it('should not block when not in plan mode', () => {
     expect(
       isPlanModeBlocked(false, false, false, mockConfirmationDetails('exec')),

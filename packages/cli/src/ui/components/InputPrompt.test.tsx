@@ -7,10 +7,11 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
-import { InputPrompt } from './InputPrompt.js';
+import { InputPrompt, classifyPastedImagePaths } from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -18,15 +19,19 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
-import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import {
+  useCommandCompletion,
+  CompletionMode,
+} from '../hooks/useCommandCompletion.js';
 import type { UseInputHistoryReturn } from '../hooks/useInputHistory.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
+import { useVoiceInput } from '../hooks/use-voice-input.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import {
@@ -41,12 +46,17 @@ import {
 const mockViewActions = vi.hoisted(() => ({
   setAgentTabBarFocused: vi.fn(),
   setBgPillFocused: vi.fn(),
+  setLivePanelFocused: vi.fn(),
+  setLivePanelSelectedIndex: vi.fn(),
+  setBgSelectedIndex: vi.fn(),
+  enterBgDetailFromPanel: vi.fn(),
 }));
 
 vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
+vi.mock('../hooks/use-voice-input.js');
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
@@ -81,6 +91,8 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
   })),
   useBackgroundTaskViewActions: vi.fn(() => ({
     setPillFocused: mockViewActions.setBgPillFocused,
+    setLivePanelFocused: mockViewActions.setLivePanelFocused,
+    setLivePanelSelectedIndex: mockViewActions.setLivePanelSelectedIndex,
   })),
 }));
 
@@ -175,11 +187,16 @@ describe('InputPrompt', () => {
   const mockedUseReverseSearchCompletion = vi.mocked(
     useReverseSearchCompletion,
   );
+  const mockedUseVoiceInput = vi.mocked(useVoiceInput);
 
   beforeEach(() => {
     vi.resetAllMocks();
     mockViewActions.setAgentTabBarFocused.mockReset();
     mockViewActions.setBgPillFocused.mockReset();
+    mockViewActions.setLivePanelFocused.mockReset();
+    mockViewActions.setLivePanelSelectedIndex.mockReset();
+    mockViewActions.setBgSelectedIndex.mockReset();
+    mockViewActions.enterBgDetailFromPanel.mockReset();
 
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
@@ -208,9 +225,15 @@ describe('InputPrompt', () => {
       dialogMode: 'closed',
       dialogOpen: false,
       pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
     });
     mockedUseBackgroundTaskViewActions.mockReturnValue({
       setPillFocused: mockViewActions.setBgPillFocused,
+      setLivePanelFocused: mockViewActions.setLivePanelFocused,
+      setLivePanelSelectedIndex: mockViewActions.setLivePanelSelectedIndex,
+      setSelectedIndex: mockViewActions.setBgSelectedIndex,
+      enterDetailFromPanel: mockViewActions.enterBgDetailFromPanel,
     } as unknown as ReturnType<typeof useBackgroundTaskViewActions>);
 
     mockCommandContext = createMockCommandContext();
@@ -273,9 +296,11 @@ describe('InputPrompt', () => {
       visibleStartIndex: 0,
       isPerfectMatch: false,
       midInputGhostText: null,
+      completionMode: CompletionMode.IDLE,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
+      dismissCompletion: vi.fn(),
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
@@ -304,6 +329,12 @@ describe('InputPrompt', () => {
     mockedUseReverseSearchCompletion.mockReturnValue(
       mockReverseSearchCompletion,
     );
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: vi.fn(() => false),
+    });
 
     props = {
       buffer: mockBuffer,
@@ -314,6 +345,7 @@ describe('InputPrompt', () => {
         getProjectRoot: () => path.join('test', 'project'),
         getTargetDir: () => path.join('test', 'project', 'src'),
         getVimMode: () => false,
+        getFastModel: () => undefined,
         getWorkspaceContext: () => ({
           getDirectories: () => ['/test/project/src'],
         }),
@@ -328,6 +360,171 @@ describe('InputPrompt', () => {
       focus: true,
       placeholder: '  Type your message or @path/to/file',
     };
+  });
+
+  it('routes Space through voice input when the prompt is empty', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('keeps normal Space typing when the prompt already has text', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'idle',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    props.buffer.setText('hello');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(props.buffer.handleInput).toHaveBeenCalled();
+    });
+    expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets Space stop voice recording even when shell mode is active', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    props.shellModeActive = true;
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('does not route voice keys while the background dialog is open', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseBackgroundTaskViewState.mockReturnValue({
+      entries: [],
+      selectedIndex: 0,
+      dialogMode: 'list',
+      dialogOpen: true,
+      pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write(' ');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('passes a voice refinement callback when a fast model is configured', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: expect.any(Function) }),
+    );
+    unmount();
+  });
+
+  it('omits voice refinement when refineTranscript is disabled', () => {
+    props.config = {
+      ...props.config,
+      getFastModel: () => 'qwen-fast',
+    } as unknown as Config;
+    const settings = {
+      merged: {
+        general: { voice: { refineTranscript: false } },
+      },
+    } as LoadedSettings;
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />, {
+      settings,
+    });
+
+    expect(mockedUseVoiceInput).toHaveBeenCalledWith(
+      expect.objectContaining({ refine: undefined }),
+    );
+    unmount();
+  });
+
+  it('lets the feedback dialog consume option keys before active voice input', async () => {
+    const handleVoiceKeypress = vi.fn(() => true);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: true,
+      messageQueue: [],
+      pendingGeminiHistoryItems: [],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('1');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).not.toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('lets non-voice keys fall through while voice recording is active', async () => {
+    const handleVoiceKeypress = vi.fn(() => false);
+    mockedUseVoiceInput.mockReturnValue({
+      status: 'recording',
+      interimText: '',
+      audioLevel: 0,
+      handleKeypress: handleVoiceKeypress,
+    });
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    stdin.write('a');
+
+    await waitFor(() => {
+      expect(handleVoiceKeypress).toHaveBeenCalled();
+    });
+    expect(props.buffer.handleInput).toHaveBeenCalled();
+    unmount();
   });
 
   // Two microtask yields are intentional: Ink 7 + React 19 split a render
@@ -363,7 +560,10 @@ describe('InputPrompt', () => {
     // generous buffer (renderWithProviders cold start can be 100-200ms).
     const SUGGESTION_VISIBLE_WAIT_MS = 700;
 
-    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+    // Regression: Enter on suggestion should fill buffer, NOT submit — matches
+    // Tab/Right-arrow behavior and Claude Code's design. This prevents accidental
+    // execution of destructive slash commands (/clear, /quit).
+    it('fills buffer on Enter when suggestion is available (does not submit)', async () => {
       vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
@@ -376,11 +576,9 @@ describe('InputPrompt', () => {
         });
         await flush();
 
-        expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-        // Enter path must NOT call buffer.insert — it passes text directly to
-        // handleSubmitAndClear. Calling insert would re-fill the buffer after
-        // it was already cleared (the microtask race bug).
-        expect(mockBuffer.insert).not.toHaveBeenCalled();
+        // Enter on suggestion should fill buffer, NOT submit
+        expect(props.onSubmit).not.toHaveBeenCalled();
+        expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
       } finally {
         vi.useRealTimers();
         unmount();
@@ -436,6 +634,210 @@ describe('InputPrompt', () => {
         unmount();
       }
     });
+
+    // Regression for #5145: the `promptSuggestion` prop fallback path must work
+    // when `followup.state.suggestion` is null (e.g. after user typed and
+    // deleted — the followup controller was dismissed but the placeholder
+    // text is still available via the prop).
+    //
+    // These tests deliberately advance LESS than SUGGESTION_DELAY_MS (300ms),
+    // so the followup controller's show-timer never fires and
+    // `followup.state.suggestion` stays null — exercising the prop fallback
+    // branch rather than the normal visible-suggestion path. (Earlier versions
+    // waited 700ms here, which silently tested the normal flow instead.)
+    describe('promptSuggestion prop fallback (when followup.state.suggestion is null)', () => {
+      // Comfortably under the 300ms SUGGESTION_DELAY_MS so the controller's
+      // state.suggestion remains null.
+      const BEFORE_SUGGESTION_VISIBLE_MS = 100;
+
+      it('accepts promptSuggestion via Tab when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\t');
+          });
+          await flush();
+
+          // Tab should insert the suggestion text into the buffer
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('accepts promptSuggestion via Right arrow when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\x1b[C'); // right arrow
+          });
+          await flush();
+
+          // Right arrow should insert the suggestion text into the buffer
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('fills buffer on Enter (does not submit) when followup.state.suggestion is null', async () => {
+        vi.useFakeTimers();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} promptSuggestion="commit this" />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Enter on suggestion should fill buffer, NOT submit (matches Tab/Right-arrow behavior)
+          expect(props.onSubmit).not.toHaveBeenCalled();
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+    });
+
+    // Regression for #5145 (doudouOUC Critical #1/#2, confirmed by wenshao's
+    // re-verification): accepting or submitting must clear the persisted
+    // `promptSuggestion` via onPromptSuggestionDismiss. Otherwise the prop
+    // survives, and the next time the buffer empties `availableSuggestion`
+    // re-derives from it and the just-accepted/submitted suggestion reappears
+    // as a ghost placeholder. Typing (#1380) and paste (#665) already clear it;
+    // accept and submit must match.
+    describe('clears promptSuggestion on accept/submit (no ghost placeholder)', () => {
+      // Under the 300ms SUGGESTION_DELAY_MS so the accept goes through the
+      // promptSuggestion fallback path (followup.state.suggestion stays null).
+      const BEFORE_SUGGESTION_VISIBLE_MS = 100;
+
+      it('calls onPromptSuggestionDismiss when Tab accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\t');
+          });
+          await flush();
+
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when Right arrow accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\x1b[C'); // right arrow
+          });
+          await flush();
+
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when Enter accepts the suggestion', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Enter accepts into the buffer (does not submit) and clears the prop.
+          expect(props.onSubmit).not.toHaveBeenCalled();
+          expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+
+      it('calls onPromptSuggestionDismiss when a typed message is submitted', async () => {
+        vi.useFakeTimers();
+        const onPromptSuggestionDismiss = vi.fn();
+        mockBuffer.text = 'ship it';
+        mockBuffer.lines = ['ship it'];
+        mockBuffer.cursor = [0, 'ship it'.length];
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt
+            {...props}
+            promptSuggestion="commit this"
+            onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+          />,
+        );
+        try {
+          await advanceTimers(BEFORE_SUGGESTION_VISIBLE_MS);
+
+          act(() => {
+            stdin.write('\r');
+          });
+          await flush();
+
+          // Submitting a non-empty buffer clears the stale suggestion too, so a
+          // synchronous slash command (/clear, /help) can't leave a ghost.
+          expect(props.onSubmit).toHaveBeenCalledWith('ship it');
+          expect(onPromptSuggestionDismiss).toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+          unmount();
+        }
+      });
+    });
   });
 
   // Regression for #4171: `onTabConsumerChange` (consumed by AppContainer
@@ -459,6 +861,50 @@ describe('InputPrompt', () => {
       await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       expect(onTabConsumerChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    // Regression for #5145: `hasTabConsumer` must be true when ONLY
+    // `promptSuggestion` prop is set (followup.state.suggestion is null),
+    // so Windows Tab approval-mode cycling is blocked even before the
+    // followup controller's debounce fires.
+    it('reports true immediately when promptSuggestion prop is set (no followup debounce needed)', async () => {
+      const onTabConsumerChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onTabConsumerChange={onTabConsumerChange}
+        />,
+      );
+      // Must report true immediately — no need to wait for followup debounce
+      // because `hasTabConsumer` includes `Boolean(promptSuggestion)`.
+      expect(onTabConsumerChange).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    // Regression for #5145 (wenshao review): `hasTabConsumer` is now gated on
+    // `buffer.text.length === 0` instead of the old sticky `suggestionDismissed`
+    // flag, so it reacts to the *current* buffer. With a promptSuggestion present
+    // but a NON-empty buffer (the user is mid-typing), Tab must NOT be consumed —
+    // Windows approval-mode cycling stays enabled. The old `Boolean(promptSuggestion)`
+    // gate wrongly reported true here. The complementary empty-buffer → true
+    // direction (i.e. restored after deleting back to empty) is pinned by
+    // "reports true immediately when promptSuggestion prop is set" above.
+    it('reports false when a promptSuggestion is set but the buffer is non-empty', async () => {
+      mockBuffer.text = 'commit';
+      const onTabConsumerChange = vi.fn();
+      const { unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          promptSuggestion="commit this"
+          onTabConsumerChange={onTabConsumerChange}
+        />,
+      );
+      await wait();
+
+      expect(onTabConsumerChange).toHaveBeenCalledWith(false);
+      expect(onTabConsumerChange).not.toHaveBeenCalledWith(true);
       unmount();
     });
 
@@ -747,13 +1193,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
 
-    // Ctrl+P should navigate history, not completion
-    // Two-step edge: pre-position cursor at col 0 so Ctrl+P directly triggers history
+    // Ctrl+P should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at col 0 so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, 0];
     stdin.write('\u0010'); // Ctrl+P
     await wait();
-    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -778,13 +1225,14 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
     expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
 
-    // Ctrl+N should navigate history, not completion
-    // Two-step edge: pre-position cursor at end so Ctrl+N directly triggers history
+    // Ctrl+N should navigate completion while suggestions are visible.
+    // Two-step edge: pre-position cursor at end so a fallthrough would
+    // directly trigger history.
     mockBuffer.visualCursor = [0, '/mem'.length];
     stdin.write('\u000E'); // Ctrl+N
     await wait();
-    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
-    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(2);
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -1210,6 +1658,39 @@ describe('InputPrompt', () => {
     expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
     expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
     expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should keep cycling export formats with Ctrl+P/N after arrow navigation fills input', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'html', value: 'html' },
+        { label: 'md', value: 'md' },
+        { label: 'json', value: 'json' },
+        { label: 'jsonl', value: 'jsonl' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+    });
+    props.buffer.setText('/export');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\u001B[B');
+    await wait();
+    stdin.write('\u000E');
+    await wait();
+    stdin.write('\u0010');
+    await wait();
+
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(2, '/export md');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(3, '/export json');
+    expect(props.buffer.setText).toHaveBeenNthCalledWith(4, '/export md');
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
     unmount();
   });
 
@@ -1872,6 +2353,72 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should dismiss completion on Enter after accepting @path suggestion', async () => {
+    // @path completion: pressing Enter should dismiss the completion
+    // (set dismissed flag + reset state) so the dropdown stays closed
+    // even if the @ token re-glob and produces new suggestions.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Enter should accept the suggestion and dismiss completion.
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should autocomplete @path on Tab without submitting or resetting completion', async () => {
+    // Tab means "complete the suggestion, do NOT execute". This is the
+    // standard shell convention. Completion state should NOT reset on Tab
+    // so the user can continue navigating deeper into directories.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Tab should autocomplete but NOT submit and NOT reset completion.
+    stdin.write('\t');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -1925,6 +2472,7 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });
@@ -2508,8 +3056,8 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      // The component will render the text with the character at the cursor inverted.
-      expect(frame).toContain(`hel${chalk.inverse('l')}o world`);
+      // The component will render the text with the character at the cursor styled.
+      expect(frame).toContain(`hel${renderSoftwareCursor('l')}o world`);
       unmount();
     });
 
@@ -2525,11 +3073,11 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('h')}ello`);
+      expect(frame).toContain(`${renderSoftwareCursor('h')}ello`);
       unmount();
     });
 
-    it('should display cursor at the end of the line as an inverted space', async () => {
+    it('should display cursor at the end of the line as a styled space', async () => {
       mockBuffer.text = 'hello';
       mockBuffer.lines = ['hello'];
       mockBuffer.viewportVisualLines = ['hello'];
@@ -2541,7 +3089,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -2558,7 +3106,7 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       // The token '@path/to/file' is colored, and the cursor highlights one char inside it.
-      expect(frame).toContain(`@path/${chalk.inverse('t')}o/file`);
+      expect(frame).toContain(`@path/${renderSoftwareCursor('t')}o/file`);
       unmount();
     });
 
@@ -2575,7 +3123,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello ${chalk.inverse('👍')} world`);
+      expect(frame).toContain(`hello ${renderSoftwareCursor('👍')} world`);
       unmount();
     });
 
@@ -2592,7 +3140,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello 👍${chalk.inverse(' ')}`);
+      expect(frame).toContain(`hello 👍${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -2608,7 +3156,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(chalk.inverse(' '));
+      expect(frame).toContain(renderSoftwareCursor(' '));
       unmount();
     });
 
@@ -2624,7 +3172,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`hello${chalk.inverse(' ')}world`);
+      expect(frame).toContain(`hello${renderSoftwareCursor(' ')}world`);
       unmount();
     });
 
@@ -2646,7 +3194,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`sec${chalk.inverse('o')}nd line`);
+      expect(frame).toContain(`sec${renderSoftwareCursor('o')}nd line`);
       unmount();
     });
 
@@ -2667,7 +3215,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`${chalk.inverse('s')}econd line`);
+      expect(frame).toContain(`${renderSoftwareCursor('s')}econd line`);
       unmount();
     });
 
@@ -2688,7 +3236,7 @@ describe('InputPrompt', () => {
       await wait();
 
       const frame = stdout.lastFrame();
-      expect(frame).toContain(`first line${chalk.inverse(' ')}`);
+      expect(frame).toContain(`first line${renderSoftwareCursor(' ')}`);
       unmount();
     });
 
@@ -2711,9 +3259,9 @@ describe('InputPrompt', () => {
 
       const frame = stdout.lastFrame();
       const lines = frame!.split('\n');
-      // The line with the cursor should just be an inverted space inside the box border
+      // The line with the cursor should just be a styled space inside the box border
       expect(
-        lines.find((l) => l.includes(chalk.inverse(' '))),
+        lines.find((l) => l.includes(renderSoftwareCursor(' '))),
       ).not.toBeUndefined();
       unmount();
     });
@@ -2743,7 +3291,7 @@ describe('InputPrompt', () => {
       // Check that all lines, including the empty one, are rendered.
       // This implicitly tests that the Box wrapper provides height for the empty line.
       expect(frame).toContain('hello');
-      expect(frame).toContain(`world${chalk.inverse(' ')}`);
+      expect(frame).toContain(`world${renderSoftwareCursor(' ')}`);
 
       const outputLines = frame!.split('\n');
       // The number of lines should be 2 for the border plus 3 for the content.
@@ -3338,7 +3886,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
+    it('expands and collapses long suggestion via Right/Left arrows', async () => {
       props.shellModeActive = false;
       const longValue = 'l'.repeat(200);
 
@@ -3357,20 +3905,22 @@ describe('InputPrompt', () => {
       await wait();
 
       stdin.write('\x12');
-      await wait();
-
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
 
       stdin.write('\u001B[C');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('←');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('←');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-expanded-match',
       );
 
       stdin.write('\u001B[D');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('→');
+      await waitFor(() => {
+        expect(clean(stdout.lastFrame())).toContain('→');
+      });
       expect(stdout.lastFrame()).toMatchSnapshot(
         'command-search-collapsed-match',
       );
@@ -3479,9 +4029,9 @@ describe('InputPrompt', () => {
         <InputPrompt {...props} />,
       );
       await wait();
-      expect(stdout.lastFrame()).not.toContain(`{chalk.inverse(' ')}`);
+      expect(stdout.lastFrame()).not.toContain(`{renderSoftwareCursor(' ')}`);
       // This snapshot is good to make sure there was an input prompt but does
-      // not show the inverted cursor because snapshots do not show colors.
+      // not show the software cursor because snapshots do not show colors.
       expect(stdout.lastFrame()).toMatchSnapshot();
       unmount();
     });
@@ -4281,6 +4831,314 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('arrow Down jumps straight to the live agent panel when a bg sub-agent is running (#4907)', async () => {
+      // Core regression for #4907: with both an Arena session (tab bar) and a
+      // running background sub-agent (live panel), Down must reach the panel in
+      // ONE press — not stop at the tab bar first.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down still falls through to the tab bar when the only bg entry is a non-agent (shell) task', async () => {
+      // The rendered live-agent roster (not bgEntries.length) gates the
+      // panel jump: a lone shell task does not render the live panel.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'shell', shellId: 'bg-shell' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down skips terminal bg agents after the live panel visibility window (#5067)', async () => {
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [
+          {
+            kind: 'agent',
+            agentId: 'done-bg-agent',
+            status: 'completed',
+            endTime: Date.now() - 9000,
+          },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down focuses the background-tasks pill when only the pill is shown (workflow-only session)', async () => {
+      // Branch 3 of descendFromComposer: no Arena roster (agents empty) and no
+      // live bg-agent panel, but a workflow run keeps the background-tasks pill
+      // on screen. ↓ from the empty composer must focus the pill so the run's
+      // detail/save dialog stays reachable — without this branch a
+      // workflow-only session could never open it.
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('[B'); // Down arrow at the bottom edge
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      expect(mockViewActions.setLivePanelFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down at the bottom of the live agent panel descends to the agent tab bar', async () => {
+      // Restores tab-bar reachability after the priority swap: from the panel's
+      // last row, Down hands focus to the tab bar (the surface below it).
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1, // bottom row: 0 = main, 1 = the only bg agent
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('Down at the bottom of the live agent panel returns to the composer when no tab bar exists', async () => {
+      // bg sub-agents without an Arena session: there is no tab bar below the
+      // panel, so Down at the last row releases focus back to the composer
+      // instead of silently consuming the key.
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1, // bottom row: 0 = main, 1 = the only bg agent
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an expired live panel falls through to the tab bar', async () => {
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [
+          {
+            kind: 'agent',
+            agentId: 'done-bg-agent',
+            status: 'completed',
+            endTime: Date.now() - 9000,
+          },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('Enter on the live panel maps the DISPLAYED row back to its bg entry index', async () => {
+      // The snapshot is newest-first but the panel renders oldest-first
+      // (panelDisplayOrder). Selecting panel row 2 must open the agent the
+      // user sees there — 'first-live-agent' (snapshot index 1) — not the
+      // mirrored snapshot position. Pins the fix for the wrong-detail bug
+      // found during the nested-subagents-ui E2E dry-run.
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [
+          { kind: 'shell', shellId: 'bg-shell' },
+          { kind: 'agent', agentId: 'first-live-agent', status: 'running' },
+          {
+            kind: 'agent',
+            agentId: 'expired-agent',
+            status: 'completed',
+            endTime: Date.now() - 9000,
+          },
+          { kind: 'agent', agentId: 'second-live-agent', status: 'running' },
+        ],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 2,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\r'); // Enter
+      await wait();
+
+      // Display order: main, second-live-agent (row 1), first-live-agent
+      // (row 2). Row 2 → snapshot index 1.
+      expect(mockViewActions.setBgSelectedIndex).toHaveBeenCalledWith(1);
+      expect(mockViewActions.enterBgDetailFromPanel).toHaveBeenCalled();
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      unmount();
+    });
+
     it('arrow Up applies the same two-step rule as Ctrl+P (snap before navigate)', async () => {
       // The arrow-key history path lives alongside Ctrl+P in InputPrompt.tsx
       // and the two must stay in lock-step. This test pins the parity so a
@@ -4356,3 +5214,42 @@ function clean(str: string | undefined): string {
   // Remove ANSI escape codes and trim whitespace
   return stripAnsi(str).trim();
 }
+
+describe('classifyPastedImagePaths', () => {
+  it('treats a lone @-prefixed image path (terminal Cmd+V injection) as all-image', () => {
+    const result = classifyPastedImagePaths(
+      '@/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
+    );
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual([
+      '/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',
+    ]);
+  });
+
+  it('splits multiple space- and newline-separated image paths', () => {
+    const result = classifyPastedImagePaths(
+      '/a/one.png /b/two.jpg\n/c/three.webp',
+    );
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual([
+      '/a/one.png',
+      '/b/two.jpg',
+      '/c/three.webp',
+    ]);
+  });
+
+  it('unwraps surrounding quotes and shell-escaped spaces', () => {
+    const result = classifyPastedImagePaths('"/a/my image.png"');
+    expect(result.allImages).toBe(true);
+    expect(result.imagePaths).toEqual(['/a/my image.png']);
+  });
+
+  it('does not treat plain text or non-image paths as image paste', () => {
+    expect(classifyPastedImagePaths('just some text').allImages).toBe(false);
+    expect(classifyPastedImagePaths('/src/index.ts').imagePaths).toEqual([]);
+    // A path followed by free text is left for normal text handling.
+    expect(
+      classifyPastedImagePaths('@/a/img.png describe this').allImages,
+    ).toBe(false);
+  });
+});

@@ -8,6 +8,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { getShellContextEnvVars } from './shellContextEnv.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
+import { sessionIdContext } from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
   getTraceContext,
@@ -73,6 +74,47 @@ describe('getShellContextEnvVars', () => {
       QWEN_CODE_SESSION_ID: 'sess-uuid',
       QWEN_CODE_AGENT_ID: 'agent-xyz',
       QWEN_CODE_PROMPT_ID: 'prompt-456',
+    });
+  });
+
+  describe('session ID from AsyncLocalStorage (daemon multi-session)', () => {
+    it('prefers sessionIdContext over process.env', () => {
+      // Daemon mode: process.env holds the FIRST session's ID forever
+      // (constructor guard `sessionEnvClaimed` in config.ts), so a later
+      // session must win via its own async context.
+      process.env['QWEN_CODE_SESSION_ID'] = 'stale-first-session';
+      const env = sessionIdContext.run('current-session', () =>
+        getShellContextEnvVars(),
+      );
+      expect(env['QWEN_CODE_SESSION_ID']).toBe('current-session');
+    });
+
+    it('falls back to process.env outside any session context (single-session CLI)', () => {
+      process.env['QWEN_CODE_SESSION_ID'] = 'cli-session';
+      const env = getShellContextEnvVars();
+      expect(env['QWEN_CODE_SESSION_ID']).toBe('cli-session');
+    });
+
+    it('isolates concurrent sessions in the same process', async () => {
+      // Regression: two daemon sessions interleaving must each see their
+      // own ID at spawn time, even though process.env is a single slot.
+      process.env['QWEN_CODE_SESSION_ID'] = 'stale-first-session';
+      let envSeenByA: Record<string, string> = {};
+      let envSeenByB: Record<string, string> = {};
+
+      await Promise.all([
+        sessionIdContext.run('session-A', async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          envSeenByA = getShellContextEnvVars();
+        }),
+        sessionIdContext.run('session-B', async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          envSeenByB = getShellContextEnvVars();
+        }),
+      ]);
+
+      expect(envSeenByA['QWEN_CODE_SESSION_ID']).toBe('session-A');
+      expect(envSeenByB['QWEN_CODE_SESSION_ID']).toBe('session-B');
     });
   });
 

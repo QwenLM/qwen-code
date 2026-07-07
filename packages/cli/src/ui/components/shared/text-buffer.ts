@@ -1791,6 +1791,21 @@ function textBufferReducerLogic(
           cursorCol: 0,
           preferredCol: null,
         };
+      } else if (cursorRow > 0) {
+        const nextState = pushUndoLocal(state);
+        const prevLineContent = currentLine(cursorRow - 1);
+        const currentLineContent = currentLine(cursorRow);
+        const newCol = cpLen(prevLineContent);
+        const newLines = [...nextState.lines];
+        newLines[cursorRow - 1] = prevLineContent + currentLineContent;
+        newLines.splice(cursorRow, 1);
+        return {
+          ...nextState,
+          lines: newLines,
+          cursorRow: cursorRow - 1,
+          cursorCol: newCol,
+          preferredCol: null,
+        };
       }
       return state;
     }

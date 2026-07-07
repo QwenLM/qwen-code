@@ -5,12 +5,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import {
-  clipboardHasImage,
-  saveClipboardImage,
-  cleanupOldClipboardImages,
-  resetLinuxClipboardTool,
-} from './clipboardUtils.js';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
@@ -144,10 +138,32 @@ function setupX11Env() {
 const originalPlatform = process.platform;
 
 describe('clipboardUtils', () => {
-  beforeEach(() => {
+  let clipboardHasImage: () => Promise<boolean>;
+  let saveClipboardImage: (dir?: string) => Promise<string | null>;
+  let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
+  let writeOsc52: (text: string) => boolean;
+
+  beforeEach(async () => {
+    // Clean up /tmp/test directory from previous runs to ensure
+    // fs.open with O_EXCL fails consistently in saveFromCommand tests.
+    // Must use the real fs module because node:fs/promises is mocked.
+    const realFs =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    await realFs.rm('/tmp/test', { recursive: true, force: true });
+
     vi.resetModules();
     vi.clearAllMocks();
-    resetLinuxClipboardTool();
+
+    // Dynamic import after resetModules gives a fresh module instance.
+    // Top-level import would be stale after resetModules.
+    const mod = await import('./clipboardUtils.js');
+    clipboardHasImage = mod.clipboardHasImage;
+    saveClipboardImage = mod.saveClipboardImage;
+    cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
+    writeOsc52 = mod.writeOsc52;
+    mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
     vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
@@ -201,7 +217,6 @@ describe('clipboardUtils', () => {
 
   describe('xclip / X11 path', () => {
     beforeEach(() => {
-      resetLinuxClipboardTool();
       setupX11Env();
     });
 
@@ -332,7 +347,7 @@ describe('clipboardUtils', () => {
             child.emit('close', 0);
           });
         } else if (callCount === 2) {
-          // wl-paste --type image/png: succeeds (png path taken)
+          // wl-paste --type image/png: attempted but O_EXCL fails (dir doesn't exist)
           spawnCalls.push({ command, args });
           process.nextTick(() => {
             child.emit('close', 0);
@@ -344,12 +359,9 @@ describe('clipboardUtils', () => {
 
       await saveClipboardImage('/tmp/test');
 
-      // With O_EXCL in saveFromCommand, the save path fails because
-      // mkdir is mocked and the directory doesn't exist. The list-types
-      // spawn verifies the correct format detection (both png and bmp
-      // reported). The branching decision is verified by the fact that
-      // python3 was not called in the list-types phase — the format
-      // selection only happens in saveFileWithWlPaste.
+      // O_EXCL in saveFromCommand prevents the second spawn because
+      // mkdir is mocked (directory never actually created), so fs.open
+      // fails. Only the list-types spawn fires.
       expect(spawnCalls).toHaveLength(1);
       expect(spawnCalls[0].args).toContain('--list-types');
     });
@@ -363,8 +375,6 @@ describe('clipboardUtils', () => {
     });
 
     it('should return null on spawn timeout (5s)', async () => {
-      vi.useFakeTimers();
-
       let callCount = 0;
       mockSpawn.mockImplementation(() => {
         callCount++;
@@ -394,16 +404,9 @@ describe('clipboardUtils', () => {
         return child;
       });
 
-      const resultPromise = saveClipboardImage('/tmp/test');
-
-      // Advance past the 5s timeout
-      await vi.advanceTimersByTimeAsync(5100);
-
-      const result = await resultPromise;
+      const result = await saveClipboardImage('/tmp/test');
       expect(result).toBe(null);
-
-      vi.useRealTimers();
-    });
+    }, 10000);
 
     it('should return null on spawn error', async () => {
       let callCount = 0;
@@ -576,6 +579,170 @@ describe('clipboardUtils', () => {
       mockSpawn.mockReturnValue(mockChild2);
       const result2 = await clipboardHasImage();
       expect(result2).toBe(false);
+    });
+  });
+
+  describe('writeOsc52', () => {
+    const originalStdoutIsTTY = process.stdout.isTTY;
+    const originalStderrIsTTY = process.stderr.isTTY;
+    let stdoutWriteMock: ReturnType<typeof vi.fn>;
+    let stderrWriteMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      stdoutWriteMock = vi.fn();
+      stderrWriteMock = vi.fn();
+      // Control multiplexer env vars for deterministic tests
+      vi.stubEnv('TMUX', undefined as unknown as string);
+      vi.stubEnv('STY', undefined as unknown as string);
+      // Mock isTTY and write
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      process.stdout.write = stdoutWriteMock;
+      process.stderr.write = stderrWriteMock;
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: originalStderrIsTTY,
+        configurable: true,
+      });
+      vi.restoreAllMocks();
+    });
+
+    it('should write OSC 52 sequence to stdout when stdout is TTY', () => {
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
+      expect(stderrWriteMock).not.toHaveBeenCalled();
+    });
+
+    it('should write OSC 52 sequence to stderr when stdout is not TTY but stderr is', () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stderrWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
+      expect(stdoutWriteMock).not.toHaveBeenCalled();
+    });
+
+    it('should return false and not write when neither stdout nor stderr is TTY', () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+
+      const result = writeOsc52('hello world');
+
+      expect(result).toBe(false);
+      expect(stdoutWriteMock).not.toHaveBeenCalled();
+      expect(stderrWriteMock).not.toHaveBeenCalled();
+    });
+
+    it('should handle special characters in text', () => {
+      const text = 'special: \n\t\r"\'\\';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
+    });
+
+    it('should handle empty string', () => {
+      const text = '';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
+    });
+
+    it('should return false on write error', () => {
+      stdoutWriteMock.mockImplementation(() => {
+        throw new Error('write failed');
+      });
+
+      const result = writeOsc52('hello');
+
+      expect(result).toBe(false);
+    });
+
+    it('should wrap in tmux DCS envelope when TMUX is set', () => {
+      vi.stubEnv('TMUX', '/tmp/tmux-1000/default,12345,0');
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const rawSequence = `\x1b]52;c;${expectedBase64}\x07`;
+      const expectedSequence = `\x1bPtmux;\x1b${rawSequence}\x1b\\`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
+    });
+
+    it('should wrap in screen DCS envelope when STY is set', () => {
+      vi.stubEnv('STY', '12345.pts-0.host');
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const rawSequence = `\x1b]52;c;${expectedBase64}\x07`;
+      const expectedSequence = `\x1bP${rawSequence}\x1b\\`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
     });
   });
 });

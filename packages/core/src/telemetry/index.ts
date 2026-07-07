@@ -14,8 +14,14 @@ const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
 export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  isValidSensitiveSpanAttributeMaxLength,
+} from './constants.js';
+export {
   initializeTelemetry,
   shutdownTelemetry,
+  forceFlushMetrics,
   refreshSessionContext,
   isTelemetrySdkInitialized,
 } from './sdk.js';
@@ -48,6 +54,7 @@ export {
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
+  recordSkillInvocation,
   logUserFeedback,
   logArenaSessionStarted,
   logArenaAgentCompleted,
@@ -140,6 +147,7 @@ export { sanitizeHookName } from './sanitize.js';
 export {
   startInteractionSpan,
   endInteractionSpan,
+  withInteractionSpan,
   startLLMRequestSpan,
   endLLMRequestSpan,
   startToolSpan,
@@ -160,6 +168,7 @@ export {
 export type {
   StartInteractionOptions,
   EndInteractionOptions,
+  InteractionSpanResultStatus,
   LLMRequestMetadata,
   ToolSpanMetadata,
   ToolBlockedDecision,
@@ -172,6 +181,51 @@ export type {
   StartSubagentSpanOptions,
   SubagentSpanMetadata,
 } from './session-tracing.js';
+export type { TelemetryRuntimeConfig } from './runtime-config.js';
+export {
+  DAEMON_TRACEPARENT_META_KEY,
+  DAEMON_TRACESTATE_META_KEY,
+  addDaemonRequestAttribute,
+  captureDaemonTelemetryContext,
+  createDaemonBridgeTelemetry,
+  emitDaemonLog,
+  extractDaemonTraceContext,
+  hashDaemonWorkspace,
+  injectDaemonTraceContext,
+  recordDaemonError,
+  recordDaemonHttpResponse,
+  runWithDaemonTelemetryContext,
+  withDaemonBridgeSpan,
+  withDaemonRequestSpan,
+  withDaemonSpan,
+  type DaemonBridgeTelemetryMetrics,
+} from './daemon-tracing.js';
+export {
+  initializeDaemonMetrics,
+  registerDaemonGaugeCallbacks,
+  recordDaemonHttpRequest,
+  recordDaemonSessionLifecycle,
+  recordDaemonChannelLifecycle,
+  recordDaemonPromptQueueWait,
+  recordDaemonPromptDuration,
+  recordDaemonBridgeError,
+  recordDaemonCancel,
+  recordDaemonPipeMessage,
+} from './daemon-metrics.js';
+export type {
+  DaemonGaugeCallbacks,
+  DaemonPipeDirection,
+} from './daemon-metrics.js';
+export {
+  startEventLoopLagMonitor,
+  type EventLoopLagMonitor,
+  type EventLoopLagMonitorOptions,
+  type EventLoopLagSnapshot,
+} from './event-loop-lag.js';
+export {
+  registerDaemonEventLoopLagGauge,
+  registerAcpEventLoopLagGauge,
+} from './event-loop-lag-metrics.js';
 export {
   addUserPromptAttributes,
   addSystemPromptAttributes,
@@ -179,8 +233,8 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  areSensitiveSpanAttributesEnabled,
   truncateContent,
-  clearDetailedSpanState,
 } from './detailed-span-attributes.js';
 export { getTraceContext, formatTraceparent } from './trace-context.js';
 export type { TraceContext } from './trace-context.js';

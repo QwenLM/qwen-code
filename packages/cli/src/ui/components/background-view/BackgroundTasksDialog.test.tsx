@@ -24,30 +24,18 @@ import {
 } from '../../hooks/useBackgroundTaskView.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 
-vi.mock('../../hooks/useBackgroundTaskView.js', () => ({
-  useBackgroundTaskView: vi.fn(),
-  // Re-export the helper so Dialog renderers can still resolve it under the
-  // mocked module. Inline impl keeps the test independent of the hook
-  // module while preserving the discriminator-based id contract.
-  entryId: (entry: DialogEntry): string => {
-    switch (entry.kind) {
-      case 'agent':
-        return entry.agentId;
-      case 'shell':
-        return entry.shellId;
-      case 'monitor':
-        return entry.monitorId;
-      case 'dream':
-        return entry.dreamId;
-      default: {
-        const _exhaustive: never = entry;
-        throw new Error(
-          `entryId: unknown DialogEntry kind: ${JSON.stringify(_exhaustive)}`,
-        );
-      }
-    }
-  },
-}));
+vi.mock('../../hooks/useBackgroundTaskView.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../hooks/useBackgroundTaskView.js')
+    >();
+  // Only the hook itself is stubbed (the Harness feeds entries directly);
+  // the module's pure helpers (entryId, compareActiveThenTerminal) keep
+  // their real implementations so renderer behavior can't silently drift
+  // from production — a hand-inlined copy here previously risked exactly
+  // that.
+  return { ...actual, useBackgroundTaskView: vi.fn() };
+});
 
 vi.mock('../../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -119,6 +107,11 @@ interface Harness {
   dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
   pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
+  pressKeyBroadcast: (key: {
+    name?: string;
+    sequence?: string;
+    ctrl?: boolean;
+  }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
@@ -143,6 +136,7 @@ function setup(initial: readonly DialogEntry[]): Harness {
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
+      resolvePendingApproval: vi.fn(),
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
         const match = currentEntries.find(
@@ -150,7 +144,11 @@ function setup(initial: readonly DialogEntry[]): Harness {
         );
         return match;
       },
+      // The detail view lists an agent's children via `.getAll()`
+      // (Sub-agents section of the nested-agent tree display).
+      getAll: () => currentEntries.filter((e) => e.kind === 'agent'),
     }),
+    getMaxSubagentDepth: () => 5,
     getMonitorRegistry: () => ({
       cancel: monitorCancel,
       // Resolve `.get(monitorId)` against the snapshot so the dialog's
@@ -226,7 +224,15 @@ function setup(initial: readonly DialogEntry[]): Harness {
         if (latest) latest(key);
       });
     },
+    pressKeyBroadcast(key) {
+      act(() => {
+        for (const handler of [...handlers]) {
+          handler(key);
+        }
+      });
+    },
     call(fn) {
+      handlers.length = 0;
       act(() => fn());
     },
     lastFrame,
@@ -345,6 +351,35 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).toHaveBeenCalledWith('bg-1');
   });
 
+  it('foreground child of a background parent cancels on the first `x` (chain-aware confirm)', () => {
+    // The two-step confirm exists to protect the USER's turn. A nested
+    // foreground child awaited by a background parent blocks that parent,
+    // not the user — same chain verdict as the [blocking] row prefix —
+    // so it cancels one-shot like any background entry.
+    const bgParent = entry({
+      id: 'p',
+      agentId: 'p',
+      description: 'bg parent work',
+      isBackgrounded: true,
+    });
+    const fgChild = entry({
+      id: 'c',
+      agentId: 'c',
+      description: 'awaited child work',
+      status: 'running',
+      isBackgrounded: false,
+      parentAgentId: 'p',
+      depth: 1,
+    });
+    const h = setup([bgParent, fgChild]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.moveSelectionDown());
+
+    h.pressKey({ sequence: 'x' });
+    expect(h.cancel).toHaveBeenCalledWith('c');
+  });
+
   it('ignores `x` on a terminal foreground entry (no arm, no cancel call)', () => {
     // A foreground entry briefly stays visible after settling but before
     // the tool-call's finally path unregisters it. The dialog's hint
@@ -428,6 +463,59 @@ describe('BackgroundTasksDialog', () => {
     // a stale armed state inherited from detail mode.
     h.pressKey({ sequence: 'x' });
     expect(h.cancel).not.toHaveBeenCalled();
+  });
+
+  it('lets ask-user-question approvals own all keyboard input in detail mode', () => {
+    const questionApproval: NonNullable<
+      AgentDialogEntry['pendingApprovals']
+    >[number] = {
+      callId: 'ask-1',
+      name: 'ask_user_question',
+      description: 'choose',
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Need input',
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              {
+                label: 'Alpha',
+                description: 'Use alpha.',
+              },
+              {
+                label: 'Beta',
+                description: 'Use beta.',
+              },
+            ],
+          },
+        ],
+      } as NonNullable<
+        AgentDialogEntry['pendingApprovals']
+      >[number]['confirmationDetails'],
+      respond: vi.fn(),
+      at: Date.now(),
+    };
+    const bg = entry({
+      agentId: 'bg-question',
+      pendingApprovals: [questionApproval],
+    });
+    const h = setup([bg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
+
+    h.pressKeyBroadcast({ sequence: 'x' });
+    h.pressKeyBroadcast({ name: 'left' });
+    h.pressKeyBroadcast({ name: 'space' });
+
+    expect(h.cancel).not.toHaveBeenCalled();
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+    expect(h.probe.current!.state.dialogOpen).toBe(true);
   });
 
   it('Esc backs out of an armed foreground cancel without closing the dialog', () => {
@@ -755,6 +843,272 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('+4 more');
       // Header still reflects the full count, not the capped slice.
       expect(f).toContain('Topics touched (12)');
+    });
+  });
+
+  // ── R2 #15: WorkflowDetailBody budget chip rendering ────────────────
+
+  function workflowEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
+    const base = {
+      id: 'wf_test1234',
+      kind: 'workflow' as const,
+      runId: 'wf_test1234',
+      description: 'demo',
+      meta: null,
+      status: 'completed' as const,
+      startTime: 0,
+      endTime: 5_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: false,
+      abortController: new AbortController(),
+      currentPhase: null,
+      phases: ['Plan'] as string[],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [] as string[],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map<string | null, number>(),
+    };
+    return { ...base, ...overrides } as unknown as DialogEntry;
+  }
+
+  describe('WorkflowDetailBody budget chip (R2 #15)', () => {
+    function openWorkflowDetail(entries: readonly DialogEntry[]) {
+      const h = setup(entries);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      return h;
+    }
+
+    it('renders the M/N token chip and capped per-phase totals', () => {
+      const perPhase = new Map<string | null, number>([['Plan', 3_500]]);
+      const wf = workflowEntry({
+        tokensSpent: 3_500,
+        tokenBudgetTotal: 10_000,
+        perPhaseTokens: perPhase,
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      // R1 #7: formatTokenCount renders 3500 as `3.5k`, 10000 as `10k`.
+      expect(f).toContain('3.5k/10k tokens');
+      expect(f).toContain('Plan');
+      expect(f).toContain('3.5kt');
+    });
+
+    it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {
+      const wf = workflowEntry({
+        tokensSpent: 850,
+        tokenBudgetTotal: null,
+        perPhaseTokens: new Map<string | null, number>([['Plan', 0]]),
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      expect(f).toContain('850 tokens');
+      // Uncapped: no slash form on the budget chip.
+      expect(f).not.toMatch(/\d+\/\d+ tokens/);
+      // Zero per-phase tally: no `· 0t` chip noise on the Plan row.
+      expect(f).not.toMatch(/Plan.*0t/);
+    });
+
+    it('hides the token chip entirely when both spend and cap are zero/null', () => {
+      const wf = workflowEntry({
+        tokensSpent: 0,
+        tokenBudgetTotal: null,
+        perPhaseTokens: new Map<string | null, number>(),
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      // Subtitle has elapsed + phase count, but no `tokens` chip.
+      expect(f).not.toMatch(/tokens/);
+    });
+
+    it('R1 #6 + R2 #15: surfaces null-sentinel per-phase tokens as `(no phase)` row', () => {
+      const perPhase = new Map<string | null, number>([
+        [null, 420], // pre-phase spend
+        ['Plan', 1_100],
+      ]);
+      const wf = workflowEntry({
+        tokensSpent: 1_520,
+        tokenBudgetTotal: 5_000,
+        perPhaseTokens: perPhase,
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = h.lastFrame() ?? '';
+      // formatTokenCount: 1520 → "1.5k", 5000 → "5.0k" (< 10000 keeps one decimal).
+      expect(f).toContain('1.5k/5.0k tokens');
+      expect(f).toContain('(no phase)');
+      expect(f).toContain('420t');
+    });
+  });
+
+  describe('nested sub-agent display', () => {
+    // Entries are passed pre-grouped (parent before child) — in production
+    // useBackgroundTaskView applies reorderChildrenUnderParents before the
+    // snapshot reaches the dialog; this suite mocks the hook, so grouping
+    // is the fixture's job and the dialog only owns indent/labels.
+    it('indents a nested child row with ↳ in the list', () => {
+      const parent = entry({
+        id: 'p',
+        agentId: 'p',
+        description: 'parent work',
+      });
+      const child = entry({
+        id: 'c',
+        agentId: 'c',
+        description: 'child work',
+        parentAgentId: 'p',
+        depth: 1,
+      });
+      const h = setup([parent, child]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('↳');
+      expect(frame.indexOf('parent work')).toBeLessThan(
+        frame.indexOf('child work'),
+      );
+    });
+
+    it('tags [blocking] only when the whole chain is foreground', () => {
+      const bgParent = entry({
+        id: 'p',
+        agentId: 'p',
+        description: 'bg parent work',
+        isBackgrounded: true,
+      });
+      const fgChild = entry({
+        id: 'c',
+        agentId: 'c',
+        description: 'awaited child work',
+        isBackgrounded: false,
+        parentAgentId: 'p',
+        depth: 1,
+      });
+      const fgTop = entry({
+        id: 't',
+        agentId: 't',
+        description: 'top-level fg work',
+        isBackgrounded: false,
+      });
+      const h = setup([bgParent, fgChild, fgTop]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      const lines = (h.lastFrame() ?? '').split('\n');
+      const childLine = lines.find((l) => l.includes('awaited child')) ?? '';
+      const topLine = lines.find((l) => l.includes('top-level fg')) ?? '';
+      // The child blocks its background parent, not the user's turn.
+      expect(childLine).not.toContain('[blocking]');
+      // Regression guard: a plain foreground top-level agent keeps the tag.
+      expect(topLine).toContain('[blocking]');
+    });
+
+    it('shows the level badge and Parent breadcrumb in a nested child detail', () => {
+      const parent = entry({
+        id: 'p',
+        agentId: 'p',
+        description: 'parent work',
+        subagentType: 'researcher',
+      });
+      const child = entry({
+        id: 'c',
+        agentId: 'c',
+        description: 'child work',
+        parentAgentId: 'p',
+        depth: 1,
+      });
+      const h = setup([parent, child]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.moveSelectionDown());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('level 2 of 5');
+      expect(frame).toContain('Parent');
+      expect(frame).toContain('main › researcher — parent work');
+    });
+
+    it('lists live children in the parent detail Sub-agents section', () => {
+      const parent = entry({
+        id: 'p',
+        agentId: 'p',
+        description: 'parent work',
+      });
+      const child = entry({
+        id: 'c',
+        agentId: 'c',
+        description: 'child work',
+        parentAgentId: 'p',
+        depth: 1,
+        subagentType: 'explore',
+      });
+      const h = setup([parent, child]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('Sub-agents');
+      expect(frame).toContain('○ explore — child work');
+      // The parent itself is top-level: no Parent section, no badge.
+      expect(frame).not.toContain('level 1 of');
+    });
+
+    it('sorts the Sub-agents roster active-first so the cap cannot hide running children', () => {
+      // getAll() is insertion-ordered (oldest spawn first). With more than
+      // five children, the raw order would fill the capped roster with the
+      // oldest completed children and hide the newest still-running one —
+      // the row the user most wants to see. Same two-bucket ordering as
+      // the main list (compareActiveThenTerminal).
+      const parent = entry({
+        id: 'p',
+        agentId: 'p',
+        description: 'parent work',
+      });
+      const doneChildren = [1, 2, 3, 4, 5].map((n) =>
+        entry({
+          id: `done-${n}`,
+          agentId: `done-${n}`,
+          description: `done-${n} work`,
+          status: 'completed',
+          startTime: n,
+          endTime: 100 + n,
+          parentAgentId: 'p',
+          depth: 1,
+        }),
+      );
+      const runningChild = entry({
+        id: 'live-6',
+        agentId: 'live-6',
+        description: 'live-6 work',
+        status: 'running',
+        startTime: 6,
+        parentAgentId: 'p',
+        depth: 1,
+      });
+      const h = setup([parent, ...doneChildren, runningChild]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('Sub-agents');
+      // The running child is visible despite being the 6th by insertion…
+      expect(frame).toContain('live-6 work');
+      // …and the oldest-finished child is the one that fell past the cap.
+      expect(frame).not.toContain('done-1 work');
+      expect(frame).toContain('1 more');
+    });
+
+    it('falls back to the launch-time parent name when the parent is gone', () => {
+      const orphan = entry({
+        id: 'c',
+        agentId: 'c',
+        description: 'child work',
+        parentAgentId: 'gone',
+        parentName: 'researcher',
+        depth: 1,
+      });
+      const h = setup([orphan]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('researcher');
+      expect(frame).toContain('no longer running');
     });
   });
 });

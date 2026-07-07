@@ -361,9 +361,11 @@ function parseLeadingMessageIndex(args: string): {
 export const copyCommand: SlashCommand = {
   name: 'copy',
   get description() {
-    return t('Copy the last AI response to clipboard (/copy N for Nth-latest)');
+    return t(
+      'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
+    );
   },
-  argumentHint: '[N]',
+  argumentHint: '[N] [<lang>|code|latex|mermaid] [<index>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: async (context, args): Promise<SlashCommandActionReturn | void> => {

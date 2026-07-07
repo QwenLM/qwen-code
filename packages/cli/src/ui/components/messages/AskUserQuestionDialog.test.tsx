@@ -12,7 +12,37 @@ import { renderWithProviders } from '../../../test-utils/render.js';
 import stripAnsi from 'strip-ansi';
 
 const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+const writeText = async (
+  stdin: { write: (input: string) => unknown },
+  text: string,
+) => {
+  stdin.write(text);
+  await wait();
+};
 const clean = (value: string | undefined) => stripAnsi(value ?? '');
+const waitForFrame = async (
+  predicate: () => void,
+  options: { timeout?: number; interval?: number } = {},
+) => {
+  const { timeout = 3000, interval = 10 } = options;
+  const start = Date.now();
+  let lastError: unknown;
+
+  while (Date.now() - start < timeout) {
+    try {
+      predicate();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(interval);
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('waitForFrame timed out');
+};
 
 const createSingleQuestion = (
   overrides: Partial<
@@ -198,6 +228,25 @@ describe('<AskUserQuestionDialog />', () => {
       unmount();
     });
 
+    it('does not auto-submit pasted numeric prefixes as option numbers', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails();
+
+      const { stdin, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('\u001B[200~2x\u001B[201~');
+      await wait();
+
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('does not auto-submit when pressing number key for "Other" custom input', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails();
@@ -301,22 +350,36 @@ describe('<AskUserQuestionDialog />', () => {
       await wait();
 
       stdin.write('4'); // Select "Other" custom input
-      await wait(150);
-      expect(clean(lastFrame())).toContain('❯ 4.');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 4.');
+      });
+      await wait();
 
       stdin.write('j');
-      await wait(150);
+      await waitForFrame(() => {
+        const frame = clean(lastFrame());
+        expect(frame).toContain('❯ 4.');
+        expect(frame).toContain('j');
+      });
+
       stdin.write('k');
-      await wait(150);
-      expect(clean(lastFrame())).toContain('❯ 4.');
+      await waitForFrame(() => {
+        const frame = clean(lastFrame());
+        expect(frame).toContain('❯ 4.');
+        expect(frame).toContain('jk');
+      });
 
       stdin.write('\u0010'); // Ctrl+P
       await wait();
-      expect(clean(lastFrame())).toContain('❯ 3. Green');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 3. Green');
+      });
 
       stdin.write('\u000E'); // Ctrl+N
       await wait();
-      expect(clean(lastFrame())).toContain('❯ 4.');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 4.');
+      });
 
       unmount();
     });
@@ -367,6 +430,121 @@ describe('<AskUserQuestionDialog />', () => {
       expect(lastFrame()).toContain('[✓]');
       unmount();
     });
+
+    it('auto-selects custom input and submits on Enter after typing', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ multiSelect: true })],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Navigate to "Type something..." option (index 3, after 3 predefined options)
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ [ ] 4.');
+      });
+      await wait();
+
+      // Type custom text
+      await writeText(stdin, 'My custom answer');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('My custom answer');
+      });
+
+      // Press Enter — should auto-select and submit
+      stdin.write('\r');
+      await wait();
+
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'My custom answer' } },
+      );
+      unmount();
+    }, 10000);
+
+    it('does not submit when Enter pressed on empty custom input', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ multiSelect: true })],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Navigate to "Type something..." option
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ [ ] 4.');
+      });
+      await wait();
+
+      // Press Enter without typing anything — should NOT submit
+      stdin.write('\r');
+      await wait();
+
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    }, 10000);
+
+    it('submits predefined options together with custom input', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ multiSelect: true })],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Space to toggle first option (Red)
+      stdin.write(' ');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('[✓] 1. Red');
+      });
+
+      // Navigate to "Type something..." option
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ [ ] 4.');
+      });
+      await wait();
+
+      // Type custom text
+      await writeText(stdin, 'Purple');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Purple');
+      });
+
+      // Press Enter — should submit both Red and Purple
+      stdin.write('\r');
+      await wait();
+
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: expect.stringContaining('Red') } },
+      );
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: expect.stringContaining('Purple') } },
+      );
+      unmount();
+    }, 10000);
   });
 
   describe('multiple questions', () => {

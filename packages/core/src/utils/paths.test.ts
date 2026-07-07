@@ -401,6 +401,11 @@ describe('resolvePath', () => {
     expect(result).toBe(path.resolve(cwd, 'src/main.ts'));
   });
 
+  it('resolves empty paths against the provided base directory', () => {
+    const result = resolvePath('/base/dir', '');
+    expect(result).toBe(path.resolve('/base/dir', ''));
+  });
+
   it('returns absolute paths unchanged', () => {
     const absolutePath = '/absolute/path/to/file.ts';
     const result = resolvePath('/some/base', absolutePath);
@@ -417,6 +422,12 @@ describe('resolvePath', () => {
     const homeDir = os.homedir();
     const result = resolvePath(undefined, '~/documents/file.txt');
     expect(result).toBe(path.join(homeDir, 'documents/file.txt'));
+  });
+
+  it('expands Windows-style tilde-prefixed paths to home directory', () => {
+    const homeDir = os.homedir();
+    const result = resolvePath('/some/base', '~\\documents\\file.txt');
+    expect(result).toBe(path.join(homeDir, 'documents', 'file.txt'));
   });
 
   it('uses baseDir when provided for relative paths', () => {
@@ -619,6 +630,9 @@ describe('resolveAndValidatePath', () => {
       expect(resolveAndValidatePath(configWithHome, '~/project')).toBe(
         homeSubdir,
       );
+      expect(resolveAndValidatePath(configWithHome, '~\\project')).toBe(
+        homeSubdir,
+      );
       expect(resolveAndValidatePath(configWithHome, '~')).toBe(fakeHome);
     } finally {
       homedirSpy.mockRestore();
@@ -667,8 +681,8 @@ describe('resolveAndValidatePath', () => {
 describe('tildeifyPath', () => {
   it('replaces home directory with tilde', () => {
     const homeDir = os.homedir();
-    const result = tildeifyPath(`${homeDir}/documents/file.txt`);
-    expect(result).toBe('~/documents/file.txt');
+    const result = tildeifyPath(path.join(homeDir, 'documents', 'file.txt'));
+    expect(result).toBe(`~${path.sep}documents${path.sep}file.txt`);
   });
 
   it('returns path unchanged if it does not start with home directory', () => {
@@ -680,6 +694,13 @@ describe('tildeifyPath', () => {
     const homeDir = os.homedir();
     const result = tildeifyPath(homeDir);
     expect(result).toBe('~');
+  });
+
+  it('does not replace paths that only share the home directory prefix', () => {
+    const homeDir = os.homedir();
+    const siblingPath = `${homeDir}2${path.sep}project${path.sep}file.txt`;
+    const result = tildeifyPath(siblingPath);
+    expect(result).toBe(siblingPath);
   });
 
   it('handles paths with home directory in the middle', () => {
@@ -924,8 +945,35 @@ describe('expandHomeDir', () => {
     expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
   });
 
+  it('should preserve trailing separators for home directory paths', () => {
+    expect(expandHomeDir('~/')).toBe(path.normalize(homeDir + path.sep));
+    expect(expandHomeDir('~\\')).toBe(path.normalize(homeDir + path.sep));
+  });
+
   it('should expand ~/path to home directory path', () => {
     expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand Windows-style ~\\path to home directory path', () => {
+    expect(expandHomeDir('~\\documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should preserve trailing separators in Windows-style tilde paths', () => {
+    expect(expandHomeDir('~\\documents\\')).toBe(
+      path.normalize(path.join(homeDir, 'documents') + path.sep),
+    );
+  });
+
+  it('should handle mixed separators in Windows-style tilde paths', () => {
+    expect(expandHomeDir('~\\foo/bar\\baz')).toBe(
+      path.join(homeDir, 'foo', 'bar', 'baz'),
+    );
+  });
+
+  it('should preserve legacy POSIX tilde path semantics', () => {
+    expect(expandHomeDir('~/foo\\bar')).toBe(
+      path.normalize(path.join(homeDir, 'foo\\bar')),
+    );
   });
 
   it('should not expand ~path (no slash)', () => {
@@ -939,7 +987,28 @@ describe('expandHomeDir', () => {
 
   it('should expand %userprofile%\\path to home directory path', () => {
     const result = expandHomeDir('%userprofile%\\documents');
-    expect(result).toBe(path.normalize(homeDir + '\\documents'));
+    expect(result).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand %USERPROFILE%/path with forward-slash separator', () => {
+    expect(expandHomeDir('%USERPROFILE%/documents')).toBe(
+      path.join(homeDir, 'documents'),
+    );
+  });
+
+  it('should preserve trailing separators for %USERPROFILE% paths', () => {
+    expect(expandHomeDir('%USERPROFILE%/')).toBe(
+      path.normalize(homeDir + path.sep),
+    );
+    expect(expandHomeDir('%USERPROFILE%\\documents\\')).toBe(
+      path.normalize(path.join(homeDir, 'documents') + path.sep),
+    );
+  });
+
+  it('should preserve legacy %USERPROFILE% prefix semantics without a separator', () => {
+    expect(expandHomeDir('%USERPROFILE%foo')).toBe(
+      path.normalize(`${homeDir}foo`),
+    );
   });
 
   it('should return regular absolute path unchanged (but normalized)', () => {

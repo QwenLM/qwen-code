@@ -269,7 +269,6 @@ export const BINARY_EXTENSIONS: string[] = [
     ...PYTHON_EXCLUDES,
   ]),
   // Additional binary extensions not in the main patterns
-  '.dat',
   '.obj',
   '.o',
   '.a',

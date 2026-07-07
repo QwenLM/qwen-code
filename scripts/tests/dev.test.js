@@ -12,8 +12,6 @@ const { spawnMock, platformMock, existsSyncMock } = vi.hoisted(() => ({
   existsSyncMock: vi.fn(() => false),
 }));
 
-const normalizePath = (filePath) => String(filePath).replaceAll('\\', '/');
-
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
 }));
@@ -34,7 +32,10 @@ vi.mock('node:fs', () => ({
   existsSync: existsSyncMock,
   symlinkSync: vi.fn(),
   mkdirSync: vi.fn(),
+  readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
 }));
+
+const normalizePath = (path) => String(path).replaceAll('\\', '/');
 
 describe('scripts/dev.js launcher', () => {
   const originalArgv = process.argv;

@@ -30,6 +30,8 @@ interface MockToolOptions {
   shouldDefer?: boolean;
   alwaysLoad?: boolean;
   searchHint?: string;
+  maxOutputChars?: number;
+  truncateKeep?: 'head' | 'tail' | 'both';
   getDefaultPermission?: () => Promise<PermissionDecision>;
   getConfirmationDetails?: (
     signal: AbortSignal,
@@ -96,6 +98,17 @@ export class MockTool extends BaseDeclarativeTool<
     updateOutput?: (output: string) => void,
   ) => Promise<ToolResult>;
 
+  private readonly _maxOutputChars?: number;
+  private readonly _truncateKeep: 'head' | 'tail' | 'both';
+
+  override get maxOutputChars(): number | undefined {
+    return this._maxOutputChars;
+  }
+
+  override get truncateKeep(): 'head' | 'tail' | 'both' {
+    return this._truncateKeep;
+  }
+
   constructor(options: MockToolOptions) {
     super(
       options.name,
@@ -109,6 +122,9 @@ export class MockTool extends BaseDeclarativeTool<
       options.alwaysLoad ?? false,
       options.searchHint,
     );
+
+    this._maxOutputChars = options.maxOutputChars;
+    this._truncateKeep = options.truncateKeep ?? 'both';
 
     if (options.getDefaultPermission) {
       this.getDefaultPermission = options.getDefaultPermission;

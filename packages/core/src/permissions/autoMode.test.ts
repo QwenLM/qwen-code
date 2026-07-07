@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,9 +18,11 @@ import {
   isInSafeToolAllowlist,
   shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
+import { clearSessionCommits } from './destructive-commands.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -61,6 +63,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       ToolNames.MONITOR,
       ToolNames.CRON_CREATE,
       ToolNames.CRON_DELETE,
+      ToolNames.LOOP_WAKEUP,
       // `send_message` injects arbitrary text into another running agent
       // as a new instruction — the classifier must see destination + body
       // so it can detect inter-agent steering toward destructive actions.
@@ -81,6 +84,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       [
         "ask_user_question",
         "cron_list",
+        "enter_plan_mode",
         "exit_plan_mode",
         "glob",
         "grep_search",
@@ -1351,9 +1355,192 @@ describe('shouldRunAutoModeForCall', () => {
     ).toBe(false);
   });
 
+  it('excludes ENTER_PLAN_MODE even under AUTO — plan entries are always allowed without classification', () => {
+    expect(
+      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.ENTER_PLAN_MODE),
+    ).toBe(false);
+  });
+
   it('returns false for unknown tool names when not in AUTO', () => {
     expect(shouldRunAutoModeForCall(ApprovalMode.DEFAULT, 'unknown_tool')).toBe(
       false,
     );
+  });
+});
+
+// ─── shouldClassifyAllShellForAutoMode ────────────────────────────────────
+
+describe('shouldClassifyAllShellForAutoMode', () => {
+  function configWithClassifyAllShell(enabled: boolean): Config {
+    return {
+      getAutoModeSettings: () => ({ classifyAllShell: enabled }),
+    } as unknown as Config;
+  }
+
+  it('returns true for Shell when classifyAllShell is enabled', () => {
+    expect(
+      shouldClassifyAllShellForAutoMode(
+        ToolNames.SHELL,
+        configWithClassifyAllShell(true),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for Monitor when classifyAllShell is enabled', () => {
+    expect(
+      shouldClassifyAllShellForAutoMode(
+        ToolNames.MONITOR,
+        configWithClassifyAllShell(true),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false for Shell when classifyAllShell is disabled', () => {
+    expect(
+      shouldClassifyAllShellForAutoMode(
+        ToolNames.SHELL,
+        configWithClassifyAllShell(false),
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false for non-shell tools even when classifyAllShell is enabled', () => {
+    for (const tool of [
+      ToolNames.EDIT,
+      ToolNames.WRITE_FILE,
+      ToolNames.READ_FILE,
+      ToolNames.WEB_FETCH,
+    ]) {
+      expect(
+        shouldClassifyAllShellForAutoMode(
+          tool,
+          configWithClassifyAllShell(true),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('returns false when classifyAllShell is undefined (default)', () => {
+    const config = {
+      getAutoModeSettings: () => ({}),
+    } as unknown as Config;
+    expect(shouldClassifyAllShellForAutoMode(ToolNames.SHELL, config)).toBe(
+      false,
+    );
+  });
+});
+
+// ─── L5.2.5 destructive command guard integration ────────────────────────
+
+describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
+  const cwd = '/Users/test/project';
+  const baseConfig = makeConfig([cwd]);
+
+  beforeEach(() => {
+    clearSessionCommits();
+  });
+
+  it('blocks git reset --hard via shell tool before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'fix the bug' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('blocked:destructive-command');
+    if (decision.via === 'blocked:destructive-command') {
+      expect(decision.reason).toContain('git reset --hard');
+    }
+  });
+
+  it('blocks terraform destroy via shell tool', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.SHELL,
+        command: 'terraform destroy',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'update infra' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('allows destructive commands when user explicitly mentions discard', async () => {
+    // With "discard" in the prompt, the guard should NOT block.
+    // The call will fall through to the classifier (which is mocked away
+    // here — we just verify it doesn't get blocked:destructive-command).
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [
+        {
+          role: 'user',
+          parts: [{ text: 'discard all local changes and reset' }],
+        },
+      ],
+      config: baseConfig,
+      signal: new AbortController().signal,
+      skipClassifierReason: 'total_denial',
+    });
+    // Should NOT be blocked:destructive-command; instead falls through
+    // to fallback because we set skipClassifierReason.
+    expect(decision.via).not.toBe('blocked:destructive-command');
+  });
+
+  it('does not block non-shell tools', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.READ_FILE, filePath: '/any/file.txt' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'read the file' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('fast-path:allowlist');
+  });
+
+  it('blocks shell indirection: bash -c "git reset --hard"', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.SHELL,
+        command: 'bash -c "git reset --hard"',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [{ role: 'user', parts: [{ text: 'fix something' }] }],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('applyAutoModeDecision handles blocked:destructive-command', () => {
+    const setAutoModeDenialState = vi.fn();
+    const denialState = {
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    };
+    const result = applyAutoModeDecision(
+      {
+        via: 'blocked:destructive-command',
+        reason: 'Blocked destructive git command',
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+    expect(result.kind).toBe('blocked');
+    if (result.kind === 'blocked') {
+      expect(result.errorMessage).toContain('Blocked destructive git command');
+      expect(result.errorMessage).toContain('Do not try to complete');
+    }
+    expect(setAutoModeDenialState).toHaveBeenCalled();
   });
 });

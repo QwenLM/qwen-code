@@ -9,7 +9,11 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { resolveAndValidatePath, unescapePath } from '../utils/paths.js';
+import {
+  resolveAndValidatePath,
+  resolvePath,
+  unescapePath,
+} from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
@@ -18,6 +22,11 @@ import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import {
+  getQwenIgnoreFileNames,
+  QwenIgnoreParser,
+} from '../utils/qwenIgnoreParser.js';
+import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -29,6 +38,12 @@ interface RipgrepJsonMatch {
     lines?: { text?: string };
     line_number: number;
   };
+}
+
+interface RipgrepMatchLine {
+  rawLine: string;
+  filePath: string;
+  key: string;
 }
 
 function isRipgrepJsonMatch(value: unknown): value is RipgrepJsonMatch {
@@ -60,21 +75,22 @@ function getRipgrepJsonPath(match: RipgrepJsonMatch): string | undefined {
 }
 
 /**
- * Per-process cache for `.qwenignore` discovery. The same directories show
+ * Per-process cache for AI ignore-file discovery. The same directories show
  * up across many Grep invocations in a typical session — without caching,
  * each invocation pays 2-3 sync syscalls per searchPath. Bounded so a
  * pathologically long session can't grow without limit.
  *
- * `dirIsDir`: searchPath → boolean (is the path itself a directory?)
- * `qwenIgnore`: dir → string | null (cached `.qwenignore` path or null)
+ * `qwenIgnore`: dir → string[] (cached supported ignore-file paths)
  *
- * **Known staleness window:** a `.qwenignore` created mid-session, or a
- * searchPath whose type flips (dir→file or vice versa), will not be
- * picked up until the entry rotates out of the FIFO (256 entries). Users
- * rarely add ignore files mid-session; a process restart resets the cache.
+ * **Known staleness window:** an ignore file created mid-session will not be
+ * picked up until the entry rotates out of the FIFO (256 entries).
  */
-const dirIsDirCache = new Map<string, boolean>();
-const qwenIgnoreCache = new Map<string, string | null>();
+interface QwenIgnoreFileForRipgrep {
+  ignoreFileName: string;
+  ignoreFilePath: string;
+}
+
+const qwenIgnoreCache = new Map<string, readonly QwenIgnoreFileForRipgrep[]>();
 const RIPGREP_CACHE_MAX = 256;
 function trimCache<K, V>(m: Map<K, V>): void {
   if (m.size <= RIPGREP_CACHE_MAX) return;
@@ -82,24 +98,42 @@ function trimCache<K, V>(m: Map<K, V>): void {
   if (oldest !== undefined) m.delete(oldest as K);
 }
 
-function toAbsoluteResultPath(filePath: string, searchPaths: string[]): string {
-  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
-    return filePath;
+function toAbsoluteResultPath(
+  filePath: string,
+  searchPaths: string[],
+  cache?: Map<string, string>,
+): string {
+  const cachedPath = cache?.get(filePath);
+  if (cachedPath !== undefined) {
+    return cachedPath;
   }
-  for (const searchPath of searchPaths) {
-    const candidate = path.resolve(searchPath, filePath);
-    if (fs.existsSync(candidate)) {
-      return candidate;
+
+  let absolutePath: string;
+  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
+    absolutePath = filePath;
+  } else {
+    absolutePath = path.resolve(searchPaths[0], filePath);
+    for (const searchPath of searchPaths) {
+      const candidate = path.resolve(searchPath, filePath);
+      if (fs.existsSync(candidate)) {
+        absolutePath = candidate;
+        break;
+      }
     }
   }
-  return path.resolve(searchPaths[0], filePath);
+
+  cache?.set(filePath, absolutePath);
+  return absolutePath;
+}
+
+function isQwenIgnoreFileName(ignoreFileName: string): boolean {
+  return ignoreFileName === '.qwenignore';
 }
 
 /**
  * Test-only: clear ripGrep's module-level discovery caches between cases.
  */
 export function _resetRipGrepCachesForTest(): void {
-  dirIsDirCache.clear();
   qwenIgnoreCache.clear();
 }
 
@@ -148,7 +182,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );
@@ -208,12 +242,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
-      interface RipgrepMatchLine {
-        rawLine: string;
-        filePath: string;
-        key: string;
-      }
-
+      const resolvedPathCache = new Map<string, string>();
       let allLines = rawOutput
         .split('\n')
         .filter((line) => line.trim())
@@ -266,6 +295,16 @@ class GrepToolInvocation extends BaseToolInvocation<
             },
           ];
         });
+
+      const filteringOptions = this.getFileFilteringOptions();
+      if (filteringOptions.respectQwenIgnore) {
+        allLines = this.filterQwenIgnoredMatches(
+          allLines,
+          searchPaths,
+          resolvedPathCache,
+          filteringOptions.customIgnoreFiles,
+        );
+      }
 
       // Deduplicate lines from potentially overlapping workspace directories.
       // ripgrep reports the same file twice when given paths like /a and /a/sub.
@@ -362,10 +401,11 @@ class GrepToolInvocation extends BaseToolInvocation<
       const resultFilePaths = Array.from(
         new Set(
           visibleLines.map((line) =>
-            toAbsoluteResultPath(line.filePath, searchPaths),
+            toAbsoluteResultPath(line.filePath, searchPaths, resolvedPathCache),
           ),
         ),
       );
+      await recordGrepResultFileReads(this.config, resultFilePaths);
 
       return {
         llmContent: llmContent.trim(),
@@ -380,6 +420,34 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: `Error: ${errorMessage}`,
       };
     }
+  }
+
+  private filterQwenIgnoredMatches(
+    lines: RipgrepMatchLine[],
+    searchPaths: string[],
+    resolvedPathCache: Map<string, string>,
+    customIgnoreFiles?: string[],
+  ): RipgrepMatchLine[] {
+    const parsers = new Map<string, QwenIgnoreParser>();
+
+    return lines.filter((line) => {
+      const absolutePath = toAbsoluteResultPath(
+        line.filePath,
+        searchPaths,
+        resolvedPathCache,
+      );
+      const ignoreRoot = this.getIgnoreRootForSearchPath(absolutePath);
+      if (ignoreRoot === undefined) {
+        return true;
+      }
+      let parser = parsers.get(ignoreRoot);
+      if (parser === undefined) {
+        parser = new QwenIgnoreParser(ignoreRoot, customIgnoreFiles);
+        parsers.set(ignoreRoot, parser);
+      }
+
+      return !parser.isIgnored(absolutePath);
+    });
   }
 
   private async performRipgrepSearch(options: {
@@ -400,38 +468,54 @@ class GrepToolInvocation extends BaseToolInvocation<
       pattern,
     ];
 
-    // Add file exclusions from .gitignore and .qwenignore
+    // Add file exclusions from .gitignore and AI-specific ignore files
     const filteringOptions = this.getFileFilteringOptions();
     if (!filteringOptions.respectGitIgnore) {
       rgArgs.push('--no-ignore-vcs');
     }
 
     if (filteringOptions.respectQwenIgnore) {
-      // Load .qwenignore from each workspace directory, not just the primary one
+      // Load ignore files from each workspace directory, not just the primary one.
       const seenIgnoreFiles = new Set<string>();
+      // Pass .qwenignore last so custom ignore negations cannot override it.
+      const nonQwenIgnorePaths: string[] = [];
+      const qwenIgnorePathsForRipgrep: string[] = [];
+      const ignoreFileNames = getQwenIgnoreFileNames(
+        filteringOptions.customIgnoreFiles,
+      );
       for (const searchPath of paths) {
-        let isDir = dirIsDirCache.get(searchPath);
-        if (isDir === undefined) {
-          try {
-            isDir = fs.statSync(searchPath).isDirectory();
-          } catch {
-            isDir = false;
-          }
-          dirIsDirCache.set(searchPath, isDir);
-          trimCache(dirIsDirCache);
+        const ignoreRoot = this.getIgnoreRootForSearchPath(searchPath);
+        if (ignoreRoot === undefined) {
+          continue;
         }
-        const dir = isDir ? searchPath : path.dirname(searchPath);
-        let qwenIgnorePath = qwenIgnoreCache.get(dir);
-        if (qwenIgnorePath === undefined) {
-          const candidate = path.join(dir, '.qwenignore');
-          qwenIgnorePath = fs.existsSync(candidate) ? candidate : null;
-          qwenIgnoreCache.set(dir, qwenIgnorePath);
+        const cacheKey = [ignoreRoot, ...ignoreFileNames].join('\0');
+        let qwenIgnoreFiles = qwenIgnoreCache.get(cacheKey);
+        if (qwenIgnoreFiles === undefined) {
+          qwenIgnoreFiles = ignoreFileNames
+            .map((ignoreFileName) => ({
+              ignoreFileName,
+              ignoreFilePath: path.join(ignoreRoot, ignoreFileName),
+            }))
+            .filter(({ ignoreFilePath }) => fs.existsSync(ignoreFilePath));
+          qwenIgnoreCache.set(cacheKey, qwenIgnoreFiles);
           trimCache(qwenIgnoreCache);
         }
-        if (qwenIgnorePath && !seenIgnoreFiles.has(qwenIgnorePath)) {
-          rgArgs.push('--ignore-file', qwenIgnorePath);
-          seenIgnoreFiles.add(qwenIgnorePath);
+        for (const { ignoreFileName, ignoreFilePath } of qwenIgnoreFiles) {
+          if (!seenIgnoreFiles.has(ignoreFilePath)) {
+            if (isQwenIgnoreFileName(ignoreFileName)) {
+              qwenIgnorePathsForRipgrep.push(ignoreFilePath);
+            } else {
+              nonQwenIgnorePaths.push(ignoreFilePath);
+            }
+            seenIgnoreFiles.add(ignoreFilePath);
+          }
         }
+      }
+      for (const qwenIgnorePath of [
+        ...nonQwenIgnorePaths,
+        ...qwenIgnorePathsForRipgrep,
+      ]) {
+        rgArgs.push('--ignore-file', qwenIgnorePath);
       }
     }
 
@@ -444,12 +528,35 @@ class GrepToolInvocation extends BaseToolInvocation<
     // Pass all search paths to ripgrep (it supports multiple paths natively)
     rgArgs.push(...paths);
 
-    const result = await runRipgrep(rgArgs, options.signal);
+    const result = await runRipgrep(
+      rgArgs,
+      options.signal,
+      this.config.getUseBuiltinRipgrep(),
+    );
     if (result.error && !result.stdout) {
       throw result.error;
     }
 
     return { stdout: result.stdout, truncated: result.truncated };
+  }
+
+  private getIgnoreRootForSearchPath(searchPath: string): string | undefined {
+    const resolvedSearchPath = path.resolve(searchPath);
+    for (const workspaceDir of this.config
+      .getWorkspaceContext()
+      .getDirectories()) {
+      const resolvedWorkspaceDir = path.resolve(workspaceDir);
+      const relative = path.relative(resolvedWorkspaceDir, resolvedSearchPath);
+      if (
+        relative === '' ||
+        (relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative))
+      ) {
+        return resolvedWorkspaceDir;
+      }
+    }
+    return undefined;
   }
 
   private getFileFilteringOptions(): FileFilteringOptions {
@@ -461,6 +568,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       respectQwenIgnore:
         options?.respectQwenIgnore ??
         DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+      customIgnoreFiles:
+        options?.customIgnoreFiles ??
+        DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
     };
   }
 
@@ -490,6 +600,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
 > {
   static readonly Name = ToolNames.GREP;
 
+  override get maxOutputChars(): number {
+    return 20_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       RipGrepTool.Name,
@@ -514,9 +628,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
               'File or directory to search in (rg PATH). Defaults to current working directory.',
           },
           limit: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
             description:
-              'Limit output to first N lines/entries. Optional - shows all matches if not specified.',
+              'Limit output to first N lines/entries. Must be a positive integer. Optional - shows all matches if not specified.',
           },
         },
         required: ['pattern'],
@@ -539,6 +654,13 @@ export class RipGrepTool extends BaseDeclarativeTool<
     );
     if (errors) {
       return errors;
+    }
+
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'limit must be a positive integer';
     }
 
     // Validate pattern is a valid regex

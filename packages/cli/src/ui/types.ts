@@ -91,6 +91,20 @@ export interface SummaryProps {
 
 export interface HistoryItemBase {
   text?: string; // Text content for user/gemini/info/error messages
+  /** Display-only flags that do not affect canonical history semantics. */
+  display?: {
+    /**
+     * If true, the item is kept in history for turn mapping but not
+     * rendered in the restored transcript. Set by ui.history.collapseOnResume
+     * when resuming a session.
+     */
+    suppressOnRestore?: boolean;
+    /**
+     * Identifies special display-only items, like the summary row added
+     * when history is collapsed.
+     */
+    kind?: 'collapse-summary';
+  };
 }
 
 export type HistoryItemUser = HistoryItemBase & {
@@ -112,6 +126,7 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
@@ -122,6 +137,7 @@ export type HistoryItemGeminiContent = HistoryItemBase & {
 export type HistoryItemGeminiThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
+  durationMs?: number;
 };
 
 export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
@@ -154,6 +170,13 @@ export type HistoryItemSuccess = HistoryItemBase & {
 
 export type HistoryItemRetryCountdown = HistoryItemBase & {
   type: 'retry_countdown';
+  text: string;
+};
+
+// Dim, tip-style disclosure shown when the vision bridge runs (success or
+// cancellation). Failures use the prominent ERROR variant instead.
+export type HistoryItemVisionNotice = HistoryItemBase & {
+  type: 'vision_notice';
   text: string;
 };
 
@@ -231,6 +254,10 @@ export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
 };
 
+export type HistoryItemSkillStats = HistoryItemBase & {
+  type: 'skill_stats';
+};
+
 export type HistoryItemQuit = HistoryItemBase & {
   type: 'quit';
   duration: string;
@@ -303,6 +330,8 @@ export interface ToolDefinition {
 
 export interface SkillDefinition {
   name: string;
+  description?: string;
+  level?: string;
 }
 
 export type HistoryItemToolsList = HistoryItemBase & {
@@ -537,12 +566,7 @@ export type HistoryItemDoctor = HistoryItemBase & {
 };
 
 export type GoalStatusKind =
-  | 'set'
-  | 'achieved'
-  | 'cleared'
-  | 'failed'
-  | 'aborted'
-  | 'checking';
+  'set' | 'achieved' | 'cleared' | 'failed' | 'aborted' | 'checking';
 
 export const TERMINAL_GOAL_STATUS_KINDS = [
   'achieved',
@@ -562,8 +586,9 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   type: 'goal_status';
   kind: GoalStatusKind;
   condition: string;
-  /** Set for progress and terminal goal states. */
+  /** Set for active, progress, and terminal goal states. */
   iterations?: number;
+  setAt?: number;
   durationMs?: number;
   lastReason?: string;
 };
@@ -585,6 +610,7 @@ export type HistoryItemWithoutId =
   | HistoryItemWarning
   | HistoryItemSuccess
   | HistoryItemRetryCountdown
+  | HistoryItemVisionNotice
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
@@ -592,6 +618,7 @@ export type HistoryItemWithoutId =
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemSkillStats
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -628,6 +655,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  SKILL_STATS = 'skill_stats',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
@@ -644,6 +672,7 @@ export enum MessageType {
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
+  VISION_NOTICE = 'vision_notice',
 }
 
 export interface InsightProgressProps {
@@ -709,6 +738,11 @@ export type Message =
       content?: string;
     }
   | {
+      type: MessageType.SKILL_STATS;
+      timestamp: Date;
+      content?: string;
+    }
+  | {
       type: MessageType.QUIT;
       timestamp: Date;
       duration: string;
@@ -745,6 +779,11 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. Applies to this submitted prompt (and its
+   * tool-call continuations) only — no session change, no persistence.
+   */
+  modelOverride?: string;
 }
 
 /**

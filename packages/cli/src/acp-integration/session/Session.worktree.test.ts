@@ -113,6 +113,7 @@ describe('Session.pendingWorktreeNotice', () => {
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
         rewindRecording: vi.fn(),
+        setTitleRecordedCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
@@ -262,5 +263,61 @@ describe('Session.pendingWorktreeNotice', () => {
     expect(session.pendingWorktreeNotice).toBeNull();
     // Message was still sent to the model.
     expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // VP5: ordering contract when the worktree notice, system reminders, and a
+  // continuation that leads with functionResponse parts all combine. Locks the
+  // `[...functionResponses, worktreeNotice, ...systemReminders, ...]` order so
+  // the two insert-after-functionResponses phases can't silently reorder.
+  it('VP5: continuation keeps functionResponses first, then worktree notice, then reminders', async () => {
+    // Plan mode makes #buildInitialSystemReminders emit a reminder part.
+    (mockConfig.getApprovalMode as ReturnType<typeof vi.fn>).mockReturnValue(
+      ApprovalMode.PLAN,
+    );
+    // History ends on a model turn with a dangling tool call → an
+    // `interrupted_turn` continuation whose parts lead with functionResponses.
+    (mockChat.getHistory as ReturnType<typeof vi.fn>).mockReturnValue([
+      { role: 'user', parts: [{ text: 'run a command' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+      },
+    ]);
+
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    const notice = 'worktree restore notice';
+    session.pendingWorktreeNotice = notice;
+
+    await session.prompt({
+      sessionId: SESSION_ID,
+      prompt: [],
+      _meta: { 'qwen.daemon.continueLastTurn': true },
+    } as unknown as PromptRequest);
+
+    expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
+    const parts = capturedMessages[0] as Array<{
+      text?: string;
+      functionResponse?: unknown;
+    }>;
+
+    // tool_result blocks must stay first (Anthropic-compatible ordering).
+    expect(parts[0].functionResponse).toBeDefined();
+    const noticeIdx = parts.findIndex(
+      (p) => typeof p.text === 'string' && p.text.includes(notice),
+    );
+    const reminderIdx = parts.findIndex(
+      (p) =>
+        typeof p.text === 'string' &&
+        p.text.includes('<system-reminder>') &&
+        !p.text.includes(notice),
+    );
+    expect(noticeIdx).toBeGreaterThan(0);
+    expect(reminderIdx).toBeGreaterThan(noticeIdx);
   });
 });

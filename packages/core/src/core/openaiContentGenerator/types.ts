@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentParameters } from '@google/genai';
+import type { GenerateContentParameters, Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
@@ -48,6 +48,9 @@ export interface RequestContext {
   // user message for strict OpenAI-compat servers. See ContentGeneratorConfig
   // for details.
   splitToolMedia?: boolean;
+  // Default keeps tool result text as content parts; "string" is an opt-in
+  // compatibility mode for older OpenAI-compatible tool templates.
+  toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
   /**
    * Per-stream mutable state for cumulative-delta normalization on the visible
    * content channel. Initialised lazily on first use. Must NOT be shared or
@@ -60,6 +63,22 @@ export interface RequestContext {
    * channel are deduplicated correctly.
    */
   reasoningDeltaState?: StreamingTextDeltaState;
+  /**
+   * Tracks whether tagged-thinking parsing has emitted a thought part in the
+   * current stream. Once true, separate reasoning_content deltas are considered
+   * duplicate reasoning and are suppressed.
+   */
+  hasTaggedThinkingThought?: boolean;
+  /**
+   * Buffered reasoning_content for tagged-thinking streams until we know
+   * whether visible content will emit tagged thought parts.
+   */
+  pendingReasoningText?: string;
+  /**
+   * Visible content buffered behind pending reasoning_content so it can be
+   * emitted after the reasoning thought if no tagged thought appears.
+   */
+  pendingContentParts?: Part[];
 }
 
 export interface ErrorHandler {

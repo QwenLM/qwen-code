@@ -388,7 +388,8 @@ Hook output supports three categories of fields:
   "permission_mode": "default | plan | auto_edit | yolo",
   "tool_name": "name of the tool being executed",
   "tool_input": "object containing the tool's input parameters",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -398,6 +399,12 @@ Hook output supports three categories of fields:
 - `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
 - `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
 - `hookSpecificOutput.additionalContext`: additional context information
+
+The `permissionDecision` value controls whether the tool runs:
+
+- `"allow"` — run the tool without the usual approval prompt.
+- `"deny"` — block the tool; it does not execute and an error is returned to the model.
+- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
@@ -426,7 +433,8 @@ Hook output supports three categories of fields:
   "tool_name": "name of the tool that was executed",
   "tool_input": "object containing the tool's input parameters",
   "tool_response": "object containing the tool's response",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -457,7 +465,8 @@ Hook output supports three categories of fields:
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_use_id": "unique identifier for the tool use",
+  "tool_use_id": "unique identifier for the tool use (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)",
   "tool_name": "name of the tool that failed",
   "tool_input": "object containing the tool's input parameters",
   "error": "error message describing the failure",
@@ -567,9 +576,14 @@ Hook output supports three categories of fields:
 ```json
 {
   "stop_hook_active": "boolean indicating if stop hook is active",
-  "last_assistant_message": "the last message from the assistant"
+  "last_assistant_message": "the last message from the assistant",
+  "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
+  "context_limit": "context window size in tokens (optional)",
+  "input_tokens": "prompt token count (may include output tokens depending on provider; optional)"
 }
 ```
+
+The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scripts to observe context usage and implement custom compact strategies — for example, a script that prints a reminder to run `/compact` when usage exceeds a custom threshold.
 
 **Output Options**:
 

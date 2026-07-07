@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ThoughtSummary } from '@qwen-code/qwen-code-core';
 import type React from 'react';
 import { useRef } from 'react';
 import { Box, Text } from 'ink';
@@ -22,8 +21,9 @@ interface LoadingIndicatorProps {
   currentLoadingPhrase?: string;
   elapsedTime: number;
   rightContent?: React.ReactNode;
-  thought?: ThoughtSummary | null;
   candidatesTokens?: number;
+  taskStartTokens?: number;
+  taskStartStreamingChars?: number;
   /**
    * Live-updating character counter for the streaming response. When provided
    * together with `isStreaming`, the indicator animates a token estimate
@@ -33,6 +33,8 @@ interface LoadingIndicatorProps {
   streamingCharsRef?: React.RefObject<number>;
   /** Whether to poll `streamingCharsRef` (true during Responding/WaitingForConfirmation). */
   isStreaming?: boolean;
+  /** Show live response speed next to the token counter. */
+  showResponseTokensPerSecond?: boolean;
   /**
    * True when receiving content (shows ↓ arrow), false when waiting for API
    * response (shows ↑ arrow).
@@ -45,10 +47,12 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   currentLoadingPhrase,
   elapsedTime,
   rightContent,
-  thought,
   candidatesTokens,
+  taskStartTokens = 0,
+  taskStartStreamingChars = 0,
   streamingCharsRef,
   isStreaming,
+  showResponseTokensPerSecond = false,
   isReceivingContent = true,
 }) => {
   const streamingState = useStreamingContext();
@@ -69,10 +73,20 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     return null;
   }
 
-  const primaryText = thought?.subject || currentLoadingPhrase;
+  // The spinner row shows status only: phrase, timer, token estimate, and the
+  // cancel affordance. Model reasoning lives in the collapsible thinking block
+  // in history, not here.
+  const primaryText = currentLoadingPhrase;
 
   const streamingTokens = streamingCharsRef ? Math.round(animatedChars / 4) : 0;
   const outputTokens = (candidatesTokens ?? 0) + streamingTokens;
+  const taskStartStreamingTokens = streamingCharsRef
+    ? Math.round(taskStartStreamingChars / 4)
+    : 0;
+  const outputTokensSinceTimerStart = Math.max(
+    0,
+    outputTokens - taskStartTokens - taskStartStreamingTokens,
+  );
   const showTokens = !isNarrow && outputTokens > 0;
   const tokenArrow = isReceivingContent ? '↓' : '↑';
 
@@ -82,12 +96,19 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   const tokenStr = showTokens
     ? ` · ${tokenArrow} ${formatTokenCount(outputTokens)} tokens`
     : '';
+  const tokenRateStr =
+    showTokens &&
+    showResponseTokensPerSecond &&
+    isReceivingContent &&
+    elapsedTime > 0
+      ? ` · ${formatTokensPerSecond(outputTokensSinceTimerStart / elapsedTime)}`
+      : '';
 
   const cancelAndTimerContent =
     streamingState !== StreamingState.WaitingForConfirmation
       ? t('({{time}}{{tokens}} · esc to cancel)', {
           time: timeStr,
-          tokens: tokenStr,
+          tokens: `${tokenStr}${tokenRateStr}`,
         })
       : null;
 
@@ -130,3 +151,16 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     </Box>
   );
 };
+
+function formatTokensPerSecond(tokensPerSecond: number): string {
+  if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) {
+    return '0 t/s';
+  }
+
+  const rounded =
+    tokensPerSecond >= 10
+      ? Math.round(tokensPerSecond).toString()
+      : tokensPerSecond.toFixed(1);
+
+  return `${rounded} t/s`;
+}

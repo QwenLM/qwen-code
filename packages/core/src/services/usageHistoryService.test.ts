@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { metricsToUsageRecord, aggregateUsage } from './usageHistoryService.js';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  metricsToUsageRecord,
+  aggregateUsage,
+  loadUsageHistory,
+  persistSessionUsage,
+} from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
@@ -175,6 +183,35 @@ describe('metricsToUsageRecord', () => {
     expect(record.tools.totalFail).toBe(2);
     expect(record.files.linesAdded).toBe(50);
     expect(record.files.linesRemoved).toBe(10);
+  });
+
+  it('copies SessionMetrics.skills into the persisted record', () => {
+    const metrics = makeMetrics({
+      skills: {
+        totalCalls: 3,
+        totalSuccess: 3,
+        totalFail: 0,
+        byName: {
+          qreview: { count: 2, success: 2, fail: 0 },
+          simplify: { count: 1, success: 1, fail: 0 },
+        },
+      },
+    });
+    const record = metricsToUsageRecord('s', '/p', 0, 1000, metrics);
+    expect(record.skills).toEqual({
+      totalCalls: 3,
+      totalSuccess: 3,
+      totalFail: 0,
+      byName: {
+        qreview: { count: 2, success: 2, fail: 0 },
+        simplify: { count: 1, success: 1, fail: 0 },
+      },
+    });
+  });
+
+  it('omits skills when SessionMetrics has none', () => {
+    const record = metricsToUsageRecord('s', '/p', 0, 1000, makeMetrics());
+    expect(record.skills).toBeUndefined();
   });
 });
 
@@ -347,5 +384,331 @@ describe('aggregateUsage', () => {
     expect(report.totalLatencyMs).toBe(0);
     expect(report.totalRequests).toBe(0);
     expect(report.tools.topTools).toEqual([]);
+  });
+});
+
+// Regression coverage for issue #4994: opening /stats during the first-ever
+// turn followed by /clear or process exit used to write the same sessionId
+// twice into usage_record.jsonl, permanently inflating every aggregate 2x.
+describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () => {
+  let tmpHome: string;
+  let originalQwenHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-usage-history-'));
+    originalQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(tmpHome, '.qwen');
+    fs.mkdirSync(process.env['QWEN_HOME'], { recursive: true });
+  });
+
+  afterEach(() => {
+    if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = originalQwenHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function plantChatJsonl(sessionId: string, tokens: number) {
+    const cwd = '/repro/project';
+    const start = new Date('2026-06-11T00:00:00Z').toISOString();
+    const mid = new Date('2026-06-11T00:01:00Z').toISOString();
+    const end = new Date('2026-06-11T00:02:00Z').toISOString();
+    const projDir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+    );
+    fs.mkdirSync(path.join(projDir, 'chats'), { recursive: true });
+    const records = [
+      {
+        sessionId,
+        cwd,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: start,
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        sessionId,
+        cwd,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: mid,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': mid,
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: tokens * 0.6,
+            output_token_count: tokens * 0.3,
+            cached_content_token_count: 0,
+            thoughts_token_count: tokens * 0.1,
+            total_token_count: tokens,
+            prompt_id: 'p1',
+          },
+        },
+      },
+      {
+        sessionId,
+        cwd,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: end,
+        type: 'assistant',
+        message: { role: 'assistant', content: 'ok' },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(projDir, 'chats', `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+  }
+
+  function makeLiveMetrics(tokens: number): SessionMetrics {
+    return {
+      models: {
+        'qwen-max': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 1200 },
+          tokens: {
+            prompt: tokens * 0.6,
+            candidates: tokens * 0.3,
+            total: tokens,
+            cached: 0,
+            thoughts: tokens * 0.1,
+          },
+          bySource: {},
+        },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          [ToolCallDecision.ACCEPT]: 0,
+          [ToolCallDecision.REJECT]: 0,
+          [ToolCallDecision.MODIFY]: 0,
+          [ToolCallDecision.AUTO_ACCEPT]: 0,
+        },
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+    };
+  }
+
+  it('read-side: dedups duplicate sessionId records already on disk (last-wins)', async () => {
+    // Simulate a usage_record.jsonl already corrupted by the pre-fix bug:
+    // two records with the same sessionId.
+    const sessionId = 'sess-dup-1';
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+    const rec = (totalTokens: number) => ({
+      version: 1 as const,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now() - 60000,
+      project: '/p',
+      durationMs: 60000,
+      totalLatencyMs: 1200,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: totalTokens * 0.6,
+          outputTokens: totalTokens * 0.3,
+          cachedTokens: 0,
+          thoughtsTokens: totalTokens * 0.1,
+          totalTokens,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+    });
+    fs.writeFileSync(
+      usagePath,
+      JSON.stringify(rec(1000)) + '\n' + JSON.stringify(rec(1600)) + '\n',
+    );
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(1);
+    // Last-wins: the second record (1600 tokens) survives.
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+
+    const report = aggregateUsage(records, 'all');
+    expect(report.sessionCount).toBe(1);
+  });
+
+  it('write-side: rebuildFromSessionJsonl skips the in-progress session when skipSessionInRebuild is passed', async () => {
+    const sessionId = 'sess-in-progress';
+    plantChatJsonl(sessionId, 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    // First /stats open during the live session.
+    const first = await loadUsageHistory(sessionId);
+    expect(first).toHaveLength(1);
+    // Critically: the file must NOT contain the in-progress session.
+    expect(fs.existsSync(usagePath)).toBe(false);
+
+    // /clear or process exit writes the authoritative record exactly once.
+    persistSessionUsage({
+      sessionId,
+      startTime: new Date('2026-06-11T00:00:00Z'),
+      endTime: new Date('2026-06-11T00:02:00Z'),
+      project: '/repro/project',
+      metrics: makeLiveMetrics(1600),
+    });
+    const lines = fs.readFileSync(usagePath, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+
+    // Subsequent /stats open after session end aggregates exactly one record.
+    const second = await loadUsageHistory();
+    expect(second).toHaveLength(1);
+    const report = aggregateUsage(second, 'all');
+    expect(report.sessionCount).toBe(1);
+    let totalTokens = 0;
+    for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
+    expect(totalTokens).toBe(1600);
+  });
+
+  it('read-only: persistRebuild:false rebuilds without writing usage_record.jsonl', async () => {
+    const sessionId = 'sess-readonly';
+    plantChatJsonl(sessionId, 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    // The daemon dashboard loads read-only: it rebuilds + returns data but must
+    // not write to ~/.qwen on a GET.
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe(sessionId);
+    expect(fs.existsSync(usagePath)).toBe(false);
+
+    // The default (persisting) load still migrates the rebuilt records to disk.
+    await loadUsageHistory();
+    expect(fs.existsSync(usagePath)).toBe(true);
+  });
+
+  it('end-to-end: /stats during first turn + /clear must not 2x the session', async () => {
+    const sessionId = 'sess-e2e';
+    plantChatJsonl(sessionId, 1600);
+
+    // Step 1: open /stats (first time) during the live session.
+    await loadUsageHistory(sessionId);
+
+    // Step 2: /clear or exit.
+    persistSessionUsage({
+      sessionId,
+      startTime: new Date('2026-06-11T00:00:00Z'),
+      endTime: new Date('2026-06-11T00:02:00Z'),
+      project: '/repro/project',
+      metrics: makeLiveMetrics(1600),
+    });
+
+    // Step 3: re-open /stats.
+    const records = await loadUsageHistory();
+    const report = aggregateUsage(records, 'all');
+
+    expect(report.sessionCount).toBe(1);
+    let totalTokens = 0;
+    for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
+    expect(totalTokens).toBe(1600);
+  });
+});
+
+describe('aggregateUsage — skills', () => {
+  function skillRecord(
+    sessionId: string,
+    skills?: UsageSummaryRecord['skills'],
+  ): UsageSummaryRecord {
+    return {
+      version: 1,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now(),
+      project: '/p',
+      durationMs: 0,
+      totalLatencyMs: 0,
+      models: {
+        m: {
+          requests: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 0,
+          totalLatencyMs: 0,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+      ...(skills ? { skills } : {}),
+    };
+  }
+
+  it('sums skill counts across sessions, sorted by count desc', () => {
+    const report = aggregateUsage(
+      [
+        skillRecord('a', {
+          totalCalls: 3,
+          totalSuccess: 3,
+          totalFail: 0,
+          byName: {
+            qreview: { count: 2, success: 2, fail: 0 },
+            simplify: { count: 1, success: 1, fail: 0 },
+          },
+        }),
+        skillRecord('b', {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: { qreview: { count: 1, success: 1, fail: 0 } },
+        }),
+      ],
+      'all',
+    );
+    expect(report.skills.totalCalls).toBe(4);
+    expect(report.skills.topSkills).toEqual([
+      { name: 'qreview', count: 3, success: 3, fail: 0 },
+      { name: 'simplify', count: 1, success: 1, fail: 0 },
+    ]);
+  });
+
+  it('caps topSkills at 25, keeping the highest-count skills', () => {
+    const byName: NonNullable<UsageSummaryRecord['skills']>['byName'] = {};
+    for (let i = 0; i < 40; i++) {
+      byName[`skill-${i}`] = { count: i + 1, success: i + 1, fail: 0 };
+    }
+    const report = aggregateUsage(
+      [
+        skillRecord('a', {
+          totalCalls: 820,
+          totalSuccess: 820,
+          totalFail: 0,
+          byName,
+        }),
+      ],
+      'all',
+    );
+    expect(report.skills.topSkills.length).toBe(25);
+    expect(report.skills.topSkills[0]!.name).toBe('skill-39');
+  });
+
+  it('is inert for records without a skills field', () => {
+    const report = aggregateUsage([skillRecord('a')], 'all');
+    expect(report.skills.totalCalls).toBe(0);
+    expect(report.skills.topSkills).toEqual([]);
   });
 });

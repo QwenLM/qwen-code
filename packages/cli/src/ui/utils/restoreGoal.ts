@@ -22,18 +22,26 @@ import {
 
 /**
  * Finds the most recent `goal_status` history item. Returns the active
- * condition when the latest goal event is non-terminal (`set` or `checking`),
- * or `null` if the last goal_status was terminal/cancelled
- * (achieved / failed / cleared / aborted) or none exists.
+ * condition plus the iteration count to resume from when the latest goal event
+ * is non-terminal (`set` or `checking`), or `null` if the last goal_status was
+ * terminal/cancelled (achieved / failed / cleared / aborted) or none exists.
+ *
+ * The iteration count is carried so the MAX_GOAL_ITERATIONS safety cap survives
+ * resume instead of resetting to zero. `checking` items persist the running
+ * count (see useGeminiStream's continuation handler); `set` items predate any
+ * iteration, so they restore at 0.
  */
-export function findGoalToRestore(history: HistoryItem[]): string | null {
+export function findGoalToRestore(
+  history: HistoryItem[],
+): { condition: string; iterations: number } | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const item = history[i];
     if (item?.type !== MessageType.GOAL_STATUS) continue;
     const goal = item as HistoryItemGoalStatus;
-    return goal.kind === 'set' || goal.kind === 'checking'
-      ? goal.condition
-      : null;
+    if (goal.kind === 'set' || goal.kind === 'checking') {
+      return { condition: goal.condition, iterations: goal.iterations ?? 0 };
+    }
+    return null;
   }
   return null;
 }
@@ -133,9 +141,9 @@ export function restoreGoalFromHistory(
   const lastTerminal = findLastTerminalGoal(history);
   setLastGoalTerminal(sessionId, lastTerminal ?? undefined);
 
-  const condition = findGoalToRestore(history);
+  const restorable = findGoalToRestore(history);
 
-  if (condition === null) {
+  if (restorable === null) {
     unregisterGoalHook(config, sessionId);
     return { restored: false };
   }
@@ -152,11 +160,14 @@ export function restoreGoalFromHistory(
   registerGoalHook({
     config,
     sessionId,
-    condition,
+    condition: restorable.condition,
     tokensAtStart: 0,
+    // Resume the iteration count so MAX_GOAL_ITERATIONS is a cross-resume cap,
+    // not a per-resume one.
+    initialIterations: restorable.iterations,
   });
   if (addItem) {
     installGoalTerminalObserver({ sessionId, config, addItem });
   }
-  return { restored: true, condition };
+  return { restored: true, condition: restorable.condition };
 }

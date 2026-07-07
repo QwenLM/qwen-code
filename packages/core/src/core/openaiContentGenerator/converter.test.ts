@@ -21,6 +21,7 @@ import {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
+import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -64,6 +65,36 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  function hasOpenAIToolCalls(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+    tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
+  } {
+    return (
+      message.role === 'assistant' &&
+      'tool_calls' in message &&
+      Array.isArray(message.tool_calls)
+    );
+  }
+
+  function isOpenAISplitMediaMessage(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): boolean {
+    return (
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.some((part) => {
+        const typedPart = part as { type?: string };
+        return (
+          typedPart.type === 'image_url' ||
+          typedPart.type === 'input_audio' ||
+          typedPart.type === 'video_url' ||
+          typedPart.type === 'file'
+        );
+      })
+    );
+  }
+
   describe('stream-local parser state', () => {
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
@@ -89,6 +120,39 @@ describe('OpenAIContentConverter', () => {
       expect(ctx2.getBuffer(0)).toBe('{"b":2}');
       expect(ctx1.getToolCallMeta(0).id).toBe('call_A');
       expect(ctx2.getToolCallMeta(0).id).toBe('call_B');
+    });
+
+    it('ignores replay chunks after an id already has complete JSON args', () => {
+      const parser = new StreamingToolCallParser();
+
+      parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
+      parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
+
+      expect(parser.getBuffer(0)).toBe('{"cmd":"echo hi"}');
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'dup_id_0001',
+          name: 'shell',
+          args: { cmd: 'echo hi' },
+          index: 0,
+        },
+      ]);
+    });
+
+    it('keeps accumulating normal fragmented JSON before it is complete', () => {
+      const parser = new StreamingToolCallParser();
+
+      parser.addChunk(0, '{"cmd"', 'call_fragmented', 'shell');
+      parser.addChunk(0, ':"echo hi"}', 'call_fragmented', 'shell');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_fragmented',
+          name: 'shell',
+          args: { cmd: 'echo hi' },
+          index: 0,
+        },
+      ]);
     });
 
     it('demuxes interleaved chunks from two concurrent streams correctly (#3516)', () => {
@@ -229,6 +293,64 @@ describe('OpenAIContentConverter', () => {
       expect(fnB?.args).toEqual({ file_path: '/b/y.ts' });
       expect(fnB?.id).toBe('call_B');
     });
+
+    it('emits no-argument tool calls that stream an empty arguments string', () => {
+      // Providers may finish a no-argument tool call with `arguments: ""`
+      // and no follow-up fragment (e.g. llama.cpp-style servers). The call
+      // must reach the caller with empty args instead of being dropped,
+      // which would make the whole turn look empty and trigger retries.
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      const opener = {
+        object: 'chat.completion.chunk',
+        id: 'noargs-open',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_noargs',
+                  type: 'function' as const,
+                  function: { name: 'list_sessions', arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const finisher = {
+        object: 'chat.completion.chunk',
+        id: 'noargs-finish',
+        created: 2,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      converter.convertOpenAIChunkToGemini(opener, stream);
+      const result = converter.convertOpenAIChunkToGemini(finisher, stream);
+
+      const fn = result.candidates?.[0]?.content?.parts?.find(
+        (p: Part) => p.functionCall,
+      )?.functionCall;
+
+      expect(fn?.name).toBe('list_sessions');
+      expect(fn?.args).toEqual({});
+      expect(fn?.id).toBe('call_noargs');
+    });
   });
 
   describe('convertGeminiRequestToOpenAI', () => {
@@ -281,10 +403,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
 
       expect(messages).toEqual([
         {
@@ -302,10 +424,10 @@ describe('OpenAIContentConverter', () => {
         output: 'Raw output text',
       });
 
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
       const toolMessage = messages.find((message) => message.role === 'tool');
 
       expect(toolMessage).toBeDefined();
@@ -843,6 +965,53 @@ describe('OpenAIContentConverter', () => {
       }>;
       const img = firstToolContent.find((p) => p.type === 'image_url');
       expect(img?.image_url?.url).toBe('data:image/png;base64,aaa');
+    });
+
+    it('should keep embedded media as content parts when string tool content is requested but splitToolMedia is false', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c1', name: 'shot', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'shot',
+                  response: { output: 'screenshot' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: false,
+        toolResultContentFormat: 'string',
+      });
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const toolContent = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(toolContent.find((p) => p.type === 'text')?.text).toBe(
+        'screenshot',
+      );
+      expect(
+        toolContent.find((p) => p.type === 'image_url')?.image_url?.url,
+      ).toBe('data:image/png;base64,aaa');
     });
 
     it('should convert function responses with fileData to tool message with embedded image_url', () => {
@@ -1448,6 +1617,23 @@ describe('OpenAIContentConverter', () => {
       expect(userMessage).toBeUndefined();
     });
 
+    it('should serialize text-only tool content as a string when requested', () => {
+      const request = createRequestWithFunctionResponse({
+        output: 'Plain text output',
+      });
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        toolResultContentFormat: 'string',
+      });
+      const toolMessage = messages.find((message) => message.role === 'tool');
+
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe('Plain text output');
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeUndefined();
+    });
+
     it('should create tool message with empty content for empty function responses', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -1678,6 +1864,194 @@ describe('OpenAIContentConverter', () => {
         false,
       );
       expect(messages.some((message) => message.role === 'tool')).toBe(false);
+    });
+
+    it('should drop later assistant tool calls that reuse a previous surviving id', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const assistantToolCallIds = messages.flatMap((message) =>
+        hasOpenAIToolCalls(message)
+          ? message.tool_calls.map((toolCall) => toolCall.id)
+          : [],
+      );
+      const toolResultIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(assistantToolCallIds).toEqual(['dup_id_0001']);
+      expect(toolResultIds).toEqual(['dup_id_0001']);
+    });
+
+    it('should drop duplicate tool call IDs within a single assistant message', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+
+      expect(assistant?.tool_calls).toHaveLength(1);
+      expect(assistant?.tool_calls?.[0].id).toBe('dup_id_0001');
+      expect(assistant?.tool_calls?.[0].function.arguments).toBe(
+        JSON.stringify({ file_path: 'a.ts' }),
+      );
+    });
+
+    it('should keep only the first adjacent tool response and its split media for a surviving id', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  response: { output: 'first' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'first' } },
+                  ],
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_image',
+                  name: 'screenshot',
+                  response: { output: 'second' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'second' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+      const toolMessages = messages.filter(
+        (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+          message.role === 'tool' && 'tool_call_id' in message,
+      );
+      const splitMediaMessages = messages.filter(isOpenAISplitMediaMessage);
+
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0]?.content).toBe('first');
+      expect(splitMediaMessages).toHaveLength(1);
+      expect(JSON.stringify(splitMediaMessages[0])).toContain('first');
+      expect(JSON.stringify(splitMediaMessages[0])).not.toContain('second');
     });
 
     it('should keep a tool response after an empty-id tool message', () => {
@@ -2376,6 +2750,36 @@ describe('OpenAIContentConverter', () => {
 
       expect(response.candidates).toEqual([]);
     });
+
+    it('keeps the estimated prompt/completion split summing to total tokens', () => {
+      // When a provider reports only total_tokens, the 70/30 estimate must
+      // still add back up to the total instead of rounding each half on its
+      // own (5 would otherwise become 4 + 2 = 6).
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      const usage = response.usageMetadata;
+      expect(usage?.totalTokenCount).toBe(5);
+      expect(
+        (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
+      ).toBe(5);
+    });
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {
@@ -2406,6 +2810,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'final answer' }),
       );
@@ -2438,6 +2843,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'final answer' }),
       );
@@ -2469,6 +2875,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'thinking...' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'visible text' }),
       );
@@ -3649,6 +4056,338 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should suppress reasoning_content when the same streaming chunk has tagged thinking content', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const chunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-dual-tagged',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'duplicate reasoning channel',
+                content: '<think>tagged reasoning</think>final answer',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(chunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should suppress late reasoning_content after streaming tagged thinking content', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-late-reasoning-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<think>tagged reasoning</think>' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-late-reasoning-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'late reasoning' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+      ]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('should suppress buffered reasoning_content when later streaming content has tagged thinking', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-reasoning-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'duplicate reasoning channel' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-reasoning-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<think>tagged reasoning</think>' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-reasoning-3',
+          created: 458,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'final answer' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'tagged reasoning', thought: true },
+      ]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should flush buffered content before later tagged thinking content', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-before-tag-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'duplicate reasoning channel',
+                content: 'early visible ',
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const secondChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-before-tag-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<think>tagged reasoning</think>final answer' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'early visible ' },
+        { text: 'tagged reasoning', thought: true },
+        { text: 'final answer' },
+      ]);
+    });
+
+    it('should flush buffered content before current content when reasoning flushes on finish', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-order-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'step 1',
+                content: 'hello ',
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-buffered-content-order-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'world' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+        { text: 'hello ' },
+        { text: 'world' },
+      ]);
+    });
+
+    it('should flush buffered reasoning_content when tagged streaming content has no thinking tags', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_content: 'separate reasoning channel',
+                content: 'final ',
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'answer' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      const finalParts = finalChunk.candidates?.[0]?.content?.parts;
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalParts).toEqual([
+        { text: 'separate reasoning channel', thought: true },
+        { text: 'final ' },
+        { text: 'answer' },
+      ]);
+      expect(isOpenAIReasoningThoughtPart(finalParts?.[0] as Part)).toBe(true);
+    });
+
+    it('should flush reasoning-only chunks when tagged streaming content has no thinking tags', () => {
+      const context = withTaggedThinkingStreamParser();
+
+      const firstChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-no-content-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'step 1' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-glm-reasoning-only-no-content-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'glm-5.2',
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+      ]);
+    });
+
     it('should flush unclosed streaming thinking content on finish', () => {
       const context = withTaggedThinkingStreamParser();
 
@@ -3779,7 +4518,7 @@ describe('OpenAIContentConverter', () => {
       expect(result[0].function.name).toBe('dynamic_tool');
     });
 
-    it('should skip functions without name or description', async () => {
+    it('should preserve functions without description and skip functions without name', async () => {
       const geminiTools = [
         {
           functionDeclarations: [
@@ -3801,8 +4540,11 @@ describe('OpenAIContentConverter', () => {
 
       const result = await converter.convertGeminiToolsToOpenAI(geminiTools);
 
-      expect(result).toHaveLength(1);
+      expect(result).toHaveLength(2);
       expect(result[0].function.name).toBe('valid_tool');
+      expect(result[0].function.description).toBe('A valid tool');
+      expect(result[1].function.name).toBe('missing_description');
+      expect(result[1].function.description).toBe('');
     });
 
     it('should handle tools without functionDeclarations', async () => {
@@ -3935,6 +4677,38 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('should not truncate non-integer length constraints', () => {
+      const params = {
+        type: 'object',
+        properties: {
+          text: {
+            type: 'string',
+            minLength: '1.5',
+            maxLength: '   ',
+          },
+          items: {
+            type: 'array',
+            minItems: '10px',
+            maxItems: '1.5',
+          },
+        },
+      };
+
+      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const properties = result?.['properties'] as Record<string, unknown>;
+
+      expect(properties?.['text']).toEqual({
+        type: 'string',
+        minLength: '1.5',
+        maxLength: '   ',
+      });
+      expect(properties?.['items']).toEqual({
+        type: 'array',
+        minItems: '10px',
+        maxItems: '1.5',
+      });
+    });
+
     it('should handle nested objects', () => {
       const params = {
         type: 'object',
@@ -4012,6 +4786,41 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('mergeConsecutiveAssistantMessages', () => {
+    it('should preserve reasoning_content from every merged assistant turn', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'First reasoning.', thought: true },
+              { text: 'First answer.' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Second reasoning.', thought: true },
+              { text: 'Second answer.' },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('assistant');
+      expect(messages[0].content).toBe('First answer.Second answer.');
+      // The reasoning of the merged-away turn must not be silently dropped.
+      expect(
+        (messages[0] as { reasoning_content?: string }).reasoning_content,
+      ).toBe('First reasoning.Second reasoning.');
+    });
+
     it('should merge two consecutive assistant messages with string content', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',

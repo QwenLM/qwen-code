@@ -48,7 +48,22 @@ export function setGeminiMdFilename(newFilename: string | string[]): void {
 
 export function getCurrentGeminiMdFilename(): string {
   if (Array.isArray(currentGeminiMdFilename)) {
-    return currentGeminiMdFilename[0];
+    //   (qwen-latest critical, addresses divergence
+    // with daemon's `extractContextFilename`): skip empty / whitespace
+    // entries so callers that pass `[' ', 'AGENTS.md']` get
+    // `'AGENTS.md'` instead of `''`. Without this filter the daemon's
+    // `extractContextFilename` (which DOES skip empty) and this
+    // process-global picker disagreed on the same input — daemon
+    // parent would write `AGENTS.md` while the ACP child would read
+    // `''`, leaving the init'd file orphaned.
+    for (const entry of currentGeminiMdFilename) {
+      if (typeof entry === 'string' && entry.trim() !== '') {
+        return entry.trim();
+      }
+    }
+    // All entries empty/whitespace — fall back to the default rather
+    // than return `undefined` (callers expect a non-empty string).
+    return DEFAULT_CONTEXT_FILENAME;
   }
   return currentGeminiMdFilename;
 }

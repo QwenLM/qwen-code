@@ -126,6 +126,94 @@ describe('textBufferReducer', () => {
     });
   });
 
+  describe('kill_line_left action', () => {
+    it('should clear text to the left of cursor on the same line', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 5,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state = textBufferReducer(stateWithText, action);
+      expect(state).toHaveOnlyValidCharacters();
+      expect(state.lines).toEqual([' world']);
+      expect(state.cursorCol).toBe(0);
+    });
+
+    it('should join with previous line when cursor is at column 0', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello', 'world'],
+        cursorRow: 1,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state = textBufferReducer(stateWithText, action);
+      expect(state).toHaveOnlyValidCharacters();
+      expect(state.lines).toEqual(['helloworld']);
+      expect(state.cursorRow).toBe(0);
+      expect(state.cursorCol).toBe(5);
+    });
+
+    it('should do nothing when cursor is at the very beginning', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state = textBufferReducer(stateWithText, action);
+      expect(state).toHaveOnlyValidCharacters();
+      expect(state.lines).toEqual(['hello']);
+      expect(state.cursorRow).toBe(0);
+      expect(state.cursorCol).toBe(0);
+    });
+
+    it('should join multiple lines when pressing kill_line_left repeatedly', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['line1', 'line2', 'line3'],
+        cursorRow: 2,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state1 = textBufferReducer(stateWithText, action);
+      expect(state1).toHaveOnlyValidCharacters();
+      expect(state1.lines).toEqual(['line1', 'line2line3']);
+      expect(state1.cursorRow).toBe(1);
+      expect(state1.cursorCol).toBe(5);
+
+      const stateAtCol0: TextBufferState = {
+        ...state1,
+        cursorCol: 0,
+      };
+      const state2 = textBufferReducer(stateAtCol0, action);
+      expect(state2).toHaveOnlyValidCharacters();
+      expect(state2.lines).toEqual(['line1line2line3']);
+      expect(state2.cursorRow).toBe(0);
+      expect(state2.cursorCol).toBe(5);
+    });
+
+    it('should undo a join operation', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello', 'world'],
+        cursorRow: 1,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const joined = textBufferReducer(stateWithText, action);
+      expect(joined.lines).toEqual(['helloworld']);
+
+      const undone = textBufferReducer(joined, { type: 'undo' });
+      expect(undone.lines).toEqual(['hello', 'world']);
+      expect(undone.cursorRow).toBe(1);
+      expect(undone.cursorCol).toBe(0);
+    });
+  });
+
   describe('undo/redo actions', () => {
     it('should undo and redo a change', () => {
       // 1. Insert text
