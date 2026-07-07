@@ -96,21 +96,30 @@ const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
 const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
- * Bind unbound durable tasks to dedicated sessions, matching the UI's
- * "新建定时任务" flow. The cron_create tool (core layer) writes tasks to
- * disk without a sessionId because it has no access to the session bridge;
- * this runs in the daemon process where the bridge is available. For each
- * unbound task: mints a dedicated session (sessionScope: 'thread'), names
- * it `⏰ prompt`, and writes the sessionId back to disk. Best-effort — a
- * spawn failure is logged and retried on the next tick.
+ * Bind unbound durable tasks to dedicated sessions, and rename bound
+ * sessions that don't yet have the ⏰ prefix. The cron_create tool binds
+ * tasks to the current chat session (so the first message is in the
+ * transcript), but can't rename the session — that's a bridge operation
+ * only the daemon process can do. This runs in the daemon process where
+ * the bridge is available.
+ *
+ * For unbound tasks (legacy / CLI mode): mints a dedicated session, names
+ * it `⏰ prompt`, writes sessionId to disk.
+ * For bound tasks without ⏰ name: renames the session to `⏰ prompt`.
+ *
+ * A Set tracks renamed sessions so we don't call updateSessionMetadata
+ * every tick. Best-effort — failures are logged and retried next tick.
  */
-async function bindUnboundTasks(
+async function bindAndNameSessions(
   bridge: KeepaliveBridge,
   boundWorkspace: string,
   tasks: readonly DurableCronTask[],
+  renamed: Set<string>,
 ): Promise<void> {
   const unbound = tasks.filter((t) => !t.sessionId && t.enabled !== false);
-  if (unbound.length === 0) return;
+  const needsName = tasks.filter(
+    (t) => t.sessionId && t.enabled !== false && !renamed.has(t.sessionId),
+  );
 
   for (const task of unbound) {
     try {
@@ -122,6 +131,7 @@ async function bindUnboundTasks(
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
         });
+        renamed.add(sessionId);
       } catch {
         // naming is non-critical — the session still fires correctly
       }
@@ -136,6 +146,18 @@ async function bindUnboundTasks(
       );
     } catch (err) {
       log.debug('keepalive: failed to bind task', task.id, err);
+    }
+  }
+
+  for (const task of needsName) {
+    const sessionId = task.sessionId!;
+    try {
+      bridge.updateSessionMetadata(sessionId, {
+        displayName: scheduledTaskSessionName(task.prompt),
+      });
+      renamed.add(sessionId);
+    } catch (err) {
+      log.debug('keepalive: failed to name session', sessionId, err);
     }
   }
 }
@@ -173,6 +195,10 @@ export function startScheduledTaskKeepalive(
   // tick would spawn a SECOND loadSession (a duplicate child) for it. Cleared on
   // the load's TRUE settlement, not the timeout.
   const reviving = new Set<string>();
+
+  // Tracks sessions the keepalive has already named with ⏰ prefix,
+  // so updateSessionMetadata isn't called every tick.
+  const renamed = new Set<string>();
 
   const tick = async (): Promise<void> => {
     let tasks;
@@ -249,7 +275,7 @@ export function startScheduledTaskKeepalive(
       }
     }
 
-    await bindUnboundTasks(bridge, boundWorkspace, tasks);
+    await bindAndNameSessions(bridge, boundWorkspace, tasks, renamed);
   };
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
