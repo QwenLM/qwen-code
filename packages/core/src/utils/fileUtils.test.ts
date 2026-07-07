@@ -1498,6 +1498,19 @@ describe('fileUtils', () => {
       expect(result._meta?.truncatedByBytes).toBe(true);
     });
 
+    it('should preserve unbounded explicit line-zero reads below the large-file threshold', async () => {
+      const content = `head\n${'body\n'.repeat(6_000)}tail\n`;
+      actualNodeFs.writeFileSync(testTextFilePath, content);
+
+      const result = await fsService.readTextFile({
+        path: testTextFilePath,
+        line: 0,
+      });
+
+      expect(result.content).toBe(content);
+      expect(result._meta?.truncatedByBytes).not.toBe(true);
+    });
+
     it('should enforce maxOutputBytes for default file-system reads below the large-file threshold', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(100));
 
@@ -1534,6 +1547,23 @@ describe('fileUtils', () => {
 
     it('should propagate aborts from unbounded full reads', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: Number.POSITIVE_INFINITY,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
+    it('should propagate aborts before rejecting large unbounded full reads', async () => {
+      actualNodeFs.writeFileSync(
+        testTextFilePath,
+        'x'.repeat(11 * 1024 * 1024),
+      );
       const controller = new AbortController();
       controller.abort();
 
