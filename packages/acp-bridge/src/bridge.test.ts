@@ -9492,6 +9492,36 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('calls freshSessionAdmission for load and resume restores', async () => {
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const releases: string[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+
+      await bridge.loadSession({
+        sessionId: 'load-1',
+        workspaceCwd: WS_A,
+      });
+      await bridge.resumeSession({
+        sessionId: 'resume-1',
+        workspaceCwd: WS_A,
+      });
+
+      expect(contexts).toMatchObject([
+        { operation: 'load', workspaceCwd: WS_A },
+        { operation: 'resume', workspaceCwd: WS_A },
+      ]);
+      expect(releases).toEqual(['load', 'resume']);
+      await bridge.shutdown();
+    });
+
     it('reserves branchSession before branch extMethod and skips a second restore reservation', async () => {
       const contexts: Array<{
         operation: string;
@@ -9534,6 +9564,43 @@ describe('createAcpSessionBridge', () => {
           workspaceCwd: WS_A,
           sourceSessionId: session.sessionId,
         },
+      ]);
+      expect(releases).toEqual(['branch']);
+      await bridge.shutdown();
+    });
+
+    it('releases branchSession admission when the branch extMethod fails', async () => {
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const releases: string[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) => {
+              if (method === 'qwen/control/session/branch') {
+                throw new Error('branch failed');
+              }
+              return {};
+            },
+          }).channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      contexts.length = 0;
+      releases.length = 0;
+
+      await expect(
+        bridge.branchSession(session.sessionId, {
+          name: 'Branch 1',
+        }),
+      ).rejects.toThrow();
+
+      expect(contexts).toMatchObject([
+        { operation: 'branch', workspaceCwd: WS_A },
       ]);
       expect(releases).toEqual(['branch']);
       await bridge.shutdown();

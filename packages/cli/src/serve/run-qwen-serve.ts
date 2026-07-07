@@ -2056,9 +2056,9 @@ export async function runQwenServe(
     };
     const primaryRuntimeEnv = {
       mode: 'runtime-overlay' as const,
-      overlayKeys: runtimeEnvSnapshot.overlayKeys,
+      overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
-      envFilePaths: runtimeEnvSnapshot.envFilePaths,
+      envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
     };
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
     let daemonTelemetrySettings: TelemetrySettings;
@@ -2425,15 +2425,40 @@ export async function runQwenServe(
             fresh.merged,
             workspace,
           );
-          const refreshedRuntimeEnv =
-            settingsRuntime.environment.buildRuntimeEnvironment(
-              fresh.merged,
-              workspace,
-              process.env,
+          let refreshedRuntimeEnv: ReturnType<
+            EnvironmentRuntime['buildRuntimeEnvironment']
+          >;
+          try {
+            refreshedRuntimeEnv =
+              settingsRuntime.environment.buildRuntimeEnvironment(
+                fresh.merged,
+                workspace,
+                process.env,
+              );
+          } catch (err) {
+            daemonLog.warn(
+              'failed to rebuild runtime env snapshot after daemon env reload; falling back to process.env',
+              {
+                error: err instanceof Error ? err.message : String(err),
+              },
             );
+            refreshedRuntimeEnv = {
+              effectiveEnv: { ...process.env },
+              overlayKeys: [] as string[],
+              envFilePaths: [] as string[],
+            };
+          }
           replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
-          primaryRuntimeEnv.overlayKeys = refreshedRuntimeEnv.overlayKeys;
-          primaryRuntimeEnv.envFilePaths = refreshedRuntimeEnv.envFilePaths;
+          primaryRuntimeEnv.overlayKeys.splice(
+            0,
+            primaryRuntimeEnv.overlayKeys.length,
+            ...refreshedRuntimeEnv.overlayKeys,
+          );
+          primaryRuntimeEnv.envFilePaths.splice(
+            0,
+            primaryRuntimeEnv.envFilePaths.length,
+            ...refreshedRuntimeEnv.envFilePaths,
+          );
           return result;
         }),
       queryWorkspaceStatus: (method, idle) =>

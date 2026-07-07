@@ -48,4 +48,31 @@ describe('createTotalSessionAdmissionController', () => {
       reservation.release();
     }
   });
+
+  it('ignores duplicate release calls', () => {
+    const admission = createTotalSessionAdmissionController({
+      maxTotalSessions: 1,
+      getBridges: () => [{ sessionCount: 0 }],
+    });
+
+    const reservation = admission({
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+    });
+    if (!reservation) throw new Error('expected reservation');
+
+    expect(() =>
+      admission({ operation: 'spawn', workspaceCwd: '/work/b' }),
+    ).toThrow(TotalSessionLimitExceededError);
+
+    reservation.release();
+    reservation.release();
+
+    const nextReservation = admission({
+      operation: 'spawn',
+      workspaceCwd: '/work/c',
+    });
+    if (!nextReservation) throw new Error('expected reservation');
+    nextReservation.release();
+  });
 });

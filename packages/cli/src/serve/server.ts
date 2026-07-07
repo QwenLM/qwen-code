@@ -468,17 +468,20 @@ export function createServeApp(
       primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
     );
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
-  const freshSessionAdmission = createTotalSessionAdmissionController({
-    maxTotalSessions: opts.maxTotalSessions,
-    getBridges: () =>
-      defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
-  });
+  const freshSessionAdmission =
+    !deps.bridge && !injectedWorkspaceRegistry
+      ? createTotalSessionAdmissionController({
+          maxTotalSessions: opts.maxTotalSessions,
+          getBridges: () =>
+            defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
+        })
+      : undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
-      freshSessionAdmission,
+      ...(freshSessionAdmission ? { freshSessionAdmission } : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,

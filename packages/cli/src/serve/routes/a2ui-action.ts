@@ -141,13 +141,9 @@ export function buildTransport(
   return new StdioClientTransport({
     command: cfg.command!,
     args: cfg.args ?? [],
-    // spawn() treats `env` as a complete replacement, not a merge — a partial
-    // env (e.g. {API_KEY}) would strip PATH/HOME and break the child. Merge
-    // over the runtime base env like packages/core/src/tools/mcp-client.ts does; when
-    // unset, let the SDK apply its safe default environment.
-    ...(cfg.env
-      ? { env: { ...baseEnv, ...cfg.env } as Record<string, string> }
-      : {}),
+    // spawn() treats `env` as a complete replacement, not a merge. Always pass
+    // the runtime base env so stdio children do not fall back to process.env.
+    env: { ...baseEnv, ...(cfg.env ?? {}) } as Record<string, string>,
     cwd: cfg.cwd,
   });
 }

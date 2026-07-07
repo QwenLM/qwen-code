@@ -411,14 +411,22 @@ describe('helpers', () => {
     expect(sdkMocks.state.stdioTransports).toHaveLength(0);
   });
 
-  it('buildTransport merges stdio env only when provided', () => {
-    buildTransport({
-      command: 'node',
-      args: ['server.mjs'],
-      env: { A2UI_TOKEN: 'secret' },
-      cwd: '/workspace',
-    });
-    buildTransport({ command: 'node' });
+  it('buildTransport always uses runtime env for stdio transports', () => {
+    const runtimeEnv = {
+      PATH: '/runtime/bin',
+      RUNTIME_ONLY: 'yes',
+      A2UI_TOKEN: 'base',
+    };
+    buildTransport(
+      {
+        command: 'node',
+        args: ['server.mjs'],
+        env: { A2UI_TOKEN: 'secret' },
+        cwd: '/workspace',
+      },
+      runtimeEnv,
+    );
+    buildTransport({ command: 'node' }, runtimeEnv);
 
     const withEnv = sdkMocks.state.stdioTransports[0] as {
       options: {
@@ -436,9 +444,12 @@ describe('helpers', () => {
       args: ['server.mjs'],
       cwd: '/workspace',
     });
+    expect(withEnv.options.env?.['PATH']).toBe('/runtime/bin');
+    expect(withEnv.options.env?.['RUNTIME_ONLY']).toBe('yes');
     expect(withEnv.options.env?.['A2UI_TOKEN']).toBe('secret');
-    expect(withEnv.options.env?.['PATH']).toBe(process.env['PATH']);
-    expect(withoutEnv.options).not.toHaveProperty('env');
+    expect(withoutEnv.options.env?.['PATH']).toBe('/runtime/bin');
+    expect(withoutEnv.options.env?.['RUNTIME_ONLY']).toBe('yes');
+    expect(withoutEnv.options.env?.['A2UI_TOKEN']).toBe('base');
   });
 
   it('callA2uiAction connects, calls the action tool, and closes resources', async () => {
