@@ -380,6 +380,7 @@ When channels are serve-managed, `qwen channel status` shows the owner as `qwen 
 ## Webhook-triggered tasks
 
 Daemon-managed channels can also accept authenticated webhook events. Qwen receives the event as context, summarizes and decides what matters, and then delivers the final response to the configured chat target. This is not a raw notification relay.
+Webhook tasks require unattended approval mode because they run without interactive approval.
 
 Example channel config:
 
@@ -388,10 +389,12 @@ Example channel config:
   "channels": {
     "dingtalk-main": {
       "type": "dingtalk",
-      "token": "$DINGTALK_TOKEN",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
       "cwd": "/repo",
       "senderPolicy": "allowlist",
       "allowedUsers": ["12345"],
+      "approvalMode": "yolo",
       "sessionScope": "user",
       "webhooks": {
         "sources": {
@@ -430,6 +433,8 @@ curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
     }
   }'
 ```
+
+The bearer header is required only when `qwen serve` is running with bearer auth enabled; the webhook secret header is always required for the webhook source.
 
 ### Multi-Channel Mode
 

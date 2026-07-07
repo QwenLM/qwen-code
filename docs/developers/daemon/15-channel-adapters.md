@@ -15,7 +15,7 @@ In daemon-managed mode, each channel maps inbound chat traffic to daemon session
 
 Webhook-triggered tasks are hosted by `qwen serve` and executed inside the daemon-managed channel worker. The HTTP route validates the source and forwards a `ChannelWebhookTask` to the worker over IPC. The worker calls `ChannelBase.runWebhookTask()`, so adapters do not implement webhook parsing.
 
-Adapters still participate through proactive send support: `supportsProactiveSend()` tells the host whether a channel can send without an inbound message, and `pushProactive()` carries the outbound content.
+Adapters still participate through proactive send support: `supportsProactiveSend()` tells the host whether a channel can send without an inbound message, `supportsProactiveTarget()` handles delivery limits for specific target shapes, and `pushProactive()` carries the outbound content.
 
 ## Responsibilities
 
