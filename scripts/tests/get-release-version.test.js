@@ -224,5 +224,104 @@ describe('getVersion', () => {
       expect(result.npmTag).toBe('latest');
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
+
+    it('should throw when no nightly dist-tag exists (promote-nightly)', () => {
+      const mockWithNoNightly = (command) => {
+        if (command.includes('npm view') && command.includes('--tag=nightly')) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.6.0', '0.6.1']);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoNightly);
+
+      expect(() => getVersion({ type: 'promote-nightly' })).toThrow(
+        'Unable to determine baseline version for nightly',
+      );
+    });
+
+    it('should throw when no dist-tag exists (patch)', () => {
+      const mockWithNoLatest = (command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest')) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoLatest);
+
+      expect(() =>
+        getVersion({ type: 'patch', 'patch-from': 'stable' }),
+      ).toThrow('Unable to determine baseline version for latest');
+    });
+
+    it('should fall back to package.json in true greenfield scenario (all dist-tags missing)', () => {
+      const mockGreenfield = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockGreenfield);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.8.0');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('');
+    });
+
+    it('should derive baseline from versions list when dist-tag is missing but versions exist', () => {
+      const mockWithVersionsButNoTag = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.6.0',
+            '0.6.1',
+            '0.7.0-preview.0',
+            '0.7.0-preview.3',
+          ]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithVersionsButNoTag);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should propagate transient NPM errors instead of falling back silently', () => {
+      const mockWithTransientError = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code ETIMEDOUT');
+        }
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithTransientError);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow('ETIMEDOUT');
+    });
   });
 });

@@ -21,10 +21,10 @@ function getVersionFromNPM(distTag) {
   try {
     return execSync(command).toString().trim();
   } catch (error) {
-    console.error(
-      `Failed to get NPM version for dist-tag "${distTag}": ${error.message}`,
-    );
-    return '';
+    if (error.message?.includes('E404') || error.message?.includes('404')) {
+      return '';
+    }
+    throw error;
   }
 }
 
@@ -56,10 +56,55 @@ function isVersionDeprecated(version) {
 function detectRollbackAndGetBaseline(npmDistTag) {
   // Get the current dist-tag version
   const distTagVersion = getVersionFromNPM(npmDistTag);
-  if (!distTagVersion) return { baseline: '', isRollback: false };
 
   // Get all published versions
   const allVersions = getAllVersionsFromNPM();
+
+  if (!distTagVersion) {
+    // Dist-tag is missing — try to derive baseline from published versions
+    if (allVersions.length === 0) return { baseline: '', isRollback: false };
+
+    let matchingVersions;
+    if (npmDistTag === 'latest') {
+      matchingVersions = allVersions.filter(
+        (v) => semver.valid(v) && !semver.prerelease(v),
+      );
+    } else if (npmDistTag === 'preview') {
+      matchingVersions = allVersions.filter(
+        (v) => semver.valid(v) && v.includes('-preview'),
+      );
+    } else if (npmDistTag === 'nightly') {
+      matchingVersions = allVersions.filter(
+        (v) => semver.valid(v) && v.includes('-nightly'),
+      );
+    } else {
+      return { baseline: '', isRollback: false };
+    }
+
+    if (matchingVersions.length === 0)
+      return { baseline: '', isRollback: false };
+
+    matchingVersions.sort((a, b) => semver.rcompare(a, b));
+
+    let highestExistingVersion = '';
+    for (const version of matchingVersions) {
+      if (!isVersionDeprecated(version)) {
+        highestExistingVersion = version;
+        break;
+      } else {
+        console.error(`Ignoring deprecated version: ${version}`);
+      }
+    }
+
+    if (!highestExistingVersion) return { baseline: '', isRollback: false };
+
+    return {
+      baseline: highestExistingVersion,
+      isRollback: false,
+      highestExistingVersion,
+    };
+  }
+
   if (allVersions.length === 0)
     return { baseline: distTagVersion, isRollback: false };
 
@@ -168,6 +213,9 @@ function getAndVerifyTags(npmDistTag, _gitTagPattern) {
   const baselineVersion = rollbackInfo.baseline;
 
   if (!baselineVersion) {
+    console.error(
+      `No baseline version found for dist-tag "${npmDistTag}" — returning null`,
+    );
     return null;
   }
 
@@ -242,6 +290,7 @@ function getStableVersion(args) {
   } else {
     const packageJson = readJson('package.json');
     releaseVersion = packageJson.version.split('-')[0];
+    validateVersion(releaseVersion, 'X.Y.Z', 'package.json version');
   }
 
   return {
@@ -267,6 +316,11 @@ function getPreviewVersion(args) {
   } else {
     const packageJson = readJson('package.json');
     releaseVersion = packageJson.version.split('-')[0] + '-preview.0';
+    validateVersion(
+      packageJson.version.split('-')[0],
+      'X.Y.Z',
+      'package.json version',
+    );
   }
 
   return {
