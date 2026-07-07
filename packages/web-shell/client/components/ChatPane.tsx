@@ -101,7 +101,7 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       actions
         .sendPrompt(trimmed, {
           ...(images && images.length ? { images } : {}),
-          onAdmitted: () => commitAccepted?.(),
+          onAdmitted: commitAccepted,
         })
         .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
       return false;

@@ -228,6 +228,29 @@ describe('ChatPane', () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
+  it('keeps the draft cleared and still reports the error when the turn fails after admission', async () => {
+    const onError = vi.fn();
+    render({ onError });
+    const commit = vi.fn();
+    act(() => {
+      latestOnSubmit!('hi', undefined, commit);
+    });
+    // Admission clears the draft.
+    await act(async () => {
+      sendPromptAdmit!();
+      await Promise.resolve();
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+    // The turn then fails mid-flight: the draft stays cleared (no second commit)
+    // and the failure is still surfaced to onError.
+    await act(async () => {
+      sendPromptReject!(new Error('turn crashed'));
+      await Promise.resolve();
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalled();
+  });
+
   it('keeps pane approvals click-only (no global keyboard shortcuts)', () => {
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
     render();
