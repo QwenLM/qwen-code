@@ -139,7 +139,7 @@ describe('useShellHistory', () => {
       });
       expect(mockedFs.writeFile).toHaveBeenCalledWith(
         MOCKED_HISTORY_FILE,
-        'new_command', // Written to file oldest-first.
+        JSON.stringify(['new_command']), // Written to file oldest-first.
       );
     });
 
@@ -148,6 +148,53 @@ describe('useShellHistory', () => {
       command = result.current.getPreviousCommand();
     });
     expect(command).toBe('new_command');
+  });
+
+  it('should preserve multi-line commands after reloading history', async () => {
+    const multiLineCommand = 'for f in a b; do\n  echo "$f"\ndone';
+
+    const { result, unmount } = renderHook(() =>
+      useShellHistory(MOCKED_PROJECT_ROOT),
+    );
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+
+    act(() => {
+      result.current.addCommandToHistory(multiLineCommand);
+    });
+
+    await waitFor(() => expect(mockedFs.writeFile).toHaveBeenCalled());
+    const writtenContent = mockedFs.writeFile.mock.calls[0][1] as string;
+    unmount();
+
+    mockedFs.readFile.mockResolvedValue(writtenContent);
+    const { result: reloaded } = renderHook(() =>
+      useShellHistory(MOCKED_PROJECT_ROOT),
+    );
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalledTimes(2));
+
+    let command: string | null = null;
+    act(() => {
+      command = reloaded.current.getPreviousCommand();
+    });
+    expect(command).toBe(multiLineCommand);
+  });
+
+  it('should load JSON history files in newest-first order', async () => {
+    mockedFs.readFile.mockResolvedValue(JSON.stringify(['cmd1', 'cmd2']));
+    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+
+    let command: string | null = null;
+    act(() => {
+      command = result.current.getPreviousCommand();
+    });
+    expect(command).toBe('cmd2');
+
+    act(() => {
+      command = result.current.getPreviousCommand();
+    });
+    expect(command).toBe('cmd1');
   });
 
   it('should navigate history correctly with previous/next commands', async () => {
@@ -227,11 +274,11 @@ describe('useShellHistory', () => {
     // After adding 'new_cmd': ['new_cmd', 'old_cmd_119', ..., 'old_cmd_21'] (100 items)
     // Written to file (reversed): ['old_cmd_21', ..., 'old_cmd_119', 'new_cmd']
     const writtenContent = mockedFs.writeFile.mock.calls[0][1] as string;
-    const writtenLines = writtenContent.split('\n');
+    const writtenHistory = JSON.parse(writtenContent) as string[];
 
-    expect(writtenLines.length).toBe(100);
-    expect(writtenLines[0]).toBe('old_cmd_21'); // New oldest command
-    expect(writtenLines[99]).toBe('new_cmd'); // Newest command
+    expect(writtenHistory.length).toBe(100);
+    expect(writtenHistory[0]).toBe('old_cmd_21'); // New oldest command
+    expect(writtenHistory[99]).toBe('new_cmd'); // Newest command
   });
 
   it('should move an existing command to the top when re-added', async () => {
@@ -250,8 +297,8 @@ describe('useShellHistory', () => {
     await waitFor(() => expect(mockedFs.writeFile).toHaveBeenCalled());
 
     const writtenContent = mockedFs.writeFile.mock.calls[0][1] as string;
-    const writtenLines = writtenContent.split('\n');
+    const writtenHistory = JSON.parse(writtenContent) as string[];
 
-    expect(writtenLines).toEqual(['cmd2', 'cmd3', 'cmd1']);
+    expect(writtenHistory).toEqual(['cmd2', 'cmd3', 'cmd1']);
   });
 });

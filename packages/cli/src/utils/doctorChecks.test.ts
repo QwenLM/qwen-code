@@ -10,23 +10,16 @@ import { type CommandContext } from '../ui/commands/types.js';
 import { createMockCommandContext } from '../test-utils/mockCommandContext.js';
 import * as systemInfoUtils from './systemInfo.js';
 import * as authModule from '../config/auth.js';
-import * as allProviders from '../auth/allProviders.js';
+import * as allProviders from '@qwen-code/qwen-code-core';
 
 vi.mock('./systemInfo.js');
 vi.mock('../config/auth.js');
-vi.mock('../auth/allProviders.js', async (importOriginal) => {
-  const actual =
-    (await importOriginal()) as typeof import('../auth/allProviders.js');
-  return {
-    ...actual,
-    findProviderByCredentials: vi.fn(actual.findProviderByCredentials),
-  };
-});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     (await importOriginal()) as typeof import('@qwen-code/qwen-code-core');
   return {
     ...actual,
+    findProviderByCredentials: vi.fn(actual.findProviderByCredentials),
     canUseRipgrep: vi.fn().mockResolvedValue(true),
     getMCPServerStatus: vi.fn().mockReturnValue('connected'),
     MCPServerStatus: {
@@ -245,7 +238,6 @@ describe('runDoctorChecks', () => {
           getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
         },
         settings: { merged: {} },
-        git: undefined,
       },
     } as unknown as CommandContext);
 
@@ -272,7 +264,6 @@ describe('runDoctorChecks', () => {
           getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
         },
         settings: { merged: {} },
-        git: undefined,
       },
     } as unknown as CommandContext);
 

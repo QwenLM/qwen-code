@@ -84,6 +84,12 @@ export class ControlService {
        */
       getToolCallUpdateCallback:
         controller.getToolCallUpdateCallback.bind(controller),
+
+      /**
+       * Handle a teammate tool approval request (stream-json sessions).
+       */
+      handleTeammateApproval:
+        controller.handleTeammateApproval.bind(controller),
     };
   }
 

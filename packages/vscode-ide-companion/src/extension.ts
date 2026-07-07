@@ -13,7 +13,7 @@ import {
   detectIdeFromEnv,
   IDE_DEFINITIONS,
   type IdeInfo,
-} from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
+} from '@qwen-code/qwen-code-core';
 import { WebViewProvider } from './webview/providers/WebViewProvider.js';
 import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
 import { registerChatViewProviders } from './webview/providers/chatViewRegistration.js';
@@ -27,6 +27,7 @@ export { createSdkDaemonSessionFactory as __daemonIdeSessionFactoryForBundle } f
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
+const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 export const DIFF_SCHEME = 'qwen-diff';
 
 /**
@@ -164,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const createViewProvider = (): WebViewProvider =>
     chatProviderRegistry!.createViewProvider();
 
-  const supportsSecondarySidebar = registerChatViewProviders({
+  registerChatViewProviders({
     context,
     createViewProvider,
   });
@@ -214,7 +215,6 @@ export async function activate(context: vscode.ExtensionContext) {
     () => chatProviderRegistry?.getEditorProviders() ?? [],
     createWebViewProvider,
     logger,
-    supportsSecondarySidebar,
   );
 
   // Register copy commands for webview context menu
@@ -363,6 +363,11 @@ export async function activate(context: vscode.ExtensionContext) {
           const terminalOptions: vscode.TerminalOptions = {
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
+            env: {
+              [IDE_WORKSPACE_PATH_ENV_VAR]: JSON.stringify(
+                workspaceFolders.map((folder) => folder.uri.fsPath),
+              ),
+            },
             location,
           };
 

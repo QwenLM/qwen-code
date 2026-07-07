@@ -125,6 +125,19 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
   />
 );
 
+// Dim, tip-style notice for the vision bridge. The ◎ sits in the gutter as the
+// sole prefix (the message text no longer carries its own glyph), and the body
+// is rendered in secondary color so the disclosure reads as a hint rather than
+// a primary INFO line.
+export const VisionNoticeMessage: React.FC<StatusTextProps> = ({ text }) => (
+  <StatusMessage
+    text={text}
+    prefix="◎"
+    prefixColor={theme.text.secondary}
+    textColor={theme.text.secondary}
+  />
+);
+
 // Mirrors Claude Code's away-summary rendering: a `※` prefix in a fixed
 // 2-column gutter, then bold "recap: " label and italic content, all
 // dim-colored. Rendered as a regular history item so it scrolls with

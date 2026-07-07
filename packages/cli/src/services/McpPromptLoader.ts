@@ -277,13 +277,13 @@ export class McpPromptLoader implements ICommandLoader {
       return promptInputs;
     }
     for (const arg of promptArgs) {
-      if (argValues[arg.name]) {
+      if (Object.hasOwn(argValues, arg.name)) {
         promptInputs[arg.name] = argValues[arg.name];
       }
     }
 
     const unfilledArgs = promptArgs.filter(
-      (arg) => arg.required && !promptInputs[arg.name],
+      (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
     );
 
     if (unfilledArgs.length === 1) {

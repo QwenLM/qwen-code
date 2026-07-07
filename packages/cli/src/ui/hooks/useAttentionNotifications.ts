@@ -118,9 +118,15 @@ export const useAttentionNotifications = ({
             'Qwen Code is waiting for your input',
             NotificationType.IdlePrompt,
             'Waiting for input',
-          ).catch(() => {
-            // Silently ignore errors - fireNotificationHook has internal error handling
-          });
+          )
+            .then((hookResult) => {
+              if (hookResult.terminalSequence) {
+                terminal.writeTerminalSequence(hookResult.terminalSequence);
+              }
+            })
+            .catch(() => {
+              // Silently ignore errors - fireNotificationHook has internal error handling
+            });
         }
         idleNotificationSentRef.current = true;
       }

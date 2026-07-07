@@ -18,28 +18,46 @@ Slash commands are used to manage Qwen Code sessions, interface, and basic behav
 
 These commands help you save, restore, and summarize work progress.
 
-| Command     | Description                                               | Usage Examples                       |
-| ----------- | --------------------------------------------------------- | ------------------------------------ |
-| `/init`     | Analyze current directory and create initial context file | `/init`                              |
-| `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
-| `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
-| `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/recap`    | Generate a one-line session recap now                     | `/recap`                             |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| Command          | Description                                                              | Usage Examples                                                |
+| ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `/init`          | Analyze current directory and create initial context file                | `/init`                                                       |
+| `/summary`       | Generate project summary based on conversation history                   | `/summary`                                                    |
+| `/compress`      | Replace chat history with summary to save Tokens                         | `/compress` or `/summarize`                                   |
+| `/compress-fast` | Fast compression without AI — strips old tool outputs and thinking parts | `/compress-fast`                                              |
+| `/resume`        | Resume a previous conversation session                                   | `/resume` or `/continue`                                      |
+| `/recap`         | Generate a one-line session recap now                                    | `/recap`                                                      |
+| `/restore`       | Revert project files to the checkpoint before a tool call ran            | `/restore` (list) or `/restore <ID>`                          |
+| `/delete`        | Delete a previous session                                                | `/delete`                                                     |
+| `/branch`        | Fork the current conversation into a new session                         | `/branch`                                                     |
+| `/fork`          | Spawn a background agent that inherits the full conversation             | `/fork <directive>`                                           |
+| `/rewind`        | Rewind conversation to a previous turn                                   | `/rewind` or `/rollback`                                      |
+| `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
+| `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
+
+> [!note]
+>
+> `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
 
 ### 1.2 Interface and Workspace Control
 
 Commands for adjusting interface appearance and work environment.
 
-| Command      | Description                              | Usage Examples                |
-| ------------ | ---------------------------------------- | ----------------------------- |
-| `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
-| `/context`   | Show context window usage breakdown      | `/context`                    |
-| → `detail`   | Show per-item context usage breakdown    | `/context detail`             |
-| `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
-| `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
-| `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
-| `/editor`    | Open dialog to select supported editor   | `/editor`                     |
+| Command              | Description                                                                                                                                                                       | Usage Examples                                                                    |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `/clear`             | Clear conversation history and free up context                                                                                                                                    | `/clear`, `/reset`, `/new`                                                        |
+| `/context`           | Show context window usage breakdown                                                                                                                                               | `/context`                                                                        |
+| → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                                                                 |
+| `/history`           | Control history display preferences and visibility                                                                                                                                | `/history collapse-on-resume`, `/history expand-on-resume`, `/history expand-now` |
+| `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                                                           |
+| `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                                                          |
+| `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                                                            |
+| `/voice`             | Toggle voice dictation input                                                                                                                                                      | `/voice`, `/voice hold`, `/voice tap`, `/voice off`, `/voice status`              |
+| `/directory`         | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`, `/dir show`                                             |
+| `/cd`                | Move this session to a new working directory                                                                                                                                      | `/cd ../other-project`                                                            |
+| `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                                                                         |
+| `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                                                                     |
+| `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch`                                           |
+| `/terminal-setup`    | Configure terminal keybindings for multiline input                                                                                                                                | `/terminal-setup`                                                                 |
 
 ### 1.3 Language Settings
 
@@ -58,34 +76,65 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command          | Description                                   | Usage Examples                                |
-| ---------------- | --------------------------------------------- | --------------------------------------------- |
-| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
-| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
-| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
-| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`         |
-| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
-| →`plan`          | Analysis only, no execution                   | Secure review                                 |
-| →`default`       | Require approval for edits                    | Daily use                                     |
-| →`auto-edit`     | Automatically approve edits                   | Trusted environment                           |
-| →`yolo`          | Automatically approve all                     | Quick prototyping                             |
-| `/model`         | Switch model used in current session          | `/model`                                      |
-| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`             |
-| `/extensions`    | List all active extensions in current session | `/extensions`                                 |
-| `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
-| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
-| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
-| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
+| Command           | Description                                                                      | Usage Examples                                                                                            |
+| ----------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/mcp`            | List configured MCP servers and tools                                            | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
+| `/import-config`  | Import MCP servers from Claude configs                                           | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
+| `/tools`          | Display currently available tool list                                            | `/tools`, `/tools desc`                                                                                   |
+| `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills               | `/skills`, `/<skill-name>`                                                                                |
+| `/plan`           | Switch to plan mode or exit plan mode                                            | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
+| `/approval-mode`  | Change the tool-approval mode (current session only)                             | `/approval-mode`, `/approval-mode auto-edit`                                                              |
+| → `plan`          | Analysis only, no execution (secure review)                                      | `/approval-mode plan`                                                                                     |
+| → `default`       | Require approval for edits (daily use)                                           | `/approval-mode default`                                                                                  |
+| → `auto-edit`     | Auto-approve edits (trusted environment)                                         | `/approval-mode auto-edit`                                                                                |
+| → `auto`          | Classifier-evaluated approval (autonomous)                                       | `/approval-mode auto`                                                                                     |
+| → `yolo`          | Auto-approve everything (quick prototyping)                                      | `/approval-mode yolo`                                                                                     |
+| `/model`          | Switch model used in current session                                             | `/model`, `/model <model-id>` (switch immediately)                                                        |
+| `/model --fast`   | Set a lighter model for prompt suggestions                                       | `/model --fast qwen3-coder-flash`                                                                         |
+| `/model --voice`  | Set the model used for voice transcription                                       | `/model --voice <model-id>`                                                                               |
+| `/model --vision` | Set the vision-bridge model used to transcribe images for a text-only main model | `/model --vision <model-id>`                                                                              |
+| `/effort`         | Set reasoning effort for thinking-capable models                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
+| `/extensions`     | Manage extensions                                                                | `/extensions list`, `/extensions manage`                                                                  |
+| → `list`          | List installed extensions                                                        | `/extensions list`                                                                                        |
+| → `manage`        | Manage installed extensions (interactive)                                        | `/extensions manage`                                                                                      |
+| → `explore`       | Open extensions page in browser                                                  | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
+| → `install`       | Install an extension from a git repo or path                                     | `/extensions install <repo-or-path>`                                                                      |
+| `/memory`         | Open the Memory Manager dialog                                                   | `/memory`                                                                                                 |
+| `/remember`       | Save a durable memory                                                            | `/remember Prefer terse responses`                                                                        |
+| `/forget`         | Remove matching entries from auto-memory                                         | `/forget <query>`                                                                                         |
+| `/dream`          | Manually run auto-memory consolidation                                           | `/dream`                                                                                                  |
+| `/hooks`          | Manage Qwen Code hooks                                                           | `/hooks`, `/hooks list`                                                                                   |
+| `/permissions`    | Manage permission rules                                                          | `/permissions`                                                                                            |
+| `/agents`         | Manage subagents                                                                 | `/agents manage`, `/agents create`                                                                        |
+| `/arena`          | Manage Arena sessions                                                            | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
+| `/goal`           | Set a goal — keep working until condition met                                    | `/goal <condition>`, `/goal clear`                                                                        |
+| `/tasks`          | List background tasks                                                            | `/tasks`                                                                                                  |
+| `/workflows`      | Inspect workflow runs                                                            | `/workflows`, `/workflows <runId>`                                                                        |
+| `/lsp`            | Show LSP server status                                                           | `/lsp`                                                                                                    |
+| `/trust`          | Manage folder trust settings                                                     | `/trust`                                                                                                  |
+
+> [!warning]
+>
+> Only install extensions (`/extensions install`) from sources you trust. Extensions can bundle MCP servers, skills, and commands that run with the same permissions as Qwen Code itself — they can access your files, API keys, and conversation data. `/extensions install` does not prompt for confirmation.
+
+> [!warning]
+>
+> The `auto-edit`, `auto`, and `yolo` approval modes bypass approval prompts for tool executions. In `yolo` mode, all actions — including shell commands, file writes, and network requests — run without confirmation. Only use these modes in trusted, sandboxed, or disposable environments.
+
+> [!note]
+>
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command.
 
 ### 1.5 Built-in Skills
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command      | Description                                                         | Usage Examples                                    |
-| ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
-| `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
-| `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
-| `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
+| Command      | Description                                                 | Usage Examples                                    |
+| ------------ | ----------------------------------------------------------- | ------------------------------------------------- |
+| `/review`    | Review code changes with 9 parallel review agents           | `/review`, `/review 123`, `/review 123 --comment` |
+| `/loop`      | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                        |
+| `/simplify`  | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`     |
+| `/qc-helper` | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`              |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 
@@ -188,7 +237,7 @@ progress; otherwise it waits for the current turn to finish and then fires).
 Unlike the manual command, the auto-trigger is fully silent on failure: if
 generation errors or there is nothing to summarize, no message is added to
 the history. Controlled by the `general.showSessionRecap` setting
-(default: `true`); the manual `/recap` command always works regardless of
+(default: `false`); the manual `/recap` command always works regardless of
 this setting.
 
 **Example:**
@@ -205,42 +254,118 @@ this setting.
 >
 > Configure a fast model via `/model --fast <model>` (e.g.
 > `qwen3-coder-flash`) to make `/recap` fast and cheap. Set
-> `general.showSessionRecap` to `false` to opt out of the auto-trigger
-> while keeping the manual command available.
+> `general.showSessionRecap` to `true` to enable the auto-trigger; the
+> manual `/recap` command always works regardless of this setting.
 
-### 1.8 Information, Settings, and Help
+### 1.8 Diff Viewer (`/diff`)
+
+The `/diff` command opens an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between the current git diff and individual conversation turns, ↑/↓ to browse files, and Enter to view inline diffs.
+
+**How it works:**
+
+In interactive mode, `/diff` opens a dialog with a **source picker** along the top:
+
+- **Current** — working tree vs HEAD (`git diff HEAD`). Shows all uncommitted changes including staged, unstaged, and untracked files.
+- **T1, T2, T3, …** — per-turn diffs, one tab per model turn that modified files. Most recent turns appear first. Each tab shows a preview of the original prompt for context.
+
+The file list displays per-file stats (lines added/removed) with tags for special states (`new`, `deleted`, `untracked`, `binary`, `truncated`, `oversized`). Press Enter on a file to view its inline diff with syntax-highlighted hunks.
+
+Per-turn diffs require file checkpointing to be enabled (on by default in interactive mode). When file checkpointing is off, only the "Current" source is available.
+
+**Keyboard shortcuts:**
+
+| Key       | Action                                      |
+| --------- | ------------------------------------------- |
+| `←` / `→` | Switch between sources (Current / T1 / T2…) |
+| `↑` / `↓` | Navigate file list                          |
+| `j` / `k` | Navigate file list (vim-style)              |
+| Enter     | View inline diff for selected file          |
+| `←` / Esc | Return to file list from inline diff view   |
+| Esc       | Close the dialog                            |
+
+**Example:**
+
+```
+┌ /diff · Turn 3 "refactor the auth middleware" ──── 3 files +45 -12 ┐
+│                                                                     │
+│ ◀ Current · T3 · T2 · T1 ▶                                         │
+│                                                                     │
+│ › src/utils/parser.ts                              +30 -8           │
+│   src/utils/parser.test.ts                         +12 -2           │
+│   README.md                                        +3 -2            │
+│                                                                     │
+│ ←/→ source · ↑/↓ file · Enter view · Esc close                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Non-interactive mode:**
+
+In headless (`--prompt`) or non-interactive contexts, `/diff` prints a plain-text summary of the working tree vs HEAD. Per-turn navigation is not available.
+
+```
+3 files changed, +45 / -12
+  +30  -8  src/utils/parser.ts
+  +12  -2  src/utils/parser.test.ts
+   +3  -2  README.md
+```
+
+### 1.9 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
-| Command     | Description                                     | Usage Examples                   |
-| ----------- | ----------------------------------------------- | -------------------------------- |
-| `/help`     | Display help information for available commands | `/help` or `/?`                  |
-| `/about`    | Display version information                     | `/about`                         |
-| `/stats`    | Display detailed statistics for current session | `/stats`                         |
-| `/settings` | Open settings editor                            | `/settings`                      |
-| `/auth`     | Change authentication method                    | `/auth`                          |
-| `/bug`      | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`     | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+| Command          | Description                                                                                                                    | Usage Examples                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `/help`          | Display help information for available commands                                                                                | `/help` or `/?`                                                                     |
+| `/status`        | Display version information                                                                                                    | `/status` or `/about`                                                               |
+| `/status paths`  | Display current session file and log paths                                                                                     | `/status paths`                                                                     |
+| `/stats`         | Open the interactive usage statistics dashboard (Session, Activity, and Efficiency tabs)                                       | `/stats` or `/usage`                                                                |
+| `/stats model`   | Show per-model token breakdown and estimated cost                                                                              | `/stats model`                                                                      |
+| `/stats tools`   | Show per-tool call counts                                                                                                      | `/stats tools`                                                                      |
+| `/stats skills`  | Show per-skill call counts for the current live session (live only; excludes cross-session daily/monthly activity)             | `/stats skills`                                                                     |
+| `/stats daily`   | Show daily token usage statistics                                                                                              | `/stats daily` (alias `day`), `/stats day [YYYY-MM-DD]`                             |
+| `/stats monthly` | Show monthly token usage statistics                                                                                            | `/stats monthly` (alias `month`), `/stats month [YYYY-MM]`                          |
+| `/stats export`  | Export usage statistics to CSV or JSON                                                                                         | `/stats export <daily\|monthly> [date\|month] [--format csv\|json] [--output path]` |
+| `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
+| `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                              | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
+| `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
+| → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
+| → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |
+| → `rollback`     | Roll back the standalone CLI binary to the previous version (standalone installs only; for conversation history use `/rewind`) | `/doctor rollback`                                                                  |
+| `/docs`          | Open full Qwen Code documentation in browser                                                                                   | `/docs`                                                                             |
+| `/ide`           | Manage IDE integration                                                                                                         | `/ide status`, `/ide install`, `/ide enable`, `/ide disable`                        |
+| `/insight`       | Generate programming insights from chat history                                                                                | `/insight`                                                                          |
+| `/setup-github`  | Set up GitHub Actions                                                                                                          | `/setup-github`                                                                     |
+| `/bug`           | Submit issue about Qwen Code                                                                                                   | `/bug Button click unresponsive`                                                    |
+| `/copy`          | Copy to clipboard: reply (Nth-last), code (by lang), LaTeX, or Mermaid                                                         | `/copy`, `/copy 2`, `/copy python`, `/copy latex`, `/copy mermaid`                  |
+| `/quit`          | Exit Qwen Code immediately                                                                                                     | `/quit` or `/exit`                                                                  |
 
-### 1.9 Common Shortcuts
+> [!warning]
+>
+> `/doctor memory --snapshot` writes a V8 heap snapshot that may contain prompts, file contents, API keys, and tool results from the current session. Review the file before sharing it.
 
-| Shortcut           | Function                | Note                   |
-| ------------------ | ----------------------- | ---------------------- |
-| `Ctrl/cmd+L`       | Clear screen            | Equivalent to `/clear` |
-| `Ctrl/cmd+T`       | Toggle tool description | MCP tool management    |
-| `Ctrl/cmd+C`×2     | Exit confirmation       | Secure exit mechanism  |
-| `Ctrl/cmd+Z`       | Undo input              | Text editing           |
-| `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
+> [!note]
+>
+> `/config` reads and writes individual settings by dot-path key (e.g. `general.vimMode`), complementing the interactive `/settings` editor. Running `/config` with no argument (or `--help`) lists every settable key with its type and current value. `/config <key>` prints the current value — except for boolean keys, where it toggles the value. `/config <key>=<value>` sets the value. Changes are written to user settings (`~/.qwen/settings.json`). Only `boolean`, `string`, `number`, and `enum` settings can be changed this way — `array` and `object` settings must be edited in `settings.json` directly. Sensitive values (API keys, tokens, base URLs) are masked in output, and setting `tools.approvalMode` to `yolo` is blocked.
 
-### 1.10 Authentication Commands
+### 1.10 Common Shortcuts
+
+| Shortcut           | Function                | Note                                                                      |
+| ------------------ | ----------------------- | ------------------------------------------------------------------------- |
+| `Ctrl/cmd+L`       | Clear screen            | Clears the visible screen only (does not reset the session like `/clear`) |
+| `Ctrl/cmd+T`       | Toggle tool description | MCP tool management                                                       |
+| `Ctrl/cmd+C`×2     | Exit confirmation       | Secure exit mechanism                                                     |
+| `Ctrl/cmd+Z`       | Undo input              | Text editing                                                              |
+| `Ctrl/cmd+Shift+Z` | Redo input              | Text editing                                                              |
+
+### 1.11 Authentication Commands
 
 Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor` to inspect the current authentication and environment status.
 
-| Command   | Description                                |
-| --------- | ------------------------------------------ |
-| `/auth`   | Configure authentication interactively     |
-| `/doctor` | Show authentication and environment checks |
+| Command   | Description                                                            |
+| --------- | ---------------------------------------------------------------------- |
+| `/auth`   | Configure authentication interactively (aliases: `/connect`, `/login`) |
+| `/doctor` | Show authentication and environment checks                             |
 
 > [!note]
 >
@@ -445,3 +570,51 @@ Requirements:
 | Shell Escaping         | Prevent command injection  | Automatic processing   |
 | Execution Confirmation | Avoid accidental execution | Dialog confirmation    |
 | Error Reporting        | Help diagnose issues       | View error information |
+
+## 5. CLI Subcommands
+
+These commands are run from the shell as `qwen <subcommand>` before starting an interactive session.
+
+### Session Management
+
+| Command              | Description                       | Usage Examples                                               |
+| -------------------- | --------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list` | List recent conversation sessions | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+
+#### `qwen sessions list`
+
+Lists your recent Qwen Code sessions with metadata.
+
+**Flags:**
+
+| Flag      | Type    | Default | Description                                     |
+| --------- | ------- | ------- | ----------------------------------------------- |
+| `--json`  | boolean | `false` | Output as JSON Lines (one JSON object per line) |
+| `--limit` | number  | `20`    | Maximum number of sessions to show              |
+
+**Human-readable output (default):**
+
+A table with columns: SESSION ID, STARTED (UTC timestamp), TITLE, BRANCH, PROMPT.
+
+**JSON output (`--json`):**
+
+Outputs JSON Lines on stdout. Each line is a JSON object with fields:
+
+```
+sessionId, startTime, mtime, prompt, gitBranch, customTitle, titleSource, filePath, cwd
+```
+
+The "has more sessions" hint is emitted via stderr so piping to `jq` remains safe.
+
+**Examples:**
+
+```bash
+# Show last 20 sessions (default)
+qwen sessions list
+
+# Show last 50 sessions
+qwen sessions list --limit 50
+
+# Output as JSON for scripting
+qwen sessions list --json | jq .
+```

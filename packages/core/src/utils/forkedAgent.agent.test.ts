@@ -4,11 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Config as ConfigImpl, ApprovalMode } from '../config/config.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import {
+  AgentEventType,
+  type AgentEventEmitter,
+} from '../agents/runtime/agent-events.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
+import type {
+  ModelConfig,
+  PromptConfig,
+} from '../agents/runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
@@ -16,6 +24,30 @@ import {
   hasRebuiltToolRegistry,
   TOOL_REGISTRY_REBUILT,
 } from '../tools/agent/agent.js';
+import { AuthType } from '../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
+
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    createRuntimeContentGeneratorView: vi.fn(),
+  };
+});
+
+function makeRuntimeView(model: string): RuntimeContentGeneratorView {
+  return {
+    contentGenerator: {} as RuntimeContentGeneratorView['contentGenerator'],
+    contentGeneratorConfig: {
+      model,
+      authType: AuthType.USE_OPENAI,
+    },
+  };
+}
 
 /**
  * Regression: `runForkedAgent` (AgentHeadless path) used to produce its
@@ -31,6 +63,10 @@ import {
  * to the wrapper.
  */
 describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
+  beforeEach(() => {
+    vi.mocked(createRuntimeContentGeneratorView).mockReset();
+  });
+
   // Bare mode keeps the registry small (ReadFile / Edit / Shell only) so
   // the rebuild covers the file tools we actually care about.
   const baseParams = {
@@ -47,19 +83,27 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
   // doesn't reliably forward `export *` re-exports through `...actual`,
   // and stubbing the full surface manually is brittle.
   function captureAgentHeadlessConfig(): {
-    captured: { config: Config | undefined };
+    captured: {
+      config: Config | undefined;
+      promptConfig: PromptConfig | undefined;
+    };
     restore: () => void;
   } {
-    const captured: { config: Config | undefined } = { config: undefined };
+    const captured: {
+      config: Config | undefined;
+      promptConfig: PromptConfig | undefined;
+    } = { config: undefined, promptConfig: undefined };
     const spy = vi
       .spyOn(AgentHeadless, 'create')
       .mockImplementation(
         async (
           _name: string,
           config: Config,
+          promptConfig: PromptConfig,
           ..._rest: unknown[]
         ): Promise<AgentHeadless> => {
           captured.config = config;
+          captured.promptConfig = promptConfig;
           return {
             execute: vi.fn().mockResolvedValue(undefined),
             getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
@@ -70,6 +114,55 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       );
     return { captured, restore: () => spy.mockRestore() };
   }
+
+  it('does not treat empty extraHistory as caller-owned initial messages by default', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { captured, restore } = captureAgentHeadlessConfig();
+    try {
+      await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+        extraHistory: [],
+      });
+    } finally {
+      restore();
+    }
+
+    expect(captured.promptConfig?.initialMessages).toBeUndefined();
+  });
+
+  it('can preserve empty extraHistory when the caller intentionally owns history', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const { captured, restore } = captureAgentHeadlessConfig();
+    try {
+      await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+        extraHistory: [],
+        preserveEmptyExtraHistory: true,
+      });
+    } finally {
+      restore();
+    }
+
+    expect(captured.promptConfig?.initialMessages).toEqual([]);
+  });
 
   it('passes a Config with the rebuilt-registry marker and YOLO approval mode to AgentHeadless.create', async () => {
     const parent = new ConfigImpl(baseParams);
@@ -102,6 +195,176 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     expect(captured.config!.getApprovalMode()).toBe(ApprovalMode.YOLO);
     // 3. Hand out a different ToolRegistry instance from the parent
     expect(captured.config!.getToolRegistry()).not.toBe(parentRegistry);
+  });
+
+  it('strips internal tags from completed finalText', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (): Promise<AgentHeadless> =>
+        ({
+          execute: vi.fn().mockResolvedValue(undefined),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi
+            .fn()
+            .mockReturnValue(
+              '<analysis>scratch</analysis><summary>done</summary>',
+            ),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+      });
+
+      expect(result.status).toBe('completed');
+      expect(result.finalText).toBe('done');
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it.each([AgentTerminateMode.MAX_TURNS, AgentTerminateMode.LOOP_DETECTED])(
+    'reports %s as failed',
+    async (terminateMode) => {
+      const parent = new ConfigImpl(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+
+      const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+        async (): Promise<AgentHeadless> =>
+          ({
+            execute: vi.fn().mockResolvedValue(undefined),
+            getTerminateMode: vi.fn().mockReturnValue(terminateMode),
+            getFinalText: vi.fn().mockReturnValue('stopped'),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          }) as any,
+      );
+
+      try {
+        const result = await runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        });
+
+        expect(result.status).toBe('failed');
+        expect(result.terminateReason).toBe(terminateMode);
+      } finally {
+        createSpy.mockRestore();
+      }
+    },
+  );
+
+  it('reports filesWritten from successful mutating tool results only', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async () => {
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'read-1',
+              name: ToolNames.READ_FILE,
+              args: { file_path: '/repo/README.md' },
+              description: 'read',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'read-1',
+              name: ToolNames.READ_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/project.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-1',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              args: { file_path: '/repo/outside.md' },
+              description: 'edit',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'edit-1',
+              name: ToolNames.EDIT,
+              success: false,
+              timestamp: Date.now(),
+            });
+          }),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi.fn().mockReturnValue('done'),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+      });
+
+      expect(result.filesTouched).toEqual([
+        '/repo/README.md',
+        '/repo/.qwen/memories/project.md',
+        '/repo/outside.md',
+      ]);
+      expect(result.filesWritten).toEqual(['/repo/.qwen/memories/project.md']);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('binds EditTool from the wrapper registry to the wrapper Config (not the parent)', async () => {
@@ -321,5 +584,93 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
     expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a runtime content-generator view for cross-auth fast models', async () => {
+    const fastModel = 'deepseek-v4-flash';
+    const runtimeView = makeRuntimeView(fastModel);
+    vi.mocked(createRuntimeContentGeneratorView).mockResolvedValue(runtimeView);
+
+    const parent = new ConfigImpl({
+      ...baseParams,
+      model: 'claude-main',
+    });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    vi.spyOn(parent, 'getContentGeneratorConfig').mockReturnValue({
+      model: 'claude-main',
+      authType: AuthType.USE_ANTHROPIC,
+    });
+    vi.spyOn(parent, 'getFastModel').mockReturnValue(
+      `${AuthType.USE_OPENAI}:${fastModel}`,
+    );
+    vi.spyOn(parent, 'getAllConfiguredModels').mockImplementation(
+      (authTypes?: AuthType[]) =>
+        authTypes?.includes(AuthType.USE_OPENAI)
+          ? [
+              {
+                id: fastModel,
+                label: fastModel,
+                authType: AuthType.USE_OPENAI,
+              },
+            ]
+          : [],
+    );
+
+    const captured: {
+      config?: Config;
+      modelConfig?: ModelConfig;
+      runtimeView?: RuntimeContentGeneratorView;
+    } = {};
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockImplementation(
+        async (
+          _name: string,
+          config: Config,
+          _promptConfig: unknown,
+          modelConfig: ModelConfig,
+          _runConfig: unknown,
+          _toolConfig: unknown,
+          _eventEmitter: unknown,
+          _hooks: unknown,
+          runtimeViewArg?: RuntimeContentGeneratorView,
+        ): Promise<AgentHeadless> => {
+          captured.config = config;
+          captured.modelConfig = modelConfig;
+          captured.runtimeView = runtimeViewArg;
+          return {
+            execute: vi.fn().mockResolvedValue(undefined),
+            getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+            getFinalText: vi.fn().mockReturnValue('done'),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any;
+        },
+      );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+      });
+      expect(result.status).toBe('completed');
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    expect(captured.modelConfig?.model).toBe(fastModel);
+    expect(captured.runtimeView).toBe(runtimeView);
+    expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
+      parent,
+      captured.config,
+      fastModel,
+      { authType: AuthType.USE_OPENAI },
+    );
   });
 });

@@ -19,17 +19,18 @@
  * and AgentComposer (with minimal customization).
  */
 
-import type React from 'react';
-import { useCallback } from 'react';
-import { Box, Text } from 'ink';
-import chalk from 'chalk';
+import type { ReactNode } from 'react';
+import { useCallback, useInsertionEffect, useRef } from 'react';
+import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
 import type { TextBuffer } from './shared/text-buffer.js';
+import { TextInputMouseController } from './shared/TextInputMouseController.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -67,7 +68,9 @@ export interface BaseTextInputProps {
   /** Placeholder text shown when the buffer is empty. */
   placeholder?: string;
   /** Custom prefix node (defaults to `> `). */
-  prefix?: React.ReactNode;
+  prefix?: ReactNode;
+  /** Width of the prefix in terminal columns. Defaults to 2 (for "> "). */
+  prefixWidth?: number;
   /** Border color for the input box. */
   borderColor?: string;
   /** Label rendered on the top border line (right-aligned). Plain string for width calculation. */
@@ -78,13 +81,15 @@ export interface BaseTextInputProps {
    * Custom line renderer for advanced rendering (e.g. syntax highlighting).
    * When not provided, lines are rendered as plain text with cursor overlay.
    */
-  renderLine?: (opts: RenderLineOptions) => React.ReactNode;
+  renderLine?: (opts: RenderLineOptions) => ReactNode;
+  /** Enable click-to-position-cursor (alternate-screen / ui.useTerminalBuffer mode). */
+  mouseEnabled?: boolean;
 }
 
 // ─── Default line renderer ──────────────────────────────────
 
 /**
- * Renders a single visual line with an inverse-video block cursor.
+ * Renders a single visual line with a high-contrast block cursor.
  * Uses codepoint-aware string operations for Unicode/emoji safety.
  */
 export function defaultRenderLine({
@@ -92,19 +97,19 @@ export function defaultRenderLine({
   isOnCursorLine,
   cursorCol,
   showCursor,
-}: RenderLineOptions): React.ReactNode {
+}: RenderLineOptions): ReactNode {
   if (!isOnCursorLine || !showCursor) {
     return <Text>{lineText || ' '}</Text>;
   }
 
   const len = cpLen(lineText);
 
-  // Cursor past end of line — append inverse space
+  // Cursor past end of line — append cursor space
   if (cursorCol >= len) {
     return (
       <Text>
         {lineText}
-        {chalk.inverse(' ') + '\u200B'}
+        {renderSoftwareCursor(' ') + '\u200B'}
       </Text>
     );
   }
@@ -116,26 +121,87 @@ export function defaultRenderLine({
   return (
     <Text>
       {before}
-      {chalk.inverse(cursorChar)}
+      {renderSoftwareCursor(cursorChar)}
       {after}
     </Text>
   );
 }
 
+// ─── Helpers ────────────────────────────────────────────────
+
+export type PhysicalCursorState = {
+  hasMeasured: boolean;
+  showCursor: boolean;
+  cursorVisualRow: number;
+  cursorVisualCol: number;
+  scrollVisualRow: number;
+  linesToRender: string[];
+  prefixWidth: number;
+};
+
+export function getAbsolutePosition(
+  node: DOMElement | null,
+): { top: number; left: number } | undefined {
+  if (!node) return undefined;
+
+  let top = 0;
+  let left = 0;
+  let current: DOMElement | undefined = node;
+  while (current) {
+    const layout = current.yogaNode?.getComputedLayout();
+    if (layout) {
+      top += layout.top;
+      left += layout.left;
+    }
+    current = current.parentNode;
+  }
+
+  return { top, left };
+}
+
+export function getPhysicalCursorPosition(
+  node: DOMElement | null,
+  {
+    hasMeasured,
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  }: PhysicalCursorState,
+): { x: number; y: number } | undefined {
+  if (!showCursor || !hasMeasured) return undefined;
+
+  const position = getAbsolutePosition(node);
+  if (!position) return undefined;
+
+  const relativeRow = cursorVisualRow - scrollVisualRow;
+  const lineText = linesToRender[relativeRow] || '';
+  const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
+  const physicalCol = stringWidth(textBeforeCursor);
+  return {
+    x: position.left + prefixWidth + physicalCol,
+    y: position.top + relativeRow + 1,
+  };
+}
+
 // ─── Component ──────────────────────────────────────────────
 
-export const BaseTextInput: React.FC<BaseTextInputProps> = ({
+export const BaseTextInput = ({
   buffer,
   onSubmit,
   onKeypress,
   showCursor = true,
   placeholder,
   prefix,
+  prefixWidth = 2,
   borderColor,
   topRightLabel,
   isActive = true,
   renderLine = defaultRenderLine,
-}) => {
+  mouseEnabled = false,
+}: BaseTextInputProps): ReactNode => {
   // ── Keyboard handling ──
 
   const handleKey = useCallback(
@@ -249,6 +315,26 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   const [cursorVisualRow, cursorVisualCol] = buffer.visualCursor;
   const scrollVisualRow = buffer.visualScrollRow;
 
+  // ── Physical cursor positioning for IME ──
+  const boxRef = useRef<DOMElement | null>(null);
+  const linesRef = useRef<DOMElement | null>(null);
+  const { hasMeasured } = useBoxMetrics(boxRef);
+  const { setCursorPosition } = useCursor();
+  const cursorPosition = getPhysicalCursorPosition(boxRef.current, {
+    hasMeasured,
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  });
+
+  useInsertionEffect(() => {
+    setCursorPosition(cursorPosition);
+    return () => setCursorPosition(undefined);
+  }, [setCursorPosition, cursorPosition]);
+
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
     <Text color={theme.text.accent}>{'> '}</Text>
@@ -264,7 +350,14 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
     : '─'.repeat(columns);
 
   return (
-    <Box flexDirection="column">
+    <Box ref={boxRef} flexDirection="column">
+      {mouseEnabled && isActive && (
+        <TextInputMouseController
+          linesRef={linesRef}
+          buffer={buffer}
+          visibleLineCount={linesToRender.length}
+        />
+      )}
       <Text color={resolvedBorderColor} wrap="truncate-end">
         {topBorderLine}
       </Text>
@@ -277,11 +370,13 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
         borderColor={resolvedBorderColor}
       >
         {resolvedPrefix}
-        <Box flexGrow={1} flexDirection="column">
+        {/* No background fill: the input area blends into the terminal's own
+            background so it stays consistent across terminals and themes. */}
+        <Box flexGrow={1} flexDirection="column" ref={linesRef}>
           {buffer.text.length === 0 && placeholder ? (
             showCursor ? (
               <Text>
-                {chalk.inverse(placeholder.slice(0, 1))}
+                {renderSoftwareCursor(placeholder.slice(0, 1))}
                 <Text color={theme.text.secondary}>{placeholder.slice(1)}</Text>
               </Text>
             ) : (

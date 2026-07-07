@@ -244,6 +244,45 @@ export function sliceTextByVisualHeight(
 }
 
 /**
+ * Wrap text into the visual rows it occupies at `width` columns, accounting
+ * for both explicit newlines and code-point-width-aware soft wrapping. Unlike
+ * `sliceTextByVisualHeight` (which keeps only a head/tail window), this returns
+ * every visual row, so callers that scroll an arbitrary offset (e.g. the
+ * ThinkingViewer) can slice the rows the user actually sees.
+ */
+export function wrapToVisualLines(text: string, width: number): string[] {
+  if (width <= 0) {
+    return [''];
+  }
+  const visualLines: string[] = [];
+  for (const logicalLine of text.split('\n')) {
+    if (logicalLine === '') {
+      visualLines.push('');
+      continue;
+    }
+    let currentLine = '';
+    let currentWidth = 0;
+    for (const char of logicalLine) {
+      const charWidth = getCachedStringWidth(char);
+      if (currentWidth + charWidth > width && currentWidth > 0) {
+        visualLines.push(currentLine);
+        currentLine = '';
+        currentWidth = 0;
+      }
+      currentLine += char;
+      currentWidth += charWidth;
+    }
+    if (currentLine) {
+      visualLines.push(currentLine);
+    }
+  }
+  if (visualLines.length === 0) {
+    visualLines.push('');
+  }
+  return visualLines;
+}
+
+/**
  * Clear the string width cache
  */
 export const clearStringWidthCache = (): void => {
@@ -389,4 +428,51 @@ export function sanitizeSensitiveText(
   }
 
   return result;
+}
+
+// Match standalone C0 controls (incl. TAB/CR/LF/BEL/BS), DEL, and C1 controls.
+// `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences; raw single
+// bytes like `\n`, `\r`, BEL, BS slip past it and can still break layouts or
+// inject terminal effects when rendered as part of a git-supplied filename.
+// eslint-disable-next-line no-control-regex
+const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
+
+function escapeFilenameControlChar(ch: string): string {
+  switch (ch) {
+    case '\b':
+      return '\\b';
+    case '\t':
+      return '\\t';
+    case '\n':
+      return '\\n';
+    case '\f':
+      return '\\f';
+    case '\r':
+      return '\\r';
+    default: {
+      // DEL (0x7F) and C1 controls (0x80-0x9F) are returned as raw bytes by
+      // JSON.stringify, which is exactly what we are trying to keep out of
+      // rendered output. Hand-roll the \uXXXX escape so every matched code
+      // point becomes printable.
+      const code = ch.charCodeAt(0);
+      return `\\u${code.toString(16).padStart(4, '0')}`;
+    }
+  }
+}
+
+/**
+ * Make a git-supplied filename safe to drop into a TUI text node or a
+ * stdout / log line. Strips both multi-byte ANSI sequences (via
+ * `escapeAnsiCtrlCodes`) and bare control bytes that git happily round-trips
+ * through `-z` paths but which would otherwise inject color resets, cursor
+ * moves, BEL, or layout-breaking newlines into the rendered output.
+ *
+ * Use this anywhere a path from `fetchGitDiff`, `fetchGitDiffHunks`, or a
+ * file-history backup is rendered to the user.
+ */
+export function sanitizeFilenameForDisplay(name: string): string {
+  return escapeAnsiCtrlCodes(name).replace(
+    FILENAME_CONTROL_CHARS_REGEX,
+    escapeFilenameControlChar,
+  );
 }

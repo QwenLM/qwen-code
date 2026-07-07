@@ -48,6 +48,8 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.MEMORY,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
+  ToolNames.ENTER_PLAN_MODE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.WEB_FETCH,
 ]);
 
@@ -77,6 +79,7 @@ export async function evaluateToolCall(
   if (WRITE_TOOLS.has(toolName)) {
     if (
       approvalMode === ApprovalMode.AUTO_EDIT ||
+      approvalMode === ApprovalMode.AUTO ||
       approvalMode === ApprovalMode.YOLO
     ) {
       return { action: 'redirect', reason: `write_tool:${toolName}` };

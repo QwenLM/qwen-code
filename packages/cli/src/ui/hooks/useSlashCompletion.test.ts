@@ -1122,4 +1122,41 @@ describe('useSlashCompletion', () => {
     expect(mockSetIsLoadingSuggestions).not.toHaveBeenCalled();
     expect(mockSetIsPerfectMatch).not.toHaveBeenCalled();
   });
+
+  describe('isDirectory propagation', () => {
+    it('should propagate isDirectory from CommandCompletionItem to Suggestion', async () => {
+      const mockCompletionFn = vi
+        .fn()
+        .mockResolvedValue([
+          { value: '/tmp/workspace/', isDirectory: true },
+          { value: '/tmp/file.txt' },
+        ]);
+
+      const slashCommands = [
+        createTestCommand({
+          name: 'dir',
+          description: 'test',
+          completion: mockCompletionFn,
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/dir ',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(2);
+      });
+
+      // First suggestion (directory) should have isDirectory: true
+      expect(result.current.suggestions[0].isDirectory).toBe(true);
+      // Second suggestion (file) should NOT have isDirectory flag
+      expect(result.current.suggestions[1].isDirectory).toBeFalsy();
+    });
+  });
 });

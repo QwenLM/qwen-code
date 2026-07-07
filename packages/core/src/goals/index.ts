@@ -11,6 +11,7 @@ export type {
   GoalTerminalObserver,
 } from './activeGoalStore.js';
 export {
+  activeGoalEquals,
   getActiveGoal,
   setActiveGoal,
   clearActiveGoal,

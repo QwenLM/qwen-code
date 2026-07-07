@@ -5,6 +5,7 @@
  */
 
 import type { Stats } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 
 /**
  * Session-scoped cache that tracks which files the model has Read or
@@ -149,7 +150,8 @@ export class FileReadCache {
    *    output was not truncated. Pass `false` for ranged reads OR
    *    for full-request reads whose content was truncated by the
    *    truncate-tool-output limit; both leave the model without
-   *    sight of every current byte.
+   *    sight of every current byte. This gates the `file_unchanged`
+   *    fast-path and notebook-specific prior-read checks.
    *  - `cacheable` — the produced content is plain text (vs. binary /
    *    image / audio / video / PDF / notebook). This flag is purely
    *    about content type, not about whether the read was complete:
@@ -230,22 +232,24 @@ export class FileReadCache {
    * see its own write as a "stale" external change.
    *
    * Read metadata is **always** refreshed alongside the write, not
-   * just for brand-new entries: the model authored the entire current
-   * content, so for prior-read enforcement purposes it has now "seen"
-   * all bytes — regardless of whether the prior recordRead happened
-   * to be partial (`lastReadWasFull=false`) or non-cacheable
-   * (`lastReadCacheable=false`). Without this, a sequence such as
-   * `ReadFile(limit=10)` → `WriteFile` (full content) → `Edit` would
-   * be rejected on the Edit because `lastReadWasFull=false` from the
-   * earlier partial read would persist through the write.
+   * just for brand-new entries: the model authored the current content
+   * produced by the mutating tool, so for prior-read enforcement purposes
+   * it has now "seen" the bytes that tool wrote. Plain text writers use
+   * the default `cacheable: true`; structured writers such as notebook cell
+   * editors can set `cacheable: false` so regular Edit / WriteFile still
+   * reject the file as a non-text payload.
    */
-  recordWrite(absPath: string, stats: Stats): FileReadEntry {
+  recordWrite(
+    absPath: string,
+    stats: Stats,
+    opts: { cacheable?: boolean } = {},
+  ): FileReadEntry {
     const entry = this.upsert(absPath, stats);
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
     entry.lastReadWasFull = true;
-    entry.lastReadCacheable = true;
+    entry.lastReadCacheable = opts.cacheable ?? true;
     // The model authored the current bytes and that result is in
     // history, so the fast-path may serve a placeholder again.
     entry.readResidentInHistory = true;
@@ -291,9 +295,10 @@ export class FileReadCache {
    * Returns `true` if a matching entry was found and disarmed; `false`
    * if there is no entry for `stats` (never tracked, or `stats`
    * resolved to a different inode than recorded — file replaced /
-   * symlink retargeted since the read). A `false` is NOT harmless: the
-   * stale entry stays armed, so the caller must fall back to
-   * {@link clear} just as it does for an unstattable path.
+   * symlink retargeted since the read). A `false` can still leave a
+   * stale entry armed, so callers that know the original path should
+   * fall back to {@link invalidateByPath}; callers without a path must
+   * fall back to {@link clear}.
    */
   markReadEvictedFromHistory(stats: Stats): boolean {
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
@@ -309,9 +314,62 @@ export class FileReadCache {
     this.byInode.delete(FileReadCache.inodeKey(stats));
   }
 
+  /**
+   * Best-effort targeted fallback when a caller cannot resolve a path to the
+   * inode it previously read (for example the file was deleted or replaced).
+   * Prefer {@link invalidate} / {@link markReadEvictedFromHistory} when Stats
+   * are available; this only matches the last observed path string.
+   *
+   * @returns true when at least one entry was removed.
+   */
+  invalidateByPath(absPath: string): boolean {
+    const target = resolvePath(absPath);
+    let removed = false;
+    for (const [key, entry] of this.byInode) {
+      if (
+        entry.realPath === absPath ||
+        resolvePath(entry.realPath) === target
+      ) {
+        this.byInode.delete(key);
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
   /** Drop every entry. Used by tests and on Config shutdown. */
   clear(): void {
     this.byInode.clear();
+  }
+
+  /**
+   * Evict entries whose most recent Read (or Write; both set
+   * {@link FileReadEntry.lastReadAt}) is older than `minutes`.
+   *
+   * This is a memory-pressure-driven eviction: it targets entries the
+   * model is least likely to need again, trading cache hit rate for lower
+   * memory footprint. Unlike {@link clear}, it preserves recently-read
+   * entries so the file_unchanged fast-path stays available for active
+   * files.
+   *
+   * @returns Number of entries evicted.
+   */
+  evictNotAccessedSince(minutes: number): number {
+    if (!Number.isFinite(minutes) || minutes < 1) {
+      return 0;
+    }
+
+    const cutoff = Date.now() - minutes * 60 * 1000;
+    let evicted = 0;
+
+    for (const [key, entry] of this.byInode) {
+      if (entry.lastReadAt !== undefined && entry.lastReadAt < cutoff) {
+        this.byInode.delete(key);
+        evicted++;
+      }
+    }
+
+    return evicted;
   }
 
   /** Number of tracked entries. Diagnostic / test use only. */

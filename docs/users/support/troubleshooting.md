@@ -20,6 +20,12 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Solution:** Set the `NODE_EXTRA_CA_CERTS` environment variable to the absolute path of your corporate root CA certificate file.
     - Example: `export NODE_EXTRA_CA_CERTS=/path/to/your/corporate-ca.crt`
 
+- **Error: `Connection error. (cause: fetch failed)` against a self-signed endpoint**
+  - **Cause:** You are pointing Qwen Code at a self-hosted server (for example a local model behind `https://`) whose TLS certificate is self-signed, so Node.js rejects it.
+  - **Solution:** Prefer trusting the certificate via `NODE_EXTRA_CA_CERTS` (above). If that is not practical in a trusted lab/private network, skip verification with the `--insecure` flag (or `QWEN_TLS_INSECURE=1`):
+    - Example: `qwen --insecure --openaiBaseUrl https://192.168.1.10:8080 ...`
+    - **Warning:** Disabling verification removes protection against man-in-the-middle attacks. Only use it for endpoints you fully trust.
+
 - **Error: `Device authorization flow failed: fetch failed`**
   - **Cause:** Node.js could not reach Qwen OAuth endpoints (often a proxy or SSL/TLS trust issue). When available, Qwen Code will also print the underlying error cause (for example: `UNABLE_TO_VERIFY_LEAF_SIGNATURE`). Note: this error is specific to the legacy Qwen OAuth flow.
   - **Solution:**
@@ -37,7 +43,7 @@ This guide provides solutions to common issues and debugging tips, including top
 ## Frequently asked questions (FAQs)
 
 - **Q: How do I update Qwen Code to the latest version?**
-  - A: If you installed it globally via `npm`, update it using the command `npm install -g @qwen-code/qwen-code@latest`. If you compiled it from source, pull the latest changes from the repository, and then rebuild using the command `npm run build`.
+  - A: If you installed Qwen Code with the standalone installer, rerun the standalone install command. If you installed it globally via `npm`, update it using the command `npm install -g @qwen-code/qwen-code@latest`. If you compiled it from source, pull the latest changes from the repository, and then rebuild using the command `npm run build`.
 
 - **Q: Where are the Qwen Code configuration or settings files stored?**
   - A: The Qwen Code configuration is stored in two `settings.json` files:
@@ -48,6 +54,11 @@ This guide provides solutions to common issues and debugging tips, including top
 
 - **Q: Why don't I see cached token counts in my stats output?**
   - A: Cached token information is only displayed when cached tokens are being used. This feature is available for API key users (e.g., Alibaba Cloud Model Studio API key or Google Cloud Vertex AI). You can still view your total token usage using the `/stats` command.
+
+- **Q: A customization (extension, hook, skill, MCP server, or subagent) seems to be breaking Qwen Code. How do I isolate it?**
+  - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, and sandbox settings — for the session. Note: the CLI flags `--yolo` and `--approval-mode` still take effect in safe mode. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
+    - Example: `qwen --safe-mode`
+    - Alternative: set the environment variable `QWEN_CODE_SAFE_MODE=true` if the CLI cannot accept flags.
 
 ## Common error messages and solutions
 
@@ -60,6 +71,7 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Cause:** The CLI is not correctly installed or it is not in your system's `PATH`.
   - **Solution:**
     The update depends on how you installed Qwen Code:
+    - If you installed `qwen` with the standalone installer, rerun the standalone install command and then open a new terminal.
     - If you installed `qwen` globally, check that your `npm` global binary directory is in your `PATH`. You can update using the command `npm install -g @qwen-code/qwen-code@latest`.
     - If you are running `qwen` from source, ensure you are using the correct command to invoke it (e.g. `node packages/cli/dist/index.js ...`). To update, pull the latest changes from the repository, and then rebuild using the command `npm run build`.
 
@@ -83,6 +95,11 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Issue:** Setting `DEBUG=true` in a project's `.env` file doesn't enable debug mode for the CLI.
   - **Cause:** The `DEBUG` and `DEBUG_MODE` variables are automatically excluded from project `.env` files to prevent interference with the CLI behavior.
   - **Solution:** Use a `.qwen/.env` file instead, or configure the `advanced.excludedEnvVars` setting in your `settings.json` to exclude fewer variables.
+
+- **Trackpad scrolling in tmux changes prompt history instead of scrolling the conversation**
+  - **Issue:** In a tmux session, trackpad or wheel scrolling may cycle through previous prompts, similar to pressing `Up Arrow` or `Down Arrow`.
+  - **Cause:** tmux can translate wheel gestures into plain arrow-key sequences. Those sequences are indistinguishable from real arrow-key presses by the time qwen-code receives them.
+  - **Solution:** Enable `ui.useTerminalBuffer`; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Companion not connecting
 

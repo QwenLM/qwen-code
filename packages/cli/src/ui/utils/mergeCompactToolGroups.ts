@@ -135,21 +135,15 @@ function isHiddenInCompactMode(item: HistoryItem): boolean {
  * Ctrl+O for plain-chat sessions that have neither tool calls nor thinking
  * blocks regardless of conversation length.
  *
- * Conservative: returns true for any `tool_group`, even though a history of
- * only force-expanded groups would technically render the same way in both
- * modes (force-expand groups bypass the compact-rendering path and their
- * adjacent `tool_use_summary` items are not absorbed). Distinguishing
- * force-expand from regular groups requires `embeddedShellFocused` and
- * `activePtyId`, which are not cheaply available at the keypress handler
- * call site — we accept the false-positive in exchange for keeping this
- * predicate self-contained and O(N).
+ * Currently only `gemini_thought` and `gemini_thought_content` items are
+ * affected by compact mode. Tool groups use type-based partitioning that
+ * is independent of compact mode.
  */
 export function compactToggleHasVisualEffect(
   history: readonly HistoryItem[],
 ): boolean {
   for (const item of history) {
     if (
-      item.type === 'tool_group' ||
       item.type === 'gemini_thought' ||
       item.type === 'gemini_thought_content'
     ) {
@@ -174,10 +168,10 @@ export function compactToggleHasVisualEffect(
  * @param absorbedCallIds - Set of tool callIds whose summary label is consumed
  *   by a compact-mode tool_group header (i.e., the corresponding tool_group is
  *   NOT force-expanded). Summaries for these callIds are dropped from the
- *   merged result so MainContent's refreshStatic heuristic fires and the
- *   tool_group re-renders with its label. Summaries for force-expanded groups
- *   pass through unchanged so HistoryItemDisplay can render them as standalone
- *   `● <label>` lines (the compact path doesn't consume their label).
+ *   merged result so the compact header can display the label directly.
+ *   Summaries for force-expanded groups pass through unchanged so
+ *   HistoryItemDisplay can render them as standalone `● <label>` lines (the
+ *   compact path doesn't consume their label).
  * @returns New array with merged tool_groups (does not mutate input)
  */
 export function mergeCompactToolGroups(
@@ -195,11 +189,7 @@ export function mergeCompactToolGroups(
     // Drop `tool_use_summary` items whose preceding callIds are *all* absorbed
     // by a compact tool_group header. Those headers will display the label
     // directly (via the `compactLabel` lookup in MainContent), so keeping the
-    // standalone summary in the merged result would either double-display the
-    // label (if HistoryItemDisplay rendered both) or, more importantly, would
-    // bump mergedHistory.length lock-step with history.length and prevent
-    // refreshStatic from firing — Ink's <Static> would never repaint the
-    // committed tool_group with the new label.
+    // standalone summary in the merged result would double-display the label.
     //
     // Summaries with at least one non-absorbed preceding callId — e.g., when
     // the corresponding tool_group is force-expanded (errors / confirming /

@@ -3,7 +3,13 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { AvailableCommand, ToolCallEvent } from './AcpBridge.js';
+import type {
+  AvailableCommand,
+  BridgeSessionInfo,
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from './ChannelAgentBridge.js';
+import { readAvailableCommandAltNames } from './AcpBridge.js';
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
@@ -37,6 +43,10 @@ export interface DaemonChannelSessionClient {
     requestId: string,
     response: RequestPermissionResponse,
   ): Promise<boolean>;
+  shellCommand?(
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
 }
 
 export interface DaemonChannelSessionFactoryRequest {
@@ -97,7 +107,16 @@ function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
 }
 
 function isAvailableCommand(value: unknown): value is AvailableCommand {
-  return isRecord(value) && typeof value['name'] === 'string';
+  if (!isRecord(value) || typeof value['name'] !== 'string') return false;
+  // altNames is optional; when present it MUST be a string[] (so the type guard is
+  // honest). A malformed wire payload — e.g. `altNames: 5` — would otherwise survive
+  // onto the command and throw at the downstream `altNames.some(...)` recognition
+  // site in ChannelBase.matchAgentCommand.
+  const altNames = value['altNames'];
+  return (
+    altNames === undefined ||
+    (Array.isArray(altNames) && altNames.every((n) => typeof n === 'string'))
+  );
 }
 
 function isPermissionRequestData(
@@ -162,13 +181,10 @@ function summarizeProtocolDetails(details: unknown): unknown {
   return summary;
 }
 
-async function drainDaemonEventLoop(): Promise<void> {
-  // TODO(daemon-roadmap): replace this bounded client-side drain with a daemon
-  // terminal turn event / SSE waterline once the typed event schema defines it.
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-}
-
-export class DaemonChannelBridge extends EventEmitter {
+export class DaemonChannelBridge
+  extends EventEmitter
+  implements ChannelAgentBridge
+{
   private readonly options: DaemonChannelBridgeOptions;
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
   private readonly eventControllers = new Map<string, AbortController>();
@@ -183,6 +199,7 @@ export class DaemonChannelBridge extends EventEmitter {
     string,
     AvailableCommand[]
   >();
+  private readonly turnBarriers = new Map<string, () => void>();
   private connected = false;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
@@ -212,6 +229,18 @@ export class DaemonChannelBridge extends EventEmitter {
 
   getAvailableCommands(sessionId: string): AvailableCommand[] {
     return this.availableCommandsBySession.get(sessionId) ?? [];
+  }
+
+  listSessions(): BridgeSessionInfo[] {
+    const result: BridgeSessionInfo[] = [];
+    for (const session of this.sessions.values()) {
+      result.push({
+        sessionId: session.sessionId,
+        workspaceCwd: session.workspaceCwd,
+        hasActivePrompt: this.activePrompts.has(session.sessionId),
+      });
+    }
+    return result;
   }
 
   async start(): Promise<void> {
@@ -278,6 +307,7 @@ export class DaemonChannelBridge extends EventEmitter {
     };
     this.on('textChunk', onChunk);
     this.on('sessionDied', onSessionDied);
+    const turnBarrier = this.createTurnBarrier(sessionId);
 
     const prompt: Array<Record<string, unknown>> = [];
     if (options?.imageBase64 && options.imageMimeType) {
@@ -291,7 +321,13 @@ export class DaemonChannelBridge extends EventEmitter {
 
     try {
       const result = await session.prompt({ prompt }, controller.signal);
-      await drainDaemonEventLoop();
+      // Prefer turn_complete for deterministic chunk collection (SSE path).
+      // Fall back to one event-loop tick for non-SSE prompt paths (blocking
+      // HTTP, non-202 responses) where turn_complete never arrives.
+      await Promise.race([
+        turnBarrier,
+        new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      ]);
       const textResult = chunks.join('');
       this.emit('promptComplete', {
         sessionId,
@@ -300,6 +336,7 @@ export class DaemonChannelBridge extends EventEmitter {
       } satisfies DaemonPromptCompleteEvent);
       return textResult;
     } finally {
+      this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
@@ -313,11 +350,24 @@ export class DaemonChannelBridge extends EventEmitter {
     }
   }
 
+  async shellCommand(
+    sessionId: string,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }> {
+    const session = this.ensureSession(sessionId);
+    if (!session.shellCommand) {
+      throw new Error('Shell command not supported by this session client');
+    }
+    return session.shellCommand(command, signal);
+  }
+
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.ensureSession(sessionId);
-    await session.cancel();
+    this.resolveTurnBarrier(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
+    await session.cancel();
   }
 
   async setSessionModel(
@@ -459,14 +509,24 @@ export class DaemonChannelBridge extends EventEmitter {
       case 'client_evicted':
         this.dropSession(
           session.sessionId,
-          this.getReason(event.data, 'client_evicted'),
+          this.getStringField(event.data, 'reason', 'client_evicted'),
         );
         break;
       case 'stream_error':
         this.dropSession(
           session.sessionId,
-          this.getError(event.data, 'stream_error'),
+          this.getStringField(event.data, 'error', 'stream_error'),
         );
+        break;
+      case 'turn_complete':
+        this.resolveTurnBarrier(session.sessionId);
+        break;
+      case 'turn_error':
+        this.emitProtocolError(
+          `Daemon turn error for session ${session.sessionId}`,
+          event.data,
+        );
+        this.resolveTurnBarrier(session.sessionId);
         break;
       default:
         break;
@@ -519,8 +579,12 @@ export class DaemonChannelBridge extends EventEmitter {
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          const commands =
-            update['availableCommands'].filter(isAvailableCommand);
+          const commands = update['availableCommands']
+            .filter(isAvailableCommand)
+            .map((cmd) => {
+              const altNames = readAvailableCommandAltNames(cmd);
+              return altNames ? { ...cmd, altNames } : cmd;
+            });
           this.availableCommandsBySession.set(sessionId, commands);
           this.latestAvailableCommandsSessionId = sessionId;
         } else {
@@ -643,13 +707,17 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   private handleSessionDied(sessionId: string, data: unknown): void {
-    this.dropSession(sessionId, this.getReason(data, 'session_died'));
+    this.dropSession(
+      sessionId,
+      this.getStringField(data, 'reason', 'session_died'),
+    );
   }
 
   private dropSession(sessionId: string, reason: string): void {
     if (!this.sessions.has(sessionId)) {
       return;
     }
+    this.resolveTurnBarrier(sessionId);
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
@@ -674,15 +742,13 @@ export class DaemonChannelBridge extends EventEmitter {
     this.emit('sessionDied', { sessionId, reason });
   }
 
-  private getReason(data: unknown, fallback: string): string {
-    return isRecord(data) && typeof data['reason'] === 'string'
-      ? data['reason']
-      : fallback;
-  }
-
-  private getError(data: unknown, fallback: string): string {
-    return isRecord(data) && typeof data['error'] === 'string'
-      ? data['error']
+  private getStringField(
+    data: unknown,
+    field: string,
+    fallback: string,
+  ): string {
+    return isRecord(data) && typeof data[field] === 'string'
+      ? (data[field] as string)
       : fallback;
   }
 
@@ -695,6 +761,24 @@ export class DaemonChannelBridge extends EventEmitter {
       controller.abort();
     }
     this.activePromptControllers.delete(sessionId);
+  }
+
+  private createTurnBarrier(sessionId: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.turnBarriers.set(sessionId, resolve);
+    });
+  }
+
+  private resolveTurnBarrier(sessionId: string): void {
+    const resolve = this.turnBarriers.get(sessionId);
+    if (resolve) {
+      this.turnBarriers.delete(sessionId);
+      resolve();
+    }
+  }
+
+  private clearTurnBarrier(sessionId: string): void {
+    this.turnBarriers.delete(sessionId);
   }
 
   private emitProtocolError(message: string, details: unknown): void {

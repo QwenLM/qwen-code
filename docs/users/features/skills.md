@@ -17,13 +17,15 @@ Agent Skills package expertise into discoverable capabilities. Each Skill consis
 
 Skills are **model-invoked** — the model autonomously decides when to use them based on your request and the Skill's description. This is different from slash commands, which are **user-invoked** (you explicitly type `/command`).
 
-If you want to invoke a Skill explicitly, use the `/skills` slash command:
+If you want to invoke a Skill explicitly, type it as a slash command using the Skill's name:
 
 ```bash
-/skills <skill-name>
+/<skill-name>
 ```
 
-Use autocomplete to browse available Skills and descriptions.
+Start typing `/` to autocomplete and browse available Skills alongside their descriptions. The `/skills` command opens the Skills panel, where you can browse, search, toggle, and launch Skills interactively.
+
+> **Note:** If you previously ran a Skill with `/skills <skill-name>`, that syntax now just opens the Skills panel and ignores the trailing argument. Use `/<skill-name>` to run a Skill directly.
 
 ### Benefits
 
@@ -74,6 +76,7 @@ Create a `SKILL.md` file with YAML frontmatter and Markdown content:
 ---
 name: your-skill-name
 description: Brief description of what this Skill does and when to use it
+priority: 10
 ---
 
 # Your Skill Name
@@ -91,11 +94,13 @@ Qwen Code currently validates that:
 
 - `name` is a non-empty string matching `/^[\p{L}\p{N}_:.-]+$/u` — Unicode letters and digits (CJK / Cyrillic / accented Latin all OK), plus `_`, `:`, `.`, `-`. Whitespace, slashes, brackets and other structurally unsafe characters are rejected at parse time.
 - `description` is a non-empty string
+- `priority` is optional. When present, it must be a finite number. Higher values sort earlier in the `/skills` listing only — slash-command completion (typing `/`) and the `/help` custom commands view stay alphabetical, so a high-priority Skill never reorders built-in commands. Omitted or invalid values are treated as unset, which behaves like `0`.
 
 Recommended conventions:
 
 - Prefer lowercase ASCII with hyphens for shareable names (e.g. `tsx-helper`)
 - Make `description` specific: include both **what** the Skill does and **when** to use it (key words users will naturally mention)
+- Use `priority` sparingly for Skills that should reliably appear before the default alphabetical order in `/skills`. Negative priorities are allowed and sort below unset Skills.
 
 ### Optional: gate a Skill on file paths (`paths:`)
 
@@ -115,8 +120,34 @@ Notes:
 
 - Globs are matched relative to the project root with [picomatch](https://github.com/micromatch/picomatch); files outside the project root never trigger activation.
 - A path-gated Skill **stays activated for the rest of the session** once a matching file is touched. A new session, or a `refreshCache` triggered by editing any Skill file, resets activations.
-- `paths:` only gates **model** discovery, and only at the SkillTool listing level. You can always invoke a path-gated Skill yourself via `/<skill-name>` or the `/skills` picker — that user path runs the Skill body regardless of activation state. The model side, however, stays gated until a matching file is touched: a slash invocation does **not** unlock model-side activation, so if you want the model to chain off your invocation (call `Skill { skill: ... }` itself), also access a file matching the skill's `paths:` first.
+- `paths:` only gates **model** discovery, and only at the SkillTool listing level. Unless `user-invocable: false` is set, you can always invoke a path-gated Skill yourself via `/<skill-name>` or the `/skills` picker — that user path runs the Skill body regardless of activation state. The model side, however, stays gated until a matching file is touched: a slash invocation does **not** unlock model-side activation, so if you want the model to chain off your invocation (call `Skill { skill: ... }` itself), also access a file matching the skill's `paths:` first.
 - Combining `paths:` with `disable-model-invocation: true` is allowed but the gate has no effect — the Skill is hidden from the model regardless, so path activation never advertises it.
+
+### Optional: control user and model invocation
+
+Skills are user-invocable by default. To hide a Skill from direct slash-command use while keeping it available for model invocation, set `user-invocable: false`:
+
+```yaml
+---
+name: model-only-helper
+description: Helper the model can call when appropriate
+user-invocable: false
+---
+```
+
+This removes the Skill from `/<skill-name>` invocation and `/skills` picker results. It does not hide the Skill from the model.
+
+To hide a Skill from model invocation while keeping direct user invocation available, set `disable-model-invocation: true`:
+
+```yaml
+---
+name: manual-helper
+description: Helper you invoke manually
+disable-model-invocation: true
+---
+```
+
+You can combine both fields, but then the Skill is not reachable through the normal user or model invocation paths.
 
 ## Add supporting files
 
@@ -167,9 +198,9 @@ To view available Skills, ask Qwen Code directly:
 What Skills are available?
 ```
 
-> **Heads up — model vs. user view.** Asking the model only surfaces Skills the model can currently see. If a Skill uses `paths:` (see "Optional: gate a Skill on file paths" above), it stays out of that listing until a matching file has been touched. The full set is always visible to you via the `/skills` slash command and on disk.
+> **Heads up — model vs. user view.** Asking the model only surfaces Skills the model can currently see. If a Skill uses `paths:` (see "Optional: gate a Skill on file paths" above), it stays out of that listing until a matching file has been touched. The `/skills` slash command shows Skills you can invoke directly; Skills with `user-invocable: false` remain visible on disk and may still be visible to the model.
 
-Or browse the full list with the slash command (always shows every Skill, including path-gated ones that have not activated yet):
+Or browse the user-invocable list with the slash command (including path-gated Skills that have not activated yet):
 
 ```text
 /skills

@@ -10,6 +10,8 @@ interface GaxiosError {
   };
 }
 
+const MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH = 1000;
+
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
@@ -36,13 +38,104 @@ export function isAbortError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Best-effort one-line description of an error's `cause`, used to surface the
+ * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
+ * failed` (whose own message carries nothing). Returns `undefined` when there
+ * is no useful detail.
+ *
+ * Handles three shapes:
+ *   - `AggregateError` (undici retries multiple addresses, e.g. IPv6 `::1` then
+ *     IPv4 `127.0.0.1`): its own `message` is empty, so unwrap `.errors[]`.
+ *   - a plain `Error` with a Node `code` (e.g. `ECONNREFUSED`) but possibly an
+ *     empty message — prefer `code`, combine with message when both add signal.
+ *   - any other value — stringify.
+ */
+function describeErrorCause(cause: unknown): string | undefined {
+  if (cause == null) return undefined;
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((e) => describeSingleError(e))
+      .filter((s): s is string => Boolean(s));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+  return describeSingleError(cause);
+}
+
+function describeSingleError(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    const codeStr = typeof code === 'string' ? code : undefined;
+    const msg = err.message?.trim();
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr || (err.name !== 'Error' ? err.name : undefined);
+  }
+  if (err && typeof err === 'object' && !Array.isArray(err)) {
+    const rec = err as Record<string, unknown>;
+    const code = rec['code'];
+    const codeStr =
+      typeof code === 'string' && code
+        ? code
+        : typeof code === 'number'
+          ? String(code)
+          : undefined;
+    const message = rec['message'];
+    const msg =
+      typeof message === 'string' && message.trim()
+        ? message.trim()
+        : undefined;
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr;
+  }
+  const str = String(err);
+  return str && str !== '[object Object]' ? str : undefined;
+}
+
+function truncateStringifiedErrorMessage(message: string): string {
+  if (message.length <= MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH) {
+    return message;
+  }
+  return `${message.slice(0, MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH - 3)}...`;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    const cause = error.cause;
-    if (cause instanceof Error && cause.message !== error.message) {
-      return `${error.message} (cause: ${cause.message})`;
+    const detail = describeErrorCause(error.cause);
+    if (detail && detail !== error.message) {
+      return truncateStringifiedErrorMessage(
+        `${error.message} (cause: ${detail})`,
+      );
     }
     return error.message;
+  }
+  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
+    const { message, cause } = error as {
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (typeof message === 'string' && message.trim()) {
+      const detail = describeErrorCause(cause);
+      const result =
+        detail && detail !== message
+          ? `${message} (cause: ${detail})`
+          : message;
+      return truncateStringifiedErrorMessage(result);
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      return serialized
+        ? truncateStringifiedErrorMessage(serialized)
+        : String(error);
+    } catch {
+      const detail = describeSingleError(error);
+      return detail ? truncateStringifiedErrorMessage(detail) : String(error);
+    }
   }
   try {
     return String(error);
@@ -179,6 +272,18 @@ export class FatalTurnLimitedError extends FatalError {
 export class FatalToolExecutionError extends FatalError {
   constructor(message: string) {
     super(message, 54);
+  }
+}
+/**
+ * Raised when a headless / unattended run exceeds a configured budget
+ * (`--max-wall-time`, `--max-tool-calls`). Distinct exit code from
+ * `FatalTurnLimitedError` (53) so CI scripts can branch on
+ * "run exhausted its budget" vs. "run hit the turn cap." See issue
+ * QwenLM/qwen-code#4103.
+ */
+export class FatalBudgetExceededError extends FatalError {
+  constructor(message: string) {
+    super(message, 55);
   }
 }
 export class FatalCancellationError extends FatalError {

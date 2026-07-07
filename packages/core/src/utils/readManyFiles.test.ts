@@ -4,17 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileReadCache } from '../services/fileReadCache.js';
+import { checkPriorRead } from '../tools/priorReadEnforcement.js';
+import { getPDFPageCount, isPdftotextAvailable } from './pdf.js';
+
+vi.mock('./pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./pdf.js')>();
+  return {
+    ...actual,
+    getPDFPageCount: vi.fn(),
+    isPdftotextAvailable: vi.fn(),
+  };
+});
+
+const mockGetPDFPageCount = vi.mocked(getPDFPageCount);
+const mockIsPdftotextAvailable = vi.mocked(isPdftotextAvailable);
 
 /** Helper to convert PartListUnion to string for test assertions */
 function contentToString(parts: PartListUnion): string {
@@ -27,6 +42,14 @@ function contentToString(parts: PartListUnion): string {
       .join('');
   }
   return JSON.stringify(parts);
+}
+
+function findInlineDataPart(parts: PartListUnion): Part | undefined {
+  if (!Array.isArray(parts)) return undefined;
+  return parts.find(
+    (part): part is Part =>
+      typeof part === 'object' && part !== null && 'inlineData' in part,
+  );
 }
 
 describe('readManyFiles', () => {
@@ -46,6 +69,21 @@ describe('readManyFiles', () => {
       getTruncateToolOutputLines: () => 1000,
       getTruncateToolOutputThreshold: () => 2500,
       getFileSystemService: () => new StandardFileSystemService(),
+      getContentGeneratorConfig: () => ({ modalities: {} }),
+      getModel: () => 'text-only-model',
+    }) as unknown as Config;
+
+  // Variant of createMockConfig wired to a live FileReadCache so the
+  // prior-read enforcement path (issue #6289) can be exercised end-to-end.
+  const createMockConfigWithCache = (
+    rootDir: string,
+    cache: FileReadCache,
+    fileReadCacheDisabled = false,
+  ): Config =>
+    ({
+      ...createMockConfig(rootDir),
+      getFileReadCache: () => cache,
+      getFileReadCacheDisabled: () => fileReadCacheDisabled,
     }) as unknown as Config;
 
   async function createTestFile(
@@ -65,6 +103,10 @@ describe('readManyFiles', () => {
   }
 
   beforeEach(async () => {
+    mockGetPDFPageCount.mockReset();
+    mockGetPDFPageCount.mockResolvedValue(null);
+    mockIsPdftotextAvailable.mockReset();
+    mockIsPdftotextAvailable.mockResolvedValue(true);
     tempRootDir = nodeFs.realpathSync(
       await fs.mkdtemp(path.join(os.tmpdir(), 'read-many-files-test-')),
     );
@@ -103,6 +145,104 @@ describe('readManyFiles', () => {
       expect(content).toContain('Content of file1.txt');
       expect(content).toContain('Content of file2.txt');
       expect(content).toContain('--- End of content ---');
+    });
+
+    it('should include truncated notebooks that do not expose text line ranges', async () => {
+      const relativePath = 'large.ipynb';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const cells = Array.from({ length: 30 }, (_, index) => ({
+        cell_type: 'code',
+        id: `large-cell-${index}`,
+        source: [`value_${index} = "${'x'.repeat(4500)}"`],
+        metadata: {},
+        outputs: [],
+      }));
+      await fs.writeFile(
+        absolutePath,
+        JSON.stringify({ cells, metadata: {} }),
+        'utf-8',
+      );
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Jupyter Notebook');
+      expect(content).toContain('remaining cells truncated');
+      expect(content).not.toContain(
+        'No files matching the criteria were found',
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.filePath).toBe(absolutePath);
+    });
+
+    it('preserves unsupported images when the bridge handoff flag is set', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const imageBytes = Buffer.from('fake png data');
+      await fs.writeFile(absolutePath, imageBytes);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        preserveUnsupportedImageForBridge: true,
+      });
+
+      const imagePart = findInlineDataPart(result.contentParts);
+      expect(imagePart).toBeDefined();
+      expect(
+        (imagePart as { inlineData: { mimeType: string; data: string } })
+          .inlineData,
+      ).toEqual({
+        mimeType: 'image/png',
+        data: imageBytes.toString('base64'),
+        displayName: 'screenshot.png',
+      });
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.content).toEqual(imagePart);
+    });
+
+    it('skips unsupported images when the bridge handoff flag is absent', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.from('fake png data'));
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      expect(findInlineDataPart(result.contentParts)).toBeUndefined();
+      expect(contentToString(result.contentParts)).toContain(
+        'Unsupported image file',
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.content).toContain('Unsupported image file');
+    });
+
+    it('references large PDFs instead of inlining extracted text for @ attachments', async () => {
+      const relativePath = 'paper.pdf';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.alloc(2 * 1024 * 1024));
+      mockGetPDFPageCount.mockResolvedValueOnce(31);
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const content = contentToString(result.contentParts);
+
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toBeUndefined();
+      expect(result.files[0]!.content).toContain('PDF "paper.pdf"');
+      expect(content).toContain("Use the 'pages' parameter");
+      expect(content.length).toBeLessThan(1000);
+      expect(mockGetPDFPageCount).toHaveBeenCalledTimes(1);
+      expect(mockGetPDFPageCount).toHaveBeenCalledWith(absolutePath);
+      expect(mockIsPdftotextAvailable).not.toHaveBeenCalled();
+
+      const status = cache.check(nodeFs.statSync(absolutePath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
     });
 
     it('should return message when no files found', async () => {
@@ -319,6 +459,144 @@ describe('readManyFiles', () => {
       // Downstream callers (e.g. atCommandProcessor) inspect this field to
       // render the read as failed rather than successful.
       expect(result.files[0]!.error).toMatch(/exceeds the 10MB limit/i);
+    });
+  });
+
+  // Issue #6289: files attached via `@path` load their content into context
+  // but were never recorded in the session FileReadCache, so a follow-up
+  // Edit / WriteFile was rejected with EDIT_REQUIRES_PRIOR_READ until the
+  // model redundantly re-read the file with read_file.
+  describe('prior-read enforcement (issue #6289)', () => {
+    it('records an @-attached text file so a later edit passes prior-read enforcement', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('attached.ts');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      // Precondition: the file has never been read this session, so the
+      // enforcement helper rejects an edit.
+      const before = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(before.ok).toBe(false);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      // The @-mention read must now satisfy prior-read enforcement without
+      // a redundant read_file.
+      const after = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(after.ok).toBe(true);
+    });
+
+    it('records the read as fresh and cacheable in the FileReadCache', async () => {
+      const { relativePath, absolutePath } = await createTestFile('notes.md');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadAt).toBeDefined();
+        expect(status.entry.lastReadCacheable).toBe(true);
+      }
+    });
+
+    it('does not record reads when fileReadCacheDisabled is set', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('attached.ts');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache, true);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      expect(cache.size()).toBe(0);
+      const decision = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(decision.ok).toBe(false);
+    });
+
+    it('does not record directories (edit enforcement still rejects them)', async () => {
+      await createTestFile('mydir', 'nested.txt');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: ['mydir'] });
+
+      expect(cache.size()).toBe(0);
+    });
+
+    it('does not let a binary image attachment satisfy text-edit enforcement', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.from('fake png data'));
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      // A binary payload cannot be mutated as text by Edit / WriteFile, so
+      // enforcement must still reject it rather than being cleared by the
+      // attachment.
+      const decision = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(decision.ok).toBe(false);
+    });
+
+    it('records a binary file as a full but non-cacheable read', async () => {
+      // A `.bin` file with a null byte is classified as `binary`: unlike an
+      // image it returns `stats` (so it IS recorded), but it carries no
+      // `originalLineCount`, so `cacheable` must be `false`. This guards the
+      // `originalLineCount !== undefined` clause of the cacheable derivation
+      // — dropping it would wrongly let a non-text payload clear prior-read
+      // enforcement for Edit / WriteFile.
+      const relativePath = 'payload.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(
+        absolutePath,
+        Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]),
+      );
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
+    it('records a truncated @-attached file as a partial (full: false) read', async () => {
+      // This attachment exceeds both truncation caps the mock config sets —
+      // the 1000-line `getTruncateToolOutputLines()` limit and the 2500-char
+      // `getTruncateToolOutputThreshold()` — so `processSingleFileContent`
+      // marks it `isTruncated`, which `recordAttachedFileRead` maps to
+      // `full: false`. On a fresh cache a partial read leaves the sticky
+      // `lastReadWasFull` at its `false` default, so this cleanly separates
+      // correct behaviour (false) from the bug it guards against: recording a
+      // truncated attachment as `full: true` would silently clear Edit /
+      // WriteFile prior-read enforcement for a file the model only partly saw.
+      // The file is still cacheable (text with a known `originalLineCount`).
+      const relativePath = 'big.ts';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const big = Array.from(
+        { length: 1500 },
+        (_, i) => `const x${i} = ${i};`,
+      ).join('\n');
+      await fs.writeFile(absolutePath, big);
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(false);
+        expect(status.entry.lastReadCacheable).toBe(true);
+      }
     });
   });
 });

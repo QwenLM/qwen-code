@@ -9,11 +9,18 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
   resolveModelConfig,
+  resolveProviderProtocol,
   type ModelConfigSourcesInput,
+  type ModelProvidersConfig,
   type ProviderModelConfig,
+  type ProviderProtocolConfig,
+  stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /**
  * Env var names that hold model selections for each auth type.
@@ -26,6 +33,102 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
 };
+
+/**
+ * Collect every modelProviders entry whose provider id resolves (via
+ * providerProtocol) to the given protocol, in declaration order. Mirrors
+ * {@link ModelRegistry}: a built-in key resolves to itself, a custom id resolves
+ * through providerProtocol. Lets credential/metadata lookups find a custom
+ * provider's models under their resolved protocol instead of only the protocol
+ * key. For built-in-only configs this equals `modelProviders[protocol]`.
+ */
+export function collectProviderModelsForProtocol(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+  protocol: string,
+): ProviderModelConfig[] {
+  if (!modelProviders) {
+    return [];
+  }
+  const out: ProviderModelConfig[] = [];
+  for (const [providerId, models] of Object.entries(modelProviders)) {
+    if (!Array.isArray(models)) {
+      continue;
+    }
+    if (resolveProviderProtocol(providerId, providerProtocol) === protocol) {
+      out.push(...models);
+    }
+  }
+  return out;
+}
+
+function findProviderIdForModel(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+  protocol: string,
+  modelProvider: ProviderModelConfig | undefined,
+): string | undefined {
+  if (!modelProviders || !modelProvider) {
+    return undefined;
+  }
+  for (const [providerId, models] of Object.entries(modelProviders)) {
+    if (!Array.isArray(models)) {
+      continue;
+    }
+    if (resolveProviderProtocol(providerId, providerProtocol) !== protocol) {
+      continue;
+    }
+    if (models.includes(modelProvider)) {
+      return providerId;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build user-visible warnings for modelProviders entries that carry models but
+ * are dropped at registration: an unknown provider id with no providerProtocol
+ * mapping, or a mapping to an unknown protocol. Without this the models silently
+ * vanish from selection (the registry only logs at debug level).
+ */
+function buildSkippedProviderWarnings(
+  modelProviders: ModelProvidersConfig | undefined,
+  providerProtocol: ProviderProtocolConfig | undefined,
+): string[] {
+  if (!modelProviders) {
+    return [];
+  }
+  const warnings: string[] = [];
+  const known = Object.values(AuthType).join(', ');
+  for (const [providerId, models] of Object.entries(modelProviders)) {
+    if (!Array.isArray(models) || models.length === 0) {
+      continue;
+    }
+    const protocol = resolveProviderProtocol(providerId, providerProtocol);
+    if (
+      protocol === AuthType.QWEN_OAUTH &&
+      providerId !== AuthType.QWEN_OAUTH
+    ) {
+      warnings.push(
+        `Warning: modelProviders provider "${providerId}" maps to "qwen-oauth" via providerProtocol, but qwen-oauth uses hard-coded models only; its ${models.length} model(s) are ignored.`,
+      );
+      continue;
+    }
+    if (protocol !== undefined) {
+      continue;
+    }
+    const mapped =
+      providerProtocol && Object.hasOwn(providerProtocol, providerId)
+        ? providerProtocol[providerId]
+        : undefined;
+    warnings.push(
+      mapped !== undefined
+        ? `Warning: providerProtocol["${providerId}"] = "${mapped}" is not a known protocol (expected one of: ${known}); its ${models.length} model(s) are ignored.`
+        : `Warning: modelProviders provider "${providerId}" is not a built-in protocol (${known}) and has no providerProtocol mapping; its ${models.length} model(s) are ignored. Add providerProtocol["${providerId}"] (e.g. "openai") to enable them.`,
+    );
+  }
+  return warnings;
+}
 
 function getIgnoredTopLevelGenerationConfigFields(
   settingsGenerationConfig: Partial<ContentGeneratorConfig> | undefined,
@@ -44,7 +147,7 @@ function getIgnoredTopLevelGenerationConfigFields(
 }
 
 function buildIgnoredTopLevelGenerationConfigWarning(
-  authType: AuthType,
+  providerId: string,
   modelProvider: ProviderModelConfig,
   ignoredFields: string[],
 ): string | undefined {
@@ -60,7 +163,7 @@ function buildIgnoredTopLevelGenerationConfigWarning(
   const fieldReference = isSingular ? 'this field' : 'these fields';
   const pronoun = isSingular ? 'it' : 'them';
 
-  return `Warning: ${fieldList} ${verb} ignored for provider model "${modelProvider.id}" from modelProviders.${authType}. Move ${fieldReference} to modelProviders.${authType}[].generationConfig for that model if you want ${pronoun} to apply.`;
+  return `Warning: ${fieldList} ${verb} ignored for provider model "${modelProvider.id}" from modelProviders.${providerId}. Move ${fieldReference} to modelProviders.${providerId}[].generationConfig for that model if you want ${pronoun} to apply.`;
 }
 
 export interface CliGenerationConfigInputs {
@@ -101,7 +204,7 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
 
   if (
     process.env['OPENAI_API_KEY'] &&
-    process.env['OPENAI_MODEL'] &&
+    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
     process.env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
@@ -156,10 +259,15 @@ export function resolveCliGenerationConfig(
   // Env vars are ONLY considered when neither argv.model nor settings.model.name is set.
   let resolvedModel: string | undefined;
   let sourceEnvVar: string | undefined;
+  // Whether the model came from settings.model.name (vs argv/env). The persisted
+  // settings.model.baseUrl disambiguator only applies to this case.
+  let resolvedFromSettings = false;
   if (argv.model) {
     resolvedModel = argv.model;
   } else if (settings.model?.name) {
-    resolvedModel = settings.model.name;
+    // Self-heal configs already corrupted by older builds.
+    resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
+    resolvedFromSettings = true;
   } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
     // Only check env vars for the current auth type
     for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
@@ -176,10 +284,55 @@ export function resolveCliGenerationConfig(
   // so the resolver correctly uses the settings-selected model (no override occurs).
   // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
+  let disambiguationWarning: string | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
-    const providers = settings.modelProviders[authType];
-    if (providers && Array.isArray(providers)) {
-      modelProvider = providers.find((p) => p.id === resolvedModel);
+    // Merge across all provider ids that route to this protocol (built-in key
+    // or custom id via providerProtocol), so a custom provider's envKey/metadata
+    // is honored, not just entries stored under the protocol key itself.
+    const providers = collectProviderModelsForProtocol(
+      settings.modelProviders,
+      settings.providerProtocol,
+      authType,
+    );
+    if (providers.length > 0) {
+      // When multiple providers share the same id, disambiguate by the
+      // persisted settings.model.baseUrl (written by the model picker). This
+      // only applies when the model itself came from settings.model.name.
+      // Fall back to the first id match if the paired provider was edited or
+      // removed (and for the legacy id-only case where no baseUrl was saved),
+      // mirroring auth.ts:findModelConfig.
+      //
+      // Note: `settings` is already merged across user/workspace/system scopes.
+      // Every writer of model.name (the picker, /model, ACP, provider install)
+      // also writes model.baseUrl in the SAME scope — a real URL, or an empty
+      // string tombstone when there is none. The tombstone matters because an
+      // omitted key cannot override a stale model.baseUrl in a lower-priority
+      // scope on merge, but '' (a present value) can. Empty string is treated
+      // as "no disambiguator" here. The only remaining desync is a hand-edited
+      // config that sets model.name in a higher scope with no baseUrl key at
+      // all; the id-only fallback bounds the blast radius to a same-id provider.
+      const persistedBaseUrl = settings.model?.baseUrl;
+      if (resolvedFromSettings && persistedBaseUrl) {
+        const exactMatch = providers.find(
+          (p) => p.id === resolvedModel && p.baseUrl === persistedBaseUrl,
+        );
+        modelProvider =
+          exactMatch ?? providers.find((p) => p.id === resolvedModel);
+        // Surface the silent fallback: the paired provider was removed or its
+        // baseUrl changed, so traffic now routes to a different same-id provider.
+        if (!exactMatch && modelProvider) {
+          const fallbackBaseUrl =
+            modelProvider.baseUrl === undefined
+              ? '(default baseUrl)'
+              : sanitizeProviderBaseUrl(modelProvider.baseUrl);
+          disambiguationWarning =
+            `Persisted model.baseUrl '${sanitizeProviderBaseUrl(persistedBaseUrl)}' no longer matches any provider ` +
+            `for model '${resolvedModel}' (authType '${authType}'); using the first id match ` +
+            `('${fallbackBaseUrl}'). Re-select the model to update it.`;
+        }
+      } else {
+        modelProvider = providers.find((p) => p.id === resolvedModel);
+      }
     }
   }
 
@@ -212,7 +365,9 @@ export function resolveCliGenerationConfig(
       baseUrl: argv.openaiBaseUrl,
     },
     settings: {
-      model: settings.model?.name,
+      model: settings.model?.name
+        ? stripRuntimeSnapshotPrefix(settings.model.name)
+        : undefined,
       apiKey: settings.security?.auth?.apiKey,
       baseUrl: settings.security?.auth?.baseUrl,
       generationConfig: settings.model?.generationConfig as
@@ -230,7 +385,12 @@ export function resolveCliGenerationConfig(
   const ignoredGenerationConfigWarning =
     authType && modelProvider
       ? buildIgnoredTopLevelGenerationConfigWarning(
-          authType,
+          findProviderIdForModel(
+            settings.modelProviders,
+            settings.providerProtocol,
+            authType,
+            modelProvider,
+          ) ?? authType,
           modelProvider,
           getIgnoredTopLevelGenerationConfigFields(
             settings.model?.generationConfig as
@@ -258,6 +418,26 @@ export function resolveCliGenerationConfig(
     openAILoggingDir,
   };
 
+  // Apply the global reasoning-effort preference (settings.model.reasoningEffort,
+  // set via /effort) onto the unified reasoning config. Skip when thinking is
+  // explicitly disabled (reasoning === false) so effort never silently
+  // re-enables it; provider adapters clamp the tier to the active model.
+  const rawReasoningEffort = settings.model?.reasoningEffort;
+  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
+  // normalizes to undefined and is silently skipped below. Surface it as a
+  // warning so the user isn't left wondering why /effort had no effect.
+  const invalidReasoningEffortWarning =
+    rawReasoningEffort && !reasoningEffort
+      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+      : undefined;
+  if (reasoningEffort && generationConfig.reasoning !== false) {
+    generationConfig.reasoning = {
+      ...(generationConfig.reasoning ?? {}),
+      effort: reasoningEffort,
+    };
+  }
+
   return {
     model: resolved.config.model || '',
     apiKey: resolved.config.apiKey || '',
@@ -266,9 +446,15 @@ export function resolveCliGenerationConfig(
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
+      ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
+      ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]
         : []),
+      ...buildSkippedProviderWarnings(
+        settings.modelProviders,
+        settings.providerProtocol,
+      ),
     ],
   };
 }

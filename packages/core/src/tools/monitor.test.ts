@@ -9,6 +9,22 @@ import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 
+const mockOsPlatform = vi.hoisted(() =>
+  vi.fn<() => NodeJS.Platform>(() => 'linux'),
+);
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      platform: mockOsPlatform,
+    },
+    platform: mockOsPlatform,
+  };
+});
+
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', async (importOriginal) => {
@@ -178,6 +194,7 @@ describe('MonitorTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockOsPlatform.mockReturnValue('linux');
 
     monitorRegistry = new MonitorRegistry();
     mockIsPathWithinWorkspace = vi.fn().mockReturnValue(true);
@@ -195,6 +212,7 @@ describe('MonitorTool', () => {
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getShellExecutionConfig: vi.fn().mockReturnValue({}),
       storage: {
         getUserSkillsDirs: vi
           .fn()
@@ -237,6 +255,17 @@ describe('MonitorTool', () => {
         };
       }
     ).createInvocation(params);
+
+  describe('schema', () => {
+    it('declares monitor limits as integers', () => {
+      const schema = monitorTool.schema.parametersJsonSchema as {
+        properties?: Record<string, { type?: string }>;
+      };
+
+      expect(schema.properties?.['max_events']?.type).toBe('integer');
+      expect(schema.properties?.['idle_timeout_ms']?.type).toBe('integer');
+    });
+  });
 
   describe('confirmation details', () => {
     it('includes command-scoped permission rules for monitor commands', async () => {
@@ -416,44 +445,49 @@ describe('MonitorTool', () => {
   });
 
   describe('getDefaultPermission', () => {
-    it('denies command substitution before confirmation', async () => {
+    // Command substitution previously returned 'deny' here. Per #4093 it
+    // now falls through to 'ask' (matching ShellToolInvocation and
+    // PermissionManager.resolveDefaultPermission); the substitution
+    // warning is surfaced via getConfirmationDetails. YOLO mode can now
+    // override the prompt; before this change it could not.
+    it('asks for command substitution before confirmation', async () => {
       const invocation = createInvocation({
         command: 'echo $(cat secret.txt)',
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside explicit shell wrappers', async () => {
+    it('asks for command substitution inside explicit shell wrappers', async () => {
       const invocation = createInvocation({
         command: `/bin/bash -c 'echo $(cat secret.txt)'`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside wrapped scripts with argv suffixes', async () => {
+    it('asks for command substitution inside wrapped scripts with argv suffixes', async () => {
       const invocation = createInvocation({
         command: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside quoted env-prefixed wrappers', async () => {
+    it('asks for command substitution inside quoted env-prefixed wrappers', async () => {
       const invocation = createInvocation({
         command: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('denies command substitution inside env-prefix assignments', async () => {
+    it('asks for command substitution inside env-prefix assignments', async () => {
       const invocation = createInvocation({
         command: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
     it('allows read-only monitor commands by default', async () => {
@@ -463,6 +497,17 @@ describe('MonitorTool', () => {
       });
 
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    });
+
+    it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
+      const invocation = createInvocation({
+        command: 'echo $(cat secret.txt)',
+      });
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { warnings?: string[] };
+
+      expect(details.warnings?.[0]).toMatch(/command substitution/i);
     });
   });
 
@@ -483,6 +528,12 @@ describe('MonitorTool', () => {
       );
     });
 
+    it('rejects fractional max_events', () => {
+      expect(validate({ command: 'tail -f log', max_events: 1.5 })).toBe(
+        'max_events must be a positive integer.',
+      );
+    });
+
     it('rejects max_events over limit', () => {
       expect(validate({ command: 'tail -f log', max_events: 20000 })).toBe(
         'max_events cannot exceed 10000.',
@@ -491,6 +542,12 @@ describe('MonitorTool', () => {
 
     it('rejects invalid idle_timeout_ms', () => {
       expect(validate({ command: 'tail -f log', idle_timeout_ms: -100 })).toBe(
+        'idle_timeout_ms must be a positive integer.',
+      );
+    });
+
+    it('rejects fractional idle_timeout_ms', () => {
+      expect(validate({ command: 'tail -f log', idle_timeout_ms: 500.5 })).toBe(
         'idle_timeout_ms must be a positive integer.',
       );
     });
@@ -614,6 +671,33 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+    });
+
+    it('uses default pager env for spawned processes when pager is unset', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('cat');
+      expect(spawnOptions.env['GIT_PAGER']).toBe('cat');
+    });
+
+    it('propagates explicit pager configuration to spawned processes', async () => {
+      vi.mocked(mockConfig.getShellExecutionConfig).mockReturnValue({
+        pager: 'more',
+      });
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      const spawnOptions = mockSpawn.mock.calls[0][2];
+      expect(spawnOptions.env['PAGER']).toBe('more');
+      expect(spawnOptions.env['GIT_PAGER']).toBe('more');
     });
 
     it('does not spawn when the turn signal is already aborted', async () => {

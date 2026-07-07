@@ -234,6 +234,55 @@ export abstract class DeclarativeTool<
   }
 
   /**
+   * Max model-facing characters for this tool's output before the scheduler
+   * spills it to disk (mirrors Claude Code's per-tool `maxResultSizeChars`).
+   *   - `undefined` → use the global truncation threshold.
+   *   - `Infinity`  → self-managed (the tool does its own size control, e.g.
+   *     ReadFile's line-based paging), exempt from scheduler char truncation.
+   * Override in subclasses to opt into a per-tool budget.
+   */
+  get maxOutputChars(): number | undefined {
+    return undefined;
+  }
+
+  /**
+   * Direction kept when this tool's oversized output is truncated: `'head'`
+   * (beginning, e.g. shell), `'tail'` (end, e.g. background agents), or
+   * `'both'` (first + last, the default).
+   */
+  get truncateKeep(): 'head' | 'tail' | 'both' {
+    return 'both';
+  }
+
+  /**
+   * Projects tool params for the AUTO approval mode classifier.
+   *
+   * Tools with security-relevant parameters (file paths, shell commands,
+   * URLs) should override this to redact voluminous or sensitive fields
+   * (full content, secrets) while exposing enough for the classifier to
+   * judge safety.
+   *
+   * Returns:
+   *   - object: projected params to send to the classifier
+   *   - empty string: signals "no security relevance" — the classifier
+   *     transcript will record only the tool name
+   *   - undefined: fall back to raw params (only safe when the tool is
+   *     known to have no sensitive params)
+   *
+   * Default is the empty-string sentinel — fail-closed: a third-party
+   * MCP tool (or any tool that has not opted in) does not leak its raw
+   * parameters (potentially containing API keys, tokens, file contents)
+   * into the classifier LLM prompt. Tools that want their args inspected
+   * by the classifier for safety judgement should override this and
+   * return an object with only the security-relevant fields.
+   */
+  toAutoClassifierInput(
+    _params: TParams,
+  ): Record<string, unknown> | string | undefined {
+    return '';
+  }
+
+  /**
    * Validates the raw tool parameters.
    * Subclasses should override this to add custom validation logic
    * beyond the JSON schema check.
@@ -391,6 +440,36 @@ export function isTool(obj: unknown): obj is AnyDeclarativeTool {
   );
 }
 
+export type ToolArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type ToolArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export interface ToolArtifact {
+  kind?: ToolArtifactKind;
+  storage?: ToolArtifactStorage;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -412,6 +491,13 @@ export interface ToolResult {
    * Scheduler-side path activation consumes these in addition to input fields.
    */
   resultFilePaths?: string[];
+
+  /**
+   * Structured artifacts produced by this tool call. Daemon/session surfaces
+   * consume this as metadata only; the producer remains responsible for the
+   * underlying file, URL, or managed resource lifecycle.
+   */
+  artifacts?: ToolArtifact[];
 
   /**
    * If this property is present, the tool call is considered a failure.
@@ -571,8 +657,27 @@ export type ToolResultDisplay =
   | TodoResultDisplay
   | PlanResultDisplay
   | AgentResultDisplay
+  | TeamResultDisplay
+  | TaskListResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData;
+
+export interface TeamResultDisplay {
+  type: 'team_result';
+  teamName: string;
+  action: 'created' | 'deleted';
+  memberCount?: number;
+}
+
+export interface TaskListResultDisplay {
+  type: 'task_list';
+  tasks: Array<{
+    id: string;
+    subject: string;
+    status: string;
+    owner?: string;
+  }>;
+}
 
 export interface FileDiff {
   fileDiff: string;
@@ -635,6 +740,8 @@ export interface ToolEditConfirmationDetails {
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
+  /** Hide UI affordances that let the user edit the proposed content. */
+  hideModify?: boolean;
 }
 
 export interface ToolConfirmationPayload {
@@ -649,6 +756,15 @@ export interface ToolConfirmationPayload {
   permissionRules?: string[];
   // used to pass user answers from ask_user_question tool
   answers?: Record<string, string>;
+  // Replacement tool args from the host's permission policy
+  // (Anthropic stream-json `can_use_tool` returns this as
+  // `updatedInput` when sanitising a tool call before allowing
+  // it). When present and the outcome is allow, the scheduler
+  // overrides the tool's args with this object before scheduling.
+  // Cross-process callers (teammates) rely on this because they
+  // can't reach into the leader's local WaitingToolCall to mutate
+  // args directly the way the leader's same-process path does.
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -664,6 +780,14 @@ export interface ToolExecuteConfirmationDetails {
   rootCommand: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
+  /**
+   * Optional informational warnings to surface in the confirmation dialog,
+   * one short string per warning. Currently used to flag commands that
+   * contain shell command substitution (`$(...)`, backticks, `<(...)`,
+   * `>(...)`) so the user can review them before approving. Renderers
+   * should display these alongside the command, not as errors.
+   */
+  warnings?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {
@@ -771,6 +895,7 @@ export enum Kind {
   Execute = 'execute',
   Think = 'think',
   Fetch = 'fetch',
+  Agent = 'agent',
   Other = 'other',
 }
 

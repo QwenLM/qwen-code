@@ -18,6 +18,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Modo shell',
   'YOLO mode': 'Modo YOLO',
+  'Auto mode': 'Modo auto',
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',
   'Accepting edits': 'Aceitando edições',
@@ -101,7 +102,42 @@ export default {
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
-  'List available skills.': 'Listar habilidades disponíveis.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Abrir o painel de habilidades (explorar, pesquisar, ativar, selecionar).',
+  'Manage Skills': 'Gerenciar Habilidades',
+  'Skills configuration saved.': 'Configuração de habilidades salva.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Configuração de habilidades salva, mas a atualização falhou: {{error}}. Reinicie para garantir que o novo estado seja aplicado.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'O espaço de trabalho não é confiável; as configurações do espaço de trabalho são ignoradas pela configuração combinada. Execute /trust primeiro, ou edite ~/.qwen/settings.json diretamente para gerenciar habilidades no escopo do usuário.',
+  'SkillManager not available.': 'SkillManager indisponível.',
+  'Loading skills…': 'Carregando habilidades…',
+  'Failed to load skills: {{error}}':
+    'Falha ao carregar habilidades: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'Falha ao salvar a configuração de habilidades: {{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Todas as habilidades disponíveis estão desativadas. Edite ~/.qwen/settings.json ou .qwen/settings.json (skills.disabled) para reativá-las.',
+  'Press esc to close.': 'Pressione Esc para fechar.',
+  '{{count}} skills · ': '{{count}} habilidades · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilidades · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Espaço alternar · Enter selecionar (preencher entrada) · Esc salvar & sair · escopo do espaço de trabalho',
+  'Search:': 'Pesquisar:',
+  'type to filter…': 'digite para filtrar…',
+  'No skills are currently available.':
+    'Nenhuma habilidade está disponível no momento.',
+  'All available skills are locked at a higher scope (see below).':
+    'Todas as habilidades disponíveis estão bloqueadas em um escopo superior (veja abaixo).',
+  'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
+  'higher scope': 'escopo superior',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [bloqueado: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navegar · Backspace edita a pesquisa',
+  Bundled: 'Integrada',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -183,10 +219,9 @@ export default {
   'open full Qwen Code documentation in your browser':
     'abrir documentação completa do Qwen Code no seu navegador',
   'Configuration not available.': 'Configuração não disponível.',
-  'Configure authentication information for login':
-    'Configurar informações de autenticação para login',
-  'Copy the last result or code snippet to clipboard':
-    'Copiar o último resultado ou trecho de código para a área de transferência',
+  'Connect an LLM provider': 'Conectar a um provedor LLM',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Copiar a última resposta da IA para a área de transferência (/copy N para a N-ésima)',
 
   // ============================================================================
   // Commands - Agents
@@ -241,7 +276,7 @@ export default {
   'Open in editor': 'Abrir no editor',
   'Edit tools': 'Editar ferramentas',
   'Edit color': 'Editar cor',
-  '❌ Error:': '❌ Erro:',
+  '✗ Error:': '✗ Erro:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Tem certeza que deseja excluir o agente "{{name}}"?',
 
@@ -250,12 +285,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Nível de Projeto (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Nível de Usuário (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Subagente criado com sucesso!',
+  '✓ Subagent Created Successfully!': '✓ Subagente criado com sucesso!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'O subagente "{{name}}" foi salvo no nível {{level}}.',
   'Name: ': 'Nome: ',
   'Location: ': 'Localização: ',
-  '❌ Error saving subagent:': '❌ Erro ao salvar subagente:',
+  '✗ Error saving subagent:': '✗ Erro ao salvar subagente:',
   'Warnings:': 'Avisos:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'O nome "{{name}}" já existe no nível {{level}} - o subagente existente será substituído',
@@ -404,16 +439,61 @@ export default {
   Text: 'Texto',
   JSON: 'JSON',
   Plan: 'Planejamento',
-  Default: 'Padrão',
+  'Ask permissions': 'Pedir permissão',
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
-  'check session stats. Usage: /stats [model|tools]':
-    'verificar estatísticas da sessão. Uso: /stats [model|tools]',
   'Show model-specific usage statistics.':
     'Mostrar estatísticas de uso específicas do modelo.',
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
+  'Show daily token usage statistics.':
+    'Mostrar estatísticas diárias de uso de tokens.',
+  'Show monthly token usage statistics.':
+    'Mostrar estatísticas mensais de uso de tokens.',
+  'Export token usage statistics to CSV or JSON.':
+    'Exportar estatísticas de uso de tokens para CSV ou JSON.',
+  'No usage data.': 'Nenhum dado de uso.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requisições)',
+  'Daily token usage for {{value}}': 'Uso diário de tokens para {{value}}',
+  'Monthly token usage for {{value}}': 'Uso mensal de tokens para {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requisições: {{requests}}',
+  'Breakdown:': 'Detalhamento:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Saída: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (incluído na entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raciocínio: {{tokens}}',
+  'By model:': 'Por modelo:',
+  'By auth type:': 'Por tipo de autenticação:',
+  'By model/auth type:': 'Por modelo/tipo de autenticação:',
+  'By source:': 'Por origem:',
+  'Failed to load token usage stats: {{error}}':
+    'Falha ao carregar estatísticas de uso de tokens: {{error}}',
+  'Expected --format csv or --format json.':
+    'Esperado --format csv ou --format json.',
+  'Expected a file path after --output.':
+    'Esperado um caminho de arquivo após --output.',
+  'Unexpected argument: {{argument}}': 'Argumento inesperado: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Uso: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'O caminho de exportação do uso de tokens deve estar dentro do diretório de trabalho do projeto.',
+  'Export target does not exist: {{path}}':
+    'O destino da exportação não existe: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Não foi possível resolver o caminho de exportação dentro do diretório de trabalho.',
+  'Could not create a temporary export file.':
+    'Não foi possível criar um arquivo temporário de exportação.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Uso de tokens exportado para {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Falha ao exportar estatísticas de uso de tokens: {{error}}',
+  'Unclosed quote in arguments.': 'Aspas não fechadas nos argumentos.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Observação: o tempo de geração (TTFT/TPS) pertence às métricas de geração.',
   'exit the cli': 'sair da cli',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -660,6 +740,8 @@ export default {
   'After tool execution fails': 'Após a falha da execução da ferramenta',
   'When notifications are sent': 'Quando notificações são enviadas',
   'When the user submits a prompt': 'Quando o usuário envia um prompt',
+  'When a slash command expands into a prompt':
+    'Quando um comando slash se expande em um prompt',
   'When a new session is started': 'Quando uma nova sessão é iniciada',
   'Right before Qwen Code concludes its response':
     'Logo antes do Qwen Code concluir sua resposta',
@@ -685,6 +767,8 @@ export default {
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
   'Input to command is JSON with original user prompt text.':
     'A entrada para o comando é JSON com o texto original do prompt do usuário.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
     'A entrada para o comando é JSON com a fonte de início da sessão.',
   'Input to command is JSON with session end reason.':
@@ -713,6 +797,8 @@ export default {
     'mostrar stderr apenas ao usuário mas continuar com chamada de ferramenta',
   'block processing, erase original prompt, and show stderr to user only':
     'bloquear processamento, apagar prompt original e mostrar stderr apenas ao usuário',
+  'block expanded prompt submission and show stderr to user only':
+    'bloquear envio do prompt expandido e mostrar stderr apenas ao usuário',
   'stdout shown to Qwen': 'stdout mostrado ao Qwen',
   'show stderr to user only (blocking errors ignored)':
     'mostrar stderr apenas ao usuário (erros de bloqueio ignorados)',
@@ -760,6 +846,21 @@ export default {
   'Resume a previous session': 'Retomar uma sessão anterior',
   'Fork the current conversation into a new session':
     'Ramificar a conversa atual em uma nova sessão',
+  'Spawn a background agent that inherits the full conversation':
+    'Iniciar um agente em segundo plano que herda toda a conversa',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Forneça uma diretiva. Uso: /fork <diretiva>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Não é possível criar um fork enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
+  'Cannot fork before the first conversation turn.':
+    'Não é possível criar um fork antes da primeira rodada da conversa.',
+  'The agent tool is unavailable; cannot fork.':
+    'A ferramenta de agente está indisponível; não é possível criar um fork.',
+  'Failed to launch fork: {{error}}': 'Falha ao iniciar o fork: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'O usuário iniciou um fork em segundo plano via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Fork criado em um agente em segundo plano. Ele herda esta conversa e roda sem bloquear — acompanhe no painel de tarefas em segundo plano; ele informará quando terminar.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Não é possível ramificar enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'No conversation to branch.': 'Não há conversa para ramificar.',
@@ -807,13 +908,14 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Modo de Aprovação de Ferramenta',
-  '{{mode}} mode': 'Modo {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Apenas analisar, não modificar arquivos nem executar comandos',
   'Require approval for file edits or shell commands':
     'Exigir aprovação para edições de arquivos ou comandos shell',
   'Automatically approve file edits':
     'Aprovar automaticamente edições de arquivos',
+  'Use classifier to automatically approve safe tool calls':
+    'Usar o classificador para aprovar automaticamente chamadas seguras de ferramentas',
   'Automatically approve all tools':
     'Aprovar automaticamente todas as ferramentas',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
@@ -824,6 +926,7 @@ export default {
   'Auto-memory: {{status}}': 'Memória automática: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Consolidação automática: {{status}} · {{lastDream}} · /dream para executar',
+  'Auto-skill: {{status}}': 'Habilidade automática: {{status}}',
   never: 'nunca',
   on: 'ativado',
   off: 'desativado',
@@ -1077,12 +1180,12 @@ export default {
     'Escolha como proceder com sua sessão:',
   'Start new chat session': 'Iniciar nova sessão de chat',
   'Continue previous conversation': 'Continuar conversa anterior',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bem-vindo de volta! (Última atualização: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objetivo Geral:',
-  'Select Authentication Method': 'Selecionar Método de Autenticação',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Você deve selecionar um método de autenticação para prosseguir. Pressione Ctrl+C novamente para sair.',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bem-vindo de volta! (Última atualização: {{timeAgo}})',
+  'Overall Goal:': 'Objetivo Geral:',
+  'Connect a Provider': 'Conectar um provedor',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Você deve conectar um provedor para prosseguir. Pressione Ctrl+C novamente para sair.',
   'Terms of Services and Privacy Notice':
     'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1250,8 +1353,8 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': 'Nenhum MCP servers configurado.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers estão iniciando ({{count}} inicializando)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers estão iniciando ({{count}} inicializando)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Nota: A primeira inicialização pode demorar mais. A disponibilidade da ferramenta será atualizada automaticamente.',
   'Configured MCP servers:': 'MCP servers configurados:',
@@ -1273,8 +1376,9 @@ export default {
   'Tools:': 'Ferramentas:',
   'Parameters:': 'Parâmetros:',
   'Prompts:': 'Prompts:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloqueado',
-  '💡 Tips:': '💡 Dicas:',
+  '★ Tips:': '★ Dicas:',
   'to show server and tool descriptions':
     'para mostrar descrições de servidores e ferramentas',
   'to show tool parameter schemas': 'para mostrar tool parameter schemas',
@@ -1377,6 +1481,21 @@ export default {
     'Nenhuma chamada de ferramenta foi feita nesta sessão.',
   'Session start time is unavailable, cannot calculate stats.':
     'Hora de início da sessão indisponível, não é possível calcular estatísticas.',
+  Activity: 'Atividade',
+  Efficiency: 'Eficiência',
+  Today: 'Hoje',
+  'Token Trend': 'Tendência de Tokens',
+  'Cache Hit Rate': 'Taxa de cache',
+  'Tool Success': 'Sucesso de ferramentas',
+  'Tool Leaderboard': 'Ranking de ferramentas',
+  Time: 'Tempo',
+  Success: 'Sucesso',
+  Cache: 'Cache',
+  Latency: 'Latência',
+  'Code Impact': 'Impacto no código',
+  net: 'líquido',
+  streak: 'sequência',
+  best: 'recorde',
 
   // ============================================================================
   // Command Format Migration
@@ -1387,6 +1506,29 @@ export default {
   'Found {{count}} TOML command files:':
     'Encontrados {{count}} arquivos de comando TOML:',
   'Current tasks': 'Tarefas atuais',
+  'Background tasks': 'Tarefas em segundo plano',
+  'No tasks currently running': 'Nenhuma tarefa em execução',
+  'No entry to show.': 'Nenhuma entrada para mostrar.',
+  'needs approval': 'precisa de aprovação',
+  'rejected — edit config to re-approve':
+    'rejeitado — edite a configuração para reaprovar',
+  'Background agent needs approval':
+    'Agente em segundo plano precisa de aprovação',
+  'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
+  Running: 'Em execução',
+  Paused: 'Pausado',
+  Completed: 'Concluído',
+  Failed: 'Falhou',
+  Stopped: 'Parado',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Comando',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidação de memória',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidação de memória (revisando {{count}} sessão)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidação de memória (revisando {{count}} sessões)',
   '... and {{count}} more': '... e mais {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'O formato TOML está obsoleto. Você gostaria de migrá-los para o formato Markdown?',
@@ -1686,8 +1828,8 @@ export default {
   'Enter your Coding Plan API key: ': 'Insira sua API Key do Coding Plan: ',
   'Select authentication method:': 'Selecione o método de autenticação:',
   '\n=== Authentication Status ===\n': '\n=== Status de Autenticação ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  Nenhum método de autenticação configurado.\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  Nenhum método de autenticação configurado.\n',
   'Run one of the following commands to get started:\n':
     'Execute um dos seguintes comandos para começar:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1708,8 +1850,8 @@ export default {
   '  Current Model: {{model}}': '  Modelo atual: {{model}}',
   '  Config Version: {{version}}': '  Versão da configuração: {{version}}',
   '  Status: API key configured\n': '  Status: API Key configurada\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
   '  Issue: API key not found in environment or settings\n':
     '  Problema: API Key não encontrada no ambiente ou configurações\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1729,6 +1871,8 @@ export default {
     'Pressione Ctrl+O para exibir a saída completa da ferramenta',
   'Switch to plan mode or exit plan mode':
     'Alternar para o modo de planejamento ou sair do modo de planejamento',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Define a intensidade de raciocínio dos modelos compatíveis ({{tiers}}); mapeada e limitada por provedor.',
   'Exited plan mode. Previous approval mode restored.':
     'Modo de planejamento encerrado. Modo de aprovação anterior restaurado.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1882,6 +2026,26 @@ export default {
     'Dreams posteriores podem ser ignorados como bloqueados até que a próxima varredura de sessões obsoletas limpe o arquivo.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'O gate do agendador não viu o timestamp deste dream; o próximo ciclo de dream pode disparar novamente antes do normal.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Histórico recolhido: {{n}} mensagens ocultas. Use /history expand-now para mostrar.',
+
   // === Same-as-English optimization ===
   '(workspace)': '(espaço de trabalho)',
   'Ref:': 'Referência:',
@@ -1891,4 +2055,40 @@ export default {
   Use: 'Uso',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Mapa de Atividade',
+  Less: 'Menos',
+  More: 'Mais',
+  Sessions: 'Sessões',
+  Duration: 'Duração',
+  Projects: 'Projetos',
+  'Loading stats...': 'Carregando estatísticas...',
+  '(no data)': '(sem dados)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrada',
+  Models: 'Modelos',
+  'All time': 'Todo o período',
+  'Last 7 days': 'Últimos 7 dias',
+  'Last 30 days': 'Últimos 30 dias',
+  'Show usage statistics dashboard.': 'Exibir painel de estatísticas de uso.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'Requisições API',
+  'Tool Calls': 'Chamadas de Ferramenta',
+  'Success rate': 'Taxa de sucesso',
+  'Code Changes': 'Alterações de Código',
+  Tool: 'Ferramenta',
+  reqs: 'reqs',
+  in: 'ent.',
+  out: 'saída',
+  'In/Out': 'Ent/Saída',
 };

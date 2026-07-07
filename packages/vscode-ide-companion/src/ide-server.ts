@@ -7,10 +7,10 @@
 import * as vscode from 'vscode';
 import {
   CloseDiffRequestSchema,
+  detectIdeFromEnv,
   IdeContextNotificationSchema,
   OpenDiffRequestSchema,
-} from '@qwen-code/qwen-code-core/src/ide/types.js';
-import { detectIdeFromEnv } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
+} from '@qwen-code/qwen-code-core';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -204,8 +204,6 @@ export class IDEServer {
         next();
       });
 
-      const mcpServer = createMcpServer(this.diffManager);
-
       this.openFilesManager = new OpenFilesManager(context);
       const onDidChangeSubscription = this.openFilesManager.onDidChange(() => {
         this.broadcastIdeContextUpdate();
@@ -247,6 +245,8 @@ export class IDEServer {
             }
           }, 30000); // 30 sec
 
+          const mcpServer = createMcpServer(this.diffManager);
+
           transport.onclose = () => {
             clearInterval(keepAlive);
             if (transport.sessionId) {
@@ -255,7 +255,7 @@ export class IDEServer {
               delete this.transports[transport.sessionId];
             }
           };
-          mcpServer.connect(transport);
+          await mcpServer.connect(transport);
         } else {
           this.log(
             'Bad Request: No valid session ID provided for non-initialize request.',

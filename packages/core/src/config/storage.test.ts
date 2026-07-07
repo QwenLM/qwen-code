@@ -190,7 +190,7 @@ describe('Storage – getRuntimeBaseDir / setRuntimeBaseDir', () => {
 
   it('handles bare tilde (~) as home directory', () => {
     Storage.setRuntimeBaseDir('~');
-    expect(Storage.getRuntimeBaseDir()).toBe(os.homedir());
+    expect(Storage.getRuntimeBaseDir()).toBe(path.normalize(os.homedir()));
   });
 });
 
@@ -216,6 +216,12 @@ describe('Storage – getPlansDir', () => {
   it('resolves relative plansDirectory values against the project root', () => {
     expect(Storage.getPlansDir(projectRoot, './project-plans')).toBe(
       path.join(projectRoot, 'project-plans'),
+    );
+  });
+
+  it('allows project subdirectories whose names start with two dots', () => {
+    expect(Storage.getPlansDir(projectRoot, './..plans')).toBe(
+      path.join(projectRoot, '..plans'),
     );
   });
 
@@ -395,13 +401,6 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     expect(storage.getProjectDir()).toContain(path.join(customDir, 'projects'));
   });
 
-  it('getHistoryDir uses custom runtime base dir', () => {
-    const customDir = path.resolve('custom');
-    Storage.setRuntimeBaseDir(customDir);
-    const storage = new Storage('/tmp/project');
-    expect(storage.getHistoryDir()).toContain(path.join(customDir, 'history'));
-  });
-
   it('getProjectTempDir uses custom runtime base dir', () => {
     const customDir = path.resolve('custom');
     Storage.setRuntimeBaseDir(customDir);
@@ -579,7 +578,7 @@ describe('Storage – QWEN_HOME env var', () => {
 
   it('handles bare tilde (~) as home directory in QWEN_HOME', () => {
     process.env['QWEN_HOME'] = '~';
-    expect(Storage.getGlobalQwenDir()).toBe(os.homedir());
+    expect(Storage.getGlobalQwenDir()).toBe(path.normalize(os.homedir()));
   });
 
   it('QWEN_HOME and QWEN_RUNTIME_DIR are independent', () => {

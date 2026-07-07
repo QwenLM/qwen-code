@@ -524,7 +524,7 @@ const TOOL_DISPLAY_NAME_BY_NAME = {
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   save_memory: 'SaveMemory',
   task: 'Task',
   skill: 'Skill',

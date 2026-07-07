@@ -13,7 +13,12 @@ import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { getCacheSafeParams, runForkedAgent } from '@qwen-code/qwen-code-core';
+import {
+  BTW_MAX_INPUT_LENGTH,
+  buildBtwCacheSafeParams,
+  buildBtwPrompt,
+  runForkedAgent,
+} from '@qwen-code/qwen-code-core';
 
 function formatBtwError(error: unknown): string {
   return t('Failed to answer btw question: {{error}}', {
@@ -22,67 +27,12 @@ function formatBtwError(error: unknown): string {
   });
 }
 
-/**
- * Wrap the user's side question with constraints so the model knows it must
- * answer without tools in a single response.
- *
- * The system-reminder is embedded in the user message rather than overriding
- * systemInstruction, because runForkedAgent inherits systemInstruction from
- * CacheSafeParams (changing it would bust the prompt cache).
- */
-function buildBtwPrompt(question: string): string {
-  return [
-    '<system-reminder>',
-    'This is a side question from the user. Answer directly in a single response.',
-    '',
-    'CRITICAL CONSTRAINTS:',
-    '- You have NO tools available — you cannot read files, run commands, or take any actions.',
-    '- You can ONLY use information already present in the conversation context.',
-    '- NEVER promise to look something up or investigate further.',
-    '- If you do not know the answer, say so.',
-    '- The main conversation is NOT interrupted; you are a separate, lightweight fork.',
-    '</system-reminder>',
-    '',
-    question,
-  ].join('\n');
-}
-
-function getBtwCacheSafeParams(
-  context: CommandContext,
-): ReturnType<typeof getCacheSafeParams> {
-  const geminiClient = context.services.config?.getGeminiClient();
-  if (
-    geminiClient &&
-    typeof geminiClient === 'object' &&
-    typeof geminiClient.getChat === 'function' &&
-    typeof geminiClient.getHistory === 'function'
-  ) {
-    const chat = geminiClient.getChat();
-    if (
-      chat &&
-      typeof chat === 'object' &&
-      typeof chat.getGenerationConfig === 'function'
-    ) {
-      const generationConfig = chat.getGenerationConfig();
-      if (generationConfig) {
-        const fullHistory = geminiClient.getHistory(true);
-        const maxHistoryEntries = 40;
-        const history =
-          fullHistory.length > maxHistoryEntries
-            ? fullHistory.slice(-maxHistoryEntries)
-            : fullHistory;
-
-        return {
-          generationConfig,
-          history,
-          model: context.services.config?.getModel() ?? '',
-          version: 0,
-        };
-      }
-    }
+function getBtwCacheSafeParams(context: CommandContext) {
+  const { config } = context.services;
+  if (config) {
+    return buildBtwCacheSafeParams(config);
   }
-
-  return getCacheSafeParams();
+  return null;
 }
 
 /**
@@ -123,7 +73,7 @@ export const btwCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
@@ -135,6 +85,16 @@ export const btwCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Please provide a question. Usage: /btw <your question>'),
+      };
+    }
+
+    if (question.length > BTW_MAX_INPUT_LENGTH) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Question too long (max {{max}} chars)', {
+          max: String(BTW_MAX_INPUT_LENGTH),
+        }),
       };
     }
 
@@ -156,6 +116,24 @@ export const btwCommand: SlashCommand = {
         messageType: 'error',
         content: t('No model configured.'),
       };
+    }
+
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode !== 'interactive') {
+      try {
+        const answer = await askBtw(
+          context,
+          question,
+          context.abortSignal ?? new AbortController().signal,
+        );
+        return { type: 'message', messageType: 'info', content: answer };
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatBtwError(error),
+        };
+      }
     }
 
     // Interactive mode: use dedicated btwItem state for the fixed bottom area.

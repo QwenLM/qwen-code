@@ -772,4 +772,49 @@ describe('FileSearch', () => {
       expect(results).toEqual(['.gitignore', 'file2.ts']);
     });
   });
+
+  describe('dispose()', () => {
+    it('should release fzf handle on dispose', async () => {
+      tmpDir = await createTmpDir({
+        src: ['a.ts', 'b.ts'],
+      });
+
+      const fileSearch = FileSearchFactory.create({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+        cache: false,
+        cacheTtl: 0,
+        enableRecursiveFileSearch: true,
+        enableFuzzySearch: true,
+      });
+
+      await fileSearch.initialize();
+      await expect(fileSearch.dispose?.()).resolves.toBeUndefined();
+      // Idempotent
+      await expect(fileSearch.dispose?.()).resolves.toBeUndefined();
+    });
+
+    it('should be a no-op for DirectoryFileSearch', async () => {
+      tmpDir = await createTmpDir({
+        src: ['a.ts'],
+      });
+
+      const fileSearch = FileSearchFactory.create({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+        cache: false,
+        cacheTtl: 0,
+        enableRecursiveFileSearch: false,
+        enableFuzzySearch: true,
+      });
+
+      await fileSearch.initialize();
+      // DirectoryFileSearch has no dispose — should be undefined.
+      expect(fileSearch.dispose).toBeUndefined();
+    });
+  });
 });

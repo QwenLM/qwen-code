@@ -175,6 +175,27 @@ type ConversationResetHandlers = {
   setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
 };
 
+/**
+ * Surface the canonical tool name (the ACP frame's `_meta.toolName`) onto the
+ * PermissionToolCall so the drawer can render tool-specific UI (e.g. the Agent
+ * tool's "Launch this agent?" prompt) without depending on a protocol `kind`
+ * ACP can't carry. Mutates in place; a pre-existing `toolName` is preserved and
+ * an absent `_meta` is a no-op.
+ */
+export function liftToolNameFromMeta(
+  toolCall:
+    | (PermissionToolCall & { _meta?: { toolName?: string } })
+    | undefined,
+): void {
+  if (
+    toolCall &&
+    toolCall.toolName === undefined &&
+    typeof toolCall._meta?.toolName === 'string'
+  ) {
+    toolCall.toolName = toolCall._meta.toolName;
+  }
+}
+
 export function resetConversationState({
   handlers,
   clearImageResolutions,
@@ -744,7 +765,7 @@ export const useWebViewMessages = ({
 
         case 'streamEnd': {
           const endData = message.data as
-            | { reason?: string; requestId?: string }
+            | { reason?: string; requestId?: string; source?: string }
             | undefined;
           const endRequestId = endData?.requestId ?? null;
 
@@ -756,6 +777,8 @@ export const useWebViewMessages = ({
                 endRequestId,
                 'active:',
                 activeRequestIdRef.current,
+                'source:',
+                endData?.source,
               );
               break;
             }
@@ -764,6 +787,7 @@ export const useWebViewMessages = ({
           // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
+          activeRequestIdRef.current = null;
 
           // If stream ended due to explicit user cancellation, proactively clear
           // waiting indicator and reset tracked execution calls.
@@ -826,6 +850,16 @@ export const useWebViewMessages = ({
         }
 
         case 'permissionRequest': {
+          // Surface the canonical tool name (the ACP frame's `_meta.toolName`)
+          // onto the PermissionToolCall so the drawer can render tool-specific
+          // UI (e.g. the Agent tool's "Launch this agent?" prompt) without
+          // depending on a protocol `kind` ACP can't carry.
+          liftToolNameFromMeta(
+            message.data?.toolCall as
+              | (PermissionToolCall & { _meta?: { toolName?: string } })
+              | undefined,
+          );
+
           handlers.handlePermissionRequest(message.data);
 
           const permToolCall = message.data?.toolCall as {

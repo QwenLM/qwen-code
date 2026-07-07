@@ -12,7 +12,6 @@ import './styles/timeline.css';
 import './styles/components.css';
 
 // Shared UI Components Export
-// Export all shared components from this package
 
 // Context
 export {

@@ -172,6 +172,8 @@ function withSafeGitConfig(args: string[]): string[] {
     'core.fsmonitor=false',
     '-c',
     'core.untrackedCache=false',
+    '-c',
+    'core.quotePath=false',
     ...args,
   ];
 }
@@ -1036,7 +1038,12 @@ async function crawlWithGitLsFiles(
 
   // Avoid `-z` with `-t`: record shape for `ls-files -t` + `-z` is not stable across Git
   // versions; newline-delimited output is fine here (index paths cannot contain newlines).
-  const trackedArgs = ['--literal-pathspecs', 'ls-files', '--cached'];
+  const trackedArgs = [
+    '--literal-pathspecs',
+    'ls-files',
+    '--cached',
+    '--recurse-submodules',
+  ];
   trackedArgs.push('-t');
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);
@@ -1074,6 +1081,16 @@ async function crawlWithGitLsFiles(
 
     const normalizedFile = normalizePath(parsed.filePath);
     if (deletedSet.has(normalizedFile)) {
+      return true;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(path.join(gitRoot, ...normalizedFile.split('/')));
+    } catch {
+      return true;
+    }
+    if (stat.isDirectory()) {
       return true;
     }
 
@@ -1187,8 +1204,62 @@ async function crawlWithGitLsFiles(
   return { success: true, files: limitedResults };
 }
 
-function buildResultsFromFileSet(files: Set<string>): string[] {
+function collectDirectoryRows(options: CrawlOptions): string[] {
+  const relativeToCrawlDir = getPosixRelative(
+    options.cwd,
+    options.crawlDirectory,
+  );
+  const dirFilter = options.ignore.getDirectoryFilter();
+  const rows: string[] = [];
+
+  const visit = (dir: string, relativePath: string, depth: number): void => {
+    const cwdRelative =
+      relativePath === ''
+        ? relativeToCrawlDir
+        : path.posix.join(relativeToCrawlDir, relativePath);
+
+    if (cwdRelative !== '.') {
+      const row = cwdRelative.endsWith('/') ? cwdRelative : `${cwdRelative}/`;
+      if (!isValidIgnorePath(row.slice(0, -1)) || dirFilter(row)) {
+        return;
+      }
+      rows.push(row);
+    }
+
+    if (options.maxDepth !== undefined && depth > options.maxDepth) {
+      return;
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const childRelative = relativePath
+        ? path.posix.join(relativePath, entry.name)
+        : entry.name;
+      visit(path.join(dir, entry.name), childRelative, depth + 1);
+    }
+  };
+
+  visit(options.crawlDirectory, '', 0);
+  return rows;
+}
+
+function buildResultsFromFileSet(
+  files: Set<string>,
+  extraDirectories: string[] = [],
+): string[] {
   const dirSet = new Set<string>();
+  for (const dir of extraDirectories) {
+    dirSet.add(dir);
+  }
   for (const file of files) {
     const parts = file.split('/');
     let current = '';
@@ -1254,7 +1325,10 @@ async function crawlWithRipgrep(
     }
   }
 
-  const results = buildResultsFromFileSet(fileSet);
+  const results = buildResultsFromFileSet(
+    fileSet,
+    collectDirectoryRows(options),
+  );
   const filteredResults = applyFilters(
     results,
     options,

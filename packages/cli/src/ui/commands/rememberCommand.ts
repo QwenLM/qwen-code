@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core';
+import {
+  buildBareRememberPrompt,
+  buildManagedRememberPrompt,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
   CommandContext,
@@ -19,6 +22,8 @@ export const rememberCommand: SlashCommand = {
     return t('Save a durable memory to the memory system.');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
+  argumentHint: '<text to remember>',
   action: (context: CommandContext, args): SlashCommandActionReturn | void => {
     const fact = args.trim();
     if (!fact) {
@@ -30,29 +35,28 @@ export const rememberCommand: SlashCommand = {
     }
 
     const config = context.services.config;
-    const useManagedMemory = config?.getManagedAutoMemoryEnabled() ?? false;
-
-    if (useManagedMemory) {
-      // In managed auto-memory mode the save_memory tool is not registered.
-      // Submit a prompt so the main agent writes the per-entry file directly,
-      // choosing the appropriate type (user / feedback / project / reference)
-      // based on the content, following the instructions in buildManagedAutoMemoryPrompt.
-      const memoryDir = config
-        ? getAutoMemoryRoot(config.getProjectRoot())
-        : undefined;
-      const dirHint = memoryDir ? ` Save it to \`${memoryDir}\`.` : '';
+    if (!config) {
       return {
-        type: 'submit_prompt',
-        content: `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${fact}`,
+        type: 'message',
+        messageType: 'error',
+        content: t('Config not loaded.'),
       };
     }
 
-    // Managed auto-memory is disabled: ask the agent to save to QWEN.md
-    // using its native file tools. We do not call save_memory because that
-    // tool was removed.
+    const useManagedMemory = config?.isManagedMemoryAvailable() ?? false;
+
+    if (useManagedMemory) {
+      return {
+        type: 'submit_prompt',
+        content: buildManagedRememberPrompt(fact, config.getProjectRoot()),
+      };
+    }
+
+    // --bare mode: ask the agent to save to QWEN.md using its native
+    // file tools.
     return {
       type: 'submit_prompt',
-      content: `Please save the following fact to memory (e.g. append to QWEN.md in the project root):\n\n${fact}`,
+      content: buildBareRememberPrompt(fact),
     };
   },
 };

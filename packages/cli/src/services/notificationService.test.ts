@@ -27,6 +27,7 @@ function createMockTerminal(): TerminalNotification {
     notifyKitty: vi.fn(),
     notifyGhostty: vi.fn(),
     notifyBell: vi.fn(),
+    writeTerminalSequence: vi.fn(() => true),
   };
 }
 

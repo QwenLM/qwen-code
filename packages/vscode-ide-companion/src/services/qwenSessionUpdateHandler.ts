@@ -69,12 +69,40 @@ export class QwenSessionUpdateHandler {
         const text = this.getTextContent(
           (update as { content?: unknown }).content,
         );
-        if (text && this.callbacks.onStreamChunk) {
+        const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+        // When MessageRewriteMiddleware is active it emits a rewritten summary
+        // (_meta.rewritten === true) in addition to the original chunk, and
+        // both carry qwenDiscreteMessage. Persist only the original here so the
+        // notification is not stored twice; the rewritten copy falls through to
+        // onStreamChunk like any other streamed text.
+        const isDiscreteMessage =
+          (meta?.qwenDiscreteMessage === true ||
+            meta?.source === 'background_notification') &&
+          meta?.rewritten !== true;
+        if (text && isDiscreteMessage && this.callbacks.onMessage) {
+          const source =
+            typeof meta?.source === 'string' ? meta.source : undefined;
+          // Forward the originating ACP session id so the webview can persist
+          // background-notification follow-ups against the conversation that
+          // owns the session, not whichever conversation happens to be active
+          // in the panel right now. Without this, switching conversations
+          // between triggering a background task and receiving its reply leaks
+          // the reply (and its full chat-history context) into the wrong
+          // conversation's persisted message store.
+          const sessionId =
+            typeof data.sessionId === 'string' ? data.sessionId : undefined;
+          this.callbacks.onMessage({
+            role: 'assistant',
+            content: text,
+            timestamp:
+              typeof meta?.timestamp === 'number' ? meta.timestamp : Date.now(),
+            ...(source ? { source } : {}),
+            ...(sessionId ? { sessionId } : {}),
+          });
+        } else if (text && this.callbacks.onStreamChunk) {
           this.callbacks.onStreamChunk(text);
         }
-        this.emitUsageMeta(
-          (update as { _meta?: SessionUpdateMeta | null })._meta,
-        );
+        this.emitUsageMeta(meta);
         break;
       }
 

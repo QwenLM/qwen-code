@@ -139,12 +139,15 @@ export class UserPromptEvent implements BaseTelemetryEvent {
   prompt_id: string;
   auth_type?: string;
   prompt?: string;
+  /** Model that actually processed the prompt (e.g. an inline override). */
+  model?: string;
 
   constructor(
     prompt_length: number,
     prompt_Id: string,
     auth_type?: string,
     prompt?: string,
+    model?: string,
   ) {
     this['event.name'] = 'user_prompt';
     this['event.timestamp'] = new Date().toISOString();
@@ -152,6 +155,7 @@ export class UserPromptEvent implements BaseTelemetryEvent {
     this.prompt_id = prompt_Id;
     this.auth_type = auth_type;
     this.prompt = prompt;
+    this.model = model;
   }
 }
 
@@ -327,13 +331,24 @@ export class ApiCancelEvent implements BaseTelemetryEvent {
   model: string;
   prompt_id: string;
   auth_type?: string;
+  // Pending self-paced /loop wakeups dropped by this abort, when any. Lets a
+  // user abort that ends a loop be told apart from an ordinary cancellation.
+  // Named for wakeups (not "loops") to avoid colliding with loop_type, the
+  // unrelated repetition-detection vocabulary in this file.
+  loop_wakeups_cancelled?: number;
 
-  constructor(model: string, prompt_id: string, auth_type?: string) {
+  constructor(
+    model: string,
+    prompt_id: string,
+    auth_type?: string,
+    loop_wakeups_cancelled?: number,
+  ) {
     this['event.name'] = 'api_cancel';
     this['event.timestamp'] = new Date().toISOString();
     this.model = model;
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
+    this.loop_wakeups_cancelled = loop_wakeups_cancelled;
   }
 }
 
@@ -424,6 +439,16 @@ export enum LoopType {
   REPETITIVE_THOUGHTS = 'repetitive_thoughts',
   READ_FILE_LOOP = 'read_file_loop',
   ACTION_STAGNATION = 'action_stagnation',
+  /** Similar read-only shell inspection commands repeat with varied args. */
+  SHELL_COMMAND_STAGNATION = 'shell_command_stagnation',
+  /** Same (tool, args) pair appears N times across the entire turn, not necessarily consecutively. */
+  GLOBAL_TOOL_CALL_DUPLICATE = 'global_tool_call_duplicate',
+  /** Two tools alternating in a fixed pattern (A B A B A B ...). */
+  ALTERNATING_TOOL_CALL_PATTERN = 'alternating_tool_call_pattern',
+  /** Total tool calls in a single turn exceeded the always-on hard cap, regardless of pattern. */
+  TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
+  /** The same tool repeatedly failed schema validation with fresh tool-call ids. */
+  INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -646,6 +671,69 @@ export class ContentRetryEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
+ * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
+ *
+ * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
+ * for-loop for `InvalidStreamError` retries that go through a SEPARATE retry
+ * budget (`INVALID_CONTENT_RETRY_OPTIONS`, NOT `retryWithBackoff`). A single
+ * user prompt may fire BOTH event types; sum across event types to count total
+ * retries per prompt_id.
+ */
+export class ApiRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'api_retry';
+  'event.timestamp': string; // ISO 8601
+  model: string;
+  prompt_id?: string;
+  attempt_number: number; // 1-based monotonic counter (matches ALS retryContext.attempt)
+  error_type?: string;
+  error_message: string;
+  status_code?: number | string;
+  retry_delay_ms: number;
+  /**
+   * Reports the backoff delay following this failed attempt (NOT the attempt's
+   * own duration — that lives on the corresponding `qwen-code.llm_request`
+   * span's `duration_ms` attribute). Set equal to `retry_delay_ms` so the
+   * LogToSpanProcessor bridge span visualises the sleep window between the
+   * failed and next attempt in the trace timeline.
+   */
+  duration_ms: number;
+  /**
+   * Name of the subagent that issued the retrying request, or undefined when
+   * the request originates from the main conversation. Read from
+   * `subagentNameContext.getStore()` at the caller site (subagentNameContext
+   * is still active inside `retry.ts`'s catch block where `onRetry` fires).
+   */
+  subagent_name?: string;
+
+  constructor(opts: {
+    model: string;
+    promptId?: string;
+    attemptNumber: number;
+    error: unknown;
+    statusCode?: number | string;
+    retryDelayMs: number;
+    subagentName?: string;
+  }) {
+    this['event.name'] = 'api_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = opts.model;
+    this.prompt_id = opts.promptId;
+    this.attempt_number = opts.attemptNumber;
+    this.error_message =
+      opts.error instanceof Error
+        ? opts.error.message
+        : String(opts.error ?? 'unknown error');
+    this.error_type =
+      opts.error instanceof Error ? opts.error.constructor.name : undefined;
+    this.status_code = opts.statusCode;
+    this.retry_delay_ms = opts.retryDelayMs;
+    this.duration_ms = opts.retryDelayMs;
+    this.subagent_name = opts.subagentName;
+  }
+}
+
 export class ContentRetryFailureEvent implements BaseTelemetryEvent {
   'event.name': 'content_retry_failure';
   'event.timestamp': string;
@@ -720,6 +808,31 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
     this.truncated_content_length = details.truncatedContentLength;
     this.threshold = details.threshold;
     this.lines = details.lines;
+  }
+}
+
+export class ToolResultPersistedEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_result_persisted';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tool_name: string;
+  bytes_written: number;
+  output_file: string;
+  prompt_id: string;
+
+  constructor(
+    prompt_id: string,
+    details: {
+      toolName: string;
+      bytesWritten: number;
+      outputFile: string;
+    },
+  ) {
+    this['event.name'] = this.eventName;
+    this.prompt_id = prompt_id;
+    this.tool_name = details.toolName;
+    this.bytes_written = details.bytesWritten;
+    this.output_file = details.outputFile;
   }
 }
 
@@ -898,12 +1011,14 @@ export class SkillLaunchEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   skill_name: string;
   success: boolean;
+  prompt_id: string;
 
-  constructor(skill_name: string, success: boolean) {
+  constructor(skill_name: string, success: boolean, prompt_id: string = '') {
     this['event.name'] = 'skill_launch';
     this['event.timestamp'] = new Date().toISOString();
     this.skill_name = skill_name;
     this.success = success;
+    this.prompt_id = prompt_id;
   }
 }
 
@@ -961,11 +1076,13 @@ export type TelemetryEvent =
   | InvalidChunkEvent
   | ContentRetryEvent
   | ContentRetryFailureEvent
+  | ApiRetryEvent
   | SubagentExecutionEvent
   | ExtensionEnableEvent
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolResultPersistedEvent
   | ModelSlashCommandEvent
   | AuthEvent
   | HookCallEvent
@@ -1113,6 +1230,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
   outcome: 'accepted' | 'ignored' | 'suppressed';
   prompt_id?: string;
   accept_method?: 'tab' | 'enter' | 'right';
+  accept_source?: 'live' | 'fallback';
   time_to_accept_ms?: number;
   time_to_ignore_ms?: number;
   time_to_first_keystroke_ms?: number;
@@ -1125,6 +1243,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
     outcome: 'accepted' | 'ignored' | 'suppressed';
     prompt_id?: string;
     accept_method?: 'tab' | 'enter' | 'right';
+    accept_source?: 'live' | 'fallback';
     time_to_accept_ms?: number;
     time_to_ignore_ms?: number;
     time_to_first_keystroke_ms?: number;
@@ -1138,6 +1257,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
     this.outcome = params.outcome;
     this.prompt_id = params.prompt_id ?? 'user_intent';
     this.accept_method = params.accept_method;
+    this.accept_source = params.accept_source;
     this.time_to_accept_ms = params.time_to_accept_ms;
     this.time_to_ignore_ms = params.time_to_ignore_ms;
     this.time_to_first_keystroke_ms = params.time_to_first_keystroke_ms;
@@ -1180,6 +1300,47 @@ export class SpeculationEvent implements BaseTelemetryEvent {
   }
 }
 
+/** #4721 P-telemetry: the `workflow` keyword steered a turn toward the tool. */
+export class WorkflowKeywordEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_keyword';
+  'event.timestamp': string;
+
+  constructor() {
+    this['event.name'] = 'qwen-code.workflow_keyword';
+    this['event.timestamp'] = new Date().toISOString();
+  }
+}
+
+/** #4721 P-telemetry: a workflow run reached a terminal state. */
+export class WorkflowRunEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_run';
+  'event.timestamp': string;
+  status: string;
+  agents_dispatched: number;
+  agents_completed: number;
+  phase_count: number;
+  tokens_spent: number;
+  duration_ms: number;
+
+  constructor(params: {
+    status: string;
+    agents_dispatched: number;
+    agents_completed: number;
+    phase_count: number;
+    tokens_spent: number;
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.workflow_run';
+    this['event.timestamp'] = new Date().toISOString();
+    this.status = params.status;
+    this.agents_dispatched = params.agents_dispatched;
+    this.agents_completed = params.agents_completed;
+    this.phase_count = params.phase_count;
+    this.tokens_spent = params.tokens_spent;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Managed Auto-Memory Events
 // ---------------------------------------------------------------------------
@@ -1190,7 +1351,11 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
   /** 'auto' = triggered by session turn; 'manual' = user-initiated */
   trigger: 'auto' | 'manual';
   status: 'completed' | 'skipped' | 'failed';
-  skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+  skipped_reason?:
+    | 'already_running'
+    | 'queued'
+    | 'memory_tool'
+    | 'memory_pressure';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1198,7 +1363,11 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
   constructor(params: {
     trigger: 'auto' | 'manual';
     status: 'completed' | 'skipped' | 'failed';
-    skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+    skipped_reason?:
+      | 'already_running'
+      | 'queued'
+      | 'memory_tool'
+      | 'memory_pressure';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;

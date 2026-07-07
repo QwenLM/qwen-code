@@ -48,9 +48,15 @@ export interface RipgrepRunResult {
   error?: Error;
 }
 
-let cachedSelection: RipgrepSelection | null = null;
+const cachedSelections = new Map<boolean, RipgrepSelection>();
 let cachedHealth: RipgrepHealth | null = null;
 let macSigningAttempted = false;
+
+export function _resetRipgrepUtilsCachesForTest(): void {
+  cachedSelections.clear();
+  cachedHealth = null;
+  macSigningAttempted = false;
+}
 
 function wslTimeout(): number {
   return process.platform === 'linux' && process.env['WSL_INTEROP']
@@ -145,22 +151,25 @@ export function getBuiltinRipgrep(): string | null {
 export async function resolveRipgrep(
   useBuiltin: boolean = true,
 ): Promise<RipgrepSelection | null> {
+  const cachedSelection = cachedSelections.get(useBuiltin);
   if (cachedSelection) return cachedSelection;
 
   if (useBuiltin) {
     // Try bundled ripgrep first
     const rgPath = getBuiltinRipgrep();
     if (rgPath && (await fileExists(rgPath))) {
-      cachedSelection = { mode: 'builtin', command: rgPath };
-      return cachedSelection;
+      const selection = { mode: 'builtin' as const, command: rgPath };
+      cachedSelections.set(useBuiltin, selection);
+      return selection;
     }
     // Fallback to system rg if bundled binary is not available
   }
 
   const { available, error } = isCommandAvailable(RIPGREP_COMMAND);
   if (available) {
-    cachedSelection = { mode: 'system', command: RIPGREP_COMMAND };
-    return cachedSelection;
+    const selection = { mode: 'system' as const, command: RIPGREP_COMMAND };
+    cachedSelections.set(useBuiltin, selection);
+    return selection;
   }
 
   if (error) {
@@ -252,14 +261,16 @@ export async function canUseRipgrep(
  * Runs ripgrep with the provided arguments
  * @param args The arguments to pass to ripgrep
  * @param signal The signal to abort the ripgrep process
+ * @param useBuiltin Whether to try the bundled ripgrep before falling back to system ripgrep
  * @returns The result of running ripgrep
  * @throws {Error} If an error occurs while running ripgrep.
  */
 export async function runRipgrep(
   args: string[],
   signal?: AbortSignal,
+  useBuiltin: boolean = true,
 ): Promise<RipgrepRunResult> {
-  const selection = await resolveRipgrep();
+  const selection = await resolveRipgrep(useBuiltin);
   if (!selection) {
     throw new Error('ripgrep not found.');
   }

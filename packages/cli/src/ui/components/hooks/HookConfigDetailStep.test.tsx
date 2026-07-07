@@ -14,17 +14,14 @@ import {
 import { HookConfigDetailStep } from './HookConfigDetailStep.js';
 import type { HookEventDisplayInfo, HookConfigDisplayInfo } from './types.js';
 
-// Mock i18n module
 vi.mock('../../../i18n/index.js', () => ({
   t: vi.fn((key: string) => key),
 }));
 
-// Mock useTerminalSize
 vi.mock('../../hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 100, rows: 24 })),
 }));
 
-// Mock semantic-colors
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: {
@@ -51,7 +48,7 @@ describe('HookConfigDetailStep', () => {
       },
       { code: 'Other', description: 'show stderr to user only' },
     ],
-    configs: [],
+    matcherGroups: [],
   });
 
   const createMockHookConfig = (
@@ -170,7 +167,6 @@ describe('HookConfigDetailStep', () => {
       <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
-    // Should not have Extension label for User Settings
     const output = lastFrame();
     const extensionMatch = output?.match(/Extension:/g);
     expect(extensionMatch).toBeNull();
@@ -252,6 +248,74 @@ describe('HookConfigDetailStep', () => {
     expect(lastFrame()).toContain('Esc to go back');
   });
 
+  it('should render Matcher field for matcher-capable events', () => {
+    const hookEvent = {
+      ...createMockHookEvent(),
+      event: HookEventName.PreToolUse,
+    };
+    const hookConfig: HookConfigDisplayInfo = {
+      config: {
+        type: HookType.Command,
+        command: '/path/to/hook.sh',
+      },
+      source: HooksConfigSource.User,
+      sourceDisplay: 'User Settings',
+      matcher: 'Bash',
+      enabled: true,
+    };
+
+    const { lastFrame } = render(
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
+    );
+
+    expect(lastFrame()).toContain('Matcher:');
+    expect(lastFrame()).toContain('Bash');
+  });
+
+  it('should render Matcher as * when matcher is missing for matcher-capable events', () => {
+    const hookEvent = {
+      ...createMockHookEvent(),
+      event: HookEventName.PreToolUse,
+    };
+    const hookConfig: HookConfigDisplayInfo = {
+      config: {
+        type: HookType.Command,
+        command: '/path/to/hook.sh',
+      },
+      source: HooksConfigSource.User,
+      sourceDisplay: 'User Settings',
+      enabled: true,
+    };
+
+    const { lastFrame } = render(
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
+    );
+
+    expect(lastFrame()).toContain('Matcher:');
+    expect(lastFrame()).toContain('*');
+  });
+
+  it('should not render Matcher field for non-matcher events', () => {
+    const hookEvent = createMockHookEvent();
+    const hookConfig: HookConfigDisplayInfo = {
+      config: {
+        type: HookType.Command,
+        command: '/path/to/hook.sh',
+      },
+      source: HooksConfigSource.User,
+      sourceDisplay: 'User Settings',
+      matcher: '*',
+      enabled: true,
+    };
+
+    const output =
+      render(
+        <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
+      ).lastFrame() ?? '';
+
+    expect(output).not.toContain('Matcher:');
+  });
+
   it('should handle different event types', () => {
     const events = [
       HookEventName.PreToolUse,
@@ -266,7 +330,7 @@ describe('HookConfigDetailStep', () => {
         shortDescription: 'Test',
         description: '',
         exitCodes: [],
-        configs: [],
+        matcherGroups: [],
       };
       const hookConfig = createMockHookConfig();
 

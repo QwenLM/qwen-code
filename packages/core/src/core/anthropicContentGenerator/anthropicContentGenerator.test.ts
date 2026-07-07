@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   CountTokensParameters,
@@ -11,6 +12,10 @@ import type {
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  DEFAULT_TIMEOUT,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../openaiContentGenerator/constants.js';
 
 // Mock the request tokenizer module BEFORE importing the class that uses it.
 const mockTokenizer = {
@@ -22,7 +27,10 @@ vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
 }));
 
-type AnthropicCreateArgs = [unknown, { signal?: AbortSignal }?];
+type AnthropicCreateArgs = [
+  unknown,
+  { signal?: AbortSignal; headers?: Record<string, string> }?,
+];
 
 const anthropicMockState: {
   constructorOptions?: Record<string, unknown>;
@@ -67,16 +75,20 @@ const importConverter = async (): Promise<{
 }> => import('./converter.js');
 
 describe('AnthropicContentGenerator', () => {
+  const MAX_OUTPUT_TOKENS_ENV = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
   let mockConfig: Config;
   let anthropicState: {
     constructorOptions?: Record<string, unknown>;
     lastCreateArgs?: AnthropicCreateArgs;
     createImpl: ReturnType<typeof vi.fn>;
   };
+  let savedMaxOutputTokensEnv: string | undefined;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
+    delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
     mockTokenizer.calculateTokens.mockResolvedValue({
       totalTokens: 50,
@@ -97,10 +109,17 @@ describe('AnthropicContentGenerator', () => {
     mockConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.2.3'),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getTelemetryEnabled: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
     } as unknown as Config;
   });
 
   afterEach(() => {
+    if (savedMaxOutputTokensEnv === undefined) {
+      delete process.env[MAX_OUTPUT_TOKENS_ENV];
+    } else {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = savedMaxOutputTokensEnv;
+    }
     vi.restoreAllMocks();
   });
 
@@ -180,6 +199,45 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBeUndefined();
     expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+  });
+
+  it('disables the request timeout when configured to 0', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        timeout: 0,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    expect(anthropicState.constructorOptions?.['timeout']).toBe(
+      DISABLED_REQUEST_TIMEOUT_MS,
+    );
+  });
+
+  it('falls back to the default request timeout when unset', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    expect(anthropicState.constructorOptions?.['timeout']).toBe(
+      DEFAULT_TIMEOUT,
+    );
   });
 
   it('treats *.anthropic.com subdomains as Anthropic-native', async () => {
@@ -1011,9 +1069,16 @@ describe('AnthropicContentGenerator', () => {
       // generateContent(); make sure the per-request header attaches there
       // too so streaming Anthropic/DeepSeek requests stay consistent.
       const { AnthropicContentGenerator } = await importGenerator();
+      // Use message_delta (not bare message_stop) so the empty-stream
+      // fallback is not triggered — bare message_stop now indicates an empty
+      // stream and causes a non-streaming retry.
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
-          yield { type: 'message_stop' };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
         })(),
       );
 
@@ -1033,6 +1098,10 @@ describe('AnthropicContentGenerator', () => {
       for await (const _chunk of stream) {
         void _chunk;
       }
+
+      // Regression guard: normal streams must NOT trigger the empty-stream
+      // fallback (which would double latency + API cost).
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
       const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
       const headers = ((options as { headers?: Record<string, string> })
@@ -1072,6 +1141,94 @@ describe('AnthropicContentGenerator', () => {
           contents: 'Hello',
         } as unknown as GenerateContentParameters),
       ).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+    });
+
+    it('does not leak abort listeners onto the caller signal across non-streaming requests', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+
+      // Reproduce the SDK leak (see the generateContentStream test): the client
+      // registers a non-removed 'abort' listener on whatever signal it gets.
+      anthropicState.createImpl.mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          opts.signal?.addEventListener('abort', () => {});
+          return {
+            id: 'anthropic-1',
+            model: 'claude-test',
+            content: [{ type: 'text', text: 'Hello' }],
+          };
+        },
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const callerAc = new AbortController();
+      for (let i = 0; i < 5; i++) {
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { abortSignal: callerAc.signal },
+        } as unknown as GenerateContentParameters);
+      }
+
+      expect(getEventListeners(callerAc.signal, 'abort')).toHaveLength(0);
+      const passedSignal = (
+        anthropicState.lastCreateArgs?.[1] as { signal?: AbortSignal }
+      )?.signal;
+      expect(passedSignal).toBeDefined();
+      expect(passedSignal).not.toBe(callerAc.signal);
+    });
+
+    it('propagates a caller abort to the per-request child signal', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+
+      const callerAc = new AbortController();
+      let capturedSignal: AbortSignal | undefined;
+      anthropicState.createImpl.mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          capturedSignal = opts.signal;
+          // The caller aborts while the request is in flight.
+          callerAc.abort();
+          return {
+            id: 'anthropic-1',
+            model: 'claude-test',
+            content: [{ type: 'text', text: 'hi' }],
+          };
+        },
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+        config: { abortSignal: callerAc.signal },
+      } as unknown as GenerateContentParameters);
+
+      // The SDK is handed a child, and the caller's abort still reaches it, so
+      // cancellation behaviour is preserved.
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal).not.toBe(callerAc.signal);
+      expect(capturedSignal!.aborted).toBe(true);
     });
 
     it('builds request with config sampling params (config overrides request) and thinking budget', async () => {
@@ -1136,7 +1293,11 @@ describe('AnthropicContentGenerator', () => {
       const [anthropicRequest, options] =
         anthropicState.lastCreateArgs as AnthropicCreateArgs;
 
-      expect(options?.signal).toBe(abortController.signal);
+      // The generator wraps the caller's signal in a per-request child to
+      // isolate the SDK's abort-listener leak, so the SDK sees the child rather
+      // than the caller's signal.
+      expect(options?.signal).toBeDefined();
+      expect(options?.signal).not.toBe(abortController.signal);
 
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
@@ -1195,6 +1356,45 @@ describe('AnthropicContentGenerator', () => {
           thinking: { type: 'enabled', budget_tokens: 128_000 },
         }),
       );
+    });
+
+    // DeepSeek's anthropic-compatible output_config.effort accepts only
+    // high/max, so low/medium must lift to high (mirroring the DeepSeek OpenAI
+    // adapter) instead of passing through verbatim, which the endpoint 400s on.
+    it("lifts effort: 'low'/'medium' to 'high' on the DeepSeek anthropic path", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      for (const effort of ['low', 'medium'] as const) {
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'deepseek-v4-pro',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'deepseek-v4-pro',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.deepseek.com/anthropic',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            reasoning: { effort },
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ output_config: { effort: 'high' } }),
+        );
+      }
     });
 
     it("still clamps effort: 'max' when model name says 'deepseek' but hostname is api.anthropic.com", async () => {
@@ -1276,6 +1476,301 @@ describe('AnthropicContentGenerator', () => {
           output_config: { effort: 'high' },
           thinking: { type: 'enabled', budget_tokens: 64_000 },
         }),
+      );
+    });
+
+    // Per-model gating: Opus 4.7/4.8 and the 5.x families accept xhigh/max
+    // natively, so those tiers must pass through to output_config.effort
+    // instead of being clamped to 'high'.
+    it("passes effort: 'max' through on Opus 4.8 (native support)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-8',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'max' },
+          // 4.6+ uses adaptive thinking; the server controls the budget.
+          thinking: { type: 'adaptive' },
+        }),
+      );
+    });
+
+    it("passes effort: 'xhigh' through on Opus 4.8 (native support)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-8',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({
+          output_config: { effort: 'xhigh' },
+          thinking: { type: 'adaptive' },
+        }),
+      );
+    });
+
+    it("clamps effort: 'xhigh' to 'max' on Opus 4.6 (has max, lacks xhigh)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'max' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on Opus 4.5 (lacks xhigh/max)", async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-5',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on dated Opus 4.0 (date suffix is not a minor version)", async () => {
+      // Regression: `claude-opus-4-20250514` is Opus 4.0, which lacks
+      // xhigh/max. The 8-digit date suffix must not be parsed as the minor
+      // version (which would make atLeast(4, 6)/atLeast(4, 7) true and wrongly
+      // grant max/xhigh, yielding a server 400).
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-opus-4-20250514',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-20250514',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
+      );
+    });
+
+    it("passes effort: 'xhigh' through on a reseller-prefixed Opus 4.7 (bedrock/…)", async () => {
+      // The version regex is intentionally unanchored so reseller-prefixed ids
+      // gate identically to bare Anthropic ids. If it ever gets anchored, this
+      // model would fall back to low/medium/high and silently clamp xhigh away.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'bedrock/claude-opus-4-7',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'bedrock/claude-opus-4-7',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'xhigh' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'xhigh' } }),
+      );
+    });
+
+    it("passes effort: 'max' through on a 5.x family model (claude-sonnet-5-0)", async () => {
+      // Every 5.x family grants xhigh/max via the `major >= 5` branch,
+      // regardless of family. Locks in that the 5.x gating isn't accidentally
+      // narrowed to specific families.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-sonnet-5-0',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-sonnet-5-0',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'max' } }),
+      );
+    });
+
+    it("clamps effort: 'max' to 'high' on claude-haiku-4-6 (haiku 4.x lacks max)", async () => {
+      // The `max` tier on 4.x is documented as opus/sonnet only; the family
+      // guard keeps haiku 4.x off `max` (which would 400) even though it is
+      // >= 4.6. (5.x haiku still gets max via the major>=5 branch.)
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'anthropic-1',
+        model: 'claude-haiku-4-6',
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-haiku-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          reasoning: { effort: 'max' },
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const [anthropicRequest] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(anthropicRequest).toEqual(
+        expect.objectContaining({ output_config: { effort: 'high' } }),
       );
     });
 
@@ -1399,17 +1894,42 @@ describe('AnthropicContentGenerator', () => {
         });
       });
 
-      it('honors explicit reasoning.budget_tokens before falling back to adaptive', async () => {
-        // Explicit budget_tokens is a user escape hatch — adaptive thinking
-        // would otherwise silently drop the user-supplied value because the
-        // adaptive shape carries no budget field. The explicit branch must
-        // run first.
+      it('keeps the budget path for dated Opus 4.0 (claude-opus-4-20250514, date suffix is not a minor)', async () => {
+        // Regression: the 8-digit date suffix must not be parsed as the minor
+        // version. Opus 4.0 lacks adaptive thinking, so it must fall to the
+        // budget path rather than emitting `{ type: 'adaptive' }` (server 400).
+        expect(await thinkingFor('claude-opus-4-20250514')).toEqual({
+          type: 'enabled',
+          budget_tokens: 32_000,
+        });
+      });
+
+      it('honors explicit reasoning.budget_tokens on models that still accept manual thinking (e.g. claude-opus-4-6)', async () => {
+        // Explicit budget_tokens is a user escape hatch on models that still
+        // accept the manual `{ type: 'enabled', budget_tokens }` shape (Opus
+        // 4.5/4.6, Sonnet 4.6): adaptive thinking would otherwise silently drop
+        // the user-supplied value because the adaptive shape carries no budget
+        // field. The explicit branch must run first for these models.
+        expect(
+          await thinkingFor('claude-opus-4-6', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+      });
+
+      it('drops manual budget_tokens for adaptive-only models that reject it (e.g. claude-opus-4-7)', async () => {
+        // Opus 4.7+ and every 5.x family reject the manual
+        // `{ type: 'enabled', budget_tokens }` shape with a 400 and require
+        // adaptive thinking, so an explicit budget must be dropped in favor of
+        // adaptive thinking + output_config.effort rather than shipped verbatim
+        // (https://platform.claude.com/docs/en/build-with-claude/effort).
         expect(
           await thinkingFor('claude-opus-4-7', {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'enabled', budget_tokens: 42_000 });
+        ).toEqual({ type: 'adaptive' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
@@ -1572,7 +2092,7 @@ describe('AnthropicContentGenerator', () => {
         );
       });
 
-      it('uses conservative default when max_tokens is not explicitly configured', async () => {
+      it('uses model default when max_tokens is not explicitly configured', async () => {
         const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue({
           id: 'anthropic-1',
@@ -1600,7 +2120,76 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 8000 }),
+          expect.objectContaining({ max_tokens: 65536 }),
+        );
+      });
+
+      it('ignores malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+
+        for (const envValue of ['1.5', '2k', 'abc']) {
+          process.env[MAX_OUTPUT_TOKENS_ENV] = envValue;
+          anthropicState.createImpl.mockResolvedValueOnce({
+            id: `anthropic-${envValue}`,
+            model: 'claude-sonnet-4',
+            content: [{ type: 'text', text: 'hi' }],
+          });
+
+          const generator = new AnthropicContentGenerator(
+            {
+              model: 'claude-sonnet-4',
+              apiKey: 'test-key',
+              timeout: 10_000,
+              maxRetries: 2,
+              samplingParams: {},
+              schemaCompliance: 'auto',
+            },
+            mockConfig,
+          );
+
+          await generator.generateContent({
+            model: 'models/ignored',
+            contents: 'Hello',
+          } as unknown as GenerateContentParameters);
+
+          const [anthropicRequest] =
+            anthropicState.lastCreateArgs as AnthropicCreateArgs;
+          expect(anthropicRequest).toEqual(
+            expect.objectContaining({ max_tokens: 65536 }),
+          );
+        }
+      });
+
+      it('respects a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: {},
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 9000 }),
         );
       });
 
@@ -1665,7 +2254,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 8000 }),
+          expect.objectContaining({ max_tokens: 65536 }),
         );
       });
     });
@@ -2164,6 +2753,71 @@ describe('AnthropicContentGenerator', () => {
       ).rejects.toThrow('407 via http://<redacted>@proxy.local');
     });
 
+    it('does not leak abort listeners onto the caller signal across streamed requests', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+
+      // Reproduce the Anthropic SDK's listener leak: core.mjs fetchWithTimeout
+      // registers an 'abort' listener on whatever signal it is handed and never
+      // removes it. Whichever signal the generator passes to the client is
+      // where that listener accumulates.
+      anthropicState.createImpl.mockImplementation(
+        (_req: unknown, opts: { signal?: AbortSignal }) => {
+          opts.signal?.addEventListener('abort', () => {});
+          return (async function* () {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: { type: 'text' },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: 'Hello' },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+          })();
+        },
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      // A single long-lived caller signal reused across many requests, as a
+      // session/turn-scoped AbortController would be.
+      const callerAc = new AbortController();
+
+      for (let i = 0; i < 5; i++) {
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { abortSignal: callerAc.signal },
+        } as unknown as GenerateContentParameters);
+        for await (const _chunk of stream) {
+          // drain
+        }
+      }
+
+      // The SDK's per-request listeners must land on short-lived child signals
+      // (aborted once the stream drains), not pile up on the caller's signal.
+      expect(getEventListeners(callerAc.signal, 'abort')).toHaveLength(0);
+
+      // And the generator must not hand the caller signal straight to the SDK.
+      const passedSignal = (
+        anthropicState.lastCreateArgs?.[1] as { signal?: AbortSignal }
+      )?.signal;
+      expect(passedSignal).toBeDefined();
+      expect(passedSignal).not.toBe(callerAc.signal);
+    });
+
     it('redacts proxy credentials from stream iteration errors', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
@@ -2413,6 +3067,98 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+    });
+
+    it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            // Empty stream: compatible gateways can return HTTP 200 with no SSE
+            // events when the real failure body is only available non-streaming.
+          })(),
+        )
+        .mockRejectedValueOnce(new Error('400 quota exceeded'));
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      await expect(async () => {
+        for await (const _chunk of stream) {
+          void _chunk;
+        }
+      }).rejects.toThrow('400 quota exceeded');
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [streamingRequest] = anthropicState.createImpl.mock
+        .calls[0] as AnthropicCreateArgs;
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
+      expect(streamingRequest).toEqual(
+        expect.objectContaining({ stream: true }),
+      );
+      expect(fallbackRequest).not.toHaveProperty('stream');
+    });
+
+    it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield { type: 'message_stop' };
+          })(),
+        )
+        .mockResolvedValueOnce({
+          id: 'msg-fallback',
+          model: 'claude-test',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'fallback ok' }],
+          usage: { input_tokens: 3, output_tokens: 2 },
+        });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.responseId).toBe('msg-fallback');
+      expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'fallback ok' },
+      ]);
+      expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
   });
 });

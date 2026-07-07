@@ -8,7 +8,6 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
-  GitService,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -50,11 +49,12 @@ export interface CommandContext {
     // TODO(abhipatel12): Ensure that config is never null.
     config: Config | null;
     settings: LoadedSettings;
-    git: GitService | undefined;
     logger: Logger | null;
   };
   // UI state and history management
   ui: {
+    /** The current history items. */
+    history: HistoryItem[];
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
@@ -88,6 +88,8 @@ export interface CommandContext {
      * @param history The array of history items to load.
      */
     loadHistory: UseHistoryManagerReturn['loadHistory'];
+    /** Refreshes the static history display in Ink. */
+    refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
@@ -163,6 +165,12 @@ export interface OpenDialogActionReturn {
   /** Optional session name for /branch — passed through to handleBranch. */
   name?: string;
 
+  /**
+   * Optional persist scope for model dialog — controls which settings file
+   * the model selection is written to ('workspace' = project, 'user' = global).
+   */
+  persistScope?: 'workspace' | 'user';
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -177,19 +185,24 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
-    | 'manage-models'
+    | 'voice-model'
+    | 'vision-model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
+    | 'effort'
     | 'resume'
     | 'delete'
     | 'branch'
     | 'extensions_manage'
     | 'hooks'
     | 'mcp'
-    | 'rewind';
+    | 'rewind'
+    | 'diff'
+    | 'stats';
 }
 
 /**
@@ -211,6 +224,13 @@ export interface SubmitPromptActionReturn {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. When set, this prompt (and any tool-call
+   * continuations it spawns) runs on the given model without changing the
+   * session's selected model or persisting anything; it auto-reverts on the
+   * next user turn.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -275,9 +295,9 @@ export type CommandSource =
   | 'bundled-skill' // BundledSkillLoader
   | 'skill-dir-command' // FileCommandLoader (user/project, no extensionName)
   | 'plugin-command' // FileCommandLoader (extension, extensionName set)
-  | 'mcp-prompt'; // McpPromptLoader
+  | 'mcp-prompt' // McpPromptLoader
+  | 'workflow-command'; // SavedWorkflowLoader (.qwen/workflows/<name>.js)
 // Reserved for future loaders (not implemented in Phase 1):
-// | 'workflow-command'
 // | 'plugin-skill'
 // | 'dynamic-skill'
 
@@ -292,6 +312,8 @@ export interface CommandCompletionItem {
   value: string;
   label?: string;
   description?: string;
+  /** Whether the completion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
+  isDirectory?: boolean;
 }
 
 // The standardized contract for any command in the system.
@@ -369,6 +391,19 @@ export interface SlashCommand {
   acceptsInput?: boolean;
 
   /**
+   * When true, accepting this command from the slash auto-completion popup
+   * (e.g. typing `/skil` and pressing Enter on the highlighted `skills`
+   * suggestion) submits `/<name>` immediately rather than just inserting
+   * the text and forcing a second Enter.
+   *
+   * Set this only on commands whose bare action takes no required argument
+   * — typically commands whose action just opens a dialog. Commands with
+   * subCommands or arg-based completion should leave this false so users
+   * can navigate further.
+   */
+  submitOnAccept?: boolean;
+
+  /**
    * Describes when to use this command — injected into the model-visible
    * description for modelInvocable commands.
    */
@@ -382,6 +417,15 @@ export interface SlashCommand {
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];
+
+  /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
+  skillDetail?: {
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+  };
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

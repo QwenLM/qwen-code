@@ -5,6 +5,9 @@
  */
 
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
 
 /**
  * Type definition for the result of parsing a JSON chunk in tool calls
@@ -69,6 +72,7 @@ export class StreamingToolCallParser {
     name?: string,
   ): ToolCallParseResult {
     let actualIndex = index;
+    const isKnownId = Boolean(id && this.idToIndexMap.has(id));
 
     // Handle tool call ID mapping for collision detection
     if (id) {
@@ -84,20 +88,28 @@ export class StreamingToolCallParser {
           const existingDepth = this.depths.get(index)!;
           const existingMeta = this.toolCallMeta.get(index);
 
-          // Check if we have a complete tool call at this index
+          // Check if we have a complete tool call at this index. Occupancy
+          // is signaled by the name metadata, not the buffer: an empty
+          // buffer with a name is a complete no-argument call.
           if (
-            existingBuffer.trim() &&
+            existingMeta?.name &&
             existingDepth === 0 &&
             existingMeta?.id &&
             existingMeta.id !== id
           ) {
-            try {
-              JSON.parse(existingBuffer);
+            let existingComplete = true;
+            if (existingBuffer.trim()) {
+              try {
+                JSON.parse(existingBuffer);
+              } catch {
+                // Existing buffer is not complete JSON, we can reuse this index
+                existingComplete = false;
+              }
+            }
+            if (existingComplete) {
               // We have a complete tool call with a different ID at this index
               // Find a new index for this tool call
               actualIndex = this.findNextAvailableIndex();
-            } catch {
-              // Existing buffer is not complete JSON, we can reuse this index
             }
           }
         }
@@ -140,14 +152,42 @@ export class StreamingToolCallParser {
       this.toolCallMeta.set(actualIndex, {});
     }
 
+    const currentBuffer = this.buffers.get(actualIndex)!;
+    const currentDepth = this.depths.get(actualIndex)!;
+    if (isKnownId && currentDepth === 0) {
+      if (currentBuffer.trim()) {
+        try {
+          JSON.parse(currentBuffer);
+          debugLogger.debug(
+            `Ignoring replay chunk for completed toolCall id=${id}`,
+          );
+          return { complete: false };
+        } catch {
+          // Not complete yet; append the incoming chunk below.
+        }
+      } else if (
+        this.toolCallMeta.get(actualIndex)?.name &&
+        name &&
+        !chunk.trim()
+      ) {
+        // The call at this index may be a completed no-argument call. An
+        // incoming chunk that carries a name but no argument content is an
+        // opener-shaped replay (duplicate ID) and must not mutate the
+        // surviving call; a chunk with argument content is a continuation
+        // for a call whose opener streamed empty arguments and must append.
+        debugLogger.debug(
+          `Ignoring replayed opener for no-argument toolCall id=${id}`,
+        );
+        return { complete: false };
+      }
+    }
+
     // Update metadata
     const meta = this.toolCallMeta.get(actualIndex)!;
     if (id) meta.id = id;
     if (name) meta.name = name;
 
     // Get current state for the actual index
-    const currentBuffer = this.buffers.get(actualIndex)!;
-    const currentDepth = this.depths.get(actualIndex)!;
     const currentInString = this.inStrings.get(actualIndex)!;
     const currentEscape = this.escapes.get(actualIndex)!;
 
@@ -228,8 +268,10 @@ export class StreamingToolCallParser {
    * 2. Auto-close unclosed strings and retry
    * 3. Fallback to safeJsonParse for malformed data
    *
-   * Only returns tool calls with both name metadata and non-empty buffers.
-   * Should be called when streaming is complete (finish_reason is present).
+   * Only returns tool calls with name metadata. An empty buffer yields
+   * empty arguments ({}), matching the non-streaming path for no-argument
+   * tools. Should be called when streaming is complete (finish_reason is
+   * present).
    *
    * @returns Array of completed tool calls with their metadata and parsed arguments
    */
@@ -245,28 +287,59 @@ export class StreamingToolCallParser {
       args: Record<string, unknown>;
       index: number;
     }> = [];
+    const emittedIds = new Set<string>();
 
     for (const [index, buffer] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
-      if (meta?.name && buffer.trim()) {
+      if (meta?.name) {
+        if (meta.id) {
+          if (emittedIds.has(meta.id)) {
+            continue;
+          }
+          emittedIds.add(meta.id);
+        }
+
         let args: Record<string, unknown> = {};
 
-        // Try to parse the final buffer
-        try {
-          args = JSON.parse(buffer);
-        } catch {
-          // Try with repair (auto-close strings)
-          const inString = this.inStrings.get(index);
-          if (inString) {
-            try {
-              args = JSON.parse(buffer + '"');
-            } catch {
-              // If all parsing fails, use safeJsonParse as fallback
+        // An empty buffer is a legal end state: for no-argument tools some
+        // providers stream `arguments: ""` (or omit the field entirely) and
+        // never send an argument fragment. Keep args as {} to match the
+        // non-streaming path in converter.ts.
+        if (buffer.trim()) {
+          // Try to parse the final buffer
+          try {
+            args = JSON.parse(buffer);
+          } catch {
+            // Try with repair (auto-close strings)
+            const inString = this.inStrings.get(index);
+            if (inString) {
+              try {
+                args = JSON.parse(buffer + '"');
+              } catch {
+                // If all parsing fails, use safeJsonParse as fallback
+                args = safeJsonParse(buffer, {});
+              }
+            } else {
               args = safeJsonParse(buffer, {});
             }
-          } else {
-            args = safeJsonParse(buffer, {});
           }
+          // Tool arguments are always JSON objects; a corrupted buffer can
+          // parse or repair to a non-object value (e.g. a bare string), so
+          // collapse anything else to {}.
+          if (
+            typeof args !== 'object' ||
+            args === null ||
+            Array.isArray(args)
+          ) {
+            debugLogger.debug(
+              `Collapsing non-object arguments for tool call ${meta.name} (id=${meta.id}) at index ${index}; buffer likely polluted by a misrouted fragment`,
+            );
+            args = {};
+          }
+        } else {
+          debugLogger.debug(
+            `Emitting no-argument tool call ${meta.name} (id=${meta.id}) at index ${index} with empty buffer`,
+          );
         }
 
         completed.push({
@@ -285,8 +358,9 @@ export class StreamingToolCallParser {
    * Finds the next available index for a new tool call
    *
    * Scans indices starting from nextAvailableIndex to find one that's safe to use.
-   * Reuses indices with empty buffers or incomplete parsing states.
-   * Skips indices with complete, parseable tool call data to prevent overwriting.
+   * Reuses indices never claimed by a named tool call or with incomplete
+   * parsing states. Skips indices with complete tool call data — including
+   * no-argument calls with empty buffers — to prevent overwriting.
    *
    * @returns The next available index safe for storing a new tool call
    */
@@ -297,22 +371,23 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(this.nextAvailableIndex)!;
       const meta = this.toolCallMeta.get(this.nextAvailableIndex);
 
-      // If buffer is empty or incomplete (depth > 0), this index is available
-      if (!buffer.trim() || depth > 0 || !meta?.id) {
+      // If the slot was never claimed by a named call or is incomplete
+      // (depth > 0), this index is available. An empty buffer alone does
+      // not mean available: with name metadata it is a complete
+      // no-argument call.
+      if (!meta?.name || depth > 0 || !meta?.id) {
         return this.nextAvailableIndex;
       }
 
-      // Try to parse the buffer to see if it's complete
-      try {
-        JSON.parse(buffer);
-        // If parsing succeeds and depth is 0, this index has a complete tool call
-        if (depth === 0) {
-          this.nextAvailableIndex++;
-          continue;
+      // A non-empty buffer must parse as complete JSON for the slot to be
+      // occupied; an empty buffer is already complete (no-argument call)
+      if (buffer.trim()) {
+        try {
+          JSON.parse(buffer);
+        } catch {
+          // If parsing fails, this index is available for reuse
+          return this.nextAvailableIndex;
         }
-      } catch {
-        // If parsing fails, this index is available for reuse
-        return this.nextAvailableIndex;
       }
 
       this.nextAvailableIndex++;
@@ -324,8 +399,9 @@ export class StreamingToolCallParser {
    * Finds the most recent incomplete tool call index
    *
    * Used when continuation chunks arrive without IDs. Scans existing tool calls
-   * to find the highest index with incomplete parsing state (depth > 0, empty buffer,
-   * or unparseable JSON). Falls back to creating a new index if none found.
+   * to find the highest index with incomplete parsing state (depth > 0, empty
+   * buffer with no name metadata yet, or unparseable JSON). Falls back to
+   * creating a new index if none found.
    *
    * @returns The index of the most recent incomplete tool call, or a new available index
    */
@@ -336,8 +412,10 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(index)!;
       const meta = this.toolCallMeta.get(index);
 
-      // Check if this tool call is incomplete
-      if (meta?.id && (depth > 0 || !buffer.trim())) {
+      // Check if this tool call is incomplete. An empty buffer counts only
+      // while no name has arrived: with name metadata it is a complete
+      // no-argument call, and stray chunks must not be appended to it
+      if (meta?.id && (depth > 0 || (!buffer.trim() && !meta?.name))) {
         maxIndex = Math.max(maxIndex, index);
       } else if (buffer.trim()) {
         // Check if buffer is parseable (complete)

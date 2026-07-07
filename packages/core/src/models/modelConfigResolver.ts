@@ -21,6 +21,8 @@
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
+import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -121,14 +123,17 @@ function applyTimeoutEnvOverride(
   const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
   if (raw === undefined) return;
 
-  const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed > 0) {
-    generationConfig.timeout = Math.floor(parsed);
-    sources['timeout'] = {
-      kind: 'env',
-      envKey: 'QWEN_CODE_API_TIMEOUT_MS',
-    };
-  }
+  const trimmed = raw.trim();
+  // Accept a non-negative integer; `0` disables the request timeout downstream
+  // (see resolveRequestTimeout). Malformed values are ignored (keep default).
+  if (!/^\d+$/.test(trimmed)) return;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) return;
+  generationConfig.timeout = parsed;
+  sources['timeout'] = {
+    kind: 'env',
+    envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+  };
 }
 
 /**
@@ -268,7 +273,7 @@ export function resolveModelConfig(
     settings?.generationConfig,
     modelProvider?.generationConfig,
     authType,
-    modelProvider?.id,
+    modelProvider?.id ?? modelResult.value,
     sources,
   );
 
@@ -394,6 +399,36 @@ function resolveGenerationConfig(
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
     }
+  }
+
+  // contextWindowSize fallback: auto-detect from model when neither
+  // modelProvider nor settings supplied it. Only known models are stamped —
+  // unknown models keep `undefined` so downstream `?? DEFAULT_TOKEN_LIMIT`
+  // consumers apply the generic default without a misleading
+  // 'auto-detected' source label.
+  if (result.contextWindowSize === undefined && modelId) {
+    const knownLimit = knownTokenLimit(modelId, 'input');
+    if (knownLimit !== undefined) {
+      result.contextWindowSize = knownLimit;
+      sources['contextWindowSize'] = computedSource('auto-detected from model');
+    }
+  }
+
+  // modalities fallback: auto-detect from model when neither modelProvider nor
+  // settings supplied it. Mirrors modelRegistry.resolveModelConfig and
+  // modelsConfig.applyResolvedModelDefaults so all paths agree on which models
+  // are multimodal — without this, env-var-only setups silently drop @image
+  // attachments for image-capable models (issue #4219).
+  //
+  // Invariant: defaultModalities() returns `{}` (text-only) for unknown
+  // models, never `undefined`. After this fallback runs with a known modelId,
+  // `result.modalities` is always defined. Downstream code must NOT branch
+  // on `modalities === undefined` to mean "unresolved" — use the sources map
+  // (kind === 'computed' vs 'modelProviders'/'settings') if that distinction
+  // matters.
+  if (result.modalities === undefined && modelId) {
+    result.modalities = defaultModalities(modelId);
+    sources['modalities'] = computedSource('auto-detected from model');
   }
 
   return result;

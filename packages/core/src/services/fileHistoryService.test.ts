@@ -14,7 +14,7 @@ import {
   readFile,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const mockStorageDir = vi.hoisted(() => vi.fn());
@@ -25,11 +25,15 @@ vi.mock('../config/storage.js', () => ({
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
     debug: vi.fn(),
+    warn: vi.fn(),
     error: vi.fn(),
   }),
 }));
 
-import { FileHistoryService } from './fileHistoryService.js';
+import {
+  FileHistoryService,
+  type FileHistorySnapshot,
+} from './fileHistoryService.js';
 
 describe('FileHistoryService', () => {
   let projectDir: string;
@@ -61,6 +65,135 @@ describe('FileHistoryService', () => {
   });
 
   describe('trackEdit', () => {
+    it('records the updated latest snapshot after tracking a file', async () => {
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      await recordingService.trackEdit(file);
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+      const recorded = recordedSnapshots[0];
+      expect(recorded.promptId).toBe('p1');
+      expect(recorded.trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    });
+
+    it('does not record duplicate tracking for the same file', async () => {
+      const recordSnapshot = vi.fn();
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      await recordingService.trackEdit(file);
+      await recordingService.trackEdit(file);
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not record when the snapshot is removed while backup is in flight', async () => {
+      const recordSnapshot = vi.fn();
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      const edit = recordingService.trackEdit(file);
+      recordingService.restoreFromSnapshots([]);
+      await edit;
+
+      expect(recordSnapshot).not.toHaveBeenCalled();
+      expect(recordingService.getSnapshots()).toEqual([]);
+    });
+
+    it('records again when a second file is tracked in the same snapshot', async () => {
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const firstFile = join(projectDir, 'a.txt');
+      const secondFile = join(projectDir, 'b.txt');
+      await writeFile(firstFile, 'a-original');
+      await writeFile(secondFile, 'b-original');
+
+      await recordingService.makeSnapshot('p1');
+      await recordingService.trackEdit(firstFile);
+      await recordingService.trackEdit(secondFile);
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(2);
+      const recorded = recordedSnapshots[1];
+      expect(recorded.trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+      expect(recorded.trackedFileBackups['b.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    });
+
+    it('swallows recorder errors after tracking a file', async () => {
+      const recordSnapshot = vi.fn(() => {
+        throw new Error('record failed');
+      });
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      await expect(recordingService.trackEdit(file)).resolves.toBeUndefined();
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+      expect(
+        recordingService.getSnapshots()[0].trackedFileBackups['a.txt'],
+      ).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    });
+
     it('should back up file before first edit in a snapshot', async () => {
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'original');
@@ -129,6 +262,16 @@ describe('FileHistoryService', () => {
     // the failed flag stays sticky until the file content changes,
     // permanently poisoning rewind for that file.
     it('heals a failed entry on the next trackEdit attempt', async () => {
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
+      service = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'p1-content');
 
@@ -158,6 +301,15 @@ describe('FileHistoryService', () => {
       expect(p2Backup).toBeDefined();
       expect(p2Backup.failed).toBeFalsy();
       expect(p2Backup.backupFileName).not.toBeNull();
+      expect(recordSnapshot).toHaveBeenCalledTimes(2);
+      expect(recordedSnapshots[1]).toEqual(
+        expect.objectContaining({
+          promptId: 'p2',
+          trackedFileBackups: expect.objectContaining({
+            'a.txt': p2Backup,
+          }),
+        }),
+      );
 
       // Verify the on-disk backup at the new name actually contains the
       // current file content. Catches a regression where the heal path
@@ -512,6 +664,69 @@ describe('FileHistoryService', () => {
       // Path outside cwd should be preserved as-is.
       expect(snapshots[0].trackedFileBackups[externalPath]).toBeDefined();
     });
+
+    it('records failed markers when restored backup files are missing', async () => {
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
+      const fresh = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+
+      fresh.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'deadbeefcafebabe@v1',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:00.000Z'),
+            },
+          },
+          timestamp: new Date('2026-06-13T00:00:01.000Z'),
+        },
+      ]);
+
+      await fresh.validateRestoredSnapshots();
+
+      const backup = fresh.getSnapshots()[0]!.trackedFileBackups['a.txt']!;
+      expect(backup.failed).toBe(true);
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+      expect(recordedSnapshots[0]!.trackedFileBackups['a.txt']?.failed).toBe(
+        true,
+      );
+    });
+
+    it('does not restore backup files that escape the session directory', async () => {
+      const fresh = new FileHistoryService('test-session', true, projectDir);
+      const victim = join(projectDir, 'victim.txt');
+      await writeFile(victim, 'current');
+      await writeFile(join(storageDir, 'outside.txt'), 'outside');
+
+      fresh.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          trackedFileBackups: {
+            'victim.txt': {
+              backupFileName: '../../outside.txt',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:00.000Z'),
+            },
+          },
+          timestamp: new Date('2026-06-13T00:00:01.000Z'),
+        },
+      ]);
+
+      const result = await fresh.rewind('p1');
+
+      expect(result.filesChanged).toEqual([]);
+      expect(result.filesFailed).toContain(victim);
+      expect(await readFile(victim, 'utf-8')).toBe('current');
+    });
   });
 
   describe('snapshot eviction', () => {
@@ -639,6 +854,323 @@ describe('FileHistoryService', () => {
     it('should return undefined when snapshot not found', async () => {
       const stats = await service.getDiffStats('nonexistent');
       expect(stats).toBeUndefined();
+    });
+  });
+
+  describe('getTurnDiff', () => {
+    it('returns undefined when disabled', async () => {
+      const disabled = new FileHistoryService('s', false, projectDir);
+      expect(await disabled.getTurnDiff('p1')).toBeUndefined();
+    });
+
+    it('returns undefined when the prompt has no snapshot', async () => {
+      expect(await service.getTurnDiff('missing')).toBeUndefined();
+    });
+
+    it('diffs a turn against the next snapshot', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'line1\nline2\nline3\n');
+
+      // Turn 1 begins — captures pre-edit state — then the tool would
+      // modify the file. We mirror that order: makeSnapshot → trackEdit
+      // → mutate. This is the same sequence `client.ts` follows on
+      // every UserQuery turn.
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'line1\nLINE2_EDITED\nline3\n');
+
+      // Turn 2 begins — this snapshot becomes the "after" for turn 1.
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      expect(turn1!.files).toHaveLength(1);
+      // filePath is repo-relative (matches Current source convention).
+      expect(turn1!.files[0].filePath).toBe(basename(file));
+      expect(turn1!.files[0].linesAdded).toBe(1);
+      expect(turn1!.files[0].linesRemoved).toBe(1);
+      expect(turn1!.files[0].isNewFile).toBe(false);
+      expect(turn1!.files[0].isDeleted).toBe(false);
+      expect(turn1!.stats.filesChanged).toBe(1);
+    });
+
+    it('compares the latest turn against the live worktree', async () => {
+      const file = join(projectDir, 'b.txt');
+      await writeFile(file, 'before');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'after-edit-1\nafter-edit-2');
+
+      const turn = await service.getTurnDiff('p1');
+      expect(turn).toBeDefined();
+      expect(turn!.files).toHaveLength(1);
+      // 2 added lines (or 1 add + content change depending on diff alg)
+      expect(
+        turn!.files[0].linesAdded + turn!.files[0].linesRemoved,
+      ).toBeGreaterThan(0);
+    });
+
+    it('flags newly created files', async () => {
+      const file = join(projectDir, 'new.txt');
+
+      // Pre-existing snapshot with no tracked files.
+      await service.makeSnapshot('p1');
+      // Now the tool creates the file mid-turn 1. trackEdit captures
+      // the pre-state (file does not exist).
+      await service.trackEdit(file);
+      await writeFile(file, 'fresh content\n');
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.isNewFile).toBe(true);
+      expect(entry!.isDeleted).toBe(false);
+      expect(entry!.linesAdded).toBeGreaterThan(0);
+    });
+
+    it('skips files with no change between snapshots', async () => {
+      const file = join(projectDir, 'untouched.txt');
+      await writeFile(file, 'stable\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // No actual modification before next snapshot.
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      // The file got tracked but content is identical — should not appear
+      // in the per-turn diff.
+      expect(turn1!.files).toHaveLength(0);
+      expect(turn1!.stats.filesChanged).toBe(0);
+    });
+
+    // Regression for the silent-empty-string bug: a backup that records a
+    // real backupFileName but is unreadable on disk used to be coerced to
+    // '', producing a fake "every line added" diff. Now we drop the row
+    // entirely so the dialog doesn't lie about phantom changes.
+    it('skips files whose backup file is missing on disk', async () => {
+      const file = join(projectDir, 'lostbackup.txt');
+      await writeFile(file, 'before');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'after');
+      await service.makeSnapshot('p2');
+
+      // Wipe the backup directory between makeSnapshot('p2') and the diff
+      // read. The snapshot records still point at the deleted file paths.
+      await rm(join(storageDir, 'file-history'), {
+        recursive: true,
+        force: true,
+      });
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      expect(turn1!.files).toHaveLength(0);
+    });
+
+    // Regression for the unbounded structuredPatch allocation: a single
+    // huge file in history could blow up TUI memory when /diff opens.
+    // Oversized rows now skip hunk construction but still surface in the
+    // file list with best-effort line-count stats.
+    it('detects files deleted during a turn', async () => {
+      const file = join(projectDir, 'doomed.txt');
+      await writeFile(file, 'line a\nline b\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Simulate the tool deleting the file mid-turn.
+      await rm(file);
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.isDeleted).toBe(true);
+      expect(entry!.isNewFile).toBe(false);
+      expect(entry!.linesRemoved).toBeGreaterThan(0);
+    });
+
+    it('flags binary content with isBinary and skips hunk generation', async () => {
+      const file = join(projectDir, 'image.bin');
+      // PNG-ish header — NUL bytes within the sniff window trip the
+      // looksBinary heuristic.
+      await writeFile(file, '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Append more binary bytes so before !== after.
+      await writeFile(
+        file,
+        '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00',
+      );
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.isBinary).toBe(true);
+      expect(entry!.hunks).toEqual([]);
+    });
+
+    // Files that target's snapshot didn't capture (e.g. they were first
+    // tracked in a later turn) must not show up in target's diff —
+    // otherwise we'd attribute a newer turn's edits to an earlier one.
+    it('does not attribute later-tracked files to earlier turns', async () => {
+      const fileA = join(projectDir, 'a.txt');
+      const fileB = join(projectDir, 'b.txt');
+      await writeFile(fileA, 'A1');
+
+      // Turn 1 only edits file A.
+      await service.makeSnapshot('p1');
+      await service.trackEdit(fileA);
+      await writeFile(fileA, 'A2');
+
+      // Turn 2 begins. makeSnapshot captures A's new state. File B does
+      // not exist yet and isn't tracked.
+      await service.makeSnapshot('p2');
+
+      // Turn 2 creates file B for the first time.
+      await service.trackEdit(fileB);
+      await writeFile(fileB, 'B1');
+
+      // Turn 3 begins. Now B is in trackedFiles → snapshot[2] captures it.
+      await service.makeSnapshot('p3');
+
+      // Turn 1's diff must reference only A, never B.
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const paths = turn1!.files.map((f) => f.filePath);
+      expect(paths).toContain(basename(fileA));
+      expect(paths).not.toContain(basename(fileB));
+    });
+
+    // Regression for the live-worktree read-failure collapse: if a file
+    // becomes unreadable in the worktree (EACCES, EBUSY, …) we used to
+    // treat it as deleted and synthesize a phantom delete hunk. Now we
+    // drop the row so the dialog never lies about removals that didn't
+    // actually happen.
+    it('does not synthesize a delete hunk when the live worktree read fails', async () => {
+      const file = join(projectDir, 'flaky.txt');
+      await writeFile(file, 'still here\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'changed\n');
+
+      // Replace the file with a directory so readFile rejects with EISDIR
+      // (a non-ENOENT failure that previously masqueraded as deletion).
+      await rm(file);
+      await mkdir(file);
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      // Row dropped because the live endpoint is unreadable, not because
+      // the file is gone.
+      expect(entry).toBeUndefined();
+    });
+
+    it('flags oversized files instead of allocating large hunks', async () => {
+      const file = join(projectDir, 'big.txt');
+      // 1.5 MB > MAX_DIFF_SIZE_BYTES (1 MB)
+      const big = 'x'.repeat(1_500_000);
+      await writeFile(file, big);
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Append a small amount so before !== after but both endpoints are
+      // still oversized.
+      await writeFile(file, big + '\nappended\n');
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.oversized).toBe(true);
+      expect(entry!.hunks).toEqual([]);
+      // Pre-read size guard bails before allocating, so we cannot compute
+      // a line-count delta. Stats are 0/0; the row's purpose is to signal
+      // the omission, not to estimate changes.
+      expect(entry!.linesAdded).toBe(0);
+      expect(entry!.linesRemoved).toBe(0);
+    });
+
+    // Regression for the live-worktree branch of the OOM guard: the
+    // previous oversized test compares two backups (both endpoints take
+    // the backup branch), so it never exercised `readPathWithSizeGuard`
+    // on the live worktree. This case has a single snapshot, so `after`
+    // is read from the live file — verifying `stat()` + open/fstat there.
+    it('flags oversized in the live-worktree branch (latest-turn endpoint)', async () => {
+      const file = join(projectDir, 'live-big.txt');
+      await writeFile(file, 'tiny seed\n');
+
+      // Single snapshot: turn 1 has no successor, so its `after`
+      // endpoint is the live worktree, not a backup.
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Inflate past MAX_DIFF_SIZE_BYTES so the worktree-side guard
+      // trips during getTurnDiff.
+      await writeFile(file, 'x'.repeat(1_500_000));
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.oversized).toBe(true);
+      expect(entry!.hunks).toEqual([]);
+      expect(entry!.linesAdded).toBe(0);
+      expect(entry!.linesRemoved).toBe(0);
+      // Worktree exists at read time → not flagged as a deletion.
+      expect(entry!.isDeleted).toBe(false);
+    });
+
+    // Mixed-size endpoint: only the `after` endpoint trips the cap. The
+    // discriminated union must still narrow `.exists` correctly when the
+    // two sides return different `kind`s.
+    it('handles mixed-size endpoints (small before, oversized after)', async () => {
+      const file = join(projectDir, 'mixed-big.txt');
+      await writeFile(file, 'tiny seed\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Grow past cap *before* snapshot p2 captures it as a backup.
+      await writeFile(file, 'x'.repeat(1_500_000));
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === basename(file));
+      expect(entry).toBeDefined();
+      expect(entry!.oversized).toBe(true);
+      // Before existed (snapshot has tiny content), so it's neither new
+      // nor a deletion even though after is oversized.
+      expect(entry!.isNewFile).toBe(false);
+      expect(entry!.isDeleted).toBe(false);
+    });
+
+    // filesOmitted should be 0 in the happy-path cases and reflected on
+    // every TurnDiff (regression: a forgetten field default would let
+    // the dialog's truncation indicator stay silent under cap pressure).
+    it('reports stats.filesOmitted === 0 when below the per-turn cap', async () => {
+      const file = join(projectDir, 'omit-baseline.txt');
+      await writeFile(file, 'a\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'a\nb\n');
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      expect(turn1!.stats.filesOmitted).toBe(0);
     });
   });
 });

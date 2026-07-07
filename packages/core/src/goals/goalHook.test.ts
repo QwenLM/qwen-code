@@ -526,6 +526,53 @@ describe('registerGoalHook / unregisterGoalHook', () => {
     expect(getActiveGoal('sess-1')).toMatchObject({ condition: 'tests pass' });
   });
 
+  it('primes the store from initialIterations on resume', () => {
+    const goal = registerGoalHook({
+      config,
+      sessionId: 'sess-1',
+      condition: 'tests pass',
+      tokensAtStart: 0,
+      initialIterations: 7,
+    });
+    expect(goal.iterations).toBe(7);
+    expect(getActiveGoal('sess-1')?.iterations).toBe(7);
+  });
+
+  it('clamps a negative initialIterations to 0', () => {
+    const goal = registerGoalHook({
+      config,
+      sessionId: 'sess-1',
+      condition: 'tests pass',
+      tokensAtStart: 0,
+      initialIterations: -3,
+    });
+    expect(goal.iterations).toBe(0);
+  });
+
+  it('honors a resumed near-cap count so MAX survives resume (no fresh budget)', async () => {
+    // Simulate resume re-arming a goal that was already at the cap last session.
+    registerGoalHook({
+      config,
+      sessionId: 'sess-1',
+      condition: 'do x',
+      tokensAtStart: 0,
+      initialIterations: MAX_GOAL_ITERATIONS,
+    });
+    judgeMock.mockResolvedValue({ ok: false, reason: 'still not done' });
+    const cb = createGoalStopHookCallback({
+      config,
+      sessionId: 'sess-1',
+      condition: 'do x',
+    });
+    const out = await cb(stopInput(), undefined);
+    // Without resumed iterations this would just block and continue; because the
+    // count survived resume, the very next not-met verdict hits the cap.
+    expect(
+      typeof out === 'object' && out !== null ? out.systemMessage : undefined,
+    ).toMatch(/max iterations/i);
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+  });
+
   it('replaces an existing goal cleanly', () => {
     registerGoalHook({
       config,

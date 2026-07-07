@@ -186,6 +186,44 @@ describe('Help Component', () => {
     expect(output).not.toContain('/test');
   });
 
+  it('orders help commands alphabetically regardless of completionPriority', () => {
+    // Skill priority is scoped to the /skills listing; /help intentionally
+    // stays alphabetical so a high-priority skill can't push a built-in
+    // command around in the help view.
+    const commands: SlashCommand[] = [
+      {
+        name: 'alpha',
+        description: 'Default priority skill',
+        kind: CommandKind.SKILL,
+        source: 'bundled-skill',
+        sourceLabel: 'Skill',
+      },
+      {
+        name: 'zeta',
+        description: 'High priority skill',
+        kind: CommandKind.SKILL,
+        source: 'bundled-skill',
+        sourceLabel: 'Skill',
+        completionPriority: 100,
+      },
+      {
+        name: 'beta',
+        description: 'Default priority skill',
+        kind: CommandKind.SKILL,
+        source: 'bundled-skill',
+        sourceLabel: 'Skill',
+      },
+    ];
+
+    const { lastFrame } = render(
+      <Help commands={commands} width={130} activeTab="custom-commands" />,
+    );
+    const output = lastFrame() ?? '';
+
+    expect(output.indexOf('/alpha')).toBeLessThan(output.indexOf('/beta'));
+    expect(output.indexOf('/beta')).toBeLessThan(output.indexOf('/zeta'));
+  });
+
   it('switches tabs with Tab and Shift+Tab when interactive', () => {
     const onClose = vi.fn();
     const { lastFrame } = render(<InteractiveHelpHarness onClose={onClose} />);

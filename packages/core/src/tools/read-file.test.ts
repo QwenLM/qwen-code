@@ -13,6 +13,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
@@ -22,6 +23,15 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
 }));
+
+vi.mock('../utils/pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/pdf.js')>();
+  return {
+    ...actual,
+    getPDFPageCount: async () => 31,
+    isPdftotextAvailable: async () => true,
+  };
+});
 
 describe('ReadFileTool', () => {
   let tempRootDir: string;
@@ -114,7 +124,7 @@ describe('ReadFileTool', () => {
       expect(typeof result).not.toBe('string');
     });
 
-    it('should allow access to files in OS temp directory', () => {
+    it('should build an invocation for files in the OS temp directory', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
       };
@@ -145,17 +155,72 @@ describe('ReadFileTool', () => {
         offset: -1,
       };
       expect(() => tool.build(params)).toThrow(
-        'Offset must be a non-negative number',
+        'Offset must be a non-negative integer',
       );
     });
 
-    it('should throw error if limit is zero or negative', () => {
+    it('should throw error if offset is fractional', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
-        limit: 0,
+        offset: 1.5,
       };
+      expect(() => tool.build(params)).toThrow('params/offset must be integer');
+    });
+
+    it('should allow zero offset', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        offset: 0,
+      };
+      expect(tool.build(params)).toBeDefined();
+    });
+
+    it.each([0, -1])(
+      'should throw error if limit is not positive (%s)',
+      (limit) => {
+        const params: ReadFileToolParams = {
+          file_path: path.join(tempRootDir, 'test.txt'),
+          limit,
+        };
+        expect(() => tool.build(params)).toThrow(
+          'Limit must be a positive integer',
+        );
+      },
+    );
+
+    it.each([0.5, 1.5])(
+      'should throw error if limit is fractional (%s)',
+      (limit) => {
+        const params: ReadFileToolParams = {
+          file_path: path.join(tempRootDir, 'test.txt'),
+          limit,
+        };
+        expect(() => tool.build(params)).toThrow(
+          'params/limit must be integer',
+        );
+      },
+    );
+
+    it('should reject offset or limit for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        offset: 0,
+        limit: 10,
+      };
+
       expect(() => tool.build(params)).toThrow(
-        'Limit must be a positive number',
+        'offset and limit are not supported for Jupyter notebook (.ipynb) files',
+      );
+    });
+
+    it('should reject pages for notebook files', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.ipynb'),
+        pages: '1',
+      };
+
+      expect(() => tool.build(params)).toThrow(
+        'pages is not supported for Jupyter notebook (.ipynb) files',
       );
     });
   });
@@ -187,6 +252,37 @@ describe('ReadFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the global qwen temp directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(Storage.getGlobalTempDir(), 'temp-file.txt'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the user extensions directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(
+          Storage.getUserExtensionsDir(),
+          'my-ext',
+          'index.js',
+        ),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths directly under the OS temp directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should return allow for paths within the subagent transcripts dir', async () => {
@@ -505,6 +601,36 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
     });
 
+    it('records truncated notebook reads as not full', async () => {
+      const nbPath = path.join(tempRootDir, 'large.ipynb');
+      const notebook = {
+        cells: Array.from({ length: 200 }, (_, i) => ({
+          cell_type: 'code',
+          source: ['x = ' + 'a'.repeat(600) + '\n'],
+          execution_count: i + 1,
+          outputs: [{ output_type: 'stream', text: ['result '.repeat(100)] }],
+          metadata: {},
+        })),
+        metadata: { language_info: { name: 'python' } },
+      };
+      await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
+      const invocation = tool.build({
+        file_path: nbPath,
+      }) as ToolInvocation<ReadFileToolParams, ToolResult>;
+
+      const result = await invocation.execute(abortSignal);
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('remaining cells truncated');
+      expect(result.llmContent).not.toContain('Showing lines');
+
+      const status = fileReadCache.check(fs.statSync(nbPath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(false);
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
     it('should reject invalid pages parameter', () => {
       const params: ReadFileToolParams = {
         file_path: '/tmp/test.pdf',
@@ -544,7 +670,9 @@ describe('ReadFileTool', () => {
         file_path: path.join(tempRootDir, 'test.txt'),
         pages: '',
       };
-      expect(() => tool.build(params)).not.toThrow();
+      const invocation = tool.build(params);
+
+      expect(invocation.params.pages).toBeUndefined();
     });
 
     it('should support offset and limit for text files', async () => {
@@ -593,7 +721,7 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('');
     });
 
-    it('should successfully read files from OS temp directory', async () => {
+    it('should read OS temp files after the invocation is executed', async () => {
       const osTempFile = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'read-file-test-'),
       );
@@ -627,6 +755,37 @@ describe('ReadFileTool', () => {
         >;
         return invocation.execute(abortSignal);
       }
+
+      it('returns a short error when a text-only model reads a large PDF without pages', async () => {
+        const pdfPath = path.join(tempRootDir, 'large.pdf');
+        await fsp.writeFile(pdfPath, Buffer.alloc(2 * 1024 * 1024));
+        const textOnlyConfig = {
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const textOnlyTool = new ReadFileTool(textOnlyConfig);
+
+        const result = await read({ file_path: pdfPath }, textOnlyTool);
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(String(result.llmContent).length).toBeLessThan(1000);
+        expect(result.llmContent).toContain('has 31 pages');
+        expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
 
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
         const filePath = path.join(tempRootDir, 'note.txt');
@@ -1037,6 +1196,63 @@ describe('ReadFileTool', () => {
         };
         const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
+      });
+
+      it('should throw error if path is ignored by .agentignore or .aiignore', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.agentignore'),
+          'agent-secret.txt\n',
+        );
+        await fsp.writeFile(
+          path.join(tempRootDir, '.aiignore'),
+          'ai-secret.txt\n',
+        );
+        const agentIgnoredFilePath = path.join(tempRootDir, 'agent-secret.txt');
+        const aiIgnoredFilePath = path.join(tempRootDir, 'ai-secret.txt');
+        await fsp.writeFile(agentIgnoredFilePath, 'content', 'utf-8');
+        await fsp.writeFile(aiIgnoredFilePath, 'content', 'utf-8');
+
+        expect(() => tool.build({ file_path: agentIgnoredFilePath })).toThrow(
+          /\.agentignore/,
+        );
+        expect(() => tool.build({ file_path: aiIgnoredFilePath })).toThrow(
+          /\.aiignore/,
+        );
+      });
+
+      it('should throw error using configured custom ignore file display', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.cursorignore'),
+          'cursor-secret.txt\n',
+        );
+        const customConfig = {
+          getFileService: () =>
+            new FileDiscoveryService(tempRootDir, ['.cursorignore']),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true, audio: true, video: true },
+          }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const customTool = new ReadFileTool(customConfig);
+        const ignoredFilePath = path.join(tempRootDir, 'cursor-secret.txt');
+        await fsp.writeFile(ignoredFilePath, 'content', 'utf-8');
+
+        expect(() => customTool.build({ file_path: ignoredFilePath })).toThrow(
+          /\.cursorignore/,
+        );
       });
 
       it('should throw error if file is in an ignored directory', async () => {

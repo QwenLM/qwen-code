@@ -133,6 +133,35 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('preserves ordered multi-part startup reminder user content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\ndeferred tools' },
+              { text: '<system-reminder>\nstartup context' },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ndeferred tools' },
+            {
+              type: 'text',
+              text: '<system-reminder>\nstartup context',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
     it('converts assistant thought parts into Anthropic thinking blocks', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',

@@ -10,7 +10,11 @@
       "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"],
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
-      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"]
+      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"],
+      "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],
+      "@qwen-code/audio-capture/*": ["../audio-capture/src/*"],
+      "@qwen-code/sdk": ["../sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/*": ["../sdk-typescript/src/*"]
     }
   },
   "include": [
@@ -87,7 +91,6 @@
     "src/ui/hooks/useGeminiStream.test.tsx",
     "src/ui/hooks/useKeypress.test.ts",
     "src/ui/hooks/usePhraseCycler.test.ts",
-    "src/ui/hooks/vim.test.ts",
     "src/ui/utils/computeStats.test.ts",
     "src/ui/themes/theme.test.ts",
     "src/validateNonInterActiveAuth.test.ts",
@@ -97,9 +100,12 @@
   "references": [
     { "path": "../core" },
     { "path": "../acp-bridge" },
+    { "path": "../audio-capture" },
+    { "path": "../sdk-typescript/tsconfig.reference.json" },
     { "path": "../channels/base" },
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
-    { "path": "../channels/dingtalk" }
+    { "path": "../channels/dingtalk" },
+    { "path": "../channels/feishu" }
   ]
 }
