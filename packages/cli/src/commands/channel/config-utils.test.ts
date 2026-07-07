@@ -255,4 +255,62 @@ describe('parseChannelConfig', () => {
     });
     expect(result.cwd).toBe(abs);
   });
+
+  it('parses webhook source targets and resolves secret env refs', async () => {
+    process.env['QWEN_TEST_WEBHOOK_SECRET'] = 'env-secret';
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: 'QWEN_TEST_WEBHOOK_SECRET',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+                isGroup: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config.webhooks).toEqual({
+      sources: {
+        'github-ci': {
+          secret: 'env-secret',
+          targets: {
+            default: {
+              chatId: 'group-1',
+              senderId: 'webhook:github-ci',
+              isGroup: true,
+            },
+          },
+        },
+      },
+    });
+    delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
+  });
+
+  it('rejects webhook targets without chatId or senderId', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              targets: {
+                default: { chatId: 'group-1' },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom.targets.default.senderId" must be a string.',
+    );
+  });
 });

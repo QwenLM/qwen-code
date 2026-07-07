@@ -1,4 +1,9 @@
-import type { ChannelConfig } from '@qwen-code/channel-base';
+import type {
+  ChannelConfig,
+  ChannelWebhookConfig,
+  ChannelWebhookSourceConfig,
+  ChannelWebhookTargetConfig,
+} from '@qwen-code/channel-base';
 import { resolvePath } from '@qwen-code/channel-base';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -90,6 +95,136 @@ function parseMemoryScopeConfig(
   return parsed as ChannelConfig['memoryScope'];
 }
 
+function requireStringField(
+  channelName: string,
+  path: string,
+  value: unknown,
+): string {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must be a string.`,
+    );
+  }
+  return value;
+}
+
+function optionalBooleanField(
+  channelName: string,
+  path: string,
+  value: unknown,
+): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'boolean') {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must be a boolean.`,
+    );
+  }
+  return value;
+}
+
+function requireObjectField(
+  channelName: string,
+  path: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must be an object.`,
+    );
+  }
+  return value as Record<string, unknown>;
+}
+
+function parseWebhookTarget(
+  channelName: string,
+  path: string,
+  raw: unknown,
+): ChannelWebhookTargetConfig {
+  const record = requireObjectField(channelName, path, raw);
+  const target: ChannelWebhookTargetConfig = {
+    chatId: requireStringField(channelName, `${path}.chatId`, record['chatId']),
+    senderId: requireStringField(
+      channelName,
+      `${path}.senderId`,
+      record['senderId'],
+    ),
+  };
+  if (record['threadId'] !== undefined) {
+    target.threadId = requireStringField(
+      channelName,
+      `${path}.threadId`,
+      record['threadId'],
+    );
+  }
+  const isGroup = optionalBooleanField(
+    channelName,
+    `${path}.isGroup`,
+    record['isGroup'],
+  );
+  if (isGroup !== undefined) {
+    target.isGroup = isGroup;
+  }
+  return target;
+}
+
+function parseWebhookSource(
+  channelName: string,
+  path: string,
+  raw: unknown,
+): ChannelWebhookSourceConfig {
+  const record = requireObjectField(channelName, path, raw);
+  const rawTargets = requireObjectField(
+    channelName,
+    `${path}.targets`,
+    record['targets'],
+  );
+  const targets: Record<string, ChannelWebhookTargetConfig> = {};
+  for (const [targetRef, targetConfig] of Object.entries(rawTargets)) {
+    targets[targetRef] = parseWebhookTarget(
+      channelName,
+      `${path}.targets.${targetRef}`,
+      targetConfig,
+    );
+  }
+
+  let secret: string | undefined;
+  if (typeof record['secret'] === 'string' && record['secret'] !== '') {
+    secret = resolveEnvVars(record['secret']);
+  }
+  if (typeof record['secretEnv'] === 'string' && record['secretEnv'] !== '') {
+    secret = resolveEnvVars(`$${record['secretEnv']}`);
+  }
+
+  return secret === undefined ? { targets } : { secret, targets };
+}
+
+function parseWebhookConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelWebhookConfig | undefined {
+  const raw = rawConfig['webhooks'];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const record = requireObjectField(channelName, 'webhooks', raw);
+  const rawSources = requireObjectField(
+    channelName,
+    'webhooks.sources',
+    record['sources'],
+  );
+  const sources: Record<string, ChannelWebhookSourceConfig> = {};
+  for (const [source, sourceConfig] of Object.entries(rawSources)) {
+    sources[source] = parseWebhookSource(
+      channelName,
+      `webhooks.sources.${source}`,
+      sourceConfig,
+    );
+  }
+  return { sources };
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
@@ -152,5 +287,6 @@ export async function parseChannelConfig(
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
+    webhooks: parseWebhookConfig(name, rawConfig),
   };
 }
