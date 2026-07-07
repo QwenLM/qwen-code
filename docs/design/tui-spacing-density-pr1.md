@@ -58,12 +58,12 @@ use fewer visible rows:
 The automated spacing assertions and terminal evidence use 100-column fixtures
 for the changed rules:
 
-| Scenario | Width | Baseline rows | PR1 rows | Delta | Evidence |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Simple assistant reply | 100 | 2 | 1 | -1 | leading history spacer removed |
-| Tool header with one-line result | 100 | 3 | 2 | -1 | header and result are adjacent |
-| Three-tool expanded group with rendered results | 100 | 16 | 11 | -5 | one header/result spacer removed per tool result and one inter-tool separator removed between adjacent tools |
-| Full representative fixture | 100 | 26 | 19 | -7 | same rendered content captured in tmux |
+| Scenario                                        | Width | Baseline rows | PR1 rows | Delta | Evidence                                                                                                     |
+| ----------------------------------------------- | ----: | ------------: | -------: | ----: | ------------------------------------------------------------------------------------------------------------ |
+| Simple assistant reply                          |   100 |             2 |        1 |    -1 | leading history spacer removed                                                                               |
+| Tool header with one-line result                |   100 |             3 |        2 |    -1 | header and result are adjacent                                                                               |
+| Three-tool expanded group with rendered results |   100 |            16 |       11 |    -5 | one header/result spacer removed per tool result and one inter-tool separator removed between adjacent tools |
+| Full representative fixture                     |   100 |            26 |       19 |    -7 | same rendered content captured in tmux                                                                       |
 
 The snapshot diffs also cover the existing 80-column fixtures to confirm the
 same row-count deltas in the current component test harness.

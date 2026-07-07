@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Vitest, Node `fs.promises`, existing `Storage.getGlobalDebugDir()`, existing `updateSymlink` helper.
 
-**Reference spec:** `docs/superpowers/specs/2026-05-26-daemon-logger-design.md`
+**Reference spec:** `docs/design/2026-05-26-daemon-logger-design.md`
 
 **Test harness:** `vitest run` from each package; for a single file: `cd packages/<pkg> && npx vitest run <relative-path>`.
 
@@ -47,7 +47,7 @@ Expected: all pass. (If not, baseline is broken — stop and report.)
 
 - [ ] **Step 3: Skim the spec**
 
-Read `docs/superpowers/specs/2026-05-26-daemon-logger-design.md` end-to-end. Key sections to internalize: §3 (modules), §4 (path), §5 (API), §6 (format + tee semantics), §7 (boot/shutdown), §11 (error handling).
+Read `docs/design/2026-05-26-daemon-logger-design.md` end-to-end. Key sections to internalize: §3 (modules), §4 (path), §5 (API), §6 (format + tee semantics), §7 (boot/shutdown), §11 (error handling).
 
 ---
 

@@ -376,22 +376,6 @@ class ToolSearchInvocation extends BaseToolInvocation<
             `[ToolSearch] setTools() failed while revealing deferred tools: ${setToolsError}\n`,
           );
         }
-
-        if (!setToolsError) {
-          try {
-            await geminiClient.refreshStartupContextReminder();
-          } catch (err) {
-            const refreshError =
-              err instanceof Error ? err.message : String(err);
-            debugLogger.warn(
-              'refreshStartupContextReminder() failed after revealing deferred tools:',
-              err,
-            );
-            process.stderr.write(
-              `[ToolSearch] refreshStartupContextReminder() failed after revealing deferred tools: ${refreshError}\n`,
-            );
-          }
-        }
       }
 
       if (setToolsError) {

@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Vitest, Express (REST routes), JSON-RPC (ACP), supertest (integration)
 
-**Spec:** `docs/superpowers/specs/2026-05-27-daemon-workspace-service-design.md`
+**Spec:** `docs/design/2026-05-27-daemon-workspace-service-design.md`
 
 ---
 
