@@ -929,6 +929,14 @@ function terminalTurnTimestamp(item: DisplayItem): number | undefined {
     : undefined;
 }
 
+function isTurnErrorItem(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'turn_error'
+  );
+}
+
 function assistantContentTimestamp(item: DisplayItem): number | undefined {
   if (item.type !== 'message' || item.message.role !== 'assistant') {
     return undefined;
@@ -1143,11 +1151,15 @@ export function applyTurnCollapse(
     let toolCallCount = 0;
     let thinkingCount = 0;
     let hasUsage = false;
+    let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
       const isStep = isHideableStep(item, i === answerIdx);
       if (isStep) {
         hiddenCount++;
+      }
+      if (isTurnErrorItem(item)) {
+        hasTurnError = true;
       }
       toolCallCount += itemToolCallCount(item);
       if (item.type === 'message' && item.message.role === 'thinking') {
@@ -1200,12 +1212,13 @@ export function applyTurnCollapse(
     // streaming, collapsed once complete. A step-less turn (e.g. a plain "hi"
     // reply) has nothing to fold, so it stays expanded and shows a chevron-less
     // metrics line. An explicit user toggle always wins.
+    const shouldStayOpen = isActiveTurn || hasTurnError || answerIdx < 0;
     const expanded =
       hiddenCount === 0
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : isActiveTurn;
+          : shouldStayOpen;
     const collapsed = !expanded;
     let turnContentGroupIndex = 0;
     const pushTurnContentGroup = (groupItems: DisplayItem[]) => {

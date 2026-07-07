@@ -1134,19 +1134,56 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 0)).toBeUndefined();
   });
 
-  it('folds a turn with no final answer down to just the prompt', () => {
+  it('keeps a turn with no final answer expanded by default', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       makeMultiToolGroup('g2'),
     ]);
     const out = collapseItems(items);
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'g2']);
     expect(collapseOf(out, 0)).toEqual({
       turnId: 'u1',
-      collapsed: true,
+      collapsed: false,
       hiddenCount: 2,
       toolCallCount: 4,
+    });
+  });
+
+  it('still allows manually collapsing a turn with no final answer', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeMultiToolGroup('g2'),
+    ]);
+    const out = collapseItems(items, {
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    expect(collapseOf(out, 0)?.collapsed).toBe(true);
+  });
+
+  it('keeps a turn with a turn error expanded by default', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 's1']);
+    expect(collapseOf(out, 0)).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+      toolCallCount: 2,
     });
   });
 
@@ -1269,8 +1306,9 @@ describe('applyTurnCollapse', () => {
       { id: 'x', role: 'assistant', content: undefined as unknown as string },
     ]);
     const out = collapseItems(items);
-    // No assistant-with-content → no final answer → fold to just the prompt.
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    // No assistant-with-content → no final answer → stays expanded.
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'x']);
     expect(collapseOf(out, 0)?.hiddenCount).toBe(2);
   });
 
