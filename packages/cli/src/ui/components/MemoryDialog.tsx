@@ -84,6 +84,9 @@ async function openFolderPath(folderPath: string): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     child.once('error', reject);
+    // Exit codes are intentionally not observed: the folder opener is
+    // fire-and-forget, and waiting for exit can block until the file manager
+    // closes.
     child.once('spawn', () => resolve());
   });
 }

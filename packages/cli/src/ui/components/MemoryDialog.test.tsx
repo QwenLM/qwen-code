@@ -81,6 +81,10 @@ const mockedFs = vi.mocked(fs);
 const originalPlatform = process.platform;
 
 type MockSpawnChild = EventEmitter & { unref: ReturnType<typeof vi.fn> };
+const folderOpenCommandByPlatform: Partial<Record<NodeJS.Platform, string>> = {
+  darwin: 'open',
+  win32: 'explorer',
+};
 
 function createMockSpawnChild(
   event: 'spawn' | 'error' = 'spawn',
@@ -99,6 +103,10 @@ function stubPlatform(platform: NodeJS.Platform): void {
     value: platform,
     configurable: true,
   });
+}
+
+function expectedFolderOpenCommand(platform = process.platform): string {
+  return folderOpenCommandByPlatform[platform] ?? 'xdg-open';
 }
 
 describe('MemoryDialog', () => {
@@ -172,7 +180,7 @@ describe('MemoryDialog', () => {
     });
 
     expect(mockedSpawn).toHaveBeenCalledWith(
-      expect.any(String),
+      expectedFolderOpenCommand(),
       [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
       expect.objectContaining({ detached: true, stdio: 'ignore' }),
     );
@@ -208,7 +216,7 @@ describe('MemoryDialog', () => {
       });
 
       expect(mockedSpawn).toHaveBeenCalledWith(
-        expect.any(String),
+        expectedFolderOpenCommand(platform),
         [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
         expect.objectContaining({ detached: true, stdio: 'ignore' }),
       );
@@ -238,7 +246,7 @@ describe('MemoryDialog', () => {
     });
 
     expect(mockedSpawn).toHaveBeenCalledWith(
-      expect.any(String),
+      expectedFolderOpenCommand(),
       [getAutoMemoryRoot('/tmp/project')],
       expect.objectContaining({ detached: true, stdio: 'ignore' }),
     );
@@ -258,7 +266,7 @@ describe('MemoryDialog', () => {
     });
 
     expect(mockedSpawn).toHaveBeenCalledWith(
-      expect.any(String),
+      expectedFolderOpenCommand(),
       [getAutoMemoryRoot('/tmp/project')],
       expect.objectContaining({ detached: true, stdio: 'ignore' }),
     );
