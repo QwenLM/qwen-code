@@ -749,6 +749,58 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('pgrep node && kill -9 1234')).toBe(false);
     expect(detectSelfKillCommand('pgrep node > /tmp/kill.log')).toBe(false);
   });
+
+  it('handles env prefix before pgrep/pidof in command substitution', () => {
+    expect(detectSelfKillCommand('kill -9 $(env LC_ALL=C pgrep node)')).toBe(
+      true,
+    );
+    expect(
+      detectSelfKillCommand('kill -9 $(env FOO=bar BAZ=qux pidof qwen)'),
+    ).toBe(true);
+  });
+
+  it('handles pidof -s (single-shot) in command substitution correctly', () => {
+    expect(detectSelfKillCommand('kill -9 $(pidof -s node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pidof -s qwen-code)')).toBe(true);
+  });
+
+  it('detects pgrep substring patterns targeting self processes', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep nod)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep qwe)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep qwen-cod)')).toBe(true);
+  });
+
+  it('does not false-positive on very short pgrep patterns', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep no)')).toBe(false);
+    expect(detectSelfKillCommand('kill -9 $(pgrep a)')).toBe(false);
+  });
+
+  it('handles xargs with additional options like -L, -d, -a', () => {
+    expect(detectSelfKillCommand('pgrep node | xargs -L1 kill')).toBe(true);
+    expect(detectSelfKillCommand("pgrep node | xargs -d '\\n' kill")).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | xargs -a /dev/stdin kill')).toBe(
+      true,
+    );
+  });
+
+  it('does not false-positive on pgrep -d (delimiter) with non-self target', () => {
+    expect(detectSelfKillCommand("kill -9 $(pgrep -d '\\n' nginx)")).toBe(
+      false,
+    );
+    expect(detectSelfKillCommand('kill -9 $(pgrep --delimiter , redis)')).toBe(
+      false,
+    );
+  });
+
+  it('regex completes quickly on adversarial input (no ReDoS)', () => {
+    const adversarial =
+      'kill -9 $(' + 'A=B '.repeat(50) + 'pgrep ' + 'a'.repeat(200) + ')';
+    const start = Date.now();
+    detectSelfKillCommand(adversarial);
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
 });
 
 describe('hasNonFinalTopLevelBackgroundOperator', () => {
