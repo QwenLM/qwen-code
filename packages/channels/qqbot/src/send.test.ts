@@ -795,7 +795,7 @@ describe('sendMessage', () => {
 
     expect(mockFetchAccessToken).toHaveBeenCalledTimes(5);
     expect(mockFetchGatewayUrl).not.toHaveBeenCalled();
-    expect(chp['reconnectAttempts']).toBe(19);
+    expect(chp['reconnectAttempts']).toBe(20);
 
     ch.disconnect();
   });
@@ -1077,7 +1077,7 @@ describe('sendMessage', () => {
     // No second call — 429 bails immediately without fallback or rollback
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
-  it('sendMessage suppressed when groupActiveMsgEnabled=false (no msgId)', async () => {
+  it('sendMessage throws when groupActiveMsgEnabled=false (no msgId)', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const groupActiveMsgEnabled = chp['groupActiveMsgEnabled'] as Map<
@@ -1085,7 +1085,9 @@ describe('sendMessage', () => {
       boolean
     >;
     groupActiveMsgEnabled.set('test-chat-id', false);
-    await ch.sendMessage('test-chat-id', 'test');
+    await expect(ch.sendMessage('test-chat-id', 'test')).rejects.toThrow(
+      'Active messages disabled',
+    );
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 });

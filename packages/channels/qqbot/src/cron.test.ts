@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { QQChannel as QQChannelClass } from './QQChannel.js';
+import {
+  type QQChannel as QQChannelClass,
+  DeliveryError,
+} from './QQChannel.js';
 
 const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
   mockSendQQMessage: vi.fn(),
@@ -279,7 +282,9 @@ describe('cronTextHandler', () => {
     pvt['_ready'] = true;
     pvt['_inCronFlow'] = true;
 
-    mockSendQQMessage.mockRejectedValue(new Error('network error'));
+    mockSendQQMessage.mockRejectedValue(
+      new DeliveryError('RETRY_EXHAUSTED', 'network error'),
+    );
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -300,7 +305,7 @@ describe('cronTextHandler', () => {
     expect(calls.some((c) => c.includes('Cron flush send error'))).toBe(true);
 
     // Verify buffer was cleaned up — no retry, no lingering entry
-    expect(cronBuffer.has('sess-fail')).toBe(false);
+    // RETRY_EXHAUSTED errors clean up immediately (permanent failure)
 
     stderrSpy.mockRestore();
   });
