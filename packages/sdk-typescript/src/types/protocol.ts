@@ -606,6 +606,7 @@ export enum ControlRequestType {
   SET_MODEL = 'set_model',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',
+  GET_AVAILABLE_MODELS = 'get_available_models',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',

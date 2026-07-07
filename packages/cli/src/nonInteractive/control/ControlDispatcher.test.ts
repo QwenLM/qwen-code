@@ -20,6 +20,7 @@ import type {
   CLIControlSetModelRequest,
   CLIControlSupportedCommandsRequest,
   CLIControlGetContextUsageRequest,
+  CLIControlGetAvailableModelsRequest,
 } from '../types.js';
 
 /**
@@ -310,6 +311,40 @@ describe('ControlDispatcher', () => {
         response: {
           subtype: 'success',
           request_id: 'req-ctx',
+          response: mockResponse,
+        },
+      });
+    });
+
+    it('should route get_available_models request to system controller', async () => {
+      const request: CLIControlRequest = {
+        type: 'control_request',
+        request_id: 'req-models',
+        request: {
+          subtype: 'get_available_models',
+        } as CLIControlGetAvailableModelsRequest,
+      };
+
+      const mockResponse = {
+        subtype: 'get_available_models',
+        models: [],
+      };
+
+      vi.mocked(mockSystemController.handleRequest).mockResolvedValue(
+        mockResponse,
+      );
+
+      await dispatcher.dispatch(request);
+
+      expect(mockSystemController.handleRequest).toHaveBeenCalledWith(
+        request.request,
+        'req-models',
+      );
+      expect(mockContext.streamJson.send).toHaveBeenCalledWith({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: 'req-models',
           response: mockResponse,
         },
       });

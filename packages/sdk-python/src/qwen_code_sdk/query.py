@@ -482,6 +482,10 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
+    async def get_available_models(self) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request("get_available_models")
+
     @property
     def control_request_timeout(self) -> float:
         return self._options.timeout.control_request

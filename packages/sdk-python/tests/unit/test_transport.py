@@ -82,6 +82,15 @@ def test_cli_argument_precedence_prefers_resume_then_continue_then_session_id() 
     assert "--session-id" not in args
 
 
+def test_get_available_models_protocol_type() -> None:
+    from qwen_code_sdk.protocol import CLIControlGetAvailableModelsRequest
+
+    req: CLIControlGetAvailableModelsRequest = {
+        "subtype": "get_available_models"
+    }
+    assert req["subtype"] == "get_available_models"
+
+
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:
     script_path = tmp_path / "fake-qwen.py"
     script_path.write_text("print('ok')\n", encoding="utf-8")

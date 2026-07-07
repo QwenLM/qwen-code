@@ -431,6 +431,10 @@ export interface CLIControlGetContextUsageRequest {
   show_details?: boolean;
 }
 
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlContinueLastTurnRequest
@@ -442,7 +446,8 @@ export type ControlRequestPayload =
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlGetAvailableModelsRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';

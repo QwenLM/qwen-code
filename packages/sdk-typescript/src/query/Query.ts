@@ -984,6 +984,16 @@ export class Query implements AsyncIterable<SDKMessage> {
   }
 
   /**
+   * Get the list of available models for the current auth type
+   *
+   * @returns Promise resolving to the list of available models
+   * @throws Error if query is closed
+   */
+  async getAvailableModels(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_AVAILABLE_MODELS);
+  }
+
+  /**
    * Get list of control commands supported by the CLI
    *
    * @returns Promise resolving to list of supported command names

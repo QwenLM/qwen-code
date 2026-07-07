@@ -238,6 +238,10 @@ class CLIControlSupportedCommandsRequest(TypedDict):
     subtype: Literal["supported_commands"]
 
 
+class CLIControlGetAvailableModelsRequest(TypedDict):
+    subtype: Literal["get_available_models"]
+
+
 ControlRequestPayload: TypeAlias = (
     CLIControlInterruptRequest
     | CLIControlPermissionRequest
@@ -246,6 +250,7 @@ ControlRequestPayload: TypeAlias = (
     | CLIControlSetModelRequest
     | CLIControlMcpStatusRequest
     | CLIControlSupportedCommandsRequest
+    | CLIControlGetAvailableModelsRequest
     | dict[str, Any]
 )
 

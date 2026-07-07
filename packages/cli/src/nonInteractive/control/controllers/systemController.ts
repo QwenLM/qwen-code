@@ -20,6 +20,7 @@ import type {
   CLIControlSetModelRequest,
   CLIMcpServerConfig,
   CLIControlGetContextUsageRequest,
+  CLIControlGetAvailableModelsRequest,
 } from '../../types.js';
 import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
 import {
@@ -79,6 +80,12 @@ export class SystemController extends BaseController {
           signal,
         );
 
+      case 'get_available_models':
+        return this.handleGetAvailableModels(
+          payload as CLIControlGetAvailableModelsRequest,
+          signal,
+        );
+
       default:
         throw new Error(`Unsupported request subtype in SystemController`);
     }
@@ -119,6 +126,42 @@ export class SystemController extends BaseController {
         error instanceof Error ? error.message : 'Failed to get context usage';
       debugLogger.error(
         '[SystemController] Failed to get context usage:',
+        error,
+      );
+      throw new Error(errorMessage);
+    }
+  }
+
+  private async handleGetAvailableModels(
+    _payload: CLIControlGetAvailableModelsRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const models = this.context.config.getAvailableModels();
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+
+      return {
+        subtype: 'get_available_models',
+        models: models.map((m) => ({
+          id: m.id,
+          label: m.label,
+          description: m.description,
+          isVision: m.isVision ?? m.capabilities?.vision ?? false,
+        })),
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : 'Failed to get available models';
+      debugLogger.error(
+        '[SystemController] Failed to get available models:',
         error,
       );
       throw new Error(errorMessage);
@@ -282,6 +325,7 @@ export class SystemController extends BaseController {
         typeof this.context.config.setApprovalMode === 'function',
       can_set_model: typeof this.context.config.setModel === 'function',
       can_get_context_usage: true,
+      can_get_available_models: true,
       // SDK MCP servers are supported - messages routed through control plane
       can_handle_mcp_message: true,
     };
