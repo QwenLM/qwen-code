@@ -97,14 +97,13 @@ const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
  * Bind unbound durable tasks to dedicated sessions, and rename bound
- * sessions that don't yet have the ⏰ prefix. The cron_create tool binds
- * tasks to the current chat session (so the first message is in the
- * transcript), but can't rename the session — that's a bridge operation
- * only the daemon process can do. This runs in the daemon process where
- * the bridge is available.
+ * sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
+ * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
+ * /headless). In daemon mode this keepalive mints a dedicated session per
+ * task and names it — binding is a daemon-only concern.
  *
- * For unbound tasks (legacy / CLI mode): mints a dedicated session, names
- * it `⏰ prompt`, writes sessionId to disk.
+ * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
+ * writes sessionId to disk.
  * For bound tasks without ⏰ name: renames the session to `⏰ prompt`.
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata

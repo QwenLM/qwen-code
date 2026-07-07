@@ -464,9 +464,6 @@ export class CronScheduler {
     }
     const job = this.create(cronExpr, prompt, recurring);
     job.durable = true;
-    if (this.sessionId) {
-      job.boundSessionId = this.sessionId;
-    }
     this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
