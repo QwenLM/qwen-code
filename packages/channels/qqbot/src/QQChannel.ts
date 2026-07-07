@@ -668,8 +668,15 @@ export class QQChannel extends ChannelBase {
       this.beforeExitHook = null;
     }
     // Clean up cron buffers (always, regardless of config flag)
+    let droppedCount = 0;
     for (const [, entry] of this.cronBuffer) {
       if (entry.timer) clearTimeout(entry.timer);
+      if (entry.buffer) droppedCount++;
+    }
+    if (droppedCount > 0) {
+      process.stderr.write(
+        `[QQ:${this.name}] Disconnect: discarding ${droppedCount} buffered cron message(s)\n`,
+      );
     }
     this.cronBuffer.clear();
     this.flushQQState();
@@ -695,6 +702,7 @@ export class QQChannel extends ChannelBase {
     this.seenMessages.clear();
     this.crossEventDedup.clear();
     this.coldStart = true;
+    this._inCronFlow = 0;
     for (const [, state] of this.streamState) {
       if (state.timer) clearTimeout(state.timer);
     }
@@ -1060,9 +1068,11 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Restore QQ routing state from disk.
-
-   * Trusts persisted JSON — if the file is corrupt, entries with undefined
-   * values may appear, which is acceptable for a rare edge case.   */
+   *
+   * Validates all restored state extensively — type checks, length bounds,
+   * and sanity filters — so a corrupted file produces clean empty maps
+   * rather than propagating invalid data.
+   */
   private restoreQQState(): boolean {
     try {
       if (!existsSync(this.qqStatePath)) return false;
@@ -1362,6 +1372,7 @@ export class QQChannel extends ChannelBase {
               this.disconnect();
               this.reconnectTimer = setTimeout(() => {
                 this.isReconnecting = false;
+                this.disposed = false;
                 // Use reconnectWithRetry instead of bare connect() —
                 // gives exponential backoff + maxReconnectAttempts guard,
                 // preventing zombie state where the channel is permanently
@@ -2148,7 +2159,7 @@ export class QQChannel extends ChannelBase {
           );
           return;
         }
-        const cleanText = (event.content || '')
+        const keywordText = (event.content || '')
           .replace(/<@[^>]{1,64}>/g, '')
           .trim()
           .toLowerCase()
@@ -2157,7 +2168,7 @@ export class QQChannel extends ChannelBase {
           new RegExp(
             `(?:^|[^\\w])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^\\w]|$)`,
             'i',
-          ).test(cleanText),
+          ).test(keywordText),
         );
         if (!matched) {
           process.stderr.write(
