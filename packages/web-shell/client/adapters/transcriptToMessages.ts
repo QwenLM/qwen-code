@@ -33,8 +33,6 @@ type DaemonPermissionTranscriptBlock = Extract<
   { kind: 'permission' }
 >;
 
-type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock;
-
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
@@ -62,7 +60,7 @@ function isIgnoredWebShellStatus(text: string): boolean {
 }
 
 function getErrorDisplayText(
-  block: ExtendedDaemonStatusTranscriptBlock,
+  block: DaemonStatusTranscriptBlock,
   labels?: TranscriptMessageLabels,
 ): string {
   if (
@@ -74,6 +72,20 @@ function getErrorDisplayText(
     return labels?.modelStreamInterrupted ?? block.text;
   }
   return block.text;
+}
+
+function getErrorMessageData(
+  data: unknown,
+  errorKind: DaemonStatusTranscriptBlock['errorKind'],
+): { data?: unknown } {
+  if (data === undefined) return {};
+  if (!errorKind) return { data };
+  return {
+    data: {
+      ...(getRecord(data) ?? { value: data }),
+      errorKind,
+    },
+  };
 }
 
 function getSessionBranchDisplayName(data: unknown): string | null {
@@ -543,7 +555,7 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'status':
       case 'debug': {
-        const statusBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const statusBlock = block;
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
@@ -588,7 +600,7 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'error': {
-        const errorBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const errorBlock = block;
         const errorKind = errorBlock.errorKind;
         messages.push({
           id: block.id,
@@ -598,11 +610,7 @@ export function transcriptBlocksToDaemonMessages(
           retryable: errorBlock.source === 'turn_error',
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
-          ...(errorKind && errorBlock.data !== undefined
-            ? { data: { ...(getRecord(errorBlock.data) ?? {}), errorKind } }
-            : errorBlock.data !== undefined
-              ? { data: errorBlock.data }
-              : {}),
+          ...getErrorMessageData(errorBlock.data, errorKind),
         });
         needsNewContentMessage = true;
         break;

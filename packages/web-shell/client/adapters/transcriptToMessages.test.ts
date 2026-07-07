@@ -2274,6 +2274,36 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages[0]).not.toHaveProperty('data');
   });
 
+  it('preserves non-object error data when adding structured errorKind', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-1',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'model_stream_interrupted' as const,
+          text: 'terminated',
+          data: 'diagnostic text',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      {
+        labels: {
+          modelStreamInterrupted: 'Localized stream interruption.',
+        },
+      },
+    );
+
+    expect(messages[0]).toMatchObject({
+      data: {
+        value: 'diagnostic text',
+        errorKind: 'model_stream_interrupted',
+      },
+    });
+  });
+
   it('converts debug blocks to system messages with info variant', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {
