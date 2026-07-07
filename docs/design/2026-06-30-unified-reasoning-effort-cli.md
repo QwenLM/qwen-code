@@ -73,12 +73,12 @@ reasoning?: false | { effort?: 'low' | 'medium' | 'high' | 'max'; budget_tokens?
 
 Existing per-provider translators:
 
-| Provider | File | Behavior |
-| --- | --- | --- |
-| DeepSeek | `provider/deepseek.ts:176-218` | nested → flat `reasoning_effort`; `low/medium→high`, `xhigh→max` |
-| Anthropic | `anthropicContentGenerator.ts:521-593`, clamp `665-693`, beta hdr `393-431` | `output_config.effort` + thinking; `max`→`high` clamp + one-time warn; `effort-2025-11-24` beta |
-| Gemini | `geminiContentGenerator.ts:107-146` | `thinkingConfig`/`thinkingLevel`; `low→LOW`, `high/max→HIGH` |
-| OpenAI/GLM/DashScope | `openaiContentGenerator/pipeline.ts:689-717` (`buildReasoningConfig`), strip `597-602` | forwards/strips `reasoning_effort`; DashScope adds `preserve_thinking` |
+| Provider             | File                                                                                   | Behavior                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| DeepSeek             | `provider/deepseek.ts:176-218`                                                         | nested → flat `reasoning_effort`; `low/medium→high`, `xhigh→max`                                |
+| Anthropic            | `anthropicContentGenerator.ts:521-593`, clamp `665-693`, beta hdr `393-431`            | `output_config.effort` + thinking; `max`→`high` clamp + one-time warn; `effort-2025-11-24` beta |
+| Gemini               | `geminiContentGenerator.ts:107-146`                                                    | `thinkingConfig`/`thinkingLevel`; `low→LOW`, `high/max→HIGH`                                    |
+| OpenAI/GLM/DashScope | `openaiContentGenerator/pipeline.ts:689-717` (`buildReasoningConfig`), strip `597-602` | forwards/strips `reasoning_effort`; DashScope adds `preserve_thinking`                          |
 
 Gaps: the union lacks `xhigh`; Gemini lacks `medium` and an `xhigh→high` rule;
 the generic pipeline must be confirmed to emit `reasoning_effort` for plain
@@ -119,7 +119,7 @@ borrow from (studied at `~/Documents/openclaw`):
 What we take: the **rank-based central clamp**, **per-model capability
 declaration**, the **three shape mappers**, and the **exact Gemini 2.5 budget
 buckets**. What we drop for v1: `minimal`/`adaptive` user tiers (decision = 5
-tiers) — they stay valid *internal* normalization targets so a model catalog can
+tiers) — they stay valid _internal_ normalization targets so a model catalog can
 still declare them.
 
 ## Design
@@ -132,13 +132,13 @@ Each provider declares a supported subset; the translator clamps a requested
 tier **down** the ladder to the nearest supported tier. Mapping (canonical →
 wire value), with `↓` marking a clamp:
 
-| Tier | OpenAI `reasoning_effort` | DeepSeek `reasoning_effort` | GLM-5.2+ `reasoning_effort` | Anthropic `output_config.effort` | Gemini 3 `thinking_level` | Qwen DashScope |
-| --- | --- | --- | --- | --- | --- | --- |
-| low | low | high¹ | low | low | low | enable_thinking:true |
-| medium | medium | high¹ | medium | medium | medium | true |
-| high | high | high | high | high (default) | high | true |
-| xhigh | xhigh | max¹ | xhigh | xhigh ↓high² | high ↓² | true |
-| max | xhigh ↓ (no `max`) | max | max | max ↓high² | high ↓² | true |
+| Tier   | OpenAI `reasoning_effort` | DeepSeek `reasoning_effort` | GLM-5.2+ `reasoning_effort` | Anthropic `output_config.effort` | Gemini 3 `thinking_level` | Qwen DashScope       |
+| ------ | ------------------------- | --------------------------- | --------------------------- | -------------------------------- | ------------------------- | -------------------- |
+| low    | low                       | high¹                       | low                         | low                              | low                       | enable_thinking:true |
+| medium | medium                    | high¹                       | medium                      | medium                           | medium                    | true                 |
+| high   | high                      | high                        | high                        | high (default)                   | high                      | true                 |
+| xhigh  | xhigh                     | max¹                        | xhigh                       | xhigh ↓high²                     | high ↓²                   | true                 |
+| max    | xhigh ↓ (no `max`)        | max                         | max                         | max ↓high²                       | high ↓²                   | true                 |
 
 ¹ DeepSeek/GLM documented internal grouping (low/medium ≡ high, xhigh ≡ max).
 ² Clamped to the model's documented ceiling (varies by Anthropic model; Gemini 3
@@ -183,12 +183,12 @@ nested `reasoning: { effort }` object; `buildReasoningConfig()`
 provider whose wire field differs must reshape it in its `buildRequest` hook.
 Known shapes:
 
-| Wire shape | Providers | qwen-code handling |
-| --- | --- | --- |
-| nested `reasoning: { effort }` | OpenAI Responses, OpenRouter, gpt-5.x | passthrough (default) ✅ |
-| flat top-level `reasoning_effort` | DeepSeek, **GLM/z.ai**, OpenAI Chat Completions, Groq | DeepSeek adapter flattens ✅; **GLM has no adapter → currently ships the nested shape, likely wrong ❌** |
-| `enable_thinking` bool | qwen3 / DashScope | adapter emits bool (disable only); no effort tiers yet |
-| `extra_body.thinking.enabled` toggle | GLM | separate on/off knob from the effort value |
+| Wire shape                           | Providers                                             | qwen-code handling                                                                                       |
+| ------------------------------------ | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| nested `reasoning: { effort }`       | OpenAI Responses, OpenRouter, gpt-5.x                 | passthrough (default) ✅                                                                                 |
+| flat top-level `reasoning_effort`    | DeepSeek, **GLM/z.ai**, OpenAI Chat Completions, Groq | DeepSeek adapter flattens ✅; **GLM has no adapter → currently ships the nested shape, likely wrong ❌** |
+| `enable_thinking` bool               | qwen3 / DashScope                                     | adapter emits bool (disable only); no effort tiers yet                                                   |
+| `extra_body.thinking.enabled` toggle | GLM                                                   | separate on/off knob from the effort value                                                               |
 
 Implication: pure passthrough only "just works" for providers that accept the
 nested shape. **PR1 must add GLM/z.ai flattening** (mirror `deepseek.ts`) and,
