@@ -17,8 +17,8 @@ import type {
 } from './acp-session-bridge.js';
 import {
   extractRememberErrorCode,
-  extractRememberErrorDetails,
-  extractRememberErrorStack,
+  shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureDiagnostics,
 } from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 import {
@@ -192,35 +192,17 @@ function createTaskError(
     code,
     message: publicErrorMessage(code, kind),
   };
-  if (code === 'managed_memory_unavailable') return error;
+  if (shouldSuppressRememberErrorDetails(code)) return error;
   return {
     ...error,
     ...(details ? { details } : {}),
   };
 }
 
-function workspaceMemoryFailureDiagnostics(err: unknown): {
-  details?: string;
-  debugDetails: string;
-  stack?: string;
-} {
-  let details: string | undefined;
-  let stack: string | undefined;
-  try {
-    details = extractRememberErrorDetails(err);
-  } catch {
-    details = undefined;
-  }
-  try {
-    stack = extractRememberErrorStack(err);
-  } catch {
-    stack = undefined;
-  }
-  return {
-    ...(details ? { details } : {}),
-    debugDetails: details ?? '<details unavailable>',
-    ...(stack ? { stack } : {}),
-  };
+function logWorkspaceMemoryExtractionError(target: string, err: unknown): void {
+  debugLogger.warn(`Failed to extract workspace memory error ${target}:`, {
+    extractionError: err instanceof Error ? err.message : String(err),
+  });
 }
 
 export class WorkspaceRememberTaskLane {
@@ -376,7 +358,10 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err);
-        const diagnostics = workspaceMemoryFailureDiagnostics(err);
+        const diagnostics = workspaceMemoryFailureDiagnostics(
+          err,
+          logWorkspaceMemoryExtractionError,
+        );
         debugLogger.error('Workspace memory remember task failed:', {
           taskId: task.taskId,
           code,
@@ -440,7 +425,10 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'forget_failed');
-        const diagnostics = workspaceMemoryFailureDiagnostics(err);
+        const diagnostics = workspaceMemoryFailureDiagnostics(
+          err,
+          logWorkspaceMemoryExtractionError,
+        );
         debugLogger.error('Workspace memory forget task failed:', {
           taskId: task.taskId,
           code,
@@ -501,7 +489,10 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'dream_failed');
-        const diagnostics = workspaceMemoryFailureDiagnostics(err);
+        const diagnostics = workspaceMemoryFailureDiagnostics(
+          err,
+          logWorkspaceMemoryExtractionError,
+        );
         debugLogger.error('Workspace memory dream task failed:', {
           taskId: task.taskId,
           code,

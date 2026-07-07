@@ -3607,7 +3607,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toMatchObject({
         code: -32099,
         message: 'Workspace memory remember timed out',
-        data: { errorKind: 'remember_timeout' },
+        data: { errorKind: 'remember_timeout', details: 'late abort' },
       });
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         'Workspace memory remember timed out:',
@@ -3658,6 +3658,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       (error as { data?: Record<string, unknown> }).data,
     ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember failed:',
+      expect.objectContaining({ details: '<details unavailable>' }),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3838,7 +3842,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toMatchObject({
         code: -32099,
         message: 'Workspace memory forget timed out',
-        data: { errorKind: 'forget_timeout' },
+        data: { errorKind: 'forget_timeout', details: 'late abort' },
       });
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         'Workspace memory forget timed out:',
@@ -3985,7 +3989,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toMatchObject({
         code: -32099,
         message: 'Workspace memory dream timed out',
-        data: { errorKind: 'dream_timeout' },
+        data: { errorKind: 'dream_timeout', details: 'late abort' },
       });
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         'Workspace memory dream timed out:',

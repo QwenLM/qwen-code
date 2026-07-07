@@ -9,6 +9,8 @@ import {
   extractRememberErrorCode,
   extractRememberErrorDetails,
   extractRememberErrorStack,
+  shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureDiagnostics,
 } from './workspace-remember-errors.js';
 
 describe('extractRememberErrorCode', () => {
@@ -89,6 +91,15 @@ describe('extractRememberErrorDetails', () => {
     );
   });
 
+  it('prefers bridge details over generic messages', () => {
+    expect(
+      extractRememberErrorDetails({
+        data: { details: 'specific bridge reason' },
+        message: 'generic message',
+      }),
+    ).toBe('specific bridge reason');
+  });
+
   it('redacts credentials before exposing details', () => {
     const details = extractRememberErrorDetails(
       new Error('Authorization: Bearer secret-token-value'),
@@ -132,6 +143,38 @@ describe('extractRememberErrorDetails', () => {
       expect(details).toBe('Authorization: <redacted>');
       expect(details).not.toContain('secret');
       expect(details).not.toContain('token-value');
+    }
+  });
+
+  it('redacts bearer tokens split by unicode space separators', () => {
+    for (const separator of [
+      '\u00a0',
+      '\u1680',
+      '\u2000',
+      '\u2009',
+      '\u200a',
+      '\u202f',
+      '\u205f',
+      '\u3000',
+    ]) {
+      const details = extractRememberErrorDetails(
+        new Error(`Bearer sk-AAAAAAAAAA${separator}BBBBBBBBBBBBBBB`),
+      );
+
+      expect(details).toBe('Bearer <redacted>');
+      expect(details).not.toContain('AAAAAAAAAA');
+      expect(details).not.toContain('BBBBBBBBBBBBBBB');
+    }
+  });
+
+  it('redacts bearer tokens after unicode space separators', () => {
+    for (const separator of ['\u00a0', '\u2009', '\u202f']) {
+      const details = extractRememberErrorDetails(
+        new Error(`Bearer${separator}secret-token-value`),
+      );
+
+      expect(details).toBe('Bearer <redacted>');
+      expect(details).not.toContain('secret-token-value');
     }
   });
 
@@ -191,6 +234,10 @@ describe('extractRememberErrorDetails', () => {
     );
   });
 
+  it('omits empty details after sanitization', () => {
+    expect(extractRememberErrorDetails(new Error('\u200b'))).toBeUndefined();
+  });
+
   it('guards against circular causes', () => {
     const cyclic: Record<string, unknown> = {};
     cyclic['cause'] = cyclic;
@@ -248,5 +295,71 @@ describe('extractRememberErrorStack', () => {
     expect(stack).toContain('\n\tat handler');
     expect(stack).not.toContain('secret-token-value');
     expect(stack).toHaveLength(1000);
+  });
+});
+
+describe('workspaceMemoryFailureDiagnostics', () => {
+  it('falls back when detail extraction throws', () => {
+    const extractionErrors: Array<{ target: string; message: string }> = [];
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('detail getter failed');
+        },
+      },
+    );
+
+    const diagnostics = workspaceMemoryFailureDiagnostics(
+      err,
+      (target, cause) =>
+        extractionErrors.push({
+          target,
+          message: cause instanceof Error ? cause.message : String(cause),
+        }),
+    );
+
+    expect(diagnostics).toEqual({ debugDetails: '<details unavailable>' });
+    expect(extractionErrors).toEqual([
+      { target: 'details', message: 'detail getter failed' },
+    ]);
+  });
+
+  it('falls back when stack extraction throws', () => {
+    const extractionErrors: Array<{ target: string; message: string }> = [];
+    const err = new Proxy(new Error('boom'), {
+      get(target, property, receiver) {
+        if (property === 'stack') {
+          throw new Error('stack getter failed');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const diagnostics = workspaceMemoryFailureDiagnostics(
+      err,
+      (target, cause) =>
+        extractionErrors.push({
+          target,
+          message: cause instanceof Error ? cause.message : String(cause),
+        }),
+    );
+
+    expect(diagnostics).toEqual({
+      details: 'boom',
+      debugDetails: 'boom',
+    });
+    expect(extractionErrors).toEqual([
+      { target: 'stack', message: 'stack getter failed' },
+    ]);
+  });
+});
+
+describe('shouldSuppressRememberErrorDetails', () => {
+  it('suppresses details only for configured public errors', () => {
+    expect(
+      shouldSuppressRememberErrorDetails('managed_memory_unavailable'),
+    ).toBe(true);
+    expect(shouldSuppressRememberErrorDetails('remember_failed')).toBe(false);
   });
 });

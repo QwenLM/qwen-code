@@ -8,12 +8,23 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 
 const MAX_REMEMBER_ERROR_DETAILS_CHARS = 1000;
 const MAX_REMEMBER_ERROR_CAUSE_DEPTH = 50;
-const REMEMBER_ERROR_INVISIBLE_RE =
-  /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+const REMEMBER_ERROR_SEPARATOR_RE =
+  /[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector}/gu;
 const REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE =
-  /\b(Bearer|QQBot)(?:[\p{Cf}\u2028\u2029]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
+  /\b(Bearer|QQBot)(?:[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
 // eslint-disable-next-line no-control-regex
 const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
+const DETAIL_SUPPRESSED_REMEMBER_ERROR_CODES = new Set([
+  'managed_memory_unavailable',
+]);
+
+export interface WorkspaceMemoryFailureDiagnostics {
+  details?: string;
+  debugDetails: string;
+  stack?: string;
+}
+
+type RememberErrorExtractionTarget = 'details' | 'stack';
 
 function errorCodeFromRecord(
   record: Record<string, unknown>,
@@ -104,14 +115,14 @@ function rawRememberErrorDetails(
 function replaceControlChars(details: string): string {
   return details
     .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
-    .replace(REMEMBER_ERROR_INVISIBLE_RE, '')
+    .replace(REMEMBER_ERROR_SEPARATOR_RE, '')
     .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
 
 function replaceStackControlChars(stack: string): string {
   return stack
     .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
-    .replace(REMEMBER_ERROR_INVISIBLE_RE, '')
+    .replace(REMEMBER_ERROR_SEPARATOR_RE, '')
     .replace(REMEMBER_ERROR_CONTROL_RE, (char) =>
       char === '\n' || char === '\t' ? char : ' ',
     );
@@ -170,4 +181,36 @@ export function extractRememberErrorDetails(err: unknown): string | undefined {
 export function extractRememberErrorStack(err: unknown): string | undefined {
   if (!(err instanceof Error) || !err.stack) return undefined;
   return sanitizeRememberErrorStack(err.stack);
+}
+
+export function shouldSuppressRememberErrorDetails(code: string): boolean {
+  return DETAIL_SUPPRESSED_REMEMBER_ERROR_CODES.has(code);
+}
+
+export function workspaceMemoryFailureDiagnostics(
+  err: unknown,
+  onExtractionError?: (
+    target: RememberErrorExtractionTarget,
+    err: unknown,
+  ) => void,
+): WorkspaceMemoryFailureDiagnostics {
+  let details: string | undefined;
+  let stack: string | undefined;
+  try {
+    details = extractRememberErrorDetails(err);
+  } catch (extractionErr) {
+    onExtractionError?.('details', extractionErr);
+    details = undefined;
+  }
+  try {
+    stack = extractRememberErrorStack(err);
+  } catch (extractionErr) {
+    onExtractionError?.('stack', extractionErr);
+    stack = undefined;
+  }
+  return {
+    ...(details ? { details } : {}),
+    debugDetails: details ?? '<details unavailable>',
+    ...(stack ? { stack } : {}),
+  };
 }
