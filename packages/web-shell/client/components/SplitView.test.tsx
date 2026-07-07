@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -26,7 +27,18 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     </div>
   ),
   useConnection: () => connectionState,
-  useSessions: () => ({ sessions: sessionsState, reload: reloadMock }),
+  // Stateful, like the real hook: reload() re-renders with the CURRENT module
+  // store. This lets a test prove the picker renders sessions that appeared
+  // only after the reload — not merely that reload() was called.
+  useSessions: () => {
+    const [sessions, setSessions] = React.useState<any[]>(() => sessionsState);
+    const reload = React.useCallback(async () => {
+      reloadMock();
+      setSessions([...sessionsState]);
+      return sessionsState;
+    }, []);
+    return { sessions, reload };
+  },
 }));
 
 vi.mock('./ChatPane', () => ({
@@ -63,7 +75,7 @@ beforeEach(() => {
     { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
     { sessionId: 's4', workspaceCwd: '/w', displayName: 'Four' },
   ];
-  reloadMock = vi.fn(async () => sessionsState);
+  reloadMock = vi.fn();
 });
 
 afterEach(() => {
@@ -92,6 +104,19 @@ function panes(): HTMLElement[] {
 function titles(): string[] {
   return Array.from(container!.querySelectorAll('[data-testid="pane-title"]')).map(
     (el) => el.textContent ?? '',
+  );
+}
+function pickerOptions(): string[] {
+  return Array.from(
+    container!.querySelectorAll('[role="option"] button'),
+  ).map((el) => (el.textContent ?? '').trim());
+}
+function openPicker(): void {
+  const addButton = container!.querySelector(
+    'button[aria-haspopup="listbox"]',
+  ) as HTMLButtonElement;
+  act(() =>
+    addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
   );
 }
 
@@ -259,6 +284,27 @@ describe('SplitView', () => {
       addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
     expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the refreshed session list on reopen — not the entry snapshot', () => {
+    render({ initialSessionIds: ['s1'] });
+    // First open: the picker offers the sessions present at entry.
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
+    // A session is created elsewhere after the split was entered…
+    sessionsState = [
+      ...sessionsState,
+      { sessionId: 's5', workspaceCwd: '/w', displayName: 'Five' },
+    ];
+    // …reopening the picker reloads and the new session now appears. Without the
+    // reload-on-open the list would be frozen at the entry snapshot (no 'Five').
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
   });
 
   it('reloads the picker list when the parent bumps the reload token', () => {

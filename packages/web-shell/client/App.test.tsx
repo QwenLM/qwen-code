@@ -352,10 +352,30 @@ mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
 vi.doMock('./components/SplitView', async () => {
   const React = await import('react');
   return {
-    SplitView: (props: { onExit?: () => void }) =>
+    SplitView: (props: {
+      onExit?: () => void;
+      initialSessionIds?: string[];
+      onPanesChange?: (ids: string[]) => void;
+    }) =>
       React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
+        // Surface the seed so a test can assert the App preserved / restored it.
+        React.createElement(
+          'span',
+          { 'data-testid': 'split-initial' },
+          (props.initialSessionIds ?? []).join(','),
+        ),
+        // Simulate the real SplitView reporting its live pane set up to the App.
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-panes',
+            type: 'button',
+            onClick: () => props.onPanesChange?.(['s1', 's2', 's3']),
+          },
+          'report',
+        ),
         React.createElement(
           'button',
           { 'data-testid': 'split-back', type: 'button', onClick: props.onExit },
@@ -1030,6 +1050,47 @@ describe('App session callbacks', () => {
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('preserves the pane set when leaving the split view and reopening it', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    // Open the split, then let SplitView report a live pane set (s1,s2,s3) back
+    // to the App — the same way real add/remove mirrors up via onPanesChange.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // Leave the split (back to the overview)…
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+
+    // …and reopen it from the toolbar. The reported panes must be restored, not
+    // reset to empty / the current session (the regression this guards).
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3');
   });
 
   it('enters the split view from a ?split= URL and consumes the param', async () => {

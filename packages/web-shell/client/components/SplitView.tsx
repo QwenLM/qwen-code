@@ -119,14 +119,23 @@ export function SplitView({
   // Also refresh when the parent signals the list changed elsewhere (a session
   // created / deleted / renamed in the sidebar or another tab), so an open
   // picker — or the next open — reflects it without re-entering the split.
+  // Skip while a reload is already in flight: a burst of session changes (bulk
+  // create/delete) bumps the token repeatedly, and we don't want a redundant
+  // concurrent round-trip per bump. `useDaemonResource` already discards stale
+  // responses via its sequence counter; this just avoids the wasted requests.
+  const reloadInFlightRef = useRef(false);
   const prevReloadTokenRef = useRef(sessionListReloadToken);
   useEffect(() => {
     if (
       sessionListReloadToken !== undefined &&
-      sessionListReloadToken !== prevReloadTokenRef.current
+      sessionListReloadToken !== prevReloadTokenRef.current &&
+      !reloadInFlightRef.current
     ) {
       prevReloadTokenRef.current = sessionListReloadToken;
-      void reload();
+      reloadInFlightRef.current = true;
+      void Promise.resolve(reload()).finally(() => {
+        reloadInFlightRef.current = false;
+      });
     }
   }, [sessionListReloadToken, reload]);
 
