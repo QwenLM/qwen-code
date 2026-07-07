@@ -12,9 +12,13 @@
 #   curl -fsSL <oss_url>/upgrade-qwen.sh | bash -s -- --force
 #
 # 参数:
-#   --force     跳过版本比较，强制重新安装
-#   --dry-run   仅显示版本信息，不执行安装
+#   --force        跳过版本比较，强制重新安装
+#   --dry-run      仅显示版本信息，不执行安装
+#   --oss-base-url OSS 根地址覆盖，格式为 https://host/prefix
 #   其他参数透传给 deploy-qwen.sh
+#
+# 环境变量:
+#   QWEN_OSS_BASE_URL - OSS 根地址覆盖，格式为 https://host/prefix
 # ──────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -22,8 +26,11 @@ set -euo pipefail
 OSS_BUCKET="dataworks-notebook-cn-shanghai"
 OSS_HOST="${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com"
 OSS_PREFIX="public-datasets/aone-release/alishu/qwen-code"
-METADATA_URL="https://${OSS_HOST}/${OSS_PREFIX}/latest/metadata.json"
-DEPLOY_URL="https://${OSS_HOST}/${OSS_PREFIX}/deploy-qwen.sh"
+EMBEDDED_QWEN_OSS_BASE_URL="__QWEN_OSS_BASE_URL__"
+if [ "${EMBEDDED_QWEN_OSS_BASE_URL}" = "__QWEN_OSS_BASE_URL__" ]; then
+  EMBEDDED_QWEN_OSS_BASE_URL="https://${OSS_HOST}/${OSS_PREFIX}"
+fi
+OSS_BASE_URL="${QWEN_OSS_BASE_URL:-${EMBEDDED_QWEN_OSS_BASE_URL}}"
 
 # ── 颜色输出 ──
 if [ -t 1 ]; then
@@ -43,6 +50,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --force)    FORCE="true"; shift ;;
     --dry-run)  DRY_RUN="true"; shift ;;
+    --oss-base-url) OSS_BASE_URL="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^[^#]/{ /^#/s/^# \{0,1\}//p }' "$0"
       exit 0
@@ -50,6 +58,23 @@ while [[ $# -gt 0 ]]; do
     *)  EXTRA_ARGS+=("$1"); shift ;;
   esac
 done
+
+OSS_BASE_URL="${OSS_BASE_URL%/}"
+case "${OSS_BASE_URL}" in
+  https://*) ;;
+  *)
+    error "Invalid --oss-base-url: ${OSS_BASE_URL}"
+    exit 1
+    ;;
+esac
+case "${OSS_BASE_URL}" in
+  *"'"*|*" "*|*";"*|*"|"*|*"&"*|*"\\"*)
+    error "Unsafe --oss-base-url: ${OSS_BASE_URL}"
+    exit 1
+    ;;
+esac
+METADATA_URL="${OSS_BASE_URL}/latest/metadata.json"
+DEPLOY_URL="${OSS_BASE_URL}/deploy-qwen.sh"
 
 # ── 获取最新版本号 ──
 info "Fetching latest version from OSS..."
@@ -134,5 +159,5 @@ fi
 
 # ── 执行升级 ──
 info "Upgrading to ${LATEST_VERSION}..."
-curl -fsSL "${DEPLOY_URL}" | bash -s -- --version "${LATEST_VERSION}" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+curl -fsSL "${DEPLOY_URL}" | bash -s -- --version "${LATEST_VERSION}" --oss-base-url "${OSS_BASE_URL}" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 info "Upgrade complete!"

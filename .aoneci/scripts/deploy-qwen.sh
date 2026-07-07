@@ -24,6 +24,7 @@
 #   QWEN_ARCH         - 架构 (amd64|arm64)，默认自动检测
 #   QWEN_INSTALL_DIR  - 安装目录，默认 /usr/local/qwen-code
 #   QWEN_ARCHIVE      - 已下载的本地 tar.gz 路径，存在时跳过下载
+#   QWEN_OSS_BASE_URL - OSS 根地址覆盖，格式为 https://host/prefix
 # ──────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -31,6 +32,11 @@ set -euo pipefail
 OSS_BUCKET="dataworks-notebook-cn-shanghai"
 OSS_HOST="${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com"
 OSS_PREFIX="public-datasets/aone-release/alishu/qwen-code"
+EMBEDDED_QWEN_OSS_BASE_URL="__QWEN_OSS_BASE_URL__"
+if [ "${EMBEDDED_QWEN_OSS_BASE_URL}" = "__QWEN_OSS_BASE_URL__" ]; then
+  EMBEDDED_QWEN_OSS_BASE_URL="https://${OSS_HOST}/${OSS_PREFIX}"
+fi
+OSS_BASE_URL="${QWEN_OSS_BASE_URL:-${EMBEDDED_QWEN_OSS_BASE_URL}}"
 
 VERSION="${QWEN_VERSION:-}"
 ARCH="${QWEN_ARCH:-}"
@@ -45,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --arch)         ARCH="$2";         shift 2 ;;
     --install-dir)  INSTALL_DIR="$2";  shift 2 ;;
     --archive)      ARCHIVE="$2";      shift 2 ;;
+    --oss-base-url) OSS_BASE_URL="$2"; shift 2 ;;
     --no-symlink)   CREATE_SYMLINK="false"; shift ;;
     -h|--help)
       sed -n '2,/^[^#]/{ /^#/s/^# \{0,1\}//p }' "$0"
@@ -56,6 +63,21 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+OSS_BASE_URL="${OSS_BASE_URL%/}"
+case "${OSS_BASE_URL}" in
+  https://*) ;;
+  *)
+    echo "Invalid --oss-base-url: ${OSS_BASE_URL}" >&2
+    exit 1
+    ;;
+esac
+case "${OSS_BASE_URL}" in
+  *"'"*|*" "*|*";"*|*"|"*|*"&"*|*"\\"*)
+    echo "Unsafe --oss-base-url: ${OSS_BASE_URL}" >&2
+    exit 1
+    ;;
+esac
 
 # ── 颜色输出 ──
 if [ -t 1 ]; then
@@ -105,7 +127,7 @@ echo ""
 # ════════════════════════════════════════════════════════════
 if [ -z "${VERSION}" ]; then
   info "No version specified, fetching latest..."
-  LATEST_URL="https://${OSS_HOST}/${OSS_PREFIX}/latest/metadata.json"
+  LATEST_URL="${OSS_BASE_URL}/latest/metadata.json"
   if curl -fsSL --head "${LATEST_URL}" >/dev/null 2>&1; then
     VERSION=$(curl -fsSL "${LATEST_URL}" 2>/dev/null \
       | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
@@ -123,9 +145,9 @@ info "Target version: ${VERSION}"
 
 # ── 构造下载 URL ──
 TARBALL="qwen-code-${VERSION}-linux-${ARCH}.tar.gz"
-DOWNLOAD_URL="https://${OSS_HOST}/${OSS_PREFIX}/${VERSION}/${TARBALL}"
-SHA256_URL="https://${OSS_HOST}/${OSS_PREFIX}/${VERSION}/SHA256SUMS"
-METADATA_URL="https://${OSS_HOST}/${OSS_PREFIX}/${VERSION}/metadata.json"
+DOWNLOAD_URL="${OSS_BASE_URL}/${VERSION}/${TARBALL}"
+SHA256_URL="${OSS_BASE_URL}/${VERSION}/SHA256SUMS"
+METADATA_URL="${OSS_BASE_URL}/${VERSION}/metadata.json"
 
 RELEASES_DIR="${INSTALL_DIR}/releases"
 CURRENT_LINK="${INSTALL_DIR}/current"
@@ -309,7 +331,7 @@ echo "    qwen                   # if /usr/local/bin is in PATH"
 echo "    ${INSTALL_DIR}/current/bin/qwen"
 echo ""
 echo "  Upgrade:"
-echo "    curl -fsSL https://${OSS_HOST}/${OSS_PREFIX}/upgrade-qwen.sh | bash"
+echo "    curl -fsSL ${OSS_BASE_URL}/upgrade-qwen.sh | bash"
 echo ""
 if [ -n "${PREV_REF}" ] && [ "${PREV_REF}" != "${NEXT_REF}" ]; then
 echo "  Rollback to previous:"

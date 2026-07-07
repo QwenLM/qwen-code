@@ -40,6 +40,9 @@ jobs:
       - 32-128Gi
     name: 'Build & Publish'
     image: alios-8u
+    envs:
+      BOOTSTRAP_TOKEN: ${{secrets.BOOTSTRAP_TOKEN}}
+      OSS_UPLOAD_TARGETS: "public finance"
     steps:
       - uses: checkout
       - uses: setup-env
@@ -170,12 +173,8 @@ jobs:
           WORKSPACE_DIR="/workspace" \
           OSS_GROUP="alishu" \
           OSS_PROJECT="qwen-code" \
-          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com" \
-          OSS_BUCKET="dataworks-notebook-cn-shanghai" \
           SKIP_METADATA="${SKIP_METADATA:-}" \
           SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER:-}" \
           SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS:-}" \
           OSS_RELEASE_CHANNELS="${OSS_RELEASE_CHANNELS:-}" \
-          OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
-          OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
           bash .aoneci/scripts/upload-oss.sh

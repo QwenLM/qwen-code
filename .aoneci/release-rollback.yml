@@ -40,6 +40,9 @@ jobs:
       - 4-8Gi
     name: 'Rollback Release'
     image: alios-8u
+    envs:
+      BOOTSTRAP_TOKEN: ${{secrets.BOOTSTRAP_TOKEN}}
+      OSS_UPLOAD_TARGETS: "public finance"
     steps:
       - uses: checkout
       - uses: setup-env
@@ -72,61 +75,61 @@ jobs:
           CHANNELS="${{ params.channels }}"
           DRY_RUN="${{ params.dry_run }}"
 
-          OSS_BUCKET="dataworks-notebook-cn-shanghai"
-          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com"
+          SCRIPT_DIR="${AONE_CI_SOURCE:-.}/.aoneci/scripts"
           OSS_PROJECT_ROOT="public-datasets/aone-release/alishu/qwen-code"
           OSS_PREFIX="${OSS_PROJECT_ROOT}/${ROLLBACK_TO}"
 
-          # 安装 ossutil
-          if ! command -v ossutil64 &>/dev/null && ! command -v ossutil &>/dev/null; then
-            curl -fsSL "https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip" -o /tmp/ossutil.zip
-            unzip -o /tmp/ossutil.zip -d /tmp/ossutil
-            chmod +x /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil64
-            cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil64 /usr/local/bin/ossutil64
-          fi
-          OSSUTIL=$(command -v ossutil64 || command -v ossutil)
-
-          ${OSSUTIL} config \
-            -e "${OSS_ENDPOINT}" \
-            -i "${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
-            -k "${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}"
-
-          # 验证目标版本的 metadata.json 存在
-          echo "📋 验证目标版本 ${ROLLBACK_TO} 的 metadata.json..."
-          METADATA_URL="oss://${OSS_BUCKET}/${OSS_PREFIX}/metadata.json"
-          if ! ${OSSUTIL} stat "$METADATA_URL" &>/dev/null; then
-            echo "❌ 目标版本 ${ROLLBACK_TO} 的 metadata.json 不存在于 OSS"
-            echo "   路径: ${METADATA_URL}"
-            exit 1
-          fi
-
-          # 下载目标版本的 metadata.json
           TMPDIR=$(mktemp -d)
-          ${OSSUTIL} cp -f "$METADATA_URL" "${TMPDIR}/metadata.json"
-          echo "✅ 目标版本 metadata.json:"
-          cat "${TMPDIR}/metadata.json"
-          echo ""
+          trap 'rm -rf "${TMPDIR}"' EXIT
 
-          # 回退每个 channel 的 metadata.json 指针
-          IFS=',' read -ra CHANNEL_LIST <<< "$CHANNELS"
-          for CHANNEL in "${CHANNEL_LIST[@]}"; do
-            CHANNEL=$(echo "$CHANNEL" | tr -d ' ')
-            if [ -z "$CHANNEL" ]; then continue; fi
+          # shellcheck disable=SC1091
+          . "${SCRIPT_DIR}/oss-targets.sh"
 
-            CHANNEL_PATH="oss://${OSS_BUCKET}/${OSS_PROJECT_ROOT}/${CHANNEL}/metadata.json"
+          CHANNEL_LIST=$(printf '%s' "${CHANNELS}" | tr ',[:space:]' '\n' | sed '/^$/d')
+          TARGETS="$(oss_upload_targets)"
+
+          printf '%s\n' "${TARGETS}" | while IFS= read -r TARGET; do
+            [ -n "${TARGET}" ] || continue
+            oss_configure_target "${TARGET}"
 
             echo ""
-            echo "🔄 Channel: ${CHANNEL}"
-            echo "   当前指向:"
-            ${OSSUTIL} cp -f "$CHANNEL_PATH" "${TMPDIR}/current_${CHANNEL}.json" 2>/dev/null || true
-            cat "${TMPDIR}/current_${CHANNEL}.json" 2>/dev/null || echo "   (不存在)"
-
-            if [ "$DRY_RUN" = "true" ]; then
-              echo "   [DRY-RUN] 将回退到 ${ROLLBACK_TO}"
-            else
-              ${OSSUTIL} cp -f "${TMPDIR}/metadata.json" "$CHANNEL_PATH"
-              echo "   ✅ 已回退到 ${ROLLBACK_TO}"
+            echo "📋 [${OSS_TARGET}] 验证目标版本 ${ROLLBACK_TO} 的 metadata.json..."
+            METADATA_URL="oss://${OSS_BUCKET}/${OSS_PREFIX}/metadata.json"
+            TARGET_METADATA="${TMPDIR}/${OSS_TARGET}_metadata.json"
+            if ! ${OSSUTIL} stat "$METADATA_URL" &>/dev/null; then
+              echo "❌ [${OSS_TARGET}] 目标版本 ${ROLLBACK_TO} 的 metadata.json 不存在于 OSS"
+              echo "   路径: ${METADATA_URL}"
+              exit 1
             fi
+
+            ${OSSUTIL} cp -f "$METADATA_URL" "${TARGET_METADATA}"
+            echo "✅ [${OSS_TARGET}] 目标版本 metadata.json:"
+            cat "${TARGET_METADATA}"
+            echo ""
+
+            for CHANNEL in ${CHANNEL_LIST}; do
+              case "${CHANNEL}" in
+                *[!A-Za-z0-9._-]*|.|..|"")
+                  echo "Invalid OSS release channel: ${CHANNEL}" >&2
+                  exit 1
+                  ;;
+              esac
+              CHANNEL_PATH="oss://${OSS_BUCKET}/${OSS_PROJECT_ROOT}/${CHANNEL}/metadata.json"
+
+              echo ""
+              echo "🔄 [${OSS_TARGET}] Channel: ${CHANNEL}"
+              echo "   当前指向:"
+              ${OSSUTIL} cp -f "$CHANNEL_PATH" "${TMPDIR}/current_${OSS_TARGET}_${CHANNEL}.json" 2>/dev/null || true
+              cat "${TMPDIR}/current_${OSS_TARGET}_${CHANNEL}.json" 2>/dev/null || echo "   (不存在)"
+
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "   [DRY-RUN] 将回退到 ${ROLLBACK_TO}"
+                echo "   路径: ${CHANNEL_PATH}"
+              else
+                ${OSSUTIL} cp -f "${TARGET_METADATA}" "$CHANNEL_PATH"
+                echo "   ✅ 已回退到 ${ROLLBACK_TO}"
+              fi
+            done
           done
 
       - name: 'Deprecate npm version'
