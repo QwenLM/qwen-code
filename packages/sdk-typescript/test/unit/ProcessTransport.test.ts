@@ -352,6 +352,30 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should include --fork-session argument when forkSession is true', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        resume: '123e4567-e89b-12d3-a456-426614174000',
+        forkSession: true,
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining(['--fork-session']),
+        expect.any(Object),
+      );
+    });
+
     it('should throw if aborted before initialization', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

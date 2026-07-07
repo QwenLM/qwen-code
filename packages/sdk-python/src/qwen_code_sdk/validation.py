@@ -49,6 +49,13 @@ def validate_query_options(options: QueryOptions) -> None:
             "resume/continue_session restore existing sessions."
         )
 
+    if options.fork_session and not (options.resume or options.continue_session):
+        raise ValidationError(
+            "fork_session requires resume or continue_session. "
+            "Use resume to fork a specific session "
+            "or continue_session to fork the latest session."
+        )
+
     if options.session_id:
         validate_session_id(options.session_id, "session_id")
 

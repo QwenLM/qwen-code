@@ -82,6 +82,23 @@ def test_cli_argument_precedence_prefers_resume_then_continue_then_session_id() 
     assert "--session-id" not in args
 
 
+def test_fork_session_adds_flag_after_resume() -> None:
+    args = build_cli_arguments(
+        QueryOptions(resume=VALID_UUID, fork_session=True)
+    )
+
+    assert "--fork-session" in args
+    resume_idx = args.index("--resume")
+    fork_idx = args.index("--fork-session")
+    assert fork_idx > resume_idx
+
+
+def test_fork_session_not_added_by_default() -> None:
+    args = build_cli_arguments(QueryOptions(session_id=VALID_UUID))
+
+    assert "--fork-session" not in args
+
+
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:
     script_path = tmp_path / "fake-qwen.py"
     script_path.write_text("print('ok')\n", encoding="utf-8")

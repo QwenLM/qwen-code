@@ -335,6 +335,10 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    if (this.options.forkSession) {
+      args.push('--fork-session');
+    }
+
     return args;
   }
 

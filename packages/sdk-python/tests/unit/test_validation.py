@@ -172,3 +172,16 @@ def test_rejects_mcp_servers() -> None:
         validate_query_options(
             QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
         )
+
+
+def test_rejects_fork_session_without_resume_or_continue() -> None:
+    with pytest.raises(ValidationError, match="fork_session requires resume"):
+        validate_query_options(QueryOptions(fork_session=True))
+
+
+def test_fork_session_with_resume_is_valid() -> None:
+    validate_query_options(QueryOptions(fork_session=True, resume=VALID_UUID))
+
+
+def test_fork_session_with_continue_is_valid() -> None:
+    validate_query_options(QueryOptions(fork_session=True, continue_session=True))

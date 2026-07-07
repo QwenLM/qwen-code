@@ -46,6 +46,13 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * Create a new forked session from the resumed or continued session.
+   * Equivalent to CLI's --fork-session flag.
+   * Must be used with `resume` or `continue`.
+   * @default false
+   */
+  forkSession?: boolean;
 };
 
 export interface QuerySystemPromptPreset {
@@ -451,6 +458,13 @@ export interface QueryOptions {
   includePartialMessages?: boolean;
 
   /**
+   * Resume the most recent session for the current project.
+   * Equivalent to CLI's `--continue` flag.
+   * @default false
+   */
+  continue?: boolean;
+
+  /**
    * Resume a previous session by providing its session ID.
    * This is equivalent to using the `--resume` flag in the Qwen CLI.
    * @example '123e4567-e89b-12d3-a456-426614174000'
@@ -464,6 +478,14 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Create a new forked session from the resumed or continued session.
+   * Equivalent to CLI's `--fork-session` flag.
+   * Must be used with `resume` or `continue`.
+   * @default false
+   */
+  forkSession?: boolean;
 
   /**
    * Timeout configuration for various SDK operations.

@@ -94,4 +94,35 @@ describe('query()', () => {
       }),
     ).toThrow(/systemPrompt/);
   });
+
+  it('passes forkSession to ProcessTransport', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    query({
+      prompt: 'hello',
+      options: {
+        resume: '123e4567-e89b-12d3-a456-426614174000',
+        forkSession: true,
+      } satisfies QueryOptions,
+    });
+
+    expect(mockProcessTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        forkSession: true,
+      }),
+    );
+  });
+
+  it('rejects forkSession without resume or continue', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    expect(() =>
+      query({
+        prompt: 'hello',
+        options: {
+          forkSession: true,
+        } satisfies QueryOptions,
+      }),
+    ).toThrow(/forkSession requires resume or continue/);
+  });
 });

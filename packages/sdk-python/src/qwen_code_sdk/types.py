@@ -110,6 +110,7 @@ class QueryOptionsDict(TypedDict, total=False):
     include_partial_messages: bool
     resume: str
     continue_session: bool
+    fork_session: bool
     session_id: str
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
@@ -135,6 +136,7 @@ class QueryOptions:
     include_partial_messages: bool = False
     resume: str | None = None
     continue_session: bool = False
+    fork_session: bool = False
     session_id: str | None = None
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
@@ -176,6 +178,7 @@ class QueryOptions:
             or False,
             resume=_as_optional_str(data, "resume"),
             continue_session=_as_optional_bool(data, "continue_session") or False,
+            fork_session=_as_optional_bool(data, "fork_session") or False,
             session_id=_as_optional_str(data, "session_id"),
             timeout=timeout,
             mcp_servers=_as_optional_nested_dict(data, "mcp_servers"),

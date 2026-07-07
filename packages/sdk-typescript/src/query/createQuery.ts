@@ -68,8 +68,10 @@ export function query({
     allowedTools: options.allowedTools,
     authType: options.authType,
     includePartialMessages: options.includePartialMessages,
+    continue: options.continue,
     resume: options.resume,
     sessionId,
+    forkSession: options.forkSession,
   });
 
   const queryOptions: QueryOptions = {
@@ -149,6 +151,13 @@ function validateOptions(options: QueryOptions): SpawnInfo | undefined {
   // Validate resume format if provided
   if (options.resume) {
     validateSessionId(options.resume, 'resume');
+  }
+
+  // Validate forkSession requires resume or continue
+  if (options.forkSession && !options.resume && !options.continue) {
+    throw new Error(
+      'forkSession requires resume or continue. Use resume to fork a specific session or continue to fork the latest session.',
+    );
   }
 
   try {

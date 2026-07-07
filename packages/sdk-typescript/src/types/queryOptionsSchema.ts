@@ -179,8 +179,10 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     includePartialMessages: z.boolean().optional(),
+    continue: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    forkSession: z.boolean().optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();
