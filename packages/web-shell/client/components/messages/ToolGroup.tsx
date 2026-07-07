@@ -62,7 +62,6 @@ interface ToolGroupProps {
   tools: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
-  shellOutputMaxLines?: number;
   isLocateFlashing?: boolean;
 }
 
@@ -1235,7 +1234,6 @@ export const ToolGroup = memo(function ToolGroup({
   tools,
   pendingApproval,
   workspaceCwd,
-  shellOutputMaxLines,
   isLocateFlashing = false,
 }: ToolGroupProps) {
   const { t } = useI18n();

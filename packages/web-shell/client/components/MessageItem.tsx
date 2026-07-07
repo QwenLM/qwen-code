@@ -31,7 +31,6 @@ interface MessageItemProps {
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
-  shellOutputMaxLines?: number;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -46,7 +45,6 @@ export const MessageItem = memo(function MessageItem({
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
-  shellOutputMaxLines,
 }: MessageItemProps) {
   const body = ((): ReactElement | null => {
     switch (message.role) {
@@ -85,7 +83,6 @@ export const MessageItem = memo(function MessageItem({
             tools={message.tools}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
             isLocateFlashing={isLocateFlashing}
           />
         );
@@ -255,7 +252,6 @@ function areMessageItemPropsEqual(
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 
