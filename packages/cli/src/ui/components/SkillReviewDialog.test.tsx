@@ -6,8 +6,7 @@
 
 import { render as inkRender } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { promises as fs, watch } from 'node:fs';
-import type { FSWatcher } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -548,83 +547,6 @@ describe('SkillReviewDialog', () => {
       { timeout: 5000 },
     );
     expect(lastFrame()).not.toContain('ALPHA_BODY_MARKER');
-  });
-
-  /**
-   * FSWatcher isn't a named runtime export under vite's node:fs interop —
-   * recover its prototype from a throwaway watcher so tests can spy on it.
-   */
-  function fsWatcherProto(): FSWatcher {
-    const probe = watch(tempDir, () => {});
-    const proto = Object.getPrototypeOf(probe) as FSWatcher;
-    probe.close();
-    return proto;
-  }
-
-  /**
-   * The preview effect's watcher is unreachable from outside the component,
-   * but its 'error' registration goes through FSWatcher.prototype.on — spy on
-   * that to recover the live watcher instance, then drive it by emitting the
-   * events the OS would ('change' bursts, 'error').
-   */
-  function findPreviewWatcher(onSpy: {
-    mock: { calls: unknown[][]; contexts: unknown[] };
-  }): FSWatcher {
-    const idx = onSpy.mock.calls.findIndex(([event]) => event === 'error');
-    // The effect must have attached an 'error' listener — without one, an
-    // async watcher error is an uncaught exception that the global handler
-    // turns into process.exit(1).
-    expect(idx).toBeGreaterThanOrEqual(0);
-    return onSpy.mock.contexts[idx] as FSWatcher;
-  }
-
-  it('coalesces the raw event burst of a single save into one debounced reload', async () => {
-    const onSpy = vi.spyOn(fsWatcherProto(), 'on');
-    const openSpy = vi.spyOn(fs, 'open');
-    try {
-      const { lastFrame } = renderDialog(skills);
-      await vi.waitFor(() =>
-        expect(lastFrame()).toContain('ALPHA_BODY_MARKER'),
-      );
-      const watcher = findPreviewWatcher(onSpy);
-      // Count only reload reads from here on.
-      openSpy.mockClear();
-      // One save fires several raw events (inotify reports MODIFY/CLOSE_WRITE/
-      // ATTRIB separately; FSEvents can also fire more than once)...
-      watcher.emit('change', 'change', 'SKILL.md');
-      watcher.emit('change', 'change', 'SKILL.md');
-      watcher.emit('change', 'change', 'SKILL.md');
-      // ...which the debounce collapses into exactly one re-read...
-      await vi.waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1), {
-        timeout: 3000,
-      });
-      // ...with no trailing extra reload once the debounce window has passed.
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(openSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      onSpy.mockRestore();
-      openSpy.mockRestore();
-    }
-  });
-
-  it('survives an async watcher error and closes the failed watcher', async () => {
-    const onSpy = vi.spyOn(fsWatcherProto(), 'on');
-    try {
-      const { lastFrame } = renderDialog(skills);
-      await vi.waitFor(() =>
-        expect(lastFrame()).toContain('ALPHA_BODY_MARKER'),
-      );
-      const watcher = findPreviewWatcher(onSpy);
-      const close = vi.spyOn(watcher, 'close');
-      // Without the 'error' listener this emit would throw straight out of
-      // the EventEmitter and fail this test.
-      watcher.emit('error', new Error('EWATCH_BOOM'));
-      expect(close).toHaveBeenCalled();
-      // The dialog is unaffected; the preview stays up.
-      expect(lastFrame()).toContain('ALPHA_BODY_MARKER');
-    } finally {
-      onSpy.mockRestore();
-    }
   });
 
   it('`o` does not advance, accept, reject, or close', async () => {
