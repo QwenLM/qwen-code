@@ -1,8 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
+import { createServer } from 'node:http';
+import type { Server } from 'node:http';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
@@ -76,6 +78,14 @@ interface DingTalkMessageData {
   };
 }
 
+interface DingTalkEventPayload {
+  EventId?: string;
+  EventType?: string;
+  CreateAt?: string;
+  CorpId?: string;
+  data?: Record<string, unknown>;
+}
+
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -126,6 +136,9 @@ export class DingtalkChannel extends ChannelBase {
    * on (re)connect, so a long-lived socket serves a stale one after ~2h.
    */
   private proactiveToken?: { token: string; expiresAt: number };
+  private openConversationId?: string;
+  private webhookServer?: Server;
+  private webhookPort?: number;
 
   constructor(
     name: string,
@@ -146,6 +159,13 @@ export class DingtalkChannel extends ChannelBase {
       clientSecret: config.clientSecret,
     });
     this.installStructuredDownstreamHandler();
+
+    this.openConversationId = (config as unknown as Record<string, unknown>)[
+      'openConversationId'
+    ] as string | undefined;
+    this.webhookPort = (config as unknown as Record<string, unknown>)[
+      'webhookPort'
+    ] as number | undefined;
   }
 
   private installStructuredDownstreamHandler(): void {
@@ -275,6 +295,10 @@ export class DingtalkChannel extends ChannelBase {
     );
 
     await this.client.connect();
+
+    if (this.webhookPort) {
+      this.startWebhookServer();
+    }
 
     // Periodically clean up dedup map
     this.dedupTimer = setInterval(() => {
@@ -470,6 +494,159 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
+  private async sendGroupMessage(text: string): Promise<void> {
+    if (!this.openConversationId) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] No openConversationId configured, cannot push to group.\n`,
+      );
+      return;
+    }
+
+    const token = await this.getProactiveToken();
+    const robotCode = this.config.clientId;
+    if (!token || !robotCode) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Cannot send group message: missing token or robotCode.\n`,
+      );
+      return;
+    }
+
+    const title = extractTitle(text);
+    const resp = await fetch(GROUP_MSG_API, {
+      method: 'POST',
+      headers: {
+        'x-acs-dingtalk-access-token': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        robotCode,
+        openConversationId: this.openConversationId,
+        msgKey: GROUP_MSG_KEY,
+        msgParam: JSON.stringify({ title, text }),
+      }),
+    });
+
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => '');
+      process.stderr.write(
+        `[DingTalk:${this.name}] sendGroupMessage failed: HTTP ${resp.status} ${detail}\n`,
+      );
+    }
+  }
+
+  private startWebhookServer(): void {
+    const port = this.webhookPort!;
+    const appSecret = this.config.clientSecret!;
+
+    this.webhookServer = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        try {
+          const body = Buffer.concat(chunks).toString('utf-8');
+          const payload: DingTalkEventPayload = body ? JSON.parse(body) : {};
+
+          const timestamp = req.headers['timestamp'] as string | undefined;
+          const sign = req.headers['sign'] as string | undefined;
+          if (
+            timestamp &&
+            sign &&
+            !this.verifySignature(timestamp, sign, appSecret)
+          ) {
+            process.stderr.write(
+              `[DingTalk:${this.name}] Webhook signature verification failed.\n`,
+            );
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'invalid signature' }));
+            return;
+          }
+
+          const eventType = payload.EventType;
+          process.stderr.write(
+            `[DingTalk:${this.name}] Webhook received: EventType=${eventType}\n`,
+          );
+
+          if (eventType === 'check_url') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ msgtype: 'check_url' }));
+            process.stderr.write(
+              `[DingTalk:${this.name}] check_url verified OK.\n`,
+            );
+            return;
+          }
+
+          if (eventType === 'doc_change') {
+            this.onDocChange(payload.data || {});
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
+        } catch (err) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] Webhook error: ${err}\n`,
+          );
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internal error' }));
+        }
+      });
+    });
+
+    this.webhookServer.listen(port, () => {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Webhook server listening on port ${port}.\n`,
+      );
+    });
+  }
+
+  private verifySignature(
+    timestamp: string,
+    sign: string,
+    appSecret: string,
+  ): boolean {
+    const expected = createHmac('sha256', appSecret)
+      .update(`${timestamp}\n${appSecret}`)
+      .digest('base64');
+    return sign === expected;
+  }
+
+  private onDocChange(data: Record<string, unknown>): void {
+    const docName = (data['dentryName'] as string) || '未知文档';
+    const docUrl = (data['url'] as string) || '';
+    const operator = (data['operatorName'] as string) || '未知用户';
+    const operateType = (data['operateType'] as string) || '变更';
+
+    const operateLabel: Record<string, string> = {
+      add: '新建',
+      update: '更新',
+      delete: '删除',
+      rename: '重命名',
+      move: '移动',
+      copy: '复制',
+      edit: '编辑',
+    };
+
+    const action = operateLabel[operateType] || operateType;
+
+    const text = [
+      `### 📄 文档变更通知`,
+      ``,
+      `- **文档**: ${docUrl ? `[${docName}](${docUrl})` : docName}`,
+      `- **操作**: ${action}`,
+      `- **操作人**: ${operator}`,
+      `- **时间**: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+    ].join('\n');
+
+    this.sendGroupMessage(text).catch((err) => {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Error sending doc_change notification: ${err}\n`,
+      );
+    });
+
+    process.stderr.write(
+      `[DingTalk:${this.name}] doc_change: ${action} "${docName}" by ${operator}\n`,
+    );
+  }
+
   private getAccessToken(): string | undefined {
     return this.client.getConfig().access_token;
   }
@@ -537,6 +714,9 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
+    if (this.webhookServer) {
+      this.webhookServer.close();
+    }
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
