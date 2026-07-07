@@ -335,6 +335,16 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    if (
+      this.options.disabledSlashCommands &&
+      this.options.disabledSlashCommands.length > 0
+    ) {
+      args.push(
+        '--disabled-slash-commands',
+        this.options.disabledSlashCommands.join(','),
+      );
+    }
+
     return args;
   }
 

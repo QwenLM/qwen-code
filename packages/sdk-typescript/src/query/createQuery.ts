@@ -70,6 +70,7 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    disabledSlashCommands: options.disabledSlashCommands,
   });
 
   const queryOptions: QueryOptions = {

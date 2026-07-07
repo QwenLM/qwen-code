@@ -240,4 +240,9 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     elif options.session_id:
         args.extend(["--session-id", options.session_id])
 
+    if options.disabled_slash_commands:
+        args.extend(
+            ["--disabled-slash-commands", ",".join(options.disabled_slash_commands)]
+        )
+
     return args

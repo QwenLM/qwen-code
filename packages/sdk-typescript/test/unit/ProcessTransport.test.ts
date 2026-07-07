@@ -352,6 +352,29 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should include --disabled-slash-commands when provided', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        disabledSlashCommands: ['/init', '/vim'],
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining(['--disabled-slash-commands', '/init,/vim']),
+        expect.any(Object),
+      );
+    });
+
     it('should throw if aborted before initialization', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

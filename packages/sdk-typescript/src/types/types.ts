@@ -46,6 +46,7 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  disabledSlashCommands?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -464,6 +465,14 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Slash command names to hide/disable.
+   * Equivalent to CLI's `--disabled-slash-commands` flag.
+   * Matched case-insensitively against the final command name.
+   * @example ['/init', '/vim']
+   */
+  disabledSlashCommands?: string[];
 
   /**
    * Timeout configuration for various SDK operations.

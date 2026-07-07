@@ -114,6 +114,7 @@ class QueryOptionsDict(TypedDict, total=False):
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
     stderr: Callable[[str], None]
+    disabled_slash_commands: list[str]
 
 
 @dataclass
@@ -139,6 +140,7 @@ class QueryOptions:
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
     stderr: Callable[[str], None] | None = None
+    disabled_slash_commands: list[str] | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> QueryOptions:
@@ -183,6 +185,7 @@ class QueryOptions:
                 Callable[[str], None] | None,
                 _as_optional_callable(data, "stderr"),
             ),
+            disabled_slash_commands=_as_optional_str_list(data, "disabled_slash_commands"),
         )
 
 

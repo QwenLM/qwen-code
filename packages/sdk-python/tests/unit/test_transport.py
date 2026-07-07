@@ -82,6 +82,16 @@ def test_cli_argument_precedence_prefers_resume_then_continue_then_session_id() 
     assert "--session-id" not in args
 
 
+def test_build_cli_arguments_includes_disabled_slash_commands() -> None:
+    args = build_cli_arguments(
+        QueryOptions(disabled_slash_commands=["/init", "/vim"])
+    )
+
+    assert "--disabled-slash-commands" in args
+    idx = args.index("--disabled-slash-commands")
+    assert args[idx + 1] == "/init,/vim"
+
+
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:
     script_path = tmp_path / "fake-qwen.py"
     script_path.write_text("print('ok')\n", encoding="utf-8")
