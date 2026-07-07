@@ -5,6 +5,9 @@ import { getPlugin, supportedTypes } from './channel-registry.js';
 export { findCliEntryPath } from './cli-entry-path.js';
 
 export function resolveEnvVars(value: string): string {
+  if (value.startsWith('$$')) {
+    return value.substring(1);
+  }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
     const envValue = process.env[envName];
@@ -46,6 +49,7 @@ const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
 
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
+  if (value.startsWith('$$')) return value.substring(1);
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
     const envValue = process.env[envName];

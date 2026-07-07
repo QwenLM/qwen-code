@@ -373,12 +373,6 @@ export class WeComChannel extends ChannelBase {
     const rawMessageId = getString(body, 'msgid') || undefined;
     const messageId = rawMessageId ?? `synthetic-${randomUUID()}`;
     const logMessageId = sanitizeLogText(rawMessageId || '(no id)', 100);
-    if (rawMessageId && this.seenMessages.has(rawMessageId)) {
-      process.stderr.write(
-        `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already seen).\n`,
-      );
-      return;
-    }
 
     const from = getRecord(body, 'from');
     const senderId = getString(from, 'userid') || '';
@@ -398,6 +392,12 @@ export class WeComChannel extends ChannelBase {
       if (this.inFlightMessages.has(rawMessageId)) {
         process.stderr.write(
           `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already in flight).\n`,
+        );
+        return;
+      }
+      if (this.seenMessages.has(rawMessageId)) {
+        process.stderr.write(
+          `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already seen).\n`,
         );
         return;
       }
@@ -428,6 +428,7 @@ export class WeComChannel extends ChannelBase {
     );
     let processStarted = false;
     try {
+      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
       if (!(await this.preflightInbound(envelope))) {
         process.stderr.write(
           `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
@@ -447,7 +448,6 @@ export class WeComChannel extends ChannelBase {
         );
         return;
       }
-      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
       if (attachments.length) {
         envelope.attachments = attachments;
       }
@@ -839,6 +839,7 @@ export class WeComChannel extends ChannelBase {
         'activity watchdog',
       );
     }, ACTIVITY_WATCHDOG_INTERVAL_MS);
+    this.activityWatchdog.unref?.();
   }
 
   private scheduleDisconnectReconnectFallback(
@@ -1134,7 +1135,9 @@ function formatSdkError(err: unknown): string {
     const errcode = record['errcode'];
     const errmsg = record['errmsg'];
     if (typeof errcode === 'number' || typeof errmsg === 'string') {
-      return `errcode=${String(errcode)} errmsg=${String(errmsg)}`;
+      return redactSensitiveErrorText(
+        `errcode=${String(errcode)} errmsg=${String(errmsg)}`,
+      );
     }
     const code = record['code'];
     const reason = record['reason'];
@@ -1146,7 +1149,9 @@ function formatSdkError(err: unknown): string {
     ) {
       return [
         typeof code === 'number' ? `code=${code}` : undefined,
-        typeof reason === 'string' ? `reason=${reason}` : undefined,
+        typeof reason === 'string'
+          ? `reason=${redactSensitiveErrorText(reason)}`
+          : undefined,
         typeof wasClean === 'boolean' ? `wasClean=${wasClean}` : undefined,
       ]
         .filter((part): part is string => Boolean(part))
@@ -1163,10 +1168,17 @@ function formatSdkError(err: unknown): string {
   return String(err);
 }
 
+function redactSensitiveErrorText(text: string): string {
+  return text.replace(
+    /(["']?(?:secret|aeskey|token|password|authorization)["']?\s*[:=]\s*)(["']?)[^"',\s}]+(\2)/giu,
+    '$1$2[REDACTED]$3',
+  );
+}
+
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return (
     value !== null &&
-    typeof value === 'object' &&
+    (typeof value === 'object' || typeof value === 'function') &&
     'then' in value &&
     typeof value.then === 'function'
   );

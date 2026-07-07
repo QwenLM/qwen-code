@@ -63,6 +63,10 @@ describe('resolveEnvVars', () => {
     expect(resolveEnvVars(`$${ENV_KEY}`)).toBe('secret');
   });
 
+  it('supports $$ escapes for literal dollar-prefixed values', () => {
+    expect(resolveEnvVars('$$literal-token')).toBe('$literal-token');
+  });
+
   it('throws when referenced env var is not set', () => {
     expect(() => resolveEnvVars(`$${ENV_KEY}`)).toThrow(
       `Environment variable ${ENV_KEY} is not set`,
@@ -109,6 +113,17 @@ describe('parseChannelConfig', () => {
 
     delete process.env['TEST_WECOM_BOT_ID'];
     delete process.env['TEST_WECOM_SECRET'];
+  });
+
+  it('supports $$ escapes in plugin-required bot credentials', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: '$$literal-bot-id',
+      secret: '$$literal-secret',
+    });
+
+    expect(result['botId']).toBe('$literal-bot-id');
+    expect(result['secret']).toBe('$literal-secret');
   });
 
   it('allows non-string plugin-required fields', async () => {
@@ -194,6 +209,17 @@ describe('parseChannelConfig', () => {
     expect(result['wsUrl']).toBe('wss://example.invalid/ws');
 
     delete process.env['TEST_WECOM_WS_URL'];
+  });
+
+  it('supports $$ escapes in plugin-declared optional config fields', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: 'bot-id',
+      secret: 'bot-secret',
+      wsUrl: '$$literal-ws-url',
+    });
+
+    expect(result['wsUrl']).toBe('$literal-ws-url');
   });
 
   it('does not resolve plugin fields twice when declarations overlap', async () => {

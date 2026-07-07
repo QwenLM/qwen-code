@@ -606,6 +606,30 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('redacts sensitive fields in structured websocket disconnect reasons', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('disconnected', {
+      code: 1006,
+      reason: 'secret=nested-secret token=token-value',
+      wasClean: false,
+    });
+
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[REDACTED]'));
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('nested-secret'),
+    );
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('token-value'),
+    );
+    stderr.mockRestore();
+  });
+
   it('reconnects when WeCom kicks the connection for a newer client', async () => {
     vi.useFakeTimers();
     const stderr = vi
@@ -832,6 +856,27 @@ describe('WeComChannel', () => {
 
     channel.disconnect();
     stderr.mockRestore();
+  });
+
+  it('does not keep the activity watchdog alive', async () => {
+    const activityWatchdog = {
+      unref: vi.fn(),
+    } as unknown as ReturnType<typeof setInterval>;
+    const dedupTimer = {
+      unref: vi.fn(),
+    } as unknown as ReturnType<typeof setInterval>;
+    const setIntervalSpy = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockReturnValueOnce(activityWatchdog)
+      .mockReturnValueOnce(dedupTimer);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    await channel.connect();
+
+    expect(activityWatchdog.unref).toHaveBeenCalledTimes(1);
+    expect(dedupTimer.unref).toHaveBeenCalledTimes(1);
+    channel.disconnect();
+    setIntervalSpy.mockRestore();
   });
 
   it('keeps kick reconnect alive when SDK disconnect throws', async () => {
@@ -1791,7 +1836,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('allows retries for messages rejected by preflight', async () => {
+  it('deduplicates messages rejected by preflight', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -1822,7 +1867,11 @@ describe('WeComChannel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     client.emit('message.text', payload);
-    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.preflights).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping duplicate message msg-preflight-rejected (already seen).\n',
+    );
     expect(bridge.newSession).not.toHaveBeenCalled();
     stderr.mockRestore();
   });
