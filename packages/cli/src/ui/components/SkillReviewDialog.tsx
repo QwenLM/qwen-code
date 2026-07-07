@@ -31,6 +31,14 @@ type Choice = 'keep' | 'discard' | 'keepAll' | 'discardAll' | 'turnOff';
 const PREVIEW_MAX_HEIGHT = 12;
 
 /**
+ * A single editor save fires several raw watch events (inotify reports
+ * MODIFY/CLOSE_WRITE/ATTRIB separately; FSEvents can also fire more than once)
+ * and each reload re-reads the file and re-attaches the watcher — coalesce
+ * them so one save costs one reload. Same interval as SettingsWatcher.
+ */
+const WATCH_DEBOUNCE_MS = 300;
+
+/**
  * Cap how much of the (model-generated, possibly huge) SKILL.md is read and
  * processed. Bounds the read + sanitize + split cost regardless of file size;
  * the rendered rows are separately capped to PREVIEW_MAX_HEIGHT. 64 KiB is far
@@ -130,6 +138,7 @@ export const SkillReviewDialog = ({
     if (!stagedPath) return;
     let cancelled = false;
     let watcher: FSWatcher | undefined;
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
     // Keep an already-visible preview on screen during a reload — flashing
     // "Loading preview…" on every save would flicker.
     setPreview((prev) =>
@@ -166,7 +175,18 @@ export const SkillReviewDialog = ({
         // effect, which re-attaches a fresh one.
         try {
           watcher = watch(stagedPath, () => {
-            if (!cancelled) setReloadCounter((c) => c + 1);
+            if (cancelled) return;
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+              if (!cancelled) setReloadCounter((c) => c + 1);
+            }, WATCH_DEBOUNCE_MS);
+          });
+          // Post-attach failures surface as async 'error' events, which are
+          // an uncaught exception (fatal via the global handler) unless
+          // consumed here. Same best-effort stance as the catch below: drop
+          // the watcher and rely on the blocking-editor reload.
+          watcher.on('error', () => {
+            watcher?.close();
           });
         } catch {
           // Best-effort: without a watcher, the reload after a blocking
@@ -178,6 +198,7 @@ export const SkillReviewDialog = ({
       });
     return () => {
       cancelled = true;
+      clearTimeout(debounceTimer);
       watcher?.close();
     };
     // reloadCounter re-runs this after the editor closes or the watcher fires;
