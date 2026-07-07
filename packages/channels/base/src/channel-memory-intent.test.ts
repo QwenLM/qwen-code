@@ -7,7 +7,9 @@ describe('parseChannelMemoryIntent', () => {
       kind: 'remember',
       text: '默认使用 staging 环境',
     });
-    expect(parseChannelMemoryIntent('帮我记一下，发布前跑 npm run build')).toEqual({
+    expect(
+      parseChannelMemoryIntent('帮我记一下，发布前跑 npm run build'),
+    ).toEqual({
       kind: 'remember',
       text: '发布前跑 npm run build',
     });
@@ -21,12 +23,6 @@ describe('parseChannelMemoryIntent', () => {
     expect(parseChannelMemoryIntent('remember: use staging')).toEqual({
       kind: 'remember',
       text: 'use staging',
-    });
-    expect(
-      parseChannelMemoryIntent('Remember that release owners are ops'),
-    ).toEqual({
-      kind: 'remember',
-      text: 'release owners are ops',
     });
   });
 
@@ -64,10 +60,16 @@ describe('parseChannelMemoryIntent', () => {
   });
 
   it('leaves ambiguous prose alone', () => {
+    expect(parseChannelMemoryIntent('保存配置到本地')).toBeNull();
     expect(parseChannelMemoryIntent('我想讨论一下记忆模块')).toBeNull();
+    expect(
+      parseChannelMemoryIntent('Remember that bug we fixed last week?'),
+    ).toBeNull();
     expect(
       parseChannelMemoryIntent('remember this might be tricky later'),
     ).toBeNull();
-    expect(parseChannelMemoryIntent('/remember-channel use staging')).toBeNull();
+    expect(
+      parseChannelMemoryIntent('/remember-channel use staging'),
+    ).toBeNull();
   });
 });
