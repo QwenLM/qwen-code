@@ -1049,6 +1049,13 @@
             "type": "string"
           }
         },
+        "visible": {
+          "description": "Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
           "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [
