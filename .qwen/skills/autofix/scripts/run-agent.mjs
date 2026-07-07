@@ -116,8 +116,8 @@ function runQwen(options, prompt) {
 
     const record = (chunk, stream) => {
       const text = chunk.toString('utf8');
-      if (!loopDetected && isLoopGuardOutput(text)) loopDetected = true;
       outputTail = (outputTail + text).slice(-20_000);
+      if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
       log.write(chunk);
       stream.write(chunk);
     };
