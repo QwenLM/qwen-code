@@ -169,21 +169,50 @@
   cursor: pointer;
 }
 
+.activeHeaderCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
 .reorderHandle {
-  flex: 0 0 28px;
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
   border: none;
-  border-left: 1px solid var(--border);
+  border-left: 0 solid transparent;
   background: transparent;
   color: var(--muted-foreground);
   font: inherit;
+  font-size: 12px;
   cursor: grab;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    flex-basis 120ms ease,
+    width 120ms ease,
+    opacity 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.reorderHandleVisible,
+.reorderHandle:focus-visible,
+.reorderHandle:active {
+  flex-basis: 24px;
+  width: 24px;
+  border-left-width: 1px;
+  border-left-color: var(--border);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .reorderHandle:active {
   cursor: grabbing;
 }
 
-.reorderHandle:hover {
+.reorderHandle:hover,
+.reorderHandle:focus-visible {
   background: var(--subtle-bg-strong);
 }
 

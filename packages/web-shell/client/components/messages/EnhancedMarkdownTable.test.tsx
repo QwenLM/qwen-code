@@ -11,6 +11,7 @@ import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 const originalElementFromPoint = document.elementFromPoint;
+const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
@@ -255,11 +256,7 @@ function dispatchCopy(target: Element) {
   return { event, setData };
 }
 
-function dragColumn(
-  container: HTMLElement,
-  fromLabel: string,
-  toLabel: string,
-): void {
+function dragColumnElements(from: Element, to: Element): void {
   const data = new Map<string, string>();
   const dataTransfer = {
     dropEffect: '',
@@ -270,8 +267,6 @@ function dragColumn(
     setData: vi.fn((type: string, value: string) => data.set(type, value)),
     getData: vi.fn((type: string) => data.get(type) ?? ''),
   };
-  const from = button(container, fromLabel);
-  const to = button(container, toLabel);
   act(() => {
     from.dispatchEvent(
       Object.assign(new Event('dragstart', { bubbles: true }), {
@@ -291,7 +286,16 @@ function dragColumn(
         dataTransfer,
       }),
     );
+    from.dispatchEvent(new Event('dragend', { bubbles: true }));
   });
+}
+
+function dragColumn(
+  container: HTMLElement,
+  fromLabel: string,
+  toLabel: string,
+): void {
+  dragColumnElements(button(container, fromLabel), button(container, toLabel));
 }
 
 function dropExternalColumn(container: HTMLElement, toLabel: string): void {
@@ -301,6 +305,32 @@ function dropExternalColumn(container: HTMLElement, toLabel: string): void {
     types: ['text/plain'],
     setData: vi.fn(),
     getData: vi.fn(() => ''),
+  };
+  const to = button(container, toLabel);
+  act(() => {
+    to.dispatchEvent(
+      Object.assign(
+        new Event('dragover', { bubbles: true, cancelable: true }),
+        {
+          dataTransfer,
+        },
+      ),
+    );
+    to.dispatchEvent(
+      Object.assign(new Event('drop', { bubbles: true, cancelable: true }), {
+        dataTransfer,
+      }),
+    );
+  });
+}
+
+function dropForgedColumn(container: HTMLElement, toLabel: string): void {
+  const dataTransfer = {
+    dropEffect: '',
+    effectAllowed: '',
+    types: [COLUMN_DRAG_MIME],
+    setData: vi.fn(),
+    getData: vi.fn(() => '2'),
   };
   const to = button(container, toLabel);
   act(() => {
@@ -842,6 +872,27 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('shows column move handles only for the active column', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+    const scoreHandle = button(container, 'Move Score');
+
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+    expect(scoreHandle.className).not.toContain('reorderHandleVisible');
+    expect(scoreHandle.tabIndex).toBe(-1);
+
+    click(button(container, 'Sort by Team'));
+
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(0);
+    expect(scoreHandle.className).not.toContain('reorderHandleVisible');
+    expect(scoreHandle.tabIndex).toBe(-1);
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('activeHeaderCell');
+  });
+
   it('reorders columns and quick copies in the visible order', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
@@ -861,6 +912,46 @@ describe('EnhancedMarkdownTable', () => {
     dropExternalColumn(container, 'Move Score');
 
     expect(rowTexts(container)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
+  });
+
+  it('ignores forged column drag payloads', () => {
+    const container = renderWideTable();
+
+    dropForgedColumn(container, 'Move Team');
+
+    expect(rowTexts(container)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
+  });
+
+  it('ignores column drags from another table', () => {
+    const source = renderWideTable();
+    const target = renderWideTable();
+
+    dragColumnElements(button(source, 'Move Score'), button(target, 'Move Team'));
+
+    expect(rowTexts(source)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
+    expect(rowTexts(target)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
+  });
+
+  it('drops reordered columns on the target header cell', () => {
+    const container = renderWideTable();
+
+    dragColumnElements(
+      button(container, 'Move Score'),
+      button(container, 'Sort by Team'),
+    );
+
+    expect(rowTexts(container)).toEqual(['10|Alpha|US', '2|Beta|EMEA']);
+  });
+
+  it('preserves hidden column slots when reordering visible columns', () => {
+    const container = renderWideTable();
+
+    click(button(container, 'Filter Region'));
+    click(textButton(container, 'Hide column'));
+    dragColumn(container, 'Move Score', 'Move Team');
+    click(textButton(container, 'Show 1 hidden column'));
+
+    expect(rowTexts(container)).toEqual(['10|US|Alpha', '2|EMEA|Beta']);
   });
 
   it('keeps hidden columns out of reordered selections', () => {

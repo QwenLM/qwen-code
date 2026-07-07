@@ -397,19 +397,37 @@ function moveColumn(order: number[], fromColumn: number, toColumn: number) {
   return next;
 }
 
+function moveVisibleColumn(
+  order: number[],
+  fromColumn: number,
+  toColumn: number,
+  hiddenColumns: Set<number>,
+) {
+  if (hiddenColumns.size === 0) return moveColumn(order, fromColumn, toColumn);
+  const visibleColumns = order.filter(
+    (columnIndex) => !hiddenColumns.has(columnIndex),
+  );
+  const nextVisibleColumns = moveColumn(
+    visibleColumns,
+    fromColumn,
+    toColumn,
+  );
+  if (nextVisibleColumns === visibleColumns) return order;
+  let visibleIndex = 0;
+  return order.map((columnIndex) => {
+    if (hiddenColumns.has(columnIndex)) return columnIndex;
+    const nextColumn = nextVisibleColumns[visibleIndex];
+    visibleIndex += 1;
+    return nextColumn ?? columnIndex;
+  });
+}
+
 function initialColumnOrder(columnCount: number): number[] {
   return Array.from({ length: columnCount }, (_, index) => index);
 }
 
 function hasColumnDragData(dataTransfer: DataTransfer): boolean {
   return Array.from(dataTransfer.types).includes(COLUMN_DRAG_MIME);
-}
-
-function getDraggedColumnIndex(dataTransfer: DataTransfer): number | null {
-  const rawColumnIndex = dataTransfer.getData(COLUMN_DRAG_MIME);
-  if (rawColumnIndex === '') return null;
-  const columnIndex = Number(rawColumnIndex);
-  return Number.isInteger(columnIndex) ? columnIndex : null;
 }
 
 function isFilterActive(filter: ColumnFilter | undefined): boolean {
@@ -1130,10 +1148,10 @@ export function EnhancedTable({
   const [columnOrder, setColumnOrder] = useState<number[]>(() =>
     initialColumnOrder(table.columnCount),
   );
+  const [activeColumn, setActiveColumn] = useState<number | null>(null);
   const [freezeFirstColumn, setFreezeFirstColumn] = useState(false);
   const [resizingColumn, setResizingColumn] =
     useState<ColumnResizeState | null>(null);
-  const [draggingColumn, setDraggingColumn] = useState<number | null>(null);
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
@@ -1158,6 +1176,7 @@ export function EnhancedTable({
     columnIndex: number;
   } | null>(null);
   const selectionFrameRef = useRef(0);
+  const draggingColumnRef = useRef<number | null>(null);
   const tableStructureKey = useMemo(
     () =>
       `${table.columnCount}\0${table.headers.map((header) => header.text).join('\0')}`,
@@ -1254,13 +1273,14 @@ export function EnhancedTable({
     setHiddenColumns(new Set());
     setColumnWidths({});
     setColumnOrder(initialColumnOrder(table.columnCount));
+    setActiveColumn(null);
     setFreezeFirstColumn(false);
     setResizingColumn(null);
-    setDraggingColumn(null);
     setDetailRowKey(null);
     resetCopiedVisible();
     resetCopiedSelection();
     draggingRef.current = false;
+    draggingColumnRef.current = null;
     setIsDragging(false);
   }, [
     resetCopiedSelection,
@@ -1443,11 +1463,13 @@ export function EnhancedTable({
     direction: SortState['direction'] | null,
   ) => {
     setSelection(null);
+    setActiveColumn(columnIndex);
     setSort(direction ? { columnIndex, direction } : null);
   };
 
   const toggleSort = (columnIndex: number) => {
     setSelection(null);
+    setActiveColumn(columnIndex);
     setSort((current) => {
       if (current?.columnIndex !== columnIndex) {
         return { columnIndex, direction: 'asc' };
@@ -1464,6 +1486,7 @@ export function EnhancedTable({
     columnIndex: number,
   ) => {
     setSelection(null);
+    setActiveColumn(columnIndex);
     filterTriggerRef.current = event.currentTarget;
     const buttonRect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 300;
@@ -1491,6 +1514,7 @@ export function EnhancedTable({
   const hideColumn = (columnIndex: number) => {
     if (orderedVisibleColumnIndexes.length <= 1) return;
     setSelection(null);
+    setActiveColumn((current) => (current === columnIndex ? null : current));
     closeFilterMenu();
     setFilters((current) => {
       const next = { ...current };
@@ -1596,13 +1620,21 @@ export function EnhancedTable({
     columnIndex: number,
   ) => {
     event.stopPropagation();
-    setDraggingColumn(columnIndex);
+    setActiveColumn(columnIndex);
+    draggingColumnRef.current = columnIndex;
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData(COLUMN_DRAG_MIME, String(columnIndex));
   };
 
-  const dragOverColumn = (event: ReactDragEvent<HTMLButtonElement>) => {
-    if (draggingColumn === null && !hasColumnDragData(event.dataTransfer)) {
+  const stopColumnDrag = () => {
+    draggingColumnRef.current = null;
+  };
+
+  const dragOverColumn = (event: ReactDragEvent<HTMLElement>) => {
+    if (
+      draggingColumnRef.current === null ||
+      !hasColumnDragData(event.dataTransfer)
+    ) {
       return;
     }
     event.preventDefault();
@@ -1610,18 +1642,28 @@ export function EnhancedTable({
   };
 
   const dropColumn = (
-    event: ReactDragEvent<HTMLButtonElement>,
+    event: ReactDragEvent<HTMLElement>,
     targetColumnIndex: number,
   ) => {
-    const sourceColumnIndex =
-      draggingColumn ?? getDraggedColumnIndex(event.dataTransfer);
-    setDraggingColumn(null);
-    if (sourceColumnIndex === null) return;
+    const sourceColumnIndex = draggingColumnRef.current;
+    stopColumnDrag();
+    if (
+      sourceColumnIndex === null ||
+      !hasColumnDragData(event.dataTransfer)
+    ) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     setSelection(null);
+    setActiveColumn(sourceColumnIndex);
     setColumnOrder((current) =>
-      moveColumn(current, sourceColumnIndex, targetColumnIndex),
+      moveVisibleColumn(
+        current,
+        sourceColumnIndex,
+        targetColumnIndex,
+        hiddenColumns,
+      ),
     );
   };
 
@@ -1920,13 +1962,16 @@ export function EnhancedTable({
                   ? { textAlign: header.textAlign }
                   : undefined;
                 const isFrozenColumn = frozenColumnIndex === columnIndex;
+                const isActiveColumn = activeColumn === columnIndex;
                 return (
                   <th
                     key={header.key}
                     className={`${styles.headerCell} ${
                       isFrozenColumn ? styles.frozenHeaderCell : ''
-                    }`}
+                    } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
                     aria-sort={ariaSort}
+                    onDragOver={dragOverColumn}
+                    onDrop={(event) => dropColumn(event, columnIndex)}
                     style={columnStyle(columnIndex, headerAlignStyle)}
                   >
                     <div className={styles.headerControls}>
@@ -1948,20 +1993,21 @@ export function EnhancedTable({
                         </span>
                       </button>
                       <button
-                        className={styles.reorderHandle}
+                        className={`${styles.reorderHandle} ${
+                          isActiveColumn ? styles.reorderHandleVisible : ''
+                        }`}
                         type="button"
                         draggable
+                        tabIndex={isActiveColumn ? 0 : -1}
                         onDragStart={(event) =>
                           startColumnDrag(event, columnIndex)
                         }
-                        onDragOver={dragOverColumn}
-                        onDrop={(event) => dropColumn(event, columnIndex)}
-                        onDragEnd={() => setDraggingColumn(null)}
+                        onDragEnd={stopColumnDrag}
                         aria-label={t('markdownTable.moveColumn', {
                           column: columnName,
                         })}
                       >
-                        ↔
+                        ⋮⋮
                       </button>
                       <button
                         className={`${styles.filterTrigger} ${
