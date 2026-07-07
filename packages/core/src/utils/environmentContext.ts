@@ -712,6 +712,27 @@ export function isSystemReminderContent(content: Content): boolean {
   );
 }
 
+export function stripSystemReminderBlocks(text: string): string {
+  let out = '';
+  let offset = 0;
+
+  while (offset < text.length) {
+    const open = text.indexOf(SYSTEM_REMINDER_OPEN, offset);
+    if (open === -1) return out + text.slice(offset);
+
+    const close = text.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      open + SYSTEM_REMINDER_OPEN.length,
+    );
+    if (close === -1) return out + text.slice(offset);
+
+    out += text.slice(offset, open);
+    offset = close + SYSTEM_REMINDER_CLOSE.length;
+  }
+
+  return out;
+}
+
 /**
  * Strip the leading startup context reminder from a chat history. Used when
  * forwarding a parent session's history to a child agent that will generate

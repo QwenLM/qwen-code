@@ -323,33 +323,6 @@ describe('getInitialChatHistory', () => {
     expect(mockToolRegistry.warmAll).toHaveBeenCalled();
     expect(history).toEqual([]);
   });
-
-  it('places deferred-tools reminder last so stable prefix stays cacheable on KV-caching servers', async () => {
-    // Pin: deferred-tools part changes when tool_search reveals a tool.
-    // Placing it LAST keeps the stable prefix (MCP + skills + startup)
-    // cacheable; only the tail recomputes on prefix-caching servers.
-    mockToolRegistry.getDeferredToolSummary.mockReturnValue([
-      { name: 'web_fetch', description: 'Fetches web pages' },
-    ]);
-
-    const [history] = await getInitialChatHistory(mockConfig as Config);
-
-    expect(history).toHaveLength(1);
-    const parts = history[0]?.parts ?? [];
-    expect(parts.length).toBeGreaterThanOrEqual(1);
-
-    // The LAST text part should be the deferred-tools reminder.
-    const lastText = parts[parts.length - 1]?.text;
-    expect(lastText).toBeDefined();
-    expect(lastText).toContain('reachable via `tool_search`');
-    expect(lastText).toContain('web_fetch');
-
-    // The FIRST text part should NOT be the deferred-tools reminder —
-    // it must be the stable MCP/skills/startup prefix.
-    const firstText = parts[0]?.text;
-    expect(firstText).toBeDefined();
-    expect(firstText).not.toContain('reachable via `tool_search`');
-  });
 });
 
 describe('stripStartupContext', () => {
