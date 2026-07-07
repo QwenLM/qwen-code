@@ -775,6 +775,90 @@ describe('群管理事件', () => {
       expect(spy).toHaveBeenCalledTimes(2);
       spy.mockRestore();
     });
+
+    // B1: streamState cleanup
+    it('clears streamState entries and cancels timers for removed group', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      // Pre-populate streamState with entries for the group
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+        }
+      >;
+      streamState.set('sid-1', {
+        chatId: 'group-del-stream',
+        buffer: 'pending text',
+        timer: setTimeout(() => {}, 9999),
+        retryCount: 0,
+      });
+      streamState.set('sid-2', {
+        chatId: 'other-group',
+        buffer: 'other text',
+        timer: null,
+        retryCount: 0,
+      });
+
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-del-stream',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // Entry for removed group is deleted
+      expect(streamState.has('sid-1')).toBe(false);
+      // Entry for other group is preserved
+      expect(streamState.has('sid-2')).toBe(true);
+      expect(streamState.get('sid-2')!.chatId).toBe('other-group');
+      // Timer was cancelled
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+
+      clearTimeoutSpy.mockRestore();
+    });
+
+    // B2: detect type check — streamState entry has the right shape
+    it('detect type check: streamState entry has chatId and buffer fields for group-del cleanup', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const streamState = chp['streamState'] as Map<
+        string,
+        { chatId: string; buffer: string; timer: unknown; retryCount: number }
+      >;
+      streamState.set('sid-detect', {
+        chatId: 'group-detect',
+        buffer: 'test buffer',
+        timer: null,
+        retryCount: 0,
+      });
+
+      // Verify entry has correct shape before cleanup
+      const entry = streamState.get('sid-detect')!;
+      expect(entry.chatId).toBe('group-detect');
+      expect(entry.buffer).toBe('test buffer');
+      expect(entry.retryCount).toBe(0);
+
+      // handleGroupDelRobot iterates streamState checking state.chatId === groupId
+      // Verify the cleanup targets the right group
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-detect',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      expect(streamState.has('sid-detect')).toBe(false);
+    });
   });
 
   describe('handleGroupMsgReject', () => {
@@ -997,5 +1081,209 @@ describe('群管理事件', () => {
 
       ch.disconnect();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gateway message handling (RESUMED, INVALID_SESSION coldStart)
+// ---------------------------------------------------------------------------
+describe('Gateway message handling', () => {
+  it('RESUMED sets _ready to true and resets reconnect state', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['_ready'] = false;
+    chp['reconnectAttempts'] = 3;
+    chp['isReconnecting'] = true;
+
+    // Simulate RESUME event (op=0, t=RESUMED)
+    pvt['handleGatewayMessage']({ op: 0, t: 'RESUMED', s: 1, d: {} }, () => {});
+
+    expect(chp['_ready']).toBe(true);
+    expect(chp['reconnectAttempts']).toBe(0);
+    expect(chp['isReconnecting']).toBe(false);
+  });
+
+  it('RESUMED clears pending readyTimeout', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['readyTimeout'] = setTimeout(() => {}, 30000);
+
+    pvt['handleGatewayMessage']({ op: 0, t: 'RESUMED', s: 1, d: {} }, () => {});
+
+    expect(chp['readyTimeout']).toBeNull();
+
+    ch.disconnect();
+  });
+
+  it('RESUMED clears connectReject and starts heartbeat', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['connectReject'] = vi.fn();
+    chp['heartbeatTimer'] = null;
+
+    pvt['handleGatewayMessage']({ op: 0, t: 'RESUMED', s: 1, d: {} }, () => {});
+
+    expect(chp['connectReject']).toBeNull();
+    // heartbeatTimer was set (startHeartbeat was called)
+    expect(chp['heartbeatTimer']).not.toBeNull();
+
+    ch.disconnect();
+  });
+
+  it('INVALID_SESSION sets coldStart=true and _ready=false', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn(), readyState: 1 };
+    chp['accessToken'] = 'test-token';
+    chp['_ready'] = true;
+    chp['coldStart'] = false;
+    chp['tryResume'] = true;
+
+    // Simulate INVALID_SESSION (op=9)
+    pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+    expect(chp['coldStart']).toBe(true);
+    expect(chp['_ready']).toBe(false);
+    expect(chp['tryResume']).toBe(false);
+
+    ch.disconnect();
+  });
+
+  it('INVALID_SESSION flushes state and sends re-IDENTIFY', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const wsSend = vi.fn();
+    chp['ws'] = { send: wsSend, close: vi.fn(), readyState: 1 };
+    chp['accessToken'] = 'test-token';
+    chp['_ready'] = true;
+
+    // Simulate INVALID_SESSION (op=9)
+    pvt['handleGatewayMessage']({ op: 9 }, () => {});
+
+    // Should have sent IDENTIFY (not RESUME, since tryResume is set to false)
+    expect(wsSend).toHaveBeenCalled();
+    const sent = wsSend.mock.calls[0][0] as string;
+    const parsed = JSON.parse(sent);
+    // After INVALID_SESSION, tryResume=false, so it sends IDENTIFY (op=2)
+    expect(parsed.op).toBe(2);
+
+    ch.disconnect();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token refresh exhaustion (10 failures → reconnect)
+// ---------------------------------------------------------------------------
+describe('Token refresh exhaustion', () => {
+  it('calls disconnect after 10 consecutive token refresh failures', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    // Set up token expiry near future so scheduleTokenRefresh fires soon
+    chp['tokenExpiresAt'] = Date.now() + 20_000;
+    chp['accessToken'] = 'test-token';
+    chp['_reconnectId'] = 1;
+
+    mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
+
+    // Spy on disconnect to verify it's called
+    const disconnectSpy = vi.spyOn(
+      ch as unknown as { disconnect: () => void },
+      'disconnect',
+    );
+
+    // Spy on reconnectWithRetry
+    const reconnectSpy = vi
+      .spyOn(
+        ch as unknown as { reconnectWithRetry: () => Promise<void> },
+        'reconnectWithRetry',
+      )
+      .mockResolvedValue(undefined);
+
+    // Call scheduleTokenRefresh (private, accessed via type cast)
+    (chp['scheduleTokenRefresh'] as () => void).call(ch);
+
+    // Advance past the initial delay
+    // tokenExpiresAt = now + 20s
+    // ttl = 20s
+    // delay = min(20*0.8=16s, max(20-30=-10s, 10s)) = min(16s, 10s) = 10s
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // First fetchToken call was made and rejected
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(1);
+
+    // Now advance through the 10 retries (each 60s apart)
+    // After each rejection, a new setTimeout(60000) fires
+    for (let i = 1; i <= 10; i++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+
+    // After 10 failures (retryCount > 10), disconnect should have been called
+    expect(disconnectSpy).toHaveBeenCalled();
+
+    disconnectSpy.mockRestore();
+    reconnectSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('stale _reconnectId discards token refresh retry callbacks', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['tokenExpiresAt'] = Date.now() + 20_000;
+    chp['accessToken'] = 'test-token';
+    const originalReconnectId = chp['_reconnectId'] as number;
+
+    mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
+
+    // Spy on disconnect
+    const disconnectSpy = vi.spyOn(
+      ch as unknown as { disconnect: () => void },
+      'disconnect',
+    );
+
+    (chp['scheduleTokenRefresh'] as () => void).call(ch);
+
+    // Advance to trigger first fetchToken -> reject
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(1);
+
+    // Change _reconnectId before the retry fires (simulate disconnect/reconnect)
+    chp['_reconnectId'] = originalReconnectId + 1;
+
+    // Advance 60s for the retry
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // Stale _reconnectId check fires in the .catch() handler, not in
+    // fetchToken itself. fetchToken calls fetchAccessToken anyway,
+    // but the .catch() returns early due to _reconnectId mismatch.
+    expect(mockFetchAccessToken).toHaveBeenCalledTimes(2);
+    // disconnect was not called (guard returned early)
+    expect(disconnectSpy).not.toHaveBeenCalled();
+
+    disconnectSpy.mockRestore();
+    vi.useRealTimers();
   });
 });

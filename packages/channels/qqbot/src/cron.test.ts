@@ -57,6 +57,8 @@ vi.mock('@qwen-code/channel-base', () => ({
       return Promise.resolve();
     }
   },
+  sanitizeLogText: (text: string, _maxLen: number): string =>
+    String(text).slice(0, 200),
   getGlobalQwenDir: () => '/tmp/test-qwen',
 }));
 
@@ -254,5 +256,181 @@ describe('cronTextHandler', () => {
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
     expect(cronBuffer.has('sess-cleanup')).toBe(false);
+  });
+
+  // A2: sendMessage failure → log + cleanup (no retry)
+  it('logs error and cleans up cronBuffer on sendMessage rejection (no retry)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
+
+    mockSendQQMessage.mockRejectedValue(new Error('network error'));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-fail', 'will fail');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+    expect(cronBuffer.has('sess-fail')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Verify error was logged
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('Cron flush send error'))).toBe(true);
+
+    // Verify buffer was cleaned up — no retry, no lingering entry
+    expect(cronBuffer.has('sess-fail')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  // A6: streamState isolation — cron handler skips sessions owned by prompt path
+  it('streamState isolation: cron handler skips sessions with existing streamState entry', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
+
+    // Pre-populate streamState for this session — prompt path owns it
+    const ss = pvt['streamState'] as Map<string, unknown>;
+    ss.set('sess-stream', {
+      chatId: 'test-chat',
+      buffer: 'existing prompt text',
+      timer: null,
+      retryCount: 0,
+    });
+
+    triggerTextChunk('sess-stream', 'should be ignored by cron');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-stream')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// _inCronFlow depth counter
+// ---------------------------------------------------------------------------
+describe('_inCronFlow depth counter', () => {
+  it('supports concurrent runCronFlow without stomping depth', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+
+    let resolve1!: () => void;
+    let resolve2!: () => void;
+    const p1 = new Promise<void>((r) => {
+      resolve1 = r;
+    });
+    const p2 = new Promise<void>((r) => {
+      resolve2 = r;
+    });
+
+    const runCronFlow = (
+      ch as unknown as {
+        runCronFlow: (fn: () => Promise<void>) => Promise<void>;
+      }
+    ).runCronFlow.bind(ch);
+
+    const flow1 = runCronFlow(async () => {
+      await p1;
+    });
+    expect(pvt['_inCronFlow']).toBe(1);
+
+    const flow2 = runCronFlow(async () => {
+      await p2;
+    });
+    expect(pvt['_inCronFlow']).toBe(2);
+
+    resolve1();
+    await flow1;
+    expect(pvt['_inCronFlow']).toBe(1);
+
+    resolve2();
+    await flow2;
+    expect(pvt['_inCronFlow']).toBe(0);
+  });
+
+  it('runCronFlow finally decrements even when fn throws', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+
+    const runCronFlow = (
+      ch as unknown as {
+        runCronFlow: (fn: () => Promise<void>) => Promise<void>;
+      }
+    ).runCronFlow.bind(ch);
+
+    expect(pvt['_inCronFlow']).toBe(0);
+
+    await expect(
+      runCronFlow(async () => {
+        throw new Error('cron task failed');
+      }),
+    ).rejects.toThrow('cron task failed');
+
+    // Depth must be 0 even after the function threw
+    expect(pvt['_inCronFlow']).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// disconnect cron cleanup
+// ---------------------------------------------------------------------------
+describe('disconnect cron cleanup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    textChunkHandlers.length = 0;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('clears cronBuffer entries and cancels their timers on disconnect', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
+
+    triggerTextChunk('sess-disc', 'pending cron text');
+    vi.advanceTimersByTime(0); // let setImmediate fire
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+    >;
+    expect(cronBuffer.has('sess-disc')).toBe(true);
+    const entry = cronBuffer.get('sess-disc')!;
+    expect(entry.timer).not.toBeNull();
+
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    (ch as unknown as { disconnect: () => void }).disconnect();
+
+    // Timer was cancelled
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    // Buffer was cleared
+    expect(cronBuffer.size).toBe(0);
+
+    clearTimeoutSpy.mockRestore();
+  });
+
+  it('disconnect resets _inCronFlow depth to zero', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_inCronFlow'] = 3;
+
+    (ch as unknown as { disconnect: () => void }).disconnect();
+
+    expect(pvt['_inCronFlow']).toBe(0);
   });
 });
