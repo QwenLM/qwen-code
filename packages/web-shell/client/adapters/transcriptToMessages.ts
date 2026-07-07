@@ -598,7 +598,7 @@ export function transcriptBlocksToDaemonMessages(
           retryable: errorBlock.source === 'turn_error',
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
-          ...(errorKind
+          ...(errorKind && errorBlock.data !== undefined
             ? { data: { ...(getRecord(errorBlock.data) ?? {}), errorKind } }
             : errorBlock.data !== undefined
               ? { data: errorBlock.data }
