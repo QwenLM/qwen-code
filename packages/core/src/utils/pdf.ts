@@ -63,10 +63,20 @@ export function buildPDFTextTooLargeGuidance(
   pagesUsed?: string,
 ): string {
   const pageRange = pagesUsed ? parsePDFPageRange(pagesUsed) : null;
+  const prefix = `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}).`;
   if (pageRange && pageRange.firstPage === pageRange.lastPage) {
-    return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.`;
+    return `${prefix} The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.`;
   }
-  return `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}). Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.`;
+  if (pageRange) {
+    const suggestedEnd = Math.floor(
+      (pageRange.firstPage + pageRange.lastPage) / 2,
+    );
+    if (suggestedEnd === pageRange.firstPage) {
+      return `${prefix} Use the 'pages' parameter with a single page, for example '${pageRange.firstPage}'.`;
+    }
+    return `${prefix} Use the 'pages' parameter with fewer pages, for example '${pageRange.firstPage}-${suggestedEnd}' or a single page.`;
+  }
+  return `${prefix} Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.`;
 }
 
 /**
