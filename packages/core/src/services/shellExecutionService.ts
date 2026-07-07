@@ -24,6 +24,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
@@ -683,6 +684,7 @@ export class ShellExecutionService {
       abortSignal,
       options.streamStdout ?? false,
       getMaxBufferedOutputBytes(shellExecutionConfig),
+      shellExecutionConfig.pager,
       options.postPromote,
     );
   }
@@ -694,6 +696,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     streamStdout: boolean,
     maxBufferedOutputBytes: number,
+    pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     try {
@@ -719,7 +722,10 @@ export class ShellExecutionService {
           ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          PAGER: 'cat',
+          ...getShellPagerEnv(pager, {
+            includeGitPager: false,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });
@@ -1419,8 +1425,10 @@ export class ShellExecutionService {
           ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          PAGER: shellExecutionConfig.pager ?? 'cat',
-          GIT_PAGER: shellExecutionConfig.pager ?? 'cat',
+          ...getShellPagerEnv(shellExecutionConfig.pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,

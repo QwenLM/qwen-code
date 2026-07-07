@@ -45,6 +45,7 @@ const {
   editorClear,
   editorCommit,
   editorFocus,
+  editorInsertText,
   settingsReload,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
@@ -105,12 +106,20 @@ const {
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestScheduledTasksProps: null as {
+        onRunPrompt?: (
+          prompt: string,
+          sessionId: string | null,
+        ) => Promise<void>;
+        onCreateViaChat?: () => void;
+      } | null,
     },
     sidebarTokens: [] as Array<number | undefined>,
     rawEnqueuePrompt: vi.fn(() => true),
     editorClear: vi.fn(),
     editorCommit: vi.fn(),
     editorFocus: vi.fn(),
+    editorInsertText: vi.fn(),
     settingsReload: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -183,7 +192,7 @@ vi.mock('./components/ChatEditor', async () => {
       testState.latestChatEditorProps = props;
       React.useImperativeHandle(ref, () => ({
         clear: editorClear,
-        insertText: vi.fn(),
+        insertText: editorInsertText,
         // The panel focus effect calls editorRef.current?.focus() when a panel
         // closes with no pending approval (e.g. resuming a session).
         focus: editorFocus,
@@ -352,22 +361,56 @@ mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
 vi.doMock('./components/SplitView', async () => {
   const React = await import('react');
   return {
-    SplitView: (props: { onExit?: () => void }) =>
+    SplitView: (props: {
+      onExit?: () => void;
+      initialSessionIds?: string[];
+      onPanesChange?: (ids: string[]) => void;
+    }) =>
       React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
+        // Surface the seed so a test can assert the App preserved / restored it.
+        React.createElement(
+          'span',
+          { 'data-testid': 'split-initial' },
+          (props.initialSessionIds ?? []).join(','),
+        ),
+        // Simulate the real SplitView reporting its live pane set up to the App.
         React.createElement(
           'button',
-          { 'data-testid': 'split-back', type: 'button', onClick: props.onExit },
+          {
+            'data-testid': 'split-report-panes',
+            type: 'button',
+            onClick: () => props.onPanesChange?.(['s1', 's2', 's3']),
+          },
+          'report',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-back',
+            type: 'button',
+            onClick: props.onExit,
+          },
           'back',
         ),
       ),
   };
 });
-mockComponent(
-  './components/dialogs/ScheduledTasksDialog',
-  'ScheduledTasksDialog',
-);
+// Capturing mock: stores the onRunPrompt handler (App's real runTaskManually)
+// so tests can drive the manual-run orchestration directly, then renders a bare
+// node like the other dialog mocks.
+vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
+  const React = await import('react');
+  return {
+    ScheduledTasksDialog: (props: {
+      onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+    }) => {
+      testState.latestScheduledTasksProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
@@ -486,11 +529,13 @@ beforeEach(() => {
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.latestChatEditorProps = null;
+  testState.latestScheduledTasksProps = null;
   sidebarTokens.length = 0;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
   editorCommit.mockClear();
   editorFocus.mockClear();
+  editorInsertText.mockClear();
   settingsReload.mockClear();
   settingsReload.mockResolvedValue(undefined);
   mockFollowup.clear.mockClear();
@@ -1026,10 +1071,53 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     // Split closed; the Session Overview panel is shown instead of the chat.
-    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('preserves the pane set when leaving the split view and reopening it', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    // Open the split, then let SplitView report a live pane set (s1,s2,s3) back
+    // to the App — the same way real add/remove mirrors up via onPanesChange.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // Leave the split (back to the overview)…
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+
+    // …and reopen it from the toolbar. The reported panes must be restored, not
+    // reset to empty / the current session (the regression this guards).
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3');
   });
 
   it('enters the split view from a ?split= URL and consumes the param', async () => {
@@ -1042,6 +1130,22 @@ describe('App session callbacks', () => {
       ).not.toBeNull();
       // The one-shot param is stripped so a reload/exit doesn't force it back.
       expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('seeds the split from a ?split= URL, deduping and capping the explicit selection', async () => {
+    // Duplicates and more than MAX_SPLIT_PANES (6) ids drive the explicit-
+    // selection branch of openSplitView (dedupe + cap + replace), distinct from
+    // the no-selection restore branch covered above.
+    window.history.pushState({}, '', '/?split=s1,s1,s2,s3,s4,s5,s6,s7');
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s1,s2,s3,s4,s5,s6');
     } finally {
       window.history.pushState({}, '', '/');
     }
@@ -1553,5 +1657,166 @@ describe('App session callbacks', () => {
       rerender({ onSessionChange });
     });
     expect(onSessionChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('App manual-run orchestration (scheduled tasks)', () => {
+  // Drives App's real runTaskManually / enqueueManualRun / tryFireBoundRun via
+  // the onRunPrompt prop the (captured) ScheduledTasksDialog mock receives.
+  // Opening the page with /schedule mounts the dialog and captures the handler.
+  async function openRunHandler(
+    container: HTMLElement,
+  ): Promise<(prompt: string, sessionId: string | null) => Promise<void>> {
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const handler = testState.latestScheduledTasksProps?.onRunPrompt;
+    if (!handler) throw new Error('onRunPrompt was not captured');
+    return handler;
+  }
+
+  // Make sendPrompt admit the prompt (fire onAdmitted) then resolve, the normal
+  // "daemon accepted it" path.
+  const admitOnSend = () =>
+    mockSessionActions.sendPrompt.mockImplementation(
+      (_text: string, opts?: { onAdmitted?: () => void }) => {
+        opts?.onAdmitted?.();
+        return Promise.resolve(undefined);
+      },
+    );
+
+  it('resolves an unbound run once the daemon admits the prompt', async () => {
+    admitOnSend();
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).resolves.toBeUndefined();
+    });
+  });
+
+  it('rejects an unbound run that settles without admitting (cancel path)', async () => {
+    // Default sendPrompt resolves WITHOUT onAdmitted → onSubmitBefore cancel /
+    // never reached the session: the caller must skip recording a run.
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toThrow(
+        /cancelled before it started/,
+      );
+    });
+  });
+
+  it('rejects an unbound run when the send throws before admission', async () => {
+    mockSessionActions.sendPrompt.mockRejectedValue(new Error('daemon boom'));
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toThrow('daemon boom');
+    });
+  });
+
+  it('fires a bound run immediately when its session is already active', async () => {
+    admitOnSend();
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    // session-1 is the current, fully-loaded session, so tryFireBoundRun fires
+    // right after loadSidebarSession without waiting on a dep-change effect.
+    await act(async () => {
+      await expect(run('do the thing', 'session-1')).resolves.toBeUndefined();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+  });
+
+  it('supersedes an older pending bound run with a newer one', async () => {
+    // Neither target is the active session, so both stay latched; the second
+    // must reject the first so its caller does not record a dropped run.
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    let firstErr: unknown;
+    let second: Promise<void> | undefined;
+    await act(async () => {
+      void run('first', 'sess-A').catch((e) => {
+        firstErr = e;
+      });
+      second = run('second', 'sess-B').catch(() => {});
+      await Promise.resolve();
+    });
+    expect((firstErr as Error | undefined)?.message).toMatch(/superseded/);
+    vi.clearAllTimers();
+    void second;
+  });
+
+  it('rejects a bound run when the session switch times out', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'never-active').catch((e) => {
+        err = e;
+      });
+      await Promise.resolve(); // loadSidebarSession resolves; no fire (not current)
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect((err as Error | undefined)?.message).toMatch(/Timed out switching/);
+  });
+
+  it('"create via chat" starts a fresh session and primes the composer', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onCreateViaChat =
+      testState.latestScheduledTasksProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    editorInsertText.mockClear();
+    await act(async () => {
+      onCreateViaChat();
+    });
+    await flush();
+    // Jumps to a NEW session (clearSession is how createNewSession starts one)
+    // rather than piling the task-creation chat onto the current conversation.
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    // ...then primes the composer with the task starter (deferred one tick).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(editorInsertText).toHaveBeenCalled();
+  });
+
+  it('"create via chat" does NOT prime the composer when the new session fails', async () => {
+    // If createNewSession() fails, the error is already surfaced — priming the
+    // (still-current) session would drop the task starter into the wrong chat.
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onCreateViaChat =
+      testState.latestScheduledTasksProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('boom'));
+    editorInsertText.mockClear();
+    await act(async () => {
+      onCreateViaChat();
+    });
+    await flush();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1); // attempted
+    expect(editorInsertText).not.toHaveBeenCalled(); // but priming skipped
   });
 });
