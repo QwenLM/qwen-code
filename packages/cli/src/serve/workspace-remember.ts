@@ -187,12 +187,20 @@ function createTaskError(
   kind: WorkspaceMemoryTaskKind,
   err: unknown,
 ): WorkspaceMemoryTaskBaseSnapshot['error'] {
-  const details = extractRememberErrorDetails(err);
-  return {
+  const error: WorkspaceMemoryTaskBaseSnapshot['error'] = {
     code,
     message: publicErrorMessage(code, kind),
-    ...(details ? { details } : {}),
   };
+  if (code === 'managed_memory_unavailable') return error;
+  try {
+    const details = extractRememberErrorDetails(err);
+    return {
+      ...error,
+      ...(details ? { details } : {}),
+    };
+  } catch {
+    return error;
+  }
 }
 
 export class WorkspaceRememberTaskLane {

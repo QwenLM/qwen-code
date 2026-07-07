@@ -24,21 +24,33 @@ function errorCodeFromRecord(
   return undefined;
 }
 
+function rawRememberErrorCode(
+  err: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+): string | undefined {
+  if (depth > MAX_REMEMBER_ERROR_CAUSE_DEPTH) return undefined;
+  if (!err || typeof err !== 'object') return undefined;
+  if (seen.has(err)) return undefined;
+  seen.add(err);
+
+  const record = err as Record<string, unknown>;
+  const direct = errorCodeFromRecord(record);
+  if (direct) return direct;
+
+  const cause = record['cause'];
+  if (cause != null) {
+    return rawRememberErrorCode(cause, seen, depth + 1);
+  }
+
+  return undefined;
+}
+
 export function extractRememberErrorCode(
   err: unknown,
   fallback = 'remember_failed',
 ): string {
-  if (err && typeof err === 'object') {
-    const record = err as Record<string, unknown>;
-    const direct = errorCodeFromRecord(record);
-    if (direct) return direct;
-    const cause = record['cause'];
-    if (cause && typeof cause === 'object') {
-      const causedBy = errorCodeFromRecord(cause as Record<string, unknown>);
-      if (causedBy) return causedBy;
-    }
-  }
-  return fallback;
+  return rawRememberErrorCode(err, new WeakSet<object>(), 0) ?? fallback;
 }
 
 function detailFromRecord(
@@ -112,16 +124,19 @@ function replaceControlChars(details: string): string {
 }
 
 function sanitizeRememberErrorDetails(details: string): string | undefined {
-  const normalized = redactLogCredentials(replaceControlChars(details)).trim();
+  const redacted = redactLogCredentials(details);
+  const normalized = redactLogCredentials(replaceControlChars(redacted)).trim();
   if (!normalized) return undefined;
   if (normalized.length <= MAX_REMEMBER_ERROR_DETAILS_CHARS) {
     return normalized;
   }
   const truncationSuffix = '... [truncated]';
-  return `${normalized.slice(
-    0,
-    MAX_REMEMBER_ERROR_DETAILS_CHARS - truncationSuffix.length,
-  )}${truncationSuffix}`;
+  let cutPoint = MAX_REMEMBER_ERROR_DETAILS_CHARS - truncationSuffix.length;
+  const codeUnit = normalized.charCodeAt(cutPoint - 1);
+  if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+    cutPoint -= 1;
+  }
+  return `${normalized.slice(0, cutPoint)}${truncationSuffix}`;
 }
 
 export function extractRememberErrorDetails(err: unknown): string | undefined {

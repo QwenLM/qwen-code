@@ -865,6 +865,7 @@ describe('workspace memory remember routes', () => {
         )
         .mockRejectedValueOnce({
           data: { errorKind: 'managed_memory_unavailable' },
+          message: 'internal managed memory config path',
         })
         .mockRejectedValueOnce({
           data: { errorKind: 'remember_timeout' },

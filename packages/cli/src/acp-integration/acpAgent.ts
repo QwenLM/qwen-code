@@ -278,11 +278,15 @@ function workspaceMemoryErrorData(
   code: string,
   err: unknown,
 ): { errorKind: string; details?: string } {
-  const details = extractRememberErrorDetails(err);
-  return {
-    errorKind: code,
-    ...(details ? { details } : {}),
-  };
+  try {
+    const details = extractRememberErrorDetails(err);
+    return {
+      errorKind: code,
+      ...(details ? { details } : {}),
+    };
+  } catch {
+    return { errorKind: code };
+  }
 }
 
 function parseAcpLocalReadRootsEnv(
@@ -5835,6 +5839,7 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          debugLogger.error('Workspace memory remember failed:', err);
           if (childSignal.aborted) {
             throw new RequestError(
               -32099,
@@ -5905,6 +5910,7 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          debugLogger.error('Workspace memory forget failed:', err);
           if (childSignal.aborted) {
             throw new RequestError(
               -32099,
@@ -5962,6 +5968,7 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
+          debugLogger.error('Workspace memory dream failed:', err);
           if (childSignal.aborted) {
             throw new RequestError(-32099, 'Workspace memory dream timed out', {
               errorKind: 'dream_timeout',

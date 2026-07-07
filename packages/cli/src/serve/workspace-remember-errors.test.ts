@@ -28,6 +28,11 @@ describe('extractRememberErrorCode', () => {
         cause: { code: 'remember_timeout' },
       }),
     ).toBe('remember_timeout');
+    expect(
+      extractRememberErrorCode({
+        cause: { cause: { code: 'remember_path_escape' } },
+      }),
+    ).toBe('remember_path_escape');
     expect(extractRememberErrorCode(new Error('boom'))).toBe('remember_failed');
     expect(extractRememberErrorCode(new Error('boom'), 'forget_failed')).toBe(
       'forget_failed',
@@ -90,6 +95,18 @@ describe('extractRememberErrorDetails', () => {
     }
   });
 
+  it('redacts credentials with hidden separators inside token values', () => {
+    for (const separator of ['\u200b', '\u2060', '\u2064']) {
+      const details = extractRememberErrorDetails(
+        new Error(`Authorization: Bearer secret${separator}token-value`),
+      );
+
+      expect(details).toBe('Authorization: <redacted>');
+      expect(details).not.toContain('secret');
+      expect(details).not.toContain('token-value');
+    }
+  });
+
   it('normalizes line separators before redacting credentials', () => {
     for (const separator of ['\u2028', '\u2029']) {
       const details = extractRememberErrorDetails(
@@ -99,6 +116,26 @@ describe('extractRememberErrorDetails', () => {
       expect(details).toBe('Authorization: <redacted>');
       expect(details).not.toContain('secret-token-value');
     }
+  });
+
+  it('normalizes bidi isolation characters before redacting credentials', () => {
+    for (const separator of ['\u2066', '\u2067', '\u2068', '\u2069']) {
+      const details = extractRememberErrorDetails(
+        new Error(`Authorization: Bearer${separator}secret-token-value`),
+      );
+
+      expect(details).toBe('Authorization: <redacted>');
+      expect(details).not.toContain('secret-token-value');
+    }
+  });
+
+  it('normalizes BOM before redacting credentials', () => {
+    const details = extractRememberErrorDetails(
+      new Error('Authorization: Bearer\ufeffsecret-token-value'),
+    );
+
+    expect(details).toBe('Authorization: <redacted>');
+    expect(details).not.toContain('secret-token-value');
   });
 
   it('sanitizes control characters', () => {
@@ -132,5 +169,14 @@ describe('extractRememberErrorDetails', () => {
 
     expect(details).toMatch(/^x+\.{3} \[truncated\]$/);
     expect(details).toHaveLength(1000);
+  });
+
+  it('does not split surrogate pairs when capping long details', () => {
+    const details = extractRememberErrorDetails(
+      new Error(`${'x'.repeat(984)}${'😀'.repeat(100)}`),
+    );
+
+    expect(details).toBe(`${'x'.repeat(984)}... [truncated]`);
+    expect(details).toHaveLength(999);
   });
 });
