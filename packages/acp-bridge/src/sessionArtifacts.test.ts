@@ -86,6 +86,34 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('keeps live removal when durable tombstone persistence fails', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-remove-live-first',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Delete me', url: 'https://example.com/delete-me' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+
+    failWrites = true;
+    await expect(store.remove(artifactId)).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+      warnings: ['artifact removal not persisted; live removal kept'],
+    });
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
   it('gets artifacts and refreshes stale workspace status', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-get',
@@ -344,7 +372,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('writes client ids into durable artifact records', async () => {
+  it('keeps client ids live without writing them into durable artifact records', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's1-client-id-durable',
@@ -372,16 +400,14 @@ describe('SessionArtifactStore', () => {
     expect(created.changes[0]?.artifact).toMatchObject({
       clientId: 'client-a',
     });
-    expect(events[0]?.changes[0]?.artifact).toMatchObject({
-      clientId: 'client-a',
-    });
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
       'persistenceWarning',
     );
   });
 
-  it('restores client ownership from durable artifact records', async () => {
+  it('does not restore client ownership from legacy durable artifact records', async () => {
     const owner = 'client-a';
     const sessionId = 's1-restored-client-owner';
     const url = 'https://example.com/owned-restored-artifact';
@@ -391,39 +417,38 @@ describe('SessionArtifactStore', () => {
       workspaceCwd: workspace,
     });
 
+    const legacyArtifact = {
+      id: artifactId,
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: 'Owned restored artifact',
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+      clientId: owner,
+    } as RebuiltSessionArtifactSnapshot['artifacts'][number] & {
+      clientId: string;
+    };
+
     await store.restore({
       v: 2,
       sessionId,
       sequence: 1,
-      artifacts: [
-        {
-          id: artifactId,
-          kind: 'link',
-          storage: 'external_url',
-          source: 'client',
-          status: 'available',
-          title: 'Owned restored artifact',
-          url,
-          retention: 'restorable',
-          clientRetained: true,
-          createdAt: '2026-07-04T00:00:00.000Z',
-          updatedAt: '2026-07-04T00:00:00.000Z',
-          clientId: owner,
-        },
-      ],
+      artifacts: [legacyArtifact],
       tombstonedIds: [],
       stickyEphemeralIds: [],
       warnings: [],
     } satisfies RebuiltSessionArtifactSnapshot);
 
-    await expect(store.list()).resolves.toMatchObject({
-      artifacts: [{ id: artifactId, clientId: owner }],
-    });
+    const listed = await store.list();
+    expect(listed.artifacts[0]).toMatchObject({ id: artifactId });
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
     await expect(
       store.remove(artifactId, { clientId: 'client-b' }),
-    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
-    await expect(
-      store.remove(artifactId, { clientId: owner }),
     ).resolves.toMatchObject({
       changes: [{ action: 'removed', artifactId }],
     });
@@ -1337,6 +1362,67 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('keeps explicit ephemeral retention while coalescing implicit duplicates', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-coalesce-explicit-ephemeral',
+      workspaceCwd: workspace,
+    });
+    const url = 'https://example.com/coalesce-ephemeral';
+
+    const result = await store.upsertMany([
+      {
+        title: 'Ephemeral',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        retention: 'ephemeral',
+      },
+      {
+        title: 'Implicit duplicate',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        metadata: { refreshed: true },
+      },
+    ]);
+
+    expect(result.changes[0]?.artifact).toMatchObject({
+      url,
+      retention: 'ephemeral',
+    });
+  });
+
+  it('keeps explicit ephemeral retention across implicit updates', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-update-explicit-ephemeral',
+      workspaceCwd: workspace,
+    });
+    const url = 'https://example.com/update-ephemeral';
+
+    await store.upsertMany([
+      {
+        title: 'Ephemeral',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        retention: 'ephemeral',
+      },
+    ]);
+    await store.upsertMany([
+      {
+        title: 'Implicit update',
+        source: 'client',
+        clientId: 'client-1',
+        url,
+        metadata: { refreshed: true },
+      },
+    ]);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ url, retention: 'ephemeral' }],
+    });
+  });
+
   it('infers artifact kind from storage and workspace extensions', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-kind',
@@ -1623,6 +1709,18 @@ describe('SessionArtifactStore', () => {
           {
             title: 'Fragment token',
             url: 'https://example.com/report#access_token=abc',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Camel token',
+            url: 'https://example.com/report?accessToken=abc',
           },
         ],
         { strict: true },
@@ -2757,7 +2855,50 @@ describe('SessionArtifactStore', () => {
     expect(snapshots).toHaveLength(0);
   });
 
-  it('drops stale sticky markers when durable eviction removes an artifact', async () => {
+  it('keeps restored sticky markers for non-restored ephemeral artifacts in snapshots', async () => {
+    const sessionId = 's11-sticky-non-restored-snapshot';
+    const stickyId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/sticky-ephemeral',
+    );
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [stickyId],
+      warnings: [],
+    });
+    for (let index = 0; index < 50; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/sticky-snapshot-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.stickyEphemeralIds).toContain(stickyId);
+  });
+
+  it('keeps restored sticky markers after live eviction removes an artifact', async () => {
     const sourceEvents: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
       sessionId: 's11-eviction-sticky',
@@ -2809,7 +2950,7 @@ describe('SessionArtifactStore', () => {
     }
 
     expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]?.stickyEphemeralIds).not.toContain(evictedArtifact.id);
+    expect(snapshots[0]?.stickyEphemeralIds).toContain(evictedArtifact.id);
   });
 
   it('applies sticky ephemeral markers while restoring durable artifacts', async () => {
@@ -2909,7 +3050,7 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
-  it('rolls back explicit removal when tombstone persistence fails', async () => {
+  it('keeps explicit removal live when tombstone persistence fails', async () => {
     let calls = 0;
     const store = new SessionArtifactStore({
       sessionId: 's11-remove-live-first',
@@ -2929,17 +3070,19 @@ describe('SessionArtifactStore', () => {
       { strict: true },
     );
 
-    await expect(store.remove(created.changes[0]!.artifactId)).rejects.toThrow(
-      'disk full',
-    );
-    await expect(store.list()).resolves.toMatchObject({
-      artifacts: [
-        expect.objectContaining({
-          id: created.changes[0]?.artifactId,
-          title: 'Sensitive',
-        }),
+    await expect(
+      store.remove(created.changes[0]!.artifactId),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'removed',
+          artifactId: created.changes[0]?.artifactId,
+          reason: 'explicit',
+        },
       ],
+      warnings: ['artifact removal not persisted; live removal kept'],
     });
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
   it('writes a tombstone when deleting a downgraded durable artifact', async () => {

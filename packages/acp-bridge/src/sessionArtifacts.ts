@@ -481,7 +481,6 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
-      const before = this.cloneState();
       this.artifacts.delete(artifactId);
       const removeChange: SessionArtifactChange & {
         durableTombstoneRequired?: boolean;
@@ -497,17 +496,8 @@ export class SessionArtifactStore {
             : undefined,
       };
       const changes: SessionArtifactChange[] = [removeChange];
-      let warnings: string[];
-      try {
-        warnings = await this.persistChanges(
-          changes,
-          this.persistence !== undefined,
-        );
-        delete removeChange.durableTombstoneRequired;
-      } catch (error) {
-        this.restoreState(before);
-        throw error;
-      }
+      const warnings = await this.persistChanges(changes, false);
+      delete removeChange.durableTombstoneRequired;
       return {
         v: 1,
         sessionId: this.sessionId,
@@ -858,9 +848,7 @@ export class SessionArtifactStore {
       .map((artifact) =>
         toPersistedArtifact(toPublicArtifact(artifact), recordedAt),
       );
-    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
-      (id) => this.artifacts.has(id),
-    );
+    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds);
     return {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
@@ -1370,7 +1358,7 @@ function mergeBatchArtifact(
       receivedSeq: existing.receivedSeq,
       retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
       retentionSource: existing.retentionSource,
-      retention: strongestRetention(existing.retention, next.retention),
+      retention: mergeRetention(existing, next),
       restoreState: 'live',
       persistenceWarning:
         existing.persistenceWarning ?? next.persistenceWarning,
@@ -1389,7 +1377,7 @@ function mergeBatchArtifact(
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
-    retention: strongestRetention(existing.retention, next.retention),
+    retention: mergeRetention(existing, next),
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
 }
@@ -1439,7 +1427,7 @@ function mergeArtifact(
       existing.storage === 'published' && !publishedUpdate
         ? existing.metadata
         : mergeMetadata(existing, incoming),
-    retention: strongestRetention(existing.retention, incoming.retention),
+    retention: mergeRetention(existing, incoming),
     restoreState: 'live',
     persistenceWarning:
       incoming.retentionExplicit && incoming.retention !== 'ephemeral'
@@ -1539,6 +1527,23 @@ function strongestRetention(
     restorable: 1,
   };
   return rank[b] > rank[a] ? b : a;
+}
+
+function mergeRetention(
+  existing: Pick<StoredArtifact, 'retention' | 'retentionExplicit'>,
+  incoming: Pick<NormalizedArtifact, 'retention' | 'retentionExplicit'>,
+): DaemonSessionArtifactRetention {
+  if (incoming.retentionExplicit && incoming.retention === 'ephemeral') {
+    return 'ephemeral';
+  }
+  if (
+    existing.retentionExplicit &&
+    existing.retention === 'ephemeral' &&
+    !incoming.retentionExplicit
+  ) {
+    return 'ephemeral';
+  }
+  return strongestRetention(existing.retention, incoming.retention);
 }
 
 function mergeMetadata(
@@ -1739,7 +1744,6 @@ function persistedArtifactToInput(
     toolCallId: artifact.toolCallId,
     toolName: artifact.toolName,
     hookEventName: artifact.hookEventName,
-    clientId: artifact.clientId,
   };
 }
 
@@ -1802,7 +1806,6 @@ function toPersistedArtifact(
     ...(artifact.hookEventName
       ? { hookEventName: artifact.hookEventName }
       : {}),
-    ...(artifact.clientId ? { clientId: artifact.clientId } : {}),
   };
 }
 
@@ -2159,8 +2162,9 @@ function hasSecretLikeUrlComponent(parsed: URL): boolean {
 }
 
 function isSecretLikeUrlText(value: string): boolean {
+  const normalized = value.replace(/([a-z])([A-Z])/g, '$1-$2');
   return /(?:^|[-_.])(token|secret|password|passwd|pwd|cookie|authorization|credential|signature|sig|api[-_]?key|access[-_]?key)(?:$|[-_.=&#])/i.test(
-    value,
+    normalized,
   );
 }
 

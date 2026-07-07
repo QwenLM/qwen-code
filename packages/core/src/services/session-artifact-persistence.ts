@@ -91,7 +91,6 @@ export interface PersistedSessionArtifact {
   toolCallId?: string;
   toolName?: string;
   hookEventName?: string;
-  clientId?: string;
 }
 
 export type SessionArtifactPersistedChangeAction =
@@ -531,7 +530,6 @@ function normalizePersistedArtifact(
     'hookEventName',
     MAX_PERSISTED_FIELD_CHARS,
   );
-  const clientId = getString(value, 'clientId', MAX_PERSISTED_FIELD_CHARS);
   return {
     id,
     kind,
@@ -560,7 +558,6 @@ function normalizePersistedArtifact(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolName ? { toolName } : {}),
     ...(hookEventName ? { hookEventName } : {}),
-    ...(clientId ? { clientId } : {}),
   };
 }
 

@@ -373,11 +373,11 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 
-  it('preserves persisted client ids during restore normalization', () => {
+  it('ignores legacy persisted client ids during restore normalization', () => {
     const restored = {
       ...artifact('s1', 'https://example.com/client-owned'),
       clientId: 'client-a',
-    } as PersistedSessionArtifact;
+    } as PersistedSessionArtifact & { clientId: string };
 
     const snapshot = rebuildSessionArtifactSnapshot([
       event({
@@ -391,7 +391,7 @@ describe('session artifact persistence records', () => {
       }),
     ]);
 
-    expect(snapshot?.artifacts[0]).toMatchObject({ clientId: 'client-a' });
+    expect(snapshot?.artifacts[0]).not.toHaveProperty('clientId');
   });
 
   it('preserves near-limit user metadata with workspace hash metadata', () => {

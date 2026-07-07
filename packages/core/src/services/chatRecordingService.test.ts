@@ -1145,7 +1145,7 @@ describe('ChatRecordingService', () => {
       expect(third.parentUuid).toBe(second.uuid);
     });
 
-    it('does not append a strict artifact record after a previous strict write failed', async () => {
+    it('appends strict artifact records after a previous strict write failed', async () => {
       vi.mocked(jsonl.writeLine)
         .mockRejectedValueOnce(new Error('corrupt journal'))
         .mockResolvedValue(undefined);
@@ -1170,8 +1170,11 @@ describe('ChatRecordingService', () => {
           tombstonedIds: [],
           stickyEphemeralIds: [],
         }),
-      ).rejects.toThrow('corrupt journal');
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      ).resolves.toBeUndefined();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const snapshotRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(snapshotRecord.subtype).toBe('session_artifact_snapshot');
     });
 
     it('keeps artifact journal records out of the active conversation chain', async () => {
