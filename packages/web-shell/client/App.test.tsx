@@ -1108,6 +1108,22 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('seeds the split from a ?split= URL, deduping and capping the explicit selection', async () => {
+    // Duplicates and more than MAX_SPLIT_PANES (6) ids drive the explicit-
+    // selection branch of openSplitView (dedupe + cap + replace), distinct from
+    // the no-selection restore branch covered above.
+    window.history.pushState({}, '', '/?split=s1,s1,s2,s3,s4,s5,s6,s7');
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s1,s2,s3,s4,s5,s6');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it('keeps the split view open when an approval becomes pending (unlike the scheduled-tasks page)', async () => {
     // Each split pane owns its own session's approval, so an approval on the
     // outer main session must NOT yank the user out of the split.
