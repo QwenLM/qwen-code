@@ -753,6 +753,10 @@ describe('serve fast path argument parsing', () => {
       'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
     ],
     [
+      ['serve', '--compacted-replay-max-bytes=0'],
+      'qwen serve: --compacted-replay-max-bytes must be a positive safe integer in [1, 268435456].',
+    ],
+    [
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],
       'qwen serve: --rate-limit-prompt must be a positive integer.',
     ],

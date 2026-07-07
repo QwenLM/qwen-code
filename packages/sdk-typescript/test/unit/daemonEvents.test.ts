@@ -2694,6 +2694,46 @@ describe('PR 21 — auth device-flow events', () => {
           v: 1,
           type: 'history_truncated',
           data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: -1,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2.5,
+            maxBytes: 512,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            truncatedTurns: -1,
+            fullTranscriptAvailable: false,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
             reason: 'wrong_reason',
             truncatedEvents: 4,
             retainedEvents: 2,

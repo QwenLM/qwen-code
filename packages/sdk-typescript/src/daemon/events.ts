@@ -2626,7 +2626,12 @@ function isHistoryTruncatedData(
     return false;
   }
   const truncatedTurns = value['truncatedTurns'];
-  return truncatedTurns === undefined || isFiniteNumber(truncatedTurns);
+  return (
+    isNonNegativeInteger(value['truncatedEvents']) &&
+    isNonNegativeInteger(value['retainedEvents']) &&
+    isNonNegativeInteger(value['maxBytes']) &&
+    (truncatedTurns === undefined || isNonNegativeInteger(truncatedTurns))
+  );
 }
 
 function isSlowClientWarningData(
@@ -3094,6 +3099,10 @@ function isOptionalNumber(value: unknown): boolean {
 
 function isOptionalNumberOrNull(value: unknown): boolean {
   return value === undefined || value === null || isFiniteNumber(value);
+}
+
+function isNonNegativeInteger(value: unknown): boolean {
+  return isFiniteNumber(value) && Number.isInteger(value) && value >= 0;
 }
 
 function isOptionalStringOrNull(value: unknown): boolean {

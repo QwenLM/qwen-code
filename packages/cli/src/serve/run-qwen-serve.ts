@@ -19,6 +19,10 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  normalizeCompactedReplayMaxBytes,
+} from '@qwen-code/acp-bridge/compactionEngine';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
@@ -148,11 +152,9 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
-const MAX_COMPACTED_REPLAY_MAX_BYTES = 256 * 1024 * 1024;
 const DEFAULT_MAX_SESSIONS = 20;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
-const DEFAULT_COMPACTED_REPLAY_MAX_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
@@ -1794,16 +1796,7 @@ export async function runQwenServe(
     }
   }
   if (opts.compactedReplayMaxBytes !== undefined) {
-    if (
-      !Number.isSafeInteger(opts.compactedReplayMaxBytes) ||
-      opts.compactedReplayMaxBytes < 1 ||
-      opts.compactedReplayMaxBytes > MAX_COMPACTED_REPLAY_MAX_BYTES
-    ) {
-      throw new TypeError(
-        `Invalid compactedReplayMaxBytes: ${opts.compactedReplayMaxBytes}. ` +
-          `Must be a positive safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`,
-      );
-    }
+    normalizeCompactedReplayMaxBytes(opts.compactedReplayMaxBytes);
   }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {

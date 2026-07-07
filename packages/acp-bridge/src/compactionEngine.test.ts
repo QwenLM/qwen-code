@@ -423,6 +423,20 @@ describe('TurnBoundaryCompactionEngine', () => {
         fullTranscriptAvailable: false,
       });
     });
+
+    it('retains the newest oversized live turn without a truncation marker', () => {
+      const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 128 });
+
+      engine.ingest(makeTextChunk(1, `oversized-${'x'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(2));
+
+      const snap = engine.snapshot();
+      expect(snap.compactedTurns[0]?.type).not.toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `oversized-${'x'.repeat(600)}`,
+      ]);
+      expect(snap.compactedTurns.at(-1)?.id).toBe(2);
+    });
   });
 
   describe('latest-wins events', () => {
@@ -807,6 +821,10 @@ describe('EventBus + CompactionEngine integration', () => {
       maxBytes: 512,
       fullTranscriptAvailable: false,
     });
+    expect(
+      (snapshot.compactedTurns[0]?.data as Record<string, unknown>)
+        .truncatedTurns,
+    ).toBeUndefined();
   });
 
   it('seedReplayEvents treats event sizing failures as zero bytes', () => {
