@@ -117,6 +117,10 @@ import {
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
+import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+} from './acp-http/client-mcp-sender-registry.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
@@ -14020,11 +14024,12 @@ describe('runQwenServe SIGINT handler', () => {
 });
 
 describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
-  function makeInjectedWorkspaceRuntime(): WorkspaceRuntime {
+  function makeInjectedWorkspaceRuntime() {
     const bridge = fakeBridge();
     const fsFactory = {
       forRequest: vi.fn(() => ({ marker: 'registry-fs' })),
     } as unknown as WorkspaceFileSystemFactory;
+    const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
     return {
       workspaceId: 'ws-registry',
       workspaceCwd: '/work/registry-primary',
@@ -14034,8 +14039,8 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       bridge,
       workspaceService: {} as DaemonWorkspaceService,
       routeFileSystemFactory: fsFactory,
-      clientMcpSenderRegistry: {},
-    } as WorkspaceRuntime;
+      clientMcpSenderRegistry,
+    } satisfies WorkspaceRuntime;
   }
 
   it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
@@ -14201,7 +14206,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
-    expect(() =>
+    expect(() => {
       createServeApp(
         {
           port: 0,
@@ -14214,8 +14219,42 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
           workspaceRegistry: registry,
           bridge: runtime.bridge,
         } as Parameters<typeof createServeApp>[2],
-      ),
-    ).not.toThrow();
+      );
+    }).not.toThrow();
+
+    const provider = createClientMcpServerProvider(
+      runtime.clientMcpSenderRegistry,
+      runtime.bridge,
+      'connA',
+    );
+    const sendSdkMcpMessage: Parameters<
+      typeof provider.registerClientMcpServer
+    >[1] = vi.fn(async (_serverName, message) => message);
+
+    await expect(
+      provider.registerClientMcpServer('chrome-tools', sendSdkMcpMessage),
+    ).resolves.toEqual({ toolCount: 3 });
+
+    expect(runtime.clientMcpSenderRegistry.serverNames()).toEqual([
+      'chrome-tools',
+    ]);
+    expect(runtime.bridge.addRuntimeMcpServerCalls).toHaveLength(1);
+    expect(runtime.bridge.addRuntimeMcpServerCalls[0]).toMatchObject({
+      name: 'chrome-tools',
+      originatorClientId: 'connA',
+    });
+
+    const payload = { jsonrpc: '2.0', id: 1, method: 'ping' } as const;
+    const sender = runtime.clientMcpSenderRegistry.lookup('chrome-tools');
+    expect(sender).toBeDefined();
+    await expect(sender!(payload)).resolves.toEqual(payload);
+    expect(sendSdkMcpMessage).toHaveBeenCalledWith('chrome-tools', payload);
+
+    await provider.unregisterClientMcpServer('chrome-tools');
+    expect(runtime.clientMcpSenderRegistry.serverNames()).toEqual([]);
+    expect(runtime.bridge.removeRuntimeMcpServerCalls).toEqual([
+      { name: 'chrome-tools', originatorClientId: 'connA' },
+    ]);
   });
 
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
