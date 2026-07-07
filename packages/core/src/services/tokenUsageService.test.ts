@@ -1,0 +1,812 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import { AuthType } from '../core/contentGenerator.js';
+import { Storage } from '../config/storage.js';
+import { makeFakeConfig } from '../test-utils/config.js';
+import { ApiResponseEvent } from '../telemetry/types.js';
+import { setDebugLogSession } from '../utils/debugLogger.js';
+import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  __overrideNowForTesting,
+  apiResponseEventToTokenUsageRecord,
+  exportTokenUsageSummary,
+  formatTokenUsageSummaryAsCsv,
+  getTokenUsageFilePath,
+  queryTokenUsage,
+  recordTokenUsageFromApiResponse,
+  recordTokenUsageFromApiResponseBestEffort,
+  resetTokenUsageFailureLogging,
+} from './tokenUsageService.js';
+
+describe('tokenUsageService', () => {
+  let tempDir: string;
+  let originalRuntimeDir: string | undefined;
+  let originalDebugLogFileEnv: string | undefined;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
+    originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    originalDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    tempDir = await mkdtemp(path.join(tmpdir(), 'qwen-token-usage-'));
+    process.env['QWEN_RUNTIME_DIR'] = tempDir;
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    setDebugLogSession(null);
+    resetTokenUsageFailureLogging();
+    if (originalRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    }
+    if (originalDebugLogFileEnv === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFileEnv;
+    }
+    Storage.setRuntimeBaseDir(null);
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  function createEvent(
+    model: string,
+    promptId: string,
+    usageData: GenerateContentResponseUsageMetadata,
+    options: {
+      timestamp?: string;
+      authType?: string;
+      responseId?: string;
+      subagentName?: string;
+      durationMs?: number;
+    } = {},
+  ): ApiResponseEvent {
+    const event = new ApiResponseEvent(
+      options.responseId ?? `${promptId}-response`,
+      model,
+      options.durationMs ?? 100,
+      promptId,
+      options.authType ?? AuthType.USE_GEMINI,
+      usageData,
+      undefined,
+      options.subagentName,
+    );
+    event['event.timestamp'] = options.timestamp ?? '2026-05-25T10:00:00.000Z';
+    return event;
+  }
+
+  it('maps an API response event to a privacy-preserving usage record', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent(
+      'qwen-model',
+      'prompt-1',
+      {
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 3,
+        thoughtsTokenCount: 5,
+        totalTokenCount: 35,
+      },
+      {
+        authType: AuthType.QWEN_OAUTH,
+        subagentName: 'agent-a',
+      },
+    );
+
+    const record = apiResponseEventToTokenUsageRecord(config, event);
+
+    expect(record).toMatchObject({
+      schemaVersion: 1,
+      timestamp: '2026-05-25T10:00:00.000Z',
+      localDate: '2026-05-25',
+      localMonth: '2026-05',
+      sessionId: 'session-1',
+      model: 'qwen-model',
+      authType: AuthType.QWEN_OAUTH,
+      source: 'agent-a',
+      inputTokens: 10,
+      outputTokens: 20,
+      cachedTokens: 3,
+      thoughtsTokens: 5,
+      totalTokens: 35,
+      apiDurationMs: 100,
+    });
+    expect(record).not.toHaveProperty('promptId');
+    expect(record).not.toHaveProperty('responseId');
+    expect(record).not.toHaveProperty('projectRoot');
+    expect(record).not.toHaveProperty('response_text');
+  });
+
+  it('uses current local date when API timestamps are missing or invalid', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const invalidTimestampEvent = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    invalidTimestampEvent['event.timestamp'] = 'not-a-date';
+    const missingTimestampEvent = createEvent('model-b', 'prompt-2', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    Reflect.deleteProperty(missingTimestampEvent, 'event.timestamp');
+
+    const invalidTimestampRecord = apiResponseEventToTokenUsageRecord(
+      config,
+      invalidTimestampEvent,
+    );
+    const missingTimestampRecord = apiResponseEventToTokenUsageRecord(
+      config,
+      missingTimestampEvent,
+    );
+
+    expect(invalidTimestampRecord.localDate).toBe('2026-05-25');
+    expect(invalidTimestampRecord.localMonth).toBe('2026-05');
+    expect(missingTimestampRecord.timestamp).toBe('2026-05-25T10:00:00.000Z');
+    expect(missingTimestampRecord.localDate).toBe('2026-05-25');
+    expect(missingTimestampRecord.localMonth).toBe('2026-05');
+  });
+
+  it('persists API usage to monthly JSONL and aggregates daily totals', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent('model-a', 'prompt-1', {
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 5,
+        thoughtsTokenCount: 2,
+        totalTokenCount: 32,
+      }),
+    );
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent(
+        'model-b',
+        'prompt-2',
+        {
+          promptTokenCount: 7,
+          candidatesTokenCount: 8,
+          cachedContentTokenCount: 1,
+          thoughtsTokenCount: 0,
+          totalTokenCount: 15,
+        },
+        {
+          authType: AuthType.USE_VERTEX_AI,
+          timestamp: '2026-05-25T12:00:00.000Z',
+        },
+      ),
+    );
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent(
+        'model-a',
+        'prompt-3',
+        {
+          promptTokenCount: 100,
+          candidatesTokenCount: 100,
+          totalTokenCount: 200,
+        },
+        {
+          timestamp: '2026-05-26T12:00:00.000Z',
+        },
+      ),
+    );
+
+    const fileContent = await readFile(
+      getTokenUsageFilePath('2026-05'),
+      'utf-8',
+    );
+    expect(fileContent.trim().split('\n')).toHaveLength(3);
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals).toMatchObject({
+      requests: 2,
+      inputTokens: 17,
+      outputTokens: 28,
+      cachedTokens: 6,
+      thoughtsTokens: 2,
+      totalTokens: 47,
+      apiDurationMs: 200,
+    });
+    expect(summary.byModel.map((group) => group.key)).toEqual([
+      'model-a',
+      'model-b',
+    ]);
+    expect(summary.byAuthType.map((group) => group.key)).toEqual([
+      AuthType.USE_GEMINI,
+      AuthType.USE_VERTEX_AI,
+    ]);
+  });
+
+  it('swallows best-effort write errors and surfaces non-ENOENT failures', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    try {
+      expect(() =>
+        recordTokenUsageFromApiResponseBestEffort(config, event),
+      ).not.toThrow();
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          '[token-usage] Write failed (ENOSPC):',
+          'disk full',
+        );
+      });
+    } finally {
+      writeSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('swallows synchronous best-effort record conversion errors', () => {
+    const config = {
+      getSessionId: () => {
+        throw Object.assign(new Error('session unavailable'), {
+          code: 'EACCES',
+        });
+      },
+    } as unknown as ReturnType<typeof makeFakeConfig>;
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine');
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    try {
+      expect(() =>
+        recordTokenUsageFromApiResponseBestEffort(config, event),
+      ).not.toThrow();
+
+      expect(writeSpy).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[token-usage] Write failed (EACCES):',
+        'session unavailable',
+      );
+    } finally {
+      writeSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('suppresses repeated console.error for same error code within 60s cooldown, re-fires after cooldown', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+
+    let fakeNow = 1000000;
+    __overrideNowForTesting(() => fakeNow);
+
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    // --- First failure: should log ---
+    let writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(1);
+      });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[token-usage] Write failed (ENOSPC):',
+        'disk full',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // --- Second failure, same code, within cooldown: suppressed ---
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.runAllTimers();
+      // Still only 1 call — the second was suppressed
+      expect(stderrSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    const eaccesError = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(eaccesError);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(2);
+      });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[token-usage] Write failed (EACCES):',
+        'permission denied',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // --- Advance time past cooldown: should log again with suppression count ---
+    fakeNow += 61_000;
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(3);
+      });
+      expect(stderrSpy).toHaveBeenLastCalledWith(
+        '[token-usage] Write failed (ENOSPC):',
+        'disk full (1 similar suppressed since last log)',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    stderrSpy.mockRestore();
+  });
+
+  it('does not surface best-effort ENOENT write failures to stderr', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const error = Object.assign(new Error('missing directory'), {
+      code: 'ENOENT',
+    });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(writeSpy).toHaveBeenCalledTimes(1);
+      });
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      writeSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('aggregates monthly model, auth type, model/auth, and source groups', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent(
+        'model-a',
+        'prompt-1',
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+          totalTokenCount: 3,
+        },
+        {
+          authType: AuthType.USE_GEMINI,
+          subagentName: 'agent-a',
+        },
+      ),
+    );
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent(
+        'model-a',
+        'prompt-2',
+        {
+          promptTokenCount: 4,
+          candidatesTokenCount: 5,
+          totalTokenCount: 9,
+        },
+        {
+          authType: AuthType.USE_VERTEX_AI,
+          subagentName: 'agent-a',
+        },
+      ),
+    );
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent(
+        'model-b',
+        'prompt-3',
+        {
+          promptTokenCount: 6,
+          candidatesTokenCount: 7,
+          totalTokenCount: 13,
+        },
+        {
+          authType: AuthType.USE_GEMINI,
+        },
+      ),
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'month',
+      value: '2026-05',
+    });
+
+    expect(summary.totals.totalTokens).toBe(25);
+    expect(summary.byModel).toEqual([
+      expect.objectContaining({ key: 'model-b', totalTokens: 13 }),
+      expect.objectContaining({ key: 'model-a', totalTokens: 12 }),
+    ]);
+    expect(summary.byAuthType).toEqual([
+      expect.objectContaining({ key: AuthType.USE_GEMINI, totalTokens: 16 }),
+      expect.objectContaining({ key: AuthType.USE_VERTEX_AI, totalTokens: 9 }),
+    ]);
+    expect(summary.byModelAndAuthType).toEqual([
+      expect.objectContaining({
+        key: `model-b|${AuthType.USE_GEMINI}`,
+        model: 'model-b',
+        authType: AuthType.USE_GEMINI,
+        totalTokens: 13,
+      }),
+      expect.objectContaining({
+        key: `model-a|${AuthType.USE_VERTEX_AI}`,
+        totalTokens: 9,
+      }),
+      expect.objectContaining({
+        key: `model-a|${AuthType.USE_GEMINI}`,
+        totalTokens: 3,
+      }),
+    ]);
+    expect(summary.bySource).toEqual([
+      expect.objectContaining({ key: 'main', totalTokens: 13 }),
+      expect.objectContaining({ key: 'agent-a', totalTokens: 12 }),
+    ]);
+  });
+
+  it('falls back to component totals when API total is missing', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent('model-a', 'prompt-1', {
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 5,
+        thoughtsTokenCount: 7,
+      }),
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals.totalTokens).toBe(37);
+    expect(summary.totals.cachedTokens).toBe(5);
+  });
+
+  it('uses cached tokens as fallback input when prompt tokens are missing', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent('model-a', 'prompt-1', {
+        promptTokenCount: 0,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 5,
+        thoughtsTokenCount: 7,
+      }),
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals.totalTokens).toBe(32);
+    expect(summary.totals.inputTokens).toBe(5);
+    expect(summary.totals.cachedTokens).toBe(5);
+  });
+
+  it('returns empty summaries for missing usage files', async () => {
+    const summary = await queryTokenUsage({
+      period: 'month',
+      value: '2026-04',
+    });
+
+    expect(summary.totals).toEqual({
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 0,
+      apiDurationMs: 0,
+    });
+    expect(summary.byModel).toEqual([]);
+  });
+
+  it('surfaces token usage read failures instead of returning zero totals', async () => {
+    const error = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    const readSpy = vi.spyOn(jsonl, 'read').mockRejectedValueOnce(error);
+
+    try {
+      await expect(
+        queryTokenUsage({ period: 'month', value: '2026-05' }),
+      ).rejects.toThrow('permission denied');
+      expect(readSpy).toHaveBeenCalledWith(getTokenUsageFilePath('2026-05'), {
+        throwOnNonEnoentError: true,
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('tolerates malformed JSONL lines while querying', async () => {
+    vi.useRealTimers();
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    const filePath = getTokenUsageFilePath('2026-05');
+    const sessionId = 'token-usage-read-test';
+    setDebugLogSession({ getSessionId: () => sessionId });
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      [
+        '{"schemaVersion":1,"id":"ok","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":1,"outputTokens":2,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":3,"apiDurationMs":4}',
+        '{"schemaVersion":1,"timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":100,"outputTokens":100,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":200,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"missing-session","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","model":"model-a","authType":"gemini","source":"main","inputTokens":100,"outputTokens":100,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":200,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"invalid"}',
+        'not-json',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals.totalTokens).toBe(3);
+    expect(summary.totals.requests).toBe(1);
+    await vi.waitFor(async () => {
+      const log = await readFile(Storage.getDebugLogPath(sessionId), 'utf-8');
+      expect(log).toContain(`Dropped 3/4 invalid record(s) from ${filePath}`);
+    });
+  });
+
+  it('reads older compatible schema versions', async () => {
+    const filePath = getTokenUsageFilePath('2026-05');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      [
+        '{"schemaVersion":1,"id":"ok","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":1,"outputTokens":2,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":3,"apiDurationMs":4}',
+        '{"schemaVersion":2,"id":"future","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":100,"outputTokens":100,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":200,"apiDurationMs":4}',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals.totalTokens).toBe(3);
+    expect(summary.totals.requests).toBe(1);
+  });
+
+  it('exports summaries as JSON and escaped CSV', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent(
+        '=cmd|quoted',
+        'prompt-1',
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+          totalTokenCount: 3,
+        },
+        {
+          authType: 'auth"quoted',
+        },
+      ),
+    );
+
+    const json = await exportTokenUsageSummary({
+      period: 'day',
+      value: '2026-05-25',
+      format: 'json',
+    });
+    expect(JSON.parse(json)).toMatchObject({
+      period: 'day',
+      value: '2026-05-25',
+      totals: { totalTokens: 3 },
+    });
+    expect(JSON.parse(json)).not.toHaveProperty('coordination');
+
+    const csv = formatTokenUsageSummaryAsCsv(
+      await queryTokenUsage({ period: 'day', value: '2026-05-25' }),
+    );
+    expect(csv).toContain('day,2026-05-25,total,total,,,,1,1,2,0,0,3,100');
+    expect(csv).toContain(
+      "day,2026-05-25,model,'=cmd|quoted,'=cmd|quoted,,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      'day,2026-05-25,auth_type,"auth""quoted",,"auth""quoted",,1,1,2,0,0,3,100',
+    );
+  });
+
+  it('escapes formula-like CSV fields after leading whitespace', () => {
+    const group = (key: string) => ({
+      key,
+      model: key,
+      requests: 1,
+      inputTokens: 1,
+      outputTokens: 2,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 3,
+      apiDurationMs: 100,
+    });
+    const csv = formatTokenUsageSummaryAsCsv({
+      period: 'day',
+      value: '2026-05-25',
+      generatedAt: '2026-05-25T10:00:00.000Z',
+      totals: {
+        requests: 9,
+        inputTokens: 9,
+        outputTokens: 18,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 27,
+        apiDurationMs: 900,
+      },
+      byModel: [
+        '=SUM(A1)',
+        ' =SUM(A1)',
+        '+SUM(A1)',
+        ' +SUM(A1)',
+        '-SUM(A1)',
+        ' -SUM(A1)',
+        '@SUM(A1)',
+        ' @SUM(A1)',
+        '\tSUM(A1)',
+      ].map(group),
+      byAuthType: [],
+      byModelAndAuthType: [],
+      bySource: [],
+    });
+
+    expect(csv).toContain(
+      "day,2026-05-25,model,'=SUM(A1),'=SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' =SUM(A1),' =SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'+SUM(A1),'+SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' +SUM(A1),' +SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'-SUM(A1),'-SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' -SUM(A1),' -SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'@SUM(A1),'@SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,' @SUM(A1),' @SUM(A1),,,1,1,2,0,0,3,100",
+    );
+    expect(csv).toContain(
+      "day,2026-05-25,model,'\tSUM(A1),'\tSUM(A1),,,1,1,2,0,0,3,100",
+    );
+  });
+
+  it('persists best-effort records asynchronously without blocking callers', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    recordTokenUsageFromApiResponseBestEffort(
+      config,
+      createEvent('model-a', 'prompt-1', {
+        promptTokenCount: 1,
+        candidatesTokenCount: 2,
+        totalTokenCount: 3,
+      }),
+    );
+
+    const fileContent = await vi.waitFor(() =>
+      readFile(getTokenUsageFilePath('2026-05'), 'utf-8'),
+    );
+    expect(fileContent).toContain('"model":"model-a"');
+  });
+
+  it('validates period values', async () => {
+    await expect(
+      queryTokenUsage({ period: 'day', value: '2026-05' }),
+    ).rejects.toThrow('Expected YYYY-MM-DD');
+    await expect(
+      queryTokenUsage({ period: 'day', value: '2026-02-29' }),
+    ).rejects.toThrow('Expected YYYY-MM-DD');
+    await expect(
+      queryTokenUsage({ period: 'day', value: '2024-02-29' }),
+    ).resolves.toMatchObject({ value: '2024-02-29' });
+    await expect(
+      queryTokenUsage({ period: 'month', value: '2026-05-25' }),
+    ).rejects.toThrow('Expected YYYY-MM');
+    await expect(
+      queryTokenUsage({ period: 'month', value: '2026-13' }),
+    ).rejects.toThrow('Expected YYYY-MM');
+    expect(() => getTokenUsageFilePath('2026-00')).toThrow('Expected YYYY-MM');
+  });
+});

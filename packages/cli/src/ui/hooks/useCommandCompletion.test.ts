@@ -215,6 +215,50 @@ describe('useCommandCompletion', () => {
         });
       });
 
+      it('should not trigger AT completion when @ is not preceded by whitespace', async () => {
+        const text = 'cici@192.168.0.160';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
+      it('should not trigger AT completion for email-like patterns', async () => {
+        const text = 'user@example.com';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
       it('should correctly identify the completion context with multiple @ symbols', async () => {
         const text = '@file1 @file2';
         const cursorOffset = 3; // @fi|le1 @file2
@@ -461,6 +505,50 @@ describe('useCommandCompletion', () => {
       });
     });
 
+    it('should use slash completion for mid-input model-invocable commands', async () => {
+      const skillCommand: SlashCommand = {
+        name: 'front-end-store-rules',
+        description: 'Store rules',
+        kind: CommandKind.SKILL,
+        modelInvocable: true,
+      };
+      const builtInCommand: SlashCommand = {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: CommandKind.BUILT_IN,
+        modelInvocable: false,
+      };
+
+      setupMocks({
+        slashSuggestions: [
+          { label: 'front-end-store-rules', value: 'front-end-store-rules' },
+        ],
+      });
+
+      const { result } = renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('please /store'),
+          testRootDir,
+          [skillCommand, builtInCommand],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.showSuggestions).toBe(true);
+      });
+
+      expect(useSlashCompletion).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          enabled: true,
+          query: '/store',
+          slashCommands: [skillCommand],
+        }),
+      );
+    });
+
     it('should complete a file path when @ appears after a slash command', async () => {
       setupMocks({
         atSuggestions: [{ label: 'src/index.ts', value: 'src/index.ts' }],
@@ -523,6 +611,84 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe('/memory ');
     });
 
+    it('should complete the mid-input slash token at the cursor', async () => {
+      setupMocks({
+        slashSuggestions: [
+          { label: 'front-end-store-rules', value: 'front-end-store-rules' },
+        ],
+        slashCompletionRange: { completionStart: 1, completionEnd: 4 },
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /review /sto');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [
+            {
+              name: 'front-end-store-rules',
+              description: 'Store rules',
+              kind: CommandKind.SKILL,
+              modelInvocable: true,
+            },
+          ],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe(
+        'please /review /front-end-store-rules ',
+      );
+    });
+
+    it('should complete a bare mid-input slash without inserting a space', async () => {
+      setupMocks({
+        slashSuggestions: [{ label: 'review', value: 'review' }],
+        slashCompletionRange: { completionStart: 1, completionEnd: 1 },
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('please /');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [
+            {
+              name: 'review',
+              description: 'Review PR',
+              kind: CommandKind.BUILT_IN,
+              modelInvocable: true,
+            },
+          ],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('please /review ');
+    });
+
     it('should complete a file path', async () => {
       setupMocks({
         atSuggestions: [{ label: 'src/file1.txt', value: 'src/file1.txt' }],
@@ -550,6 +716,41 @@ describe('useCommandCompletion', () => {
       });
 
       expect(result.current.textBuffer.text).toBe('@src/file1.txt ');
+    });
+
+    it('should not append trailing space for directory completions', async () => {
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('@src/com');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/');
     });
 
     it('should complete a file path when cursor is not at the end of the line', async () => {
@@ -585,6 +786,44 @@ describe('useCommandCompletion', () => {
         '@src/file1.txt is a good file',
       );
     });
+
+    it('should preserve existing space after directory completions at mid-line cursor', async () => {
+      const text = '@src/com is a dir';
+      const cursorOffset = 8; // after "m"
+
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest(text, cursorOffset);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/ is a dir');
+    });
   });
 
   describe('argument hint ghost text', () => {
@@ -618,7 +857,7 @@ describe('useCommandCompletion', () => {
       });
     });
 
-    it('shows mid-input ghost text for model-invocable commands', () => {
+    it('does not show ghost text while dropdown handles partial mid-input commands', () => {
       const slashCommands: SlashCommand[] = [
         {
           name: 'review',
@@ -647,12 +886,7 @@ describe('useCommandCompletion', () => {
         return completion;
       });
 
-      expect(result.current.midInputGhostText).toEqual({
-        text: 'iew',
-        insertPosition: 'please /rev'.length,
-        acceptText: 'iew',
-        showCursorBeforeText: false,
-      });
+      expect(result.current.midInputGhostText).toBeNull();
     });
 
     it('shows argumentHint for a complete mid-input model-invocable command', () => {

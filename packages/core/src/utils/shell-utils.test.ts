@@ -6,8 +6,11 @@
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
 import {
+  buildShellExecWarnings,
   checkArgumentSafety,
   checkCommandPermissions,
+  COMMAND_SUBSTITUTION_WARNING,
+  detectSelfKillCommand,
   escapeShellArg,
   getCommandRoots,
   getShellConfiguration,
@@ -505,6 +508,18 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('cmd.exe /c "dir"')).toEqual('dir');
   });
 
+  it('should preserve the full unquoted command after cmd.exe /c', async () => {
+    expect(stripShellWrapper('cmd.exe /c taskkill /F /IM node.exe')).toEqual(
+      'taskkill /F /IM node.exe',
+    );
+  });
+
+  it('should preserve the full unquoted command after PowerShell -Command', async () => {
+    expect(
+      stripShellWrapper('powershell -Command taskkill /F /IM node.exe'),
+    ).toEqual('taskkill /F /IM node.exe');
+  });
+
   it('should not strip anything if no wrapper is present', async () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
@@ -561,6 +576,80 @@ describe('stripTrailingBackgroundAmp', () => {
     expect(stripTrailingBackgroundAmp('sleep 5 & echo done')).toBe(
       'sleep 5 & echo done',
     );
+  });
+});
+
+describe('detectSelfKillCommand', () => {
+  it('detects broad Windows taskkill patterns that target qwen-code hosts', () => {
+    expect(detectSelfKillCommand('taskkill /F /IM node.exe 2>nul')).toBe(true);
+    expect(
+      detectSelfKillCommand('taskkill /FI "IMAGENAME eq qwen-code.exe" /F'),
+    ).toBe(true);
+  });
+
+  it('detects broad Unix killall and pkill patterns', () => {
+    expect(detectSelfKillCommand('killall -9 node')).toBe(true);
+    expect(detectSelfKillCommand('pkill node')).toBe(true);
+    expect(detectSelfKillCommand('pkill -f qwen-code')).toBe(true);
+    expect(detectSelfKillCommand('pkill -f /usr/bin/node')).toBe(true);
+    expect(detectSelfKillCommand('pkill -9f node')).toBe(true);
+    expect(detectSelfKillCommand("bash -lc 'pkill -f qwen'")).toBe(true);
+  });
+
+  it('detects self-kill commands in chains and execution prefixes', () => {
+    expect(detectSelfKillCommand('echo setup && killall node')).toBe(true);
+    expect(detectSelfKillCommand('false || taskkill /F /IM node.exe')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('sudo killall node')).toBe(true);
+    expect(detectSelfKillCommand('env FOO=bar pkill -f qwen-code')).toBe(true);
+    expect(detectSelfKillCommand('command -p killall node')).toBe(true);
+  });
+
+  it('detects taskkill inline and dash-prefixed image options', () => {
+    expect(detectSelfKillCommand('taskkill /IM:node.exe /F')).toBe(true);
+    expect(
+      detectSelfKillCommand('taskkill /FI:"IMAGENAME eq qwen-code.exe" /F'),
+    ).toBe(true);
+    expect(detectSelfKillCommand('taskkill -IM node.exe -F')).toBe(true);
+  });
+
+  it('detects glob patterns emitted by shell parsing', () => {
+    expect(detectSelfKillCommand('killall node*')).toBe(true);
+    expect(detectSelfKillCommand('pkill -f node*')).toBe(true);
+    expect(detectSelfKillCommand('taskkill /IM node*')).toBe(true);
+  });
+
+  it('detects taskkill through Windows shell wrappers', () => {
+    expect(
+      detectSelfKillCommand('powershell -Command "taskkill /F /IM node.exe"'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'pwsh -NoProfile -Command "taskkill /F /IM node.exe"',
+      ),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand('powershell -Command taskkill /F /IM node.exe'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'powershell -ExecutionPolicy Bypass -Command "taskkill /F /IM node.exe"',
+      ),
+    ).toBe(true);
+    expect(detectSelfKillCommand('cmd.exe /c taskkill /F /IM node.exe')).toBe(
+      true,
+    );
+  });
+
+  it('allows targeted process kills and unrelated process patterns', () => {
+    expect(detectSelfKillCommand('taskkill /PID 1234 /F')).toBe(false);
+    expect(detectSelfKillCommand('kill 1234')).toBe(false);
+    expect(detectSelfKillCommand('pkill -f vite')).toBe(false);
+    expect(detectSelfKillCommand('pkill -f "node server.js"')).toBe(false);
+    expect(detectSelfKillCommand('pkill -9f "node server.js"')).toBe(false);
+    expect(detectSelfKillCommand('pkill -F qwen-code.pid vite')).toBe(false);
+    expect(detectSelfKillCommand('taskkill /IM notepad.exe')).toBe(false);
   });
 });
 
@@ -1096,5 +1185,56 @@ describe('checkArgumentSafety', () => {
       expect(result.dangerousPatterns).toContain('& background operator');
       expect(result.dangerousPatterns).toHaveLength(3);
     });
+  });
+});
+
+// Regression coverage for PR #4386 R4 (cid 3293078758): the dual-check
+// branch of `buildShellExecWarnings` — where the stripped form has no
+// substitution but the raw command does (e.g. env-prefix wrapped in
+// `bash -c`) — was untested. Without coverage, removing the
+// `|| detectCommandSubstitution(rawCommand)` clause would not regress
+// any test in this file.
+describe('buildShellExecWarnings', () => {
+  it('returns undefined when neither stripped nor raw command has substitution', () => {
+    expect(
+      buildShellExecWarnings('npm install', 'npm install'),
+    ).toBeUndefined();
+  });
+
+  it('returns the substitution warning when the stripped command has $()', () => {
+    const result = buildShellExecWarnings(
+      'echo $(cat secret)',
+      'echo $(cat secret)',
+    );
+    expect(result).toEqual([COMMAND_SUBSTITUTION_WARNING]);
+  });
+
+  it('returns the substitution warning when the raw command has substitution but the stripped form does not (env-prefix wrapper case)', () => {
+    // `stripShellWrapper("FOO=$(cat secret) bash -c 'echo ok'")` yields
+    // `echo ok` — no substitution — so the `|| rawCommand` branch is the
+    // only thing that fires the warning here.
+    const raw = `FOO=$(cat secret) bash -c 'echo ok'`;
+    const stripped = stripShellWrapper(raw);
+    // Sanity-check the precondition before asserting on the helper.
+    expect(stripped).not.toContain('$(');
+
+    expect(buildShellExecWarnings(stripped, raw)).toEqual([
+      COMMAND_SUBSTITUTION_WARNING,
+    ]);
+  });
+
+  it('returns the warning for backtick substitution in either input', () => {
+    expect(buildShellExecWarnings('echo `whoami`', 'echo `whoami`')).toEqual([
+      COMMAND_SUBSTITUTION_WARNING,
+    ]);
+  });
+
+  it('returns the warning for process substitution <(...)', () => {
+    expect(
+      buildShellExecWarnings(
+        'diff <(ls /a) <(ls /b)',
+        'diff <(ls /a) <(ls /b)',
+      ),
+    ).toEqual([COMMAND_SUBSTITUTION_WARNING]);
   });
 });

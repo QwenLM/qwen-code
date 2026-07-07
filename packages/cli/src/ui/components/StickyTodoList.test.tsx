@@ -22,7 +22,7 @@ function makeTodos(count: number): TodoItem[] {
 }
 
 describe('StickyTodoList', () => {
-  it('keeps each task number attached to the original task after sorting', () => {
+  it('keeps each visible task number attached to the original task after sorting', () => {
     const todos: TodoItem[] = [
       {
         id: 'done',
@@ -56,14 +56,9 @@ describe('StickyTodoList', () => {
     expect(
       lines.find((line) => line.includes('Run cli tests')) ?? '',
     ).toContain('2.');
-    expect(
-      lines.find((line) => line.includes('Summarize results')) ?? '',
-    ).toContain('1.');
+    expect(output).not.toContain('Summarize results');
     expect(output.indexOf('Run core tests')).toBeLessThan(
       output.indexOf('Run cli tests'),
-    );
-    expect(output.indexOf('Run cli tests')).toBeLessThan(
-      output.indexOf('Summarize results'),
     );
   });
 
@@ -104,7 +99,7 @@ describe('StickyTodoList', () => {
     expect(output).toContain('Run cli tests');
     expect(output).not.toContain('Run core tests');
     expect(output).not.toContain('Summarize results');
-    expect(output).toContain('... and 2 more');
+    expect(output).toContain('... and 1 more');
     expect(lines).toHaveLength(6);
   });
 
@@ -120,7 +115,26 @@ describe('StickyTodoList', () => {
     const output = lastFrame() ?? '';
 
     expect(output).toContain('10. ◐ Task 10');
-    expect(output).toContain('... and 9 more');
+    expect(output).not.toContain('... and 9 more');
+  });
+
+  it('hides the sticky panel when every task is completed', () => {
+    const todos: TodoItem[] = [
+      {
+        id: 'done-1',
+        content: 'Run tests',
+        status: 'completed',
+      },
+      {
+        id: 'done-2',
+        content: 'Summarize results',
+        status: 'completed',
+      },
+    ];
+
+    const { lastFrame } = render(<StickyTodoList todos={todos} width={60} />);
+
+    expect(lastFrame()).toBe('');
   });
 
   it('derives a viewport-aware visible item count', () => {

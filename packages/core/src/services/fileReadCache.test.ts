@@ -570,6 +570,39 @@ describe('FileReadCache', () => {
       );
     });
 
+    it('invalidates a stale resident entry by its last observed path', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+
+      expect(cache.invalidateByPath('/x/foo.ts')).toBe(true);
+      expect(cache.check(stats).state).toBe('unknown');
+    });
+
+    it('invalidates by a relative path that resolves to the recorded path', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      const relative = path.join('x', 'foo.ts');
+      cache.recordRead(path.resolve(relative), stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(cache.invalidateByPath(relative)).toBe(true);
+      expect(cache.check(stats).state).toBe('unknown');
+    });
+
+    it('returns false when no entry was recorded for the path', () => {
+      const cache = new FileReadCache();
+      cache.recordRead('/x/foo.ts', makeStats(), {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(cache.invalidateByPath('/x/other.ts')).toBe(false);
+      expect(cache.size()).toBe(1);
+    });
+
     it('a subsequent real read re-arms the fast-path (resident again)', () => {
       const cache = new FileReadCache();
       const stats = makeStats();
@@ -702,6 +735,123 @@ describe('FileReadCache', () => {
 
       expect(cache.size()).toBeLessThanOrEqual(4096);
       expect(cache.check(makeStats({ ino: 0 })).state).not.toBe('unknown');
+    });
+  });
+
+  describe('evictNotAccessedSince', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('evicts entries with lastReadAt before the cutoff', () => {
+      const cache = new FileReadCache();
+      const now = 2_000_000_000;
+      const old = now - 100 * 60_000; // 100 minutes ago
+      const recent = now - 5 * 60_000; // 5 minutes ago
+
+      const oldStats = makeStats({ ino: 1 });
+      const recentStats = makeStats({ ino: 2 });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(old);
+      cache.recordRead('/x/old.ts', oldStats, { full: true, cacheable: true });
+
+      vi.setSystemTime(recent);
+      cache.recordRead('/x/recent.ts', recentStats, {
+        full: true,
+        cacheable: true,
+      });
+
+      // Now set time to "now" and evict entries older than 30 minutes
+      vi.setSystemTime(now);
+
+      const evicted = cache.evictNotAccessedSince(30);
+      expect(evicted).toBe(1);
+      expect(cache.check(oldStats).state).toBe('unknown');
+      expect(cache.check(recentStats).state).toBe('fresh');
+    });
+
+    it('evicts entries that were only written, never read', () => {
+      const cache = new FileReadCache();
+      vi.useFakeTimers();
+
+      const pastWrite = 1000; // some fixed timestamp in the past
+      vi.setSystemTime(pastWrite);
+      cache.recordWrite('/x/old-write.ts', makeStats({ ino: 2 }));
+
+      // Advance time by 120 minutes
+      vi.setSystemTime(pastWrite + 120 * 60_000);
+
+      const evicted = cache.evictNotAccessedSince(60);
+      expect(evicted).toBe(1);
+      expect(cache.size()).toBe(0);
+    });
+
+    it('preserves recently accessed entries', () => {
+      const cache = new FileReadCache();
+      vi.useFakeTimers();
+
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      cache.recordRead('/x/recent.ts', makeStats({ ino: 1 }), {
+        full: true,
+        cacheable: true,
+      });
+
+      const evicted = cache.evictNotAccessedSince(30);
+      expect(evicted).toBe(0);
+      expect(cache.size()).toBe(1);
+    });
+
+    it('returns correct eviction count', () => {
+      const cache = new FileReadCache();
+      vi.useFakeTimers();
+
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      // 3 recent entries
+      for (let i = 0; i < 3; i++) {
+        cache.recordRead(`/x/recent-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Jump 120 minutes back, add 2 old entries
+      vi.setSystemTime(now - 120 * 60_000);
+      for (let i = 10; i < 12; i++) {
+        cache.recordRead(`/x/old-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Back to now
+      vi.setSystemTime(now);
+
+      const evicted = cache.evictNotAccessedSince(60);
+      expect(evicted).toBe(2);
+      expect(cache.size()).toBe(3);
+    });
+
+    it('returns 0 for empty cache', () => {
+      const cache = new FileReadCache();
+      expect(cache.evictNotAccessedSince(30)).toBe(0);
+    });
+
+    it('does not evict entries for sub-minute windows', () => {
+      const cache = new FileReadCache();
+      cache.recordRead('/x/recent.ts', makeStats({ ino: 1 }), {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(cache.evictNotAccessedSince(0)).toBe(0);
+      expect(cache.evictNotAccessedSince(-30)).toBe(0);
+      expect(cache.evictNotAccessedSince(0.0000001)).toBe(0);
+      expect(cache.size()).toBe(1);
     });
   });
 });

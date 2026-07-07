@@ -5,8 +5,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { buildResumedHistoryItems } from './resumeHistoryUtils.js';
-import { ToolCallStatus } from '../types.js';
+import {
+  applyCollapsePolicyAndSummary,
+  buildResumedHistoryItems,
+  stripSuppressOnRestore,
+  expandCollapsedHistory,
+} from './resumeHistoryUtils.js';
+import { MessageType, ToolCallStatus } from '../types.js';
 import type {
   AnyDeclarativeTool,
   Config,
@@ -14,16 +19,12 @@ import type {
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import type { HistoryItem } from '../types.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
     getToolRegistry: () => ({
       getTool: (name: string) => tools[name],
-    }),
-    getContentGenerator: () => ({
-      // Default to showing full thinking content during resume unless explicitly
-      // summarized; tests don't care about summarized thinking behavior.
-      useSummarizedThinking: () => false,
     }),
   }) as unknown as Config;
 
@@ -52,6 +53,7 @@ describe('resumeHistoryUtils', () => {
         },
         {
           type: 'assistant',
+          timestamp: '2026-01-15T14:30:00.000Z',
           message: {
             parts: [
               { text: 'Hi there' } as Part,
@@ -89,7 +91,12 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toEqual([
       { id: baseTimestamp + 1, type: 'user', text: 'Hello' },
-      { id: baseTimestamp + 2, type: 'gemini', text: 'Hi there' },
+      {
+        id: baseTimestamp + 2,
+        type: 'gemini',
+        text: 'Hi there',
+        timestamp: new Date('2026-01-15T14:30:00.000Z').getTime(),
+      },
       {
         id: baseTimestamp + 3,
         type: 'tool_group',
@@ -143,14 +150,19 @@ describe('resumeHistoryUtils', () => {
       20,
     );
 
-    expect(items).toContainEqual({ id: 21, type: 'user', text: 'save logs' });
+    expect(items).toContainEqual({
+      id: 21,
+      type: 'notification',
+      text: 'save logs',
+    });
   });
 
-  it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {
+  it('marks tool results as error, omits thought text, and falls back when tool is missing', () => {
     const conversation = {
       messages: [
         {
           type: 'assistant',
+          timestamp: '2026-01-15T15:00:00.000Z',
           message: {
             parts: [
               {
@@ -188,10 +200,10 @@ describe('resumeHistoryUtils', () => {
     expect(items).toEqual([
       {
         id: expect.any(Number),
-        type: 'gemini_thought',
-        text: 'should be skipped',
+        type: 'gemini',
+        text: 'visible text',
+        timestamp: new Date('2026-01-15T15:00:00.000Z').getTime(),
       },
-      { id: expect.any(Number), type: 'gemini', text: 'visible text' },
       {
         id: expect.any(Number),
         type: 'tool_group',
@@ -205,6 +217,46 @@ describe('resumeHistoryUtils', () => {
             confirmationDetails: undefined,
           },
         ],
+      },
+    ]);
+  });
+
+  it('keeps thought text in standalone previews without config', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T16:00:00.000Z',
+          message: {
+            parts: [
+              {
+                text: 'preview thought',
+                thought: true,
+              } as unknown as Part,
+              { text: 'visible text' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, null);
+
+    expect(items).toEqual([
+      {
+        id: expect.any(Number),
+        type: 'gemini_thought',
+        text: 'preview thought',
+      },
+      {
+        id: expect.any(Number),
+        type: 'gemini',
+        text: 'visible text',
+        timestamp: new Date('2026-01-15T16:00:00.000Z').getTime(),
       },
     ]);
   });
@@ -304,6 +356,7 @@ describe('resumeHistoryUtils', () => {
         },
         {
           type: 'assistant',
+          timestamp: '2026-01-15T17:00:00.000Z',
           message: { parts: [{ text: 'Follow-up' } as Part] },
         },
       ],
@@ -322,7 +375,325 @@ describe('resumeHistoryUtils', () => {
         type: 'about',
         systemInfo: expect.objectContaining({ cliVersion: '1.2.3' }),
       },
-      { id: 8, type: 'gemini', text: 'Follow-up' },
+      {
+        id: 8,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T17:00:00.000Z').getTime(),
+      },
     ]);
+  });
+
+  it('preserves model-sent slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: true,
+          },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T18:00:00.000Z',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 20);
+
+    expect(items).toEqual([
+      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      {
+        id: 22,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T18:00:00.000Z').getTime(),
+      },
+    ]);
+  });
+
+  it('preserves local-only slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/about',
+            sentToModel: false,
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 30);
+
+    expect(items).toEqual([
+      { id: 31, type: 'user', text: '/about', sentToModel: false },
+    ]);
+  });
+
+  it('omits sentToModel for legacy slash command records', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/legacy',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([{ id: 41, type: 'user', text: '/legacy' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+
+  it('omits corrupted non-boolean sentToModel metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: 'true',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+});
+
+describe('applyCollapsePolicyAndSummary', () => {
+  const makeItems = (): HistoryItem[] =>
+    [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'first response' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'second response' },
+      { id: 5, type: MessageType.USER, text: 'third' },
+      { id: 6, type: MessageType.GEMINI, text: 'third response' },
+    ] as HistoryItem[];
+
+  const expectSuppressed = (item: HistoryItem) => {
+    expect(item.display).toEqual(
+      expect.objectContaining({ suppressOnRestore: true }),
+    );
+  };
+
+  const expectVisible = (item: HistoryItem) => {
+    expect(item.display?.suppressOnRestore).toBeUndefined();
+  };
+
+  it('suppresses all items and shows the full summary count by default', () => {
+    const result = applyCollapsePolicyAndSummary(makeItems(), true);
+
+    expect(result).toHaveLength(7);
+    result.slice(0, 6).forEach(expectSuppressed);
+    expect(result[6]).toEqual(
+      expect.objectContaining({
+        id: 7,
+        type: MessageType.INFO,
+        text: expect.stringContaining('6 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
+
+  it('keeps the most recent N user turns visible and summarizes only hidden items', () => {
+    const result = applyCollapsePolicyAndSummary(makeItems(), true, 2);
+
+    expect(result).toHaveLength(7);
+    result.slice(0, 2).forEach(expectSuppressed);
+    result.slice(2, 6).forEach(expectVisible);
+    expect(result[6]).toEqual(
+      expect.objectContaining({
+        id: 7,
+        type: MessageType.INFO,
+        text: expect.stringContaining('2 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
+
+  it('shows all items without a summary when preview count covers all user turns', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, true, 3);
+
+    expect(result).toEqual(rawItems);
+    expect(
+      result.some((item) => item.display?.kind === 'collapse-summary'),
+    ).toBe(false);
+    result.forEach(expectVisible);
+  });
+
+  it('shows all items without a summary when preview count is -1', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, true, -1);
+
+    expect(result).toBe(rawItems);
+  });
+
+  it('returns raw items unchanged when collapseOnResume is false', () => {
+    const rawItems = makeItems();
+    const result = applyCollapsePolicyAndSummary(rawItems, false, 1);
+
+    expect(result).toBe(rawItems);
+  });
+
+  it('returns empty history without a summary', () => {
+    expect(applyCollapsePolicyAndSummary([], true)).toEqual([]);
+  });
+});
+
+describe('stripSuppressOnRestore', () => {
+  it('returns item unchanged when display is undefined', () => {
+    const item = { id: 1, type: 'user', text: 'hello' } as HistoryItem;
+    expect(stripSuppressOnRestore(item)).toBe(item);
+  });
+
+  it('returns item unchanged when suppressOnRestore is absent', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: {},
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: {},
+    });
+  });
+
+  it('strips suppressOnRestore while preserving other display properties', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true, kind: 'collapse-summary' },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { kind: 'collapse-summary' },
+    });
+  });
+
+  it('sets display to undefined when suppressOnRestore was the only property', () => {
+    const item = {
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: { suppressOnRestore: true },
+    } as HistoryItem;
+    const result = stripSuppressOnRestore(item);
+    expect(result).toEqual({
+      id: 1,
+      type: 'user',
+      text: 'hello',
+      display: undefined,
+    });
+  });
+});
+
+describe('expandCollapsedHistory', () => {
+  it('returns empty array for empty input', () => {
+    expect(expandCollapsedHistory([])).toEqual([]);
+  });
+
+  it('filters out collapse-summary items and strips suppressOnRestore', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        id: 3,
+        type: 'info',
+        text: 'Summary',
+        display: { kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello', display: undefined },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('preserves items without suppressOnRestore', () => {
+    const items = [
+      { id: 1, type: 'user', text: 'hello' },
+      {
+        id: 2,
+        type: 'gemini',
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([
+      { id: 1, type: 'user', text: 'hello' },
+      { id: 2, type: 'gemini', text: 'hi', display: undefined },
+    ]);
+  });
+
+  it('handles items with both suppressOnRestore and kind', () => {
+    const items = [
+      {
+        id: 1,
+        type: 'user',
+        text: 'hello',
+        display: { suppressOnRestore: true, kind: 'collapse-summary' },
+      },
+    ] as HistoryItem[];
+    const result = expandCollapsedHistory(items);
+    expect(result).toEqual([]);
   });
 });

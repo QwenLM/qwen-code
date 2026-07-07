@@ -9,6 +9,7 @@ import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
+import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -29,6 +30,7 @@ import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
 import { ArenaStatusDialog } from './arena/ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
+import { EffortDialog } from './EffortDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -43,18 +45,22 @@ import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { SkillsManagerDialog } from './skills/SkillsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { ElicitationDialog } from './mcp/ElicitationDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
+import { StatsDialog } from './StatsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { SkillReviewDialog } from './SkillReviewDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -74,6 +80,11 @@ export const DialogManager = ({
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
+  const dialogMaxHeight = getDialogMaxHeight(terminalHeight, staticExtraHeight);
+  const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
+  // Long list-style dialogs use this finite budget for their own internal
+  // virtualization even when the outer app layout is not height-constrained.
+  const listDialogHeight = dialogMaxHeight;
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -124,9 +135,25 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isMcpApprovalDialogOpen && uiState.currentMcpApproval) {
+    return (
+      <MCPServerApprovalDialog
+        serverName={uiState.currentMcpApproval.name}
+        summary={uiState.currentMcpApproval.summary}
+        source={uiState.currentMcpApproval.source}
+        pendingServers={uiState.pendingMcpApprovals}
+        remaining={uiState.mcpApprovalRemaining}
+        onSelect={uiActions.handleMcpApprovalSelect}
+      />
+    );
+  }
   if (uiState.shellConfirmationRequest) {
     return (
-      <ShellConfirmationDialog request={uiState.shellConfirmationRequest} />
+      <ShellConfirmationDialog
+        request={uiState.shellConfirmationRequest}
+        availableTerminalHeight={constrainedDialogHeight}
+        contentWidth={mainAreaWidth}
+      />
     );
   }
   if (uiState.loopDetectionConfirmationRequest) {
@@ -142,16 +169,24 @@ export const DialogManager = ({
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
-  if (uiState.confirmUpdateExtensionRequests.length > 0) {
+  // Extension install/update requests (consent, setting input, plugin choice)
+  // are rendered inside the ExtensionsManagerDialog when it is open, so the
+  // dialog keeps its tab/list state instead of being unmounted.
+  if (
+    uiState.confirmUpdateExtensionRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.confirmUpdateExtensionRequests[0];
     return (
       <ConsentPrompt
         prompt={request.prompt}
         onConfirm={request.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -163,7 +198,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.settingInputRequests.length > 0) {
+  if (
+    uiState.settingInputRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.settingInputRequests[0];
     // Use settingName as key to force re-mount when switching between different settings
     return (
@@ -178,7 +216,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.pluginChoiceRequests.length > 0) {
+  if (
+    uiState.pluginChoiceRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.pluginChoiceRequests[0];
     return (
       <PluginChoicePrompt
@@ -212,9 +253,7 @@ export const DialogManager = ({
           onSelect={uiActions.handleThemeSelect}
           onHighlight={uiActions.handleThemeHighlight}
           settings={settings}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
           terminalWidth={mainAreaWidth}
         />
       </Box>
@@ -241,6 +280,10 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isVoiceModelMode={uiState.isVoiceModelMode}
+        isVisionModelMode={uiState.isVisionModelMode}
+        persistScope={uiState.modelDialogPersistScope}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -262,10 +305,15 @@ export const DialogManager = ({
               uiActions.openModelDialog({ fastModelMode: true });
               return;
             }
+            if (settingName === 'visionModel') {
+              uiActions.openModelDialog({ visionModelMode: true });
+              return;
+            }
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
-          availableTerminalHeight={terminalHeight - staticExtraHeight}
+          availableTerminalHeight={listDialogHeight}
+          width={mainAreaWidth}
           config={config}
         />
       </Box>
@@ -280,7 +328,7 @@ export const DialogManager = ({
         addItem={addItem}
         onSaved={uiActions.notifyStatusLineSettingsChanged}
         onClose={uiActions.closeStatusLineDialog}
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -307,9 +355,17 @@ export const DialogManager = ({
           settings={settings}
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isEffortDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <EffortDialog
+          currentEffort={config.getReasoningEffort()}
+          onSelect={uiActions.handleEffortSelect}
         />
       </Box>
     );
@@ -432,6 +488,20 @@ export const DialogManager = ({
     );
   }
 
+  if (uiState.isSkillsManagerDialogOpen) {
+    return (
+      <SkillsManagerDialog
+        settings={settings}
+        config={config}
+        addItem={addItem}
+        onClose={uiActions.closeSkillsManagerDialog}
+        reloadCommands={uiActions.reloadCommands}
+        setInputBuffer={uiActions.setInputBuffer}
+        availableTerminalHeight={constrainedDialogHeight}
+      />
+    );
+  }
+
   if (uiState.isExtensionsManagerDialogOpen) {
     return (
       <ExtensionsManagerDialog
@@ -442,6 +512,11 @@ export const DialogManager = ({
   }
   if (uiState.isHooksDialogOpen) {
     return <HooksManagementDialog onClose={uiActions.closeHooksDialog} />;
+  }
+  if (uiState.isStatsDialogOpen) {
+    return (
+      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+    );
   }
   if (uiState.isMcpDialogOpen) {
     return <MCPManagementDialog onClose={uiActions.closeMcpDialog} />;
@@ -500,6 +575,19 @@ export const DialogManager = ({
     );
   }
 
+  if (uiState.isSkillReviewDialogOpen && uiState.skillReviewPending) {
+    return (
+      <SkillReviewDialog
+        key={uiState.skillReviewPending.taskId}
+        skills={uiState.skillReviewPending.skills}
+        onAccept={uiActions.acceptPendingSkill}
+        onReject={uiActions.rejectPendingSkill}
+        onClose={uiActions.closeSkillReviewDialog}
+        onDismiss={uiActions.dismissSkillReviewDialog}
+      />
+    );
+  }
+
   // Background tasks dialog — lowest priority so other dialogs
   // (permissions, trust prompts, auth, etc.) always take precedence. The
   // dialog is part of the shared dialogsVisible machinery (see
@@ -508,7 +596,7 @@ export const DialogManager = ({
   if (bgTasksDialogOpen) {
     return (
       <BackgroundTasksDialog
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={listDialogHeight}
         terminalWidth={mainAreaWidth}
       />
     );

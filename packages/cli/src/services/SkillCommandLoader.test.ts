@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SkillCommandLoader } from './SkillCommandLoader.js';
-import { CommandKind } from '../ui/commands/types.js';
+import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
   type Config,
@@ -31,15 +31,24 @@ function makeSkillPrompt(body: string): string {
 describe('SkillCommandLoader', () => {
   let mockConfig: Config;
   let mockSkillManager: { listSkills: ReturnType<typeof vi.fn> };
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
+    mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       getBareMode: vi.fn().mockReturnValue(false),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      // SkillCommandLoader filters via this. Default to empty so existing
+      // assertions about "all skills surface" stay true; per-test cases
+      // override to verify the filter behavior.
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
     } as unknown as Config;
   });
 
@@ -77,6 +86,33 @@ describe('SkillCommandLoader', () => {
     const commands = await loader.loadCommands(signal);
 
     expect(commands[0]?.argumentHint).toBe('[topic]');
+  });
+
+  it('should default skills to user-invocable slash commands', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(true);
+  });
+
+  it('should propagate userInvocable from skills to slash commands', async () => {
+    const skill = makeSkill({ userInvocable: false });
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(false);
+    expect(commands[0]?.modelInvocable).toBe(true);
   });
 
   it('should query user, project, and extension levels', async () => {
@@ -330,5 +366,95 @@ describe('SkillCommandLoader', () => {
       'proj-skill',
       'ext-skill',
     ]);
+  });
+
+  describe('allowedTools grant', () => {
+    it('grants allowedTools as session allow rules when the command runs', async () => {
+      const skill = makeSkill({
+        level: 'user',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not grant when the skill declares no allowedTools', async () => {
+      const skill = makeSkill({ level: 'user' }); // no allowedTools
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('skills.disabled filter', () => {
+    it('omits disabled skills (case-insensitive) from the command list', async () => {
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) => {
+          if (level === 'user')
+            return Promise.resolve([
+              makeSkill({ name: 'KeepMe', level: 'user' }),
+              makeSkill({ name: 'HideMe', level: 'user' }),
+            ]);
+          return Promise.resolve([]);
+        },
+      );
+      // Disabled set is lower-case (matches Config.getDisabledSkillNames
+      // contract). Loader compares with `.toLowerCase()`.
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['hideme']));
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual(['KeepMe']);
+    });
+
+    it('reflects provider mutations on each load (live read)', async () => {
+      // Regression: the provider must be called per-load, not cached, so
+      // CommandService rebuilds (triggered by `reloadCommands`) pick up
+      // the latest `skills.disabled`. A frozen-at-construction snapshot
+      // would be a silent regression.
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          level === 'user'
+            ? Promise.resolve([makeSkill({ name: 'foo', level: 'user' })])
+            : Promise.resolve([]),
+      );
+      let disabled = new Set<string>();
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockImplementation(() => disabled);
+
+      const loader = new SkillCommandLoader(mockConfig);
+
+      const first = await loader.loadCommands(signal);
+      expect(first.map((c) => c.name)).toEqual(['foo']);
+
+      disabled = new Set(['foo']);
+      const second = await loader.loadCommands(signal);
+      expect(second).toEqual([]);
+
+      disabled = new Set<string>();
+      const third = await loader.loadCommands(signal);
+      expect(third.map((c) => c.name)).toEqual(['foo']);
+    });
   });
 });

@@ -4,22 +4,56 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MCP_RESTART_SERVER_DEADLINE_MS,
+  MCP_RESTART_CLIENT_HEADROOM_MS,
+} from '@qwen-code/acp-bridge/mcpTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
-import { parseSseStream } from './sse.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
+import type { DaemonTransport } from './DaemonTransport.js';
+import { RestSseTransport } from './RestSseTransport.js';
 import type {
   DaemonAgentMutationResult,
   DaemonAuthProviderId,
+  DaemonAuthProviderCatalog,
+  DaemonAuthProviderInstallRequest,
+  DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
+  DaemonArchiveSessionsResult,
+  DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonEvent,
   DaemonSessionContextStatus,
+  DaemonSessionContextUsageStatus,
+  BranchSessionRequest,
+  DaemonBranchedSession,
+  DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
+  DaemonSessionGroup,
+  DaemonSessionGroupCatalog,
+  DaemonSessionGroupInput,
+  DaemonSessionGroupUpdate,
+  DaemonSessionLspStatus,
+  DaemonSessionListPage,
+  DaemonSessionListPageOptions,
+  DaemonSessionOrganizationResult,
+  DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionStatsStatus,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
+  DaemonSessionTaskStatus,
+  DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
@@ -31,24 +65,82 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonWorkspaceMemoryDreamOptions,
+  DaemonWorkspaceMemoryDreamTask,
+  DaemonWorkspaceMemoryForgetOptions,
+  DaemonWorkspaceMemoryForgetTask,
+  DaemonWorkspaceMemoryRememberOptions,
+  DaemonWorkspaceMemoryRememberTask,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
   SetModelResult,
+  SetSessionLanguageResult,
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonGithubSetupRequest,
+  DaemonGithubSetupResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonReloadResponse,
+  DaemonMcpManageAction,
+  DaemonMcpManageResult,
+  DaemonSessionBtwResult,
+  DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
+  DaemonSessionRecapResult,
+  DaemonShellCommandResult,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
+  DaemonRewindSnapshotInfo,
+  DaemonRewindResult,
+  ForkSessionRequest,
+  DaemonSessionHooksStatus,
+  DaemonWorkspaceExtensionsStatus,
+  ExtensionMutationResponse,
+  ExtensionInstallRequest,
+  ExtensionInstallResponse,
+  ExtensionOperationStatus,
+  ExtensionScopeRequest,
+  ExtensionRefreshResponse,
+  ExtensionUpdateCheckResponse,
+  DaemonWorkspaceHooksStatus,
+  DaemonPermissionRuleType,
+  DaemonPermissionScope,
+  DaemonWorkspaceSettingsStatus,
+  DaemonWorkspacePermissionsStatus,
+  DaemonSettingUpdateResult,
+  DaemonVoiceAudioInput,
+  DaemonWorkspaceVoiceStatus,
+  DaemonWorkspaceVoiceTranscribeOptions,
+  DaemonWorkspaceVoiceTranscriptionResult,
+  DaemonWorkspaceVoiceUpdate,
+  DaemonWorkspaceTrustChangeRequest,
+  DaemonWorkspaceTrustChangeResult,
+  DaemonWorkspaceTrustStatus,
+  DaemonUnarchiveSessionsResult,
 } from './types.js';
+
+const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
+const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
+const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
 
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
@@ -88,10 +180,56 @@ export interface DaemonClientOptions {
    * Defaults to 30s. Set to `0` or `Infinity` to disable.
    */
   fetchTimeoutMs?: number;
+  /**
+   * Per-session cap on local `prompt()` calls that have been admitted but
+   * not completed. For 202 daemons the slot is held until the temporary
+   * SSE wait finishes. Defaults to 5. Set to `0` or `Infinity` to
+   * disable; `null` is accepted for direct
+   * `/capabilities.limits` passthrough.
+   */
+  maxPendingPromptsPerSession?: number | null;
+  /**
+   * Pluggable transport. When omitted, a `RestSseTransport` is created
+   * automatically — this preserves the existing REST+SSE behavior with
+   * zero caller-side changes. Pass an `AcpWsTransport` or
+   * `AcpHttpTransport` to use JSON-RPC over WebSocket or HTTP.
+   */
+  transport?: DaemonTransport;
 }
 
+const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
+
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
+const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
+// Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+// Server deadline + headroom so the client never races the daemon's own budget.
+const MCP_RESTART_DEFAULT_TIMEOUT_MS =
+  MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+const urlEncode = encodeURIComponent;
+
+function normalizePermissionRuleInput(rule: string): string {
+  const trimmed = rule.trim();
+  if (!trimmed) {
+    throw new Error('rule must be a non-empty string');
+  }
+  return trimmed;
+}
+
+export function normalizePendingPromptLimit(
+  value: number | null | undefined,
+): number {
+  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  if (value === null || value === 0 || value === Infinity) {
+    return Infinity;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError('bad maxPendingPromptsPerSession');
+  }
+  return value;
+}
 
 /**
  * Strip any trailing slashes from a base URL via plain string ops. The
@@ -107,24 +245,84 @@ function stripTrailingSlashes(url: string): string {
 }
 
 /**
- * Thrown for any non-2xx daemon response. `status` and `body` are surfaced
- * so callers can branch on the standard daemon HTTP semantics (404 missing
- * session, 401 bad token, 400 malformed body, 500 agent failure).
+ * SDK env fallback for the daemon bearer token. Mirrors the daemon-side
+ * `--token` CLI fallback to `QWEN_SERVER_TOKEN` so a developer with
+ * `export QWEN_SERVER_TOKEN=...` in their shell never has to thread the
+ * value through every `DaemonClient` construction.
+ *
+ * Defensive on three axes:
+ *   1. **Browser-safe**: `globalThis.process` indirection. The SDK is
+ *      imported by `@qwen-code/webui`; a literal
+ *      `process.env[...]` would explode at module load on browser
+ *      bundles. Browser globals don't expose `process` so this returns
+ *      `undefined` cleanly there.
+ *   2. **Whitespace stripped**: matches the daemon-side trim behavior
+ *      documented in the `qwen-serve` user guide under the CLI flags
+ *      section — handy for `$(cat token.txt)` that produces a trailing
+ *      newline.
+ *   3. **Empty / whitespace-only treated as unset**: a stale
+ *      `export QWEN_SERVER_TOKEN=""` would otherwise let the
+ *      Authorization header through as `Bearer ` (no token), which
+ *      the daemon rejects but is confusing to debug. Returning
+ *      `undefined` here means the constructor's `?? readTokenFromEnv()`
+ *      fallback chain treats both "unset" and "set-but-empty"
+ *      identically — no header sent.
  */
-export class DaemonHttpError extends Error {
-  readonly status: number;
-  readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
-    super(message);
-    this.name = 'DaemonHttpError';
-    this.status = status;
-    this.body = body;
+function readTokenFromEnv(): string | undefined {
+  try {
+    const proc = (
+      globalThis as {
+        process?: { env?: Record<string, string | undefined> };
+      }
+    ).process;
+    const raw = proc?.env?.['QWEN_SERVER_TOKEN'];
+    if (typeof raw !== 'string') return undefined;
+    const trimmed = raw.trim();
+    return trimmed.length === 0 ? undefined : trimmed;
+  } catch {
+    return undefined;
   }
+}
+
+// Re-export DaemonHttpError from its dedicated module so existing
+// `import { DaemonHttpError } from './DaemonClient.js'` continues to
+// work. The class itself lives in DaemonHttpError.ts to break the
+// import chain from RestSseTransport → DaemonClient (browser bundle).
+export { DaemonHttpError } from './DaemonHttpError.js';
+
+/**
+ * SDK-side representation of the daemon's `prompt_queue_full` condition.
+ * Mirrors the bridge-side `PromptQueueFullError` wire data.
+ */
+export class DaemonPendingPromptLimitError extends Error {
+  declare readonly sessionId: string;
+  declare readonly limit: number;
+  declare readonly pendingCount: number;
+
+  constructor(sessionId: string, limit: number, pendingCount: number) {
+    super(`Pending prompts full: "${sessionId}" (${pendingCount}/${limit})`);
+    this.name = 'DaemonPendingPromptLimitError';
+    this.sessionId = sessionId;
+    this.limit = limit;
+    this.pendingCount = pendingCount;
+  }
+}
+
+export interface DaemonTurnError extends DaemonHttpError {
+  _daemonTurnError: true;
+}
+
+export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { _daemonTurnError?: unknown })._daemonTurnError === true
+  );
 }
 
 export interface CreateSessionRequest {
   /**
-   * Workspace path the daemon must be bound to (per #3803 §02). When
+   * Workspace path the daemon must be bound to. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
    * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
    * to be explicit, or omit it for the daemon-knows-best path. A
@@ -141,11 +339,11 @@ export interface CreateSessionRequest {
    * forces a distinct session for this call. The reverse override
    * (per-request `'single'` against a daemon defaulting to `'thread'`)
    * is also supported, though the daemon's default is hardcoded to
-   * `'single'` today (#4175 may add a CLI flag in a follow-up). Omit
+   * `'single'` today. Omit
    * to inherit the daemon-wide default.
    *
    * Only `'single'` and `'thread'` are accepted; anything else yields
-   * `400 invalid_session_scope`. Old daemons (pre-#4175 PR 5) silently
+   * `400 invalid_session_scope`. Old daemons silently
    * ignore the field — clients should pre-flight
    * `caps.features.session_scope_override` before sending.
    */
@@ -164,7 +362,30 @@ export interface PromptRequest {
   prompt: PromptContentBlock[];
   /** Optional ACP _meta passthrough. */
   _meta?: Record<string, unknown> | null;
+  /**
+   * Per-prompt wallclock cap (positive integer ms).
+   * The effective deadline is `min(server flag, this)` — the request
+   * can shorten, never extend. When omitted, the server's
+   * `--prompt-deadline-ms` flag governs alone (unlimited when both
+   * are unset). On expiry the daemon returns 504 +
+   * `errorKind: 'prompt_deadline_exceeded'`.
+   *
+   * Daemons without `prompt_absolute_deadline` capability
+   * tag) silently ignore the field — pre-flight
+   * `caps.features.includes('prompt_absolute_deadline')` before
+   * relying on it.
+   */
+  deadlineMs?: number;
   [key: string]: unknown;
+}
+
+/**
+ * 202 Accepted envelope returned by non-blocking
+ * `POST /session/:id/prompt`.
+ */
+export interface NonBlockingPromptAccepted {
+  promptId: string;
+  lastEventId: number;
 }
 
 export interface SubscribeOptions {
@@ -191,12 +412,20 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  private readonly promptLimit: number;
+  private readonly promptCounts: Record<string, number> = Object.create(null);
+  /**
+   * Pluggable transport layer. Defaults to `RestSseTransport` when
+   * no explicit transport is supplied — preserving the pre-abstraction
+   * REST+SSE behavior with zero breaking changes.
+   */
+  readonly transport: DaemonTransport;
   // Lazy singleton so clients that never touch auth pay no allocation cost.
   // Exposed via the readonly `auth` accessor below.
   private _authFlow?: DaemonAuthFlow;
 
   /**
-   * High-level auth helper (issue #4175 PR 21). Wraps the four
+   * High-level auth helper. Wraps the four
    * `*DeviceFlow*` methods with a `start(...).awaitCompletion()` shape
    * for the common "log in remotely" UX. Lazy-constructed.
    */
@@ -209,7 +438,12 @@ export class DaemonClient {
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
-    this.token = opts.token;
+    // When no explicit token is passed, fall back to
+    // QWEN_SERVER_TOKEN env var so clients with
+    // `export QWEN_SERVER_TOKEN=...` in their shell don't have to
+    // thread the value through every construction. See
+    // `readTokenFromEnv` above for browser-safety + trim semantics.
+    this.token = opts.token ?? readTokenFromEnv();
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
     // Coerce non-positive / non-finite to 0 (= disabled). Without this
     // a caller passing `-1` or `NaN` would slip past the
@@ -221,6 +455,37 @@ export class DaemonClient {
     // it instead of defending the math at every call site.
     const raw = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     this.fetchTimeoutMs = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    this.promptLimit = normalizePendingPromptLimit(
+      opts.maxPendingPromptsPerSession,
+    );
+    this.transport =
+      opts.transport ??
+      new RestSseTransport(this.baseUrl, this.token, this._fetch);
+  }
+
+  get maxPendingPromptsPerSession(): number {
+    return this.promptLimit;
+  }
+
+  /** @internal */
+  reservePromptSlot(sessionId: string, limit = this.promptLimit): () => void {
+    if (limit === Infinity) return () => {};
+    const promptCounts = this.promptCounts;
+    const pendingCount = promptCounts[sessionId] ?? 0;
+    if (pendingCount >= limit) {
+      throw new DaemonPendingPromptLimitError(sessionId, limit, pendingCount);
+    }
+    promptCounts[sessionId] = pendingCount + 1;
+    let released: boolean | undefined;
+    return () => {
+      if (released) return;
+      released = true;
+      if ((promptCounts[sessionId] ?? 0) <= 1) {
+        delete promptCounts[sessionId];
+      } else {
+        --promptCounts[sessionId]!;
+      }
+    };
   }
 
   /**
@@ -235,8 +500,10 @@ export class DaemonClient {
     url: string,
     init: RequestInit = {},
     consume?: (res: Response) => Promise<T>,
+    perCallTimeoutMs?: number,
+    mode: 'transport' | 'rest' = 'transport',
   ): Promise<T> {
-    // BRN1o: when `consume` is provided, the timer must remain
+    // When `consume` is provided, the timer must remain
     // armed through the entire callback (body read + parse). The
     // previous `Response`-returning shape cleared the timer the
     // moment headers arrived, so `await res.json()` against a
@@ -246,8 +513,31 @@ export class DaemonClient {
     // composed abort signal still flows through to fetch's body
     // stream, so an in-progress `res.json()` rejects cleanly when
     // the timer fires.
-    if (!this.fetchTimeoutMs || !Number.isFinite(this.fetchTimeoutMs)) {
-      const res = await this._fetch(url, init);
+    //
+    // `perCallTimeoutMs` lets a single call (e.g. `restartMcpServer`,
+    // where the daemon waits up to 300s for MCP rediscovery) override
+    // the client-wide default.
+    //
+    // Accept finite, non-negative values -- including `0`, which the
+    // `restartMcpServer` JSDoc documents as "disable the timeout
+    // entirely". Zero falls through to the no-timeout branch below
+    // via the `!effectiveTimeoutMs` truthiness check. NaN / negative
+    // inputs still coerce back to the client-wide default so callers
+    // can pass a derived expression without defending the math at
+    // every site.
+    let effectiveTimeoutMs = this.fetchTimeoutMs;
+    if (
+      perCallTimeoutMs !== undefined &&
+      Number.isFinite(perCallTimeoutMs) &&
+      perCallTimeoutMs >= 0
+    ) {
+      effectiveTimeoutMs = perCallTimeoutMs;
+    }
+    if (!effectiveTimeoutMs || !Number.isFinite(effectiveTimeoutMs)) {
+      const res =
+        mode === 'rest'
+          ? await this._fetch(url, init)
+          : await this.transport.fetch(url, init);
       if (consume) return consume(res);
       return res as unknown as T;
     }
@@ -262,8 +552,8 @@ export class DaemonClient {
     // body consume callback, if any) settles.
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
-      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError'));
-    }, this.fetchTimeoutMs);
+      ctrl.abort(new DOMException('timeout', 'TimeoutError'));
+    }, effectiveTimeoutMs);
     if (typeof timer === 'object' && timer && 'unref' in timer) {
       (timer as { unref: () => void }).unref();
     }
@@ -272,7 +562,10 @@ export class DaemonClient {
       ? composeAbortSignals([callerSignal, ctrl.signal])
       : ctrl.signal;
     try {
-      const res = await this._fetch(url, { ...init, signal });
+      const res =
+        mode === 'rest'
+          ? await this._fetch(url, { ...init, signal })
+          : await this.transport.fetch(url, { ...init, signal });
       if (consume) return await consume(res);
       return res as unknown as T;
     } finally {
@@ -295,7 +588,17 @@ export class DaemonClient {
   private async failOnError(
     res: Response,
     label: string,
-  ): Promise<DaemonHttpError> {
+  ): Promise<DaemonHttpError>;
+  private async failOnError(
+    res: Response,
+    label: string,
+    sessionId: string,
+  ): Promise<DaemonHttpError | DaemonPendingPromptLimitError>;
+  private async failOnError(
+    res: Response,
+    label: string,
+    sessionId?: string,
+  ): Promise<DaemonHttpError | DaemonPendingPromptLimitError> {
     // Read the body exactly once. `res.json()` consumes the stream even on
     // parse-failure, leaving a subsequent `res.text()` empty — so go via
     // text() and attempt JSON parsing ourselves; raw text is a useful
@@ -317,7 +620,51 @@ export class DaemonClient {
       body && typeof body === 'object' && 'error' in body
         ? String((body as { error: unknown }).error)
         : `HTTP ${res.status}`;
+    if (sessionId && res.status === 503 && body && typeof body === 'object') {
+      const data = body as {
+        code?: unknown;
+        limit?: unknown;
+        pendingCount?: unknown;
+        sessionId?: unknown;
+      };
+      if (data.code === 'prompt_queue_full') {
+        return new DaemonPendingPromptLimitError(
+          typeof data.sessionId === 'string' ? data.sessionId : sessionId,
+          typeof data.limit === 'number' ? data.limit : 0,
+          typeof data.pendingCount === 'number' ? data.pendingCount : 0,
+        );
+      }
+    }
     return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
+  }
+
+  private async jsonRequest<T>(
+    path: string,
+    label: string,
+    opts: {
+      method?: string;
+      body?: unknown;
+      clientId?: string;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<T> {
+    const hasBody = opts.body !== undefined;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      {
+        ...(opts.method ? { method: opts.method } : {}),
+        headers: this.headers(
+          hasBody ? { 'Content-Type': 'application/json' } : {},
+          opts.clientId,
+        ),
+        ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, label);
+        return (await res.json()) as T;
+      },
+      opts.timeoutMs,
+    );
   }
 
   // -- Lifecycle / discovery ---------------------------------------------
@@ -344,6 +691,43 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Consolidated daemon status report (`GET /daemon/status`). The default
+   * `summary` detail reads cheap in-memory counters; `full` adds per-session,
+   * ACP-connection, auth, and workspace diagnostics sections.
+   */
+  async daemonStatus(
+    detail: DaemonStatusReportDetail = 'summary',
+  ): Promise<DaemonStatusReport> {
+    const query = detail === 'summary' ? '' : `?detail=${detail}`;
+    return await this.jsonRequest<DaemonStatusReport>(
+      `/daemon/status${query}`,
+      'GET /daemon/status',
+    );
+  }
+
+  /**
+   * Aggregate local token-usage dashboard (`GET /usage/dashboard`): the
+   * selected range's flattened totals plus a trailing per-day heatmap, read
+   * from the durable local usage history (global, cross-project). `range`
+   * scopes the summary (default `today`); `heatmapDays` sets the heatmap
+   * window (default ~6 months, server-clamped to 1..366).
+   */
+  async usageDashboard(
+    opts: { range?: DaemonUsageRange; heatmapDays?: number } = {},
+  ): Promise<DaemonUsageDashboard> {
+    const params = new URLSearchParams();
+    if (opts.range !== undefined) params.set('range', opts.range);
+    if (opts.heatmapDays !== undefined) {
+      params.set('heatmapDays', String(opts.heatmapDays));
+    }
+    const query = params.toString();
+    return await this.jsonRequest<DaemonUsageDashboard>(
+      `/usage/dashboard${query ? `?${query}` : ''}`,
+      'GET /usage/dashboard',
+    );
+  }
+
   async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp`,
@@ -351,6 +735,39 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
         return (await res.json()) as DaemonWorkspaceMcpStatus;
+      },
+    );
+  }
+
+  async workspaceMcpTools(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpToolsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/tools`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/mcp/:server/tools');
+        }
+        return (await res.json()) as DaemonWorkspaceMcpToolsStatus;
+      },
+    );
+  }
+
+  async workspaceMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/resources`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace/mcp/:server/resources',
+          );
+        }
+        return (await res.json()) as DaemonWorkspaceMcpResourcesStatus;
       },
     );
   }
@@ -381,7 +798,123 @@ export class DaemonClient {
     );
   }
 
-  // -- Workspace files (issue #4175 PR 20) -------------------------------
+  async workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/hooks`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /workspace/hooks');
+        return (await res.json()) as DaemonWorkspaceHooksStatus;
+      },
+    );
+  }
+
+  async sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/hooks`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /session/:id/hooks');
+        return (await res.json()) as DaemonSessionHooksStatus;
+      },
+    );
+  }
+
+  async workspaceExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return await this.jsonRequest<DaemonWorkspaceExtensionsStatus>(
+      '/workspace/extensions',
+      'GET /workspace/extensions',
+    );
+  }
+
+  async installExtension(
+    params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    return await this.jsonRequest<ExtensionInstallResponse>(
+      '/workspace/extensions/install',
+      'POST /workspace/extensions/install',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async extensionOperationStatus(
+    operationId: string,
+  ): Promise<ExtensionOperationStatus> {
+    return await this.jsonRequest<ExtensionOperationStatus>(
+      `/workspace/extensions/operations/${urlEncode(operationId)}`,
+      'GET /workspace/extensions/operations/:operationId',
+    );
+  }
+
+  async checkExtensionUpdates(
+    clientId?: string,
+  ): Promise<ExtensionUpdateCheckResponse> {
+    return await this.jsonRequest<ExtensionUpdateCheckResponse>(
+      '/workspace/extensions/check-updates',
+      'POST /workspace/extensions/check-updates',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async refreshExtensions(
+    clientId?: string,
+  ): Promise<ExtensionRefreshResponse> {
+    return await this.jsonRequest<ExtensionRefreshResponse>(
+      '/workspace/extensions/refresh',
+      'POST /workspace/extensions/refresh',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async enableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${urlEncode(name)}/enable`,
+      'POST /workspace/extensions/:name/enable',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async disableExtension(
+    name: string,
+    params: ExtensionScopeRequest,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${urlEncode(name)}/disable`,
+      'POST /workspace/extensions/:name/disable',
+      { method: 'POST', body: params, clientId },
+    );
+  }
+
+  async updateExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${urlEncode(name)}/update`,
+      'POST /workspace/extensions/:name/update',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async uninstallExtension(
+    name: string,
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse> {
+    return await this.jsonRequest<ExtensionMutationResponse>(
+      `/workspace/extensions/${urlEncode(name)}`,
+      'DELETE /workspace/extensions/:name',
+      { method: 'DELETE', clientId },
+    );
+  }
+
+  // -- Workspace files (workspace files) -------------------------------
 
   async readWorkspaceFile(
     filePath: string,
@@ -432,6 +965,45 @@ export class DaemonClient {
     );
   }
 
+  async fileStat(filePath: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/stat`);
+    url.searchParams.set('path', filePath);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /stat');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
+  async dirList(dirPath: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/list`);
+    url.searchParams.set('path', dirPath);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /list');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
+  async glob(pattern: string): Promise<unknown> {
+    const url = new URL(`${this.baseUrl}/glob`);
+    url.searchParams.set('pattern', pattern);
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /glob');
+        return (await res.json()) as unknown;
+      },
+    );
+  }
+
   async writeWorkspaceFile(
     req: DaemonWorkspaceFileWriteRequest,
     clientId?: string,
@@ -468,7 +1040,7 @@ export class DaemonClient {
     );
   }
 
-  // -- Workspace memory (issue #4175 PR 16) ------------------------------
+  // -- Workspace memory (workspace memory/agents) ------------------------------
 
   /**
    * Fetch the daemon's `QWEN.md` / `AGENTS.md` snapshot. Read-only;
@@ -482,8 +1054,7 @@ export class DaemonClient {
    * directories or recurse into the workspace tree. The route's
    * companion helper `walkWorkspaceForMemory` keeps a guarded
    * upward-walk loop body for a future hierarchical mode but breaks
-   * after iteration 1 in this release. PR 16.5 will lift the cap
-   * once auto-memory CRUD lands.
+   * after iteration 1 in this release.
    */
   async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
     return await this.fetchWithTimeout(
@@ -525,7 +1096,92 @@ export class DaemonClient {
     );
   }
 
-  // -- Workspace agents (issue #4175 PR 16) ------------------------------
+  /**
+   * Queue a hidden managed-memory remember task for the daemon's bound
+   * workspace. This does not require an existing session; callers should
+   * poll `getWorkspaceMemoryRememberTask()` until the task is terminal.
+   */
+  async rememberWorkspaceMemory(
+    content: string,
+    opts: DaemonWorkspaceMemoryRememberOptions = {},
+  ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
+      WORKSPACE_MEMORY_REMEMBER_PATH,
+      `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
+      {
+        method: 'POST',
+        body: {
+          content,
+          contextMode: opts.contextMode ?? 'workspace',
+        },
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryRememberTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_REMEMBER_PATH}/${urlEncode(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_REMEMBER_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async forgetWorkspaceMemory(
+    query: string,
+    opts: DaemonWorkspaceMemoryForgetOptions = {},
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
+      WORKSPACE_MEMORY_FORGET_PATH,
+      `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
+      {
+        method: 'POST',
+        body: { query },
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryForgetTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_FORGET_PATH}/${urlEncode(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_FORGET_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async dreamWorkspaceMemory(
+    opts: DaemonWorkspaceMemoryDreamOptions = {},
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryDreamTask>(
+      WORKSPACE_MEMORY_DREAM_PATH,
+      `POST ${WORKSPACE_MEMORY_DREAM_PATH}`,
+      {
+        method: 'POST',
+        body: {},
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryDreamTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_DREAM_PATH}/${urlEncode(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_DREAM_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  // -- Workspace agents (workspace memory/agents) ------------------------------
 
   async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
     return await this.fetchWithTimeout(
@@ -565,11 +1221,32 @@ export class DaemonClient {
     );
   }
 
+  async generateWorkspaceAgent(
+    description: string,
+    clientId?: string,
+  ): Promise<DaemonGeneratedAgentContent> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents/generate`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ description }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/agents/generate');
+        }
+        return (await res.json()) as DaemonGeneratedAgentContent;
+      },
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
   async getWorkspaceAgent(
     agentType: string,
   ): Promise<DaemonWorkspaceAgentDetail> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`,
+      `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -598,8 +1275,8 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonAgentMutationResult> {
     const url = opts.scope
-      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
-      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+      ? `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}?scope=${urlEncode(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`;
     return await this.fetchWithTimeout(
       url,
       {
@@ -631,8 +1308,8 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<void> {
     const url = opts.scope
-      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
-      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+      ? `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}?scope=${urlEncode(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`;
     return await this.fetchWithTimeout(
       url,
       {
@@ -697,13 +1374,26 @@ export class DaemonClient {
     );
   }
 
+  async workspaceTools(): Promise<DaemonWorkspaceToolsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/tools');
+        }
+        return (await res.json()) as DaemonWorkspaceToolsStatus;
+      },
+    );
+  }
+
   // -- Sessions ----------------------------------------------------------
 
   async createOrAttachSession(
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
-    // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
+    // Omitting `cwd` lets the daemon fall back to its
     // bound workspace. JSON.stringify strips `undefined` values, so
     // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
     // server then takes the documented fallback path.
@@ -747,19 +1437,105 @@ export class DaemonClient {
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
+    options?: {
+      pageSize?: number;
+      archiveState?: DaemonSessionArchiveState;
+    },
   ): Promise<DaemonSessionSummary[]> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/:id/sessions');
-        }
-        const body = (await res.json()) as {
-          sessions: DaemonSessionSummary[];
-        };
-        return body.sessions;
-      },
+    const page = await this.listWorkspaceSessionsPage(workspaceCwd, options);
+    return page.sessions;
+  }
+
+  async listWorkspaceSessionsPage(
+    workspaceCwd: string,
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionListPage> {
+    const requestedPageSize =
+      options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
+    const pageSize = Math.max(
+      1,
+      Math.min(
+        1000,
+        Math.round(
+          Number.isFinite(requestedPageSize)
+            ? requestedPageSize
+            : DEFAULT_SESSION_LIST_PAGE_SIZE,
+        ),
+      ),
+    );
+    const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.cursor !== undefined) {
+      query.set('cursor', options.cursor);
+    }
+    if (options?.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
+    if (options?.view !== undefined) {
+      query.set('view', options.view);
+    }
+    if (options?.group !== undefined) {
+      query.set('group', options.group);
+    }
+    return await this.jsonRequest<DaemonSessionListPage>(
+      `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
+      'GET /workspace/sessions',
+    );
+  }
+
+  async listSessionGroups(
+    workspaceCwd: string,
+  ): Promise<DaemonSessionGroupCatalog> {
+    return await this.jsonRequest<DaemonSessionGroupCatalog>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups`,
+      'GET /workspace/session-groups',
+    );
+  }
+
+  async createSessionGroup(
+    workspaceCwd: string,
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup> {
+    const body = await this.jsonRequest<{ group: DaemonSessionGroup }>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups`,
+      'POST /workspace/session-groups',
+      { method: 'POST', body: input },
+    );
+    return body.group;
+  }
+
+  async updateSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup> {
+    const body = await this.jsonRequest<{ group: DaemonSessionGroup }>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups/${urlEncode(groupId)}`,
+      'PATCH /workspace/session-groups/:groupId',
+      { method: 'PATCH', body: update },
+    );
+    return body.group;
+  }
+
+  async deleteSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+  ): Promise<{ deleted: boolean }> {
+    return await this.jsonRequest<{ deleted: boolean }>(
+      `/workspace/${urlEncode(workspaceCwd)}/session-groups/${urlEncode(groupId)}`,
+      'DELETE /workspace/session-groups/:groupId',
+      { method: 'DELETE' },
+    );
+  }
+
+  async updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult> {
+    return await this.jsonRequest<DaemonSessionOrganizationResult>(
+      `/session/${urlEncode(sessionId)}/organization`,
+      'PATCH /session/:id/organization',
+      { method: 'PATCH', body: update, clientId },
     );
   }
 
@@ -771,6 +1547,40 @@ export class DaemonClient {
     return this.restoreSession('load', sessionId, req, clientId);
   }
 
+  async exportSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    const format = opts.format ?? 'html';
+    const query = opts.format ? `?format=${urlEncode(opts.format)}` : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/export${query}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/export');
+        }
+        const content = await res.text();
+        const mimeType = res.headers.get('content-type') ?? '';
+        const filename =
+          /filename="([^"]+)"/i.exec(
+            res.headers.get('content-disposition') ?? '',
+          )?.[1] ?? `export.${format}`;
+        return {
+          content,
+          filename,
+          mimeType,
+          format,
+        };
+      },
+      undefined,
+      'rest',
+    );
+  }
+
   async resumeSession(
     sessionId: string,
     req: RestoreSessionRequest = {},
@@ -779,12 +1589,54 @@ export class DaemonClient {
     return this.restoreSession('resume', sessionId, req, clientId);
   }
 
+  async branchSession(
+    sessionId: string,
+    req: BranchSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonBranchedSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/branch`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ name: req.name }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/branch');
+        }
+        return (await res.json()) as DaemonBranchedSession;
+      },
+    );
+  }
+
+  async forkSession(
+    sessionId: string,
+    req: ForkSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonForkSessionResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/fork`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ directive: req.directive }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/fork');
+        }
+        return (await res.json()) as DaemonForkSessionResult;
+      },
+    );
+  }
+
   async sessionContext(
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionContextStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/context`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -795,12 +1647,34 @@ export class DaemonClient {
     );
   }
 
+  async sessionContextUsage(
+    sessionId: string,
+    opts: { detail?: boolean } = {},
+    clientId?: string,
+  ): Promise<DaemonSessionContextUsageStatus> {
+    const params = new URLSearchParams();
+    if (opts.detail === true) params.set('detail', 'true');
+    const query = params.toString();
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/context-usage${
+        query ? `?${query}` : ''
+      }`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/context-usage');
+        }
+        return (await res.json()) as DaemonSessionContextUsageStatus;
+      },
+    );
+  }
+
   async sessionSupportedCommands(
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionSupportedCommandsStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/supported-commands`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/supported-commands`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -810,6 +1684,99 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSessionSupportedCommandsStatus;
+      },
+    );
+  }
+
+  async sessionTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTasksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/tasks');
+        }
+        return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionLspStatus(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionLspStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/lsp`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/lsp');
+        }
+        return (await res.json()) as DaemonSessionLspStatus;
+      },
+    );
+  }
+
+  async sessionTaskCancel(
+    sessionId: string,
+    taskId: string,
+    kind: DaemonSessionTaskStatus['kind'],
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/cancel`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ kind }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/tasks/:taskId/cancel',
+          );
+        }
+        return (await res.json()) as { cancelled: boolean };
+      },
+    );
+  }
+
+  async sessionGoalClear(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<{ cleared: boolean; condition?: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/goal/clear`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/goal/clear');
+        }
+        return (await res.json()) as { cleared: boolean; condition?: string };
+      },
+    );
+  }
+
+  async sessionStats(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionStatsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/stats`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/stats');
+        }
+        return (await res.json()) as DaemonSessionStatsStatus;
       },
     );
   }
@@ -828,7 +1795,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/${action}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/${action}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -844,7 +1811,7 @@ export class DaemonClient {
   }
 
   /**
-   * #4175 Wave 4 PR 17. Change the approval mode of a live session.
+   * Change the approval mode of a live session.
    * The daemon applies the change in the ACP child's per-session
    * `Config` and publishes an `approval_mode_changed` event. Pass
    * `opts.persist: true` to also write `tools.approvalMode` to the
@@ -864,7 +1831,7 @@ export class DaemonClient {
     opts?: { persist?: boolean; clientId?: string },
   ): Promise<DaemonApprovalModeResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/approval-mode`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/approval-mode`,
       {
         method: 'POST',
         headers: this.headers(
@@ -885,8 +1852,242 @@ export class DaemonClient {
     );
   }
 
+  async getRewindSnapshots(
+    sessionId: string,
+  ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/rewind/snapshots`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/rewind/snapshots',
+          );
+        }
+        return (await res.json()) as { snapshots: DaemonRewindSnapshotInfo[] };
+      },
+    );
+  }
+
+  async rewindSession(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string; rewindFiles?: boolean },
+  ): Promise<DaemonRewindResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/rewind`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          promptId,
+          ...(opts?.rewindFiles !== undefined
+            ? { rewindFiles: opts.rewindFiles }
+            : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/rewind');
+        }
+        return (await res.json()) as DaemonRewindResult;
+      },
+    );
+  }
+
   /**
-   * #4175 Wave 4 PR 17. Toggle a tool name in the workspace's
+   * Generate a one-sentence "where did I leave off"
+   * recap of the session. Wraps `generateSessionRecap` (core/services/
+   * sessionRecap.ts) via an ACP control-channel ext-method, so the
+   * summary is computed against the active GeminiClient chat history
+   * inside the daemon's ACP child.
+   *
+   * Non-strict mutation gate — posture matches `/session/:id/prompt`
+   * (the route costs tokens but mutates no state). Calls `_fetch`
+   * directly without the per-call `fetchTimeoutMs` wrapper because the
+   * underlying side-query can take longer than the default 30s under
+   * a slow model. Older daemons (pre-recap support) return 404 —
+   * pre-flight `caps.features.session_recap` before calling.
+   *
+   * Cancellation: the optional `signal` aborts only the LOCAL HTTP
+   * fetch. It does NOT propagate to the daemon — the bridge-side wait
+   * continues until the 60s `SESSION_RECAP_TIMEOUT_MS` backstop, and
+   * the side-query inside the ACP child always runs to completion (no
+   * cross-process abort plumbing in v1). A future request-id-based
+   * cancel ext-method will plumb a real signal end-to-end if/when the
+   * bandwidth cost justifies it.
+   *
+   * `recap` may be `null` on too-short histories or transient model
+   * failures (a 200 response with `recap: null`), per the best-effort
+   * contract of the core helper.
+   */
+  async recapSession(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionRecapResult> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/recap`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
+    return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  async btwSession(
+    sessionId: string,
+    question: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionBtwResult> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/btw`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ question }),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/btw');
+    return (await res.json()) as DaemonSessionBtwResult;
+  }
+
+  /**
+   * Queue a user message typed while the session's turn is still running. The
+   * ACP child drains it between tool batches so the model sees it before the
+   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
+   * caller should then send the message as a normal next-turn prompt.
+   */
+  async enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonMidTurnMessageResult> {
+    // Route through `fetchWithTimeout` like every other method so a hung daemon
+    // can't wedge this promise forever (the caller in `actions.ts` awaits it).
+    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
+    // timeout controller, so the mid-turn-settle abort still propagates.
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-message`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ message }),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-message',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * List prompts in the daemon's per-session pending queue. Includes the
+   * currently running prompt (`state: 'running'`) and any FIFO-waiting
+   * prompts (`state: 'queued'`). Returns an empty array when no prompts
+   * are pending.
+   */
+  async getPendingPrompts(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonPendingPromptsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/pending-prompts`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/pending-prompts');
+        }
+        return (await res.json()) as DaemonPendingPromptsResult;
+      },
+    );
+  }
+
+  /**
+   * Remove a specific prompt from the daemon's pending queue. For queued
+   * prompts this aborts them so the FIFO skips dispatch; for the running
+   * prompt this triggers a cancel. Returns `{ removed: false }` when the
+   * promptId is not found.
+   */
+  async removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonRemovePendingPromptResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/pending-prompts/${urlEncode(promptId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /session/:id/pending-prompts/:promptId',
+          );
+        }
+        return (await res.json()) as DaemonRemovePendingPromptResult;
+      },
+    );
+  }
+
+  /**
+   * Execute a direct daemon-side shell command for a session. The daemon must
+   * be started with direct session shell enabled and bearer auth configured;
+   * callers must also provide a client id already bound to this session.
+   * Prefer `DaemonSessionClient.shellCommand()` when available because it
+   * forwards the session-bound client id automatically.
+   */
+  async shellCommand(
+    sessionId: string,
+    command: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonShellCommandResult> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/shell`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ command }),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/shell');
+    return (await res.json()) as DaemonShellCommandResult;
+  }
+
+  /**
+   * Toggle a tool name in the workspace's
    * `tools.disabled` settings list. Strict-gated mutation route — the
    * daemon must be configured with a bearer token. The daemon writes
    * the settings file directly and fan-outs a `tool_toggled` event to
@@ -906,7 +2107,7 @@ export class DaemonClient {
     opts?: { clientId?: string },
   ): Promise<DaemonToolToggleResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/tools/${encodeURIComponent(toolName)}/enable`,
+      `${this.baseUrl}/workspace/tools/${urlEncode(toolName)}/enable`,
       {
         method: 'POST',
         headers: this.headers(
@@ -927,23 +2128,240 @@ export class DaemonClient {
     );
   }
 
+  async workspaceSettings(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceSettingsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/settings`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/settings');
+        }
+        return (await res.json()) as DaemonWorkspaceSettingsStatus;
+      },
+    );
+  }
+
+  async setWorkspaceSetting(
+    scope: 'workspace',
+    key: string,
+    value: unknown,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSettingUpdateResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/settings`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ scope, key, value }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/settings');
+        }
+        return (await res.json()) as DaemonSettingUpdateResult;
+      },
+    );
+  }
+
+  async workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
+    return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
+      '/workspace/voice',
+      'GET /workspace/voice',
+      { clientId },
+    );
+  }
+
+  async setWorkspaceVoice(
+    update: DaemonWorkspaceVoiceUpdate,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceVoiceStatus> {
+    return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
+      '/workspace/voice',
+      'POST /workspace/voice',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
+  async transcribeWorkspaceVoice(
+    audio: DaemonVoiceAudioInput,
+    opts: DaemonWorkspaceVoiceTranscribeOptions,
+  ): Promise<DaemonWorkspaceVoiceTranscriptionResult> {
+    const query = opts.voiceModel
+      ? `?${new URLSearchParams({ voiceModel: opts.voiceModel }).toString()}`
+      : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/voice/transcribe${query}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': opts.mimeType }, opts.clientId),
+        body: audio as BodyInit,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/voice/transcribe');
+        }
+        return (await res.json()) as DaemonWorkspaceVoiceTranscriptionResult;
+      },
+      VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
+      'rest',
+    );
+  }
+
+  async workspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/trust`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/trust');
+        }
+        return (await res.json()) as DaemonWorkspaceTrustStatus;
+      },
+    );
+  }
+
+  async requestWorkspaceTrustChange(
+    request: DaemonWorkspaceTrustChangeRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceTrustChangeResult> {
+    return await this.jsonRequest<DaemonWorkspaceTrustChangeResult>(
+      '/workspace/trust/request',
+      'POST /workspace/trust/request',
+      { method: 'POST', body: request, clientId },
+    );
+  }
+
+  async workspacePermissions(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspacePermissionsStatus> {
+    return await this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'GET /workspace/permissions',
+      { clientId: opts?.clientId },
+    );
+  }
+
   /**
-   * #4175 Wave 4 PR 17. Restart a configured MCP server through the
-   * ACP child's `McpClientManager`. The daemon pre-checks the live
-   * budget snapshot from PR 14 v1; soft refusals (in-flight discovery,
+   * Replace one permission rule list.
+   *
+   * `capabilities.features` including `workspace_permissions` means the
+   * daemon exposes the permissions surface. A write still needs a live ACP
+   * session so the active child can receive the update; without one the
+   * daemon rejects the request with `permission_session_required`.
+   */
+  async setWorkspacePermissionRules(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rules: readonly string[],
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    return await this.jsonRequest<DaemonWorkspacePermissionsStatus>(
+      '/workspace/permissions',
+      'POST /workspace/permissions',
+      {
+        method: 'POST',
+        body: { scope, ruleType, rules: [...rules] },
+        clientId: opts?.clientId,
+      },
+    );
+  }
+
+  /**
+   * Convenience helper that appends a single rule to the specified scope/type
+   * list. Performs a non-atomic read-modify-write: GETs the current rules,
+   * appends the new rule locally, then POSTs the full replacement list.
+   *
+   * @remarks Not safe for concurrent use — a concurrent modification between
+   * the GET and POST will be silently overwritten (lost-update / TOCTOU).
+   */
+  async addWorkspacePermissionRule(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalized = normalizePermissionRuleInput(rule);
+    const current = await this.workspacePermissions(opts);
+    const rules = current[scope].rules[ruleType];
+    if (rules.includes(normalized)) return current;
+    return await this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      [...rules, normalized],
+      opts,
+    );
+  }
+
+  /**
+   * Convenience helper that removes a single rule from the specified scope/type
+   * list. Performs a non-atomic read-modify-write: GETs the current rules,
+   * removes the rule locally, then POSTs the full replacement list.
+   *
+   * @remarks Not safe for concurrent use — a concurrent modification between
+   * the GET and POST will be silently overwritten (lost-update / TOCTOU).
+   */
+  async removeWorkspacePermissionRule(
+    scope: DaemonPermissionScope,
+    ruleType: DaemonPermissionRuleType,
+    rule: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspacePermissionsStatus> {
+    const normalized = normalizePermissionRuleInput(rule);
+    const current = await this.workspacePermissions(opts);
+    const rules = current[scope].rules[ruleType];
+    if (!rules.includes(normalized)) return current;
+    return await this.setWorkspacePermissionRules(
+      scope,
+      ruleType,
+      rules.filter((item) => item !== normalized),
+      opts,
+    );
+  }
+
+  /**
+   * Restart a configured MCP server through the ACP child's
+   * `McpClientManager`. The daemon pre-checks the live budget
+   * snapshot; soft refusals (in-flight discovery,
    * disabled server, budget would exceed under `enforce` mode) come
    * back as 200 OK with `{restarted: false, skipped: true, reason}`.
    * Only hard errors (unknown server name, no live ACP channel)
    * surface as non-2xx.
    *
+   * The daemon-side restart waits up to 5 minutes for stdio MCP
+   * discovery; the SDK default allows that budget plus 30s headroom
+   * so a slow but valid restart isn't
+   * aborted client-side while the daemon continues working. Callers can pass a custom
+   * `timeoutMs` when their threat model needs a tighter cap, or `0`
+   * to disable the timeout entirely.
+   *
+   * `entryIndex` targets one pooled entry by index. Use `'*'` to
+   * restart all entries for a pooled server.
+   *
    * Pre-flight `caps.features.workspace_mcp_restart` before calling.
    */
   async restartMcpServer(
     serverName: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; entryIndex?: number | '*'; timeoutMs?: number },
   ): Promise<DaemonMcpRestartResult> {
+    const query =
+      opts?.entryIndex === undefined
+        ? ''
+        : `?entryIndex=${urlEncode(String(opts.entryIndex))}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/restart${query}`,
       {
         method: 'POST',
         headers: this.headers(
@@ -961,11 +2379,127 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonMcpRestartResult;
       },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  async reload(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonReloadResponse> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/reload`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/reload');
+        }
+        return (await res.json()) as DaemonReloadResponse;
+      },
+      opts?.timeoutMs,
+    );
+  }
+
+  async manageMcpServer(
+    serverName: string,
+    action: DaemonMcpManageAction,
+    opts?: { clientId?: string; timeoutMs?: number },
+  ): Promise<DaemonMcpManageResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${urlEncode(serverName)}/${urlEncode(action)}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/mcp/:server/:action',
+          );
+        }
+        return (await res.json()) as DaemonMcpManageResult;
+      },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
     );
   }
 
   /**
-   * #4175 Wave 4 PR 17. Scaffold a `QWEN.md` at the daemon's bound
+   * Add (or replace) a runtime MCP server. The daemon
+   * validates the config, starts the server, and emits an
+   * `mcp_server_added` SSE event to all live sessions. Callers
+   * pre-flight `caps.features.mcp_server_runtime_mutation` before
+   * calling — older daemons return 404.
+   */
+  async addRuntimeMcpServer(
+    request: DaemonRuntimeMcpAddRequest,
+    opts?: { clientId?: string; timeoutMs?: number },
+  ): Promise<DaemonRuntimeMcpAddResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/servers`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(request),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/mcp/servers');
+        }
+        return (await res.json()) as DaemonRuntimeMcpAddResult;
+      },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  /**
+   * Remove a runtime MCP server by name. The daemon
+   * tears down the server process, removes it from the runtime
+   * overlay, and emits an `mcp_server_removed` SSE event. Idempotent
+   * at the HTTP level: if the server was never present the daemon
+   * returns 200 with `{ skipped: true, reason: 'not_present' }`.
+   * Pre-flight `caps.features.mcp_server_runtime_mutation` before
+   * calling.
+   */
+  async removeRuntimeMcpServer(
+    name: string,
+    opts?: { clientId?: string; timeoutMs?: number },
+  ): Promise<DaemonRuntimeMcpRemoveResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/servers/${urlEncode(name)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /workspace/mcp/servers/:name',
+          );
+        }
+        return (await res.json()) as DaemonRuntimeMcpRemoveResult;
+      },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  /**
+   * Scaffold a `QWEN.md` at the daemon's bound
    * workspace root. Mechanical only — does NOT invoke the LLM. The
    * daemon writes an empty file; clients that want AI-driven content
    * fill should follow up with `POST /session/:id/prompt`.
@@ -1000,6 +2534,22 @@ export class DaemonClient {
     );
   }
 
+  async setupGithub(
+    params: DaemonGithubSetupRequest,
+    clientId?: string,
+  ): Promise<DaemonGithubSetupResult> {
+    return await this.jsonRequest<DaemonGithubSetupResult>(
+      '/workspace/setup-github',
+      'POST /workspace/setup-github',
+      {
+        method: 'POST',
+        body: params,
+        clientId,
+        timeoutMs: GITHUB_SETUP_DEFAULT_TIMEOUT_MS,
+      },
+    );
+  }
+
   /**
    * Switch the active model for a session. Backed by ACP's currently-unstable
    * `unstable_setSessionModel`; the daemon also publishes a `model_switched`
@@ -1011,7 +2561,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1026,15 +2576,43 @@ export class DaemonClient {
     );
   }
 
+  async setSessionLanguage(
+    sessionId: string,
+    language: string,
+    opts?: { syncOutputLanguage?: boolean; clientId?: string },
+  ): Promise<SetSessionLanguageResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/language`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          language,
+          syncOutputLanguage: opts?.syncOutputLanguage ?? false,
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/language');
+        }
+        return (await res.json()) as SetSessionLanguageResult;
+      },
+    );
+  }
+
   /**
-   * Send a prompt to the agent. Long-lived: a model + tool turn can
-   * take minutes, so this method bypasses `fetchTimeoutMs` (which
-   * would force a default 30s deadline that's too short for normal
-   * use). Cancellation is via the optional `signal` — when it fires,
-   * the daemon receives the underlying TCP close and forwards an
-   * ACP `cancel` notification to the agent, resolving the prompt
-   * with `stopReason: 'cancelled'`. `cancel(sessionId)` is the
-   * out-of-band alternative.
+   * Send a prompt to the agent. Supports both blocking (legacy 200)
+   * and non-blocking (202 + SSE `turn_complete`) daemon responses.
+   *
+   * For 202 daemons this opens a **temporary** SSE subscription to
+   * await the matching `turn_complete`/`turn_error`. Callers that
+   * already manage a long-lived SSE subscription (e.g.
+   * `DaemonSessionClient`) should prefer {@link promptNonBlocking}
+   * and correlate via their existing event stream to avoid the extra
+   * connection.
    */
   async prompt(
     sessionId: string,
@@ -1042,8 +2620,78 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    const res = await this._fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
+    signal?.throwIfAborted();
+    const releasePromptSlot = this.reservePromptSlot(sessionId);
+    let releaseOnExit = true;
+    try {
+      const res = await this.transport.fetch(
+        `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
+        {
+          method: 'POST',
+          headers: this.headers(
+            { 'Content-Type': 'application/json' },
+            clientId,
+          ),
+          body: JSON.stringify(req),
+          signal,
+        },
+      );
+
+      if (res.status === 202) {
+        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        releaseOnExit = false;
+        try {
+          return await this._awaitTurnComplete(
+            sessionId,
+            accept.promptId,
+            accept.lastEventId,
+            signal,
+            clientId,
+          );
+        } finally {
+          releasePromptSlot();
+        }
+      }
+
+      if (!res.ok) {
+        throw await this.failOnError(
+          res,
+          'POST /session/:id/prompt',
+          sessionId,
+        );
+      }
+      return (await res.json()) as PromptResult;
+    } finally {
+      if (releaseOnExit) releasePromptSlot();
+    }
+  }
+
+  /**
+   * Fire-and-forget prompt trigger. Returns the 202 acceptance
+   * envelope (`{ promptId, lastEventId }`) without waiting for the
+   * turn to complete. The caller is responsible for observing
+   * `turn_complete` / `turn_error` on the session's SSE stream,
+   * matching by `promptId`.
+   *
+   * This is the recommended path for callers that already maintain a
+   * long-lived SSE subscription (like `DaemonSessionClient`) —
+   * avoids the extra SSE connection that {@link prompt} opens for
+   * the temporary 202 fallback.
+   *
+   * Falls back to `prompt()` for legacy 200 daemons.
+   *
+   * Note: this method does not enforce the local pending-prompt cap.
+   * Callers that need early-fail behavior should use {@link prompt} or
+   * reserve a slot before calling this method.
+   */
+  async promptNonBlocking(
+    sessionId: string,
+    req: PromptRequest,
+    signal?: AbortSignal,
+    clientId?: string,
+  ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1051,15 +2699,59 @@ export class DaemonClient {
         signal,
       },
     );
-    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
+
+    if (res.status === 202) {
+      return (await res.json()) as NonBlockingPromptAccepted;
+    }
+
+    if (!res.ok) {
+      throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
+    }
     return (await res.json()) as PromptResult;
+  }
+
+  private async _awaitTurnComplete(
+    sessionId: string,
+    promptId: string,
+    lastEventId: number,
+    signal?: AbortSignal,
+    clientId?: string,
+  ): Promise<PromptResult> {
+    const sseAbort = new AbortController();
+    const composedSignal = signal
+      ? composeAbortSignals([signal, sseAbort.signal])
+      : sseAbort.signal;
+
+    try {
+      const events = this.subscribeEvents(sessionId, {
+        lastEventId,
+        signal: composedSignal,
+      });
+      for await (const event of events) {
+        const result = matchTurnEvent(event, promptId);
+        if (result !== undefined) return result;
+      }
+      throw new Error('SSE stream ended');
+    } catch (err) {
+      if (
+        signal?.aborted &&
+        err instanceof DOMException &&
+        err.name === 'AbortError'
+      ) {
+        this.cancel(sessionId, clientId).catch(() => {});
+        throw err;
+      }
+      throw err;
+    } finally {
+      if (!sseAbort.signal.aborted) sseAbort.abort();
+    }
   }
 
   /**
    * Bump the daemon's last-seen bookkeeping for this session. The
    * route is short-lived — drives diagnostics and future revocation
-   * policy (Wave 5 PR 24) — so it goes through the standard
-   * `fetchTimeoutMs`. Older daemons (pre-PR 9) return 404 for
+   * policy -- so it goes through the standard
+   * `fetchTimeoutMs`. Older daemons return 404 for
    * `/heartbeat`; clients should pre-flight
    * `caps.features.client_heartbeat` before calling.
    */
@@ -1068,7 +2760,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<HeartbeatResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/heartbeat`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/heartbeat`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1085,7 +2777,7 @@ export class DaemonClient {
 
   async cancel(sessionId: string, clientId?: string): Promise<void> {
     await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/cancel`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1112,87 +2804,16 @@ export class DaemonClient {
     sessionId: string,
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
-    const headers = this.headers({ Accept: 'text/event-stream' });
-    if (opts.lastEventId !== undefined) {
-      headers['Last-Event-ID'] = String(opts.lastEventId);
-    }
-    // Apply `fetchTimeoutMs` to the CONNECT phase only (request → headers
-    // received). The SSE body itself must NOT be timed out — it's
-    // long-lived by design — so once `_fetch` returns the timer is
-    // cleared. Without this, an unresponsive daemon (TCP open but no
-    // headers) blocks `subscribeEvents` indefinitely instead of
-    // failing with the same 30s default the rest of the SDK uses.
-    const connectCtrl = new AbortController();
-    let connectTimer: ReturnType<typeof setTimeout> | undefined;
-    if (this.fetchTimeoutMs && Number.isFinite(this.fetchTimeoutMs)) {
-      connectTimer = setTimeout(
-        () =>
-          connectCtrl.abort(
-            new DOMException('Initial connect timed out', 'TimeoutError'),
-          ),
-        this.fetchTimeoutMs,
-      );
-      if (
-        typeof connectTimer === 'object' &&
-        connectTimer &&
-        'unref' in connectTimer
-      ) {
-        (connectTimer as { unref: () => void }).unref();
-      }
-    }
-    const fetchSignal = opts.signal
-      ? composeAbortSignals([opts.signal, connectCtrl.signal])
-      : connectCtrl.signal;
-    // Build the SSE URL, optionally with `?maxQueued=N`. We don't
-    // validate the value client-side — the daemon's
-    // `parseMaxQueuedQuery` is the source of truth on the range
-    // `[16, 2048]` and returns a structured `400 invalid_max_queued`
-    // for anything outside, so duplicating the bounds here would
-    // diverge if the daemon's range ever shifts.
-    let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
-    if (opts.maxQueued !== undefined) {
-      url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
-    }
-    let res: Response;
-    try {
-      res = await this._fetch(url, { headers, signal: fetchSignal });
-    } finally {
-      if (connectTimer !== undefined) clearTimeout(connectTimer);
-    }
-    if (!res.ok) {
-      throw await this.failOnError(res, 'GET /session/:id/events');
-    }
-    // A 200 with the wrong content type usually means a misconfigured
-    // proxy or middleware swallowed our SSE response and replaced it
-    // with JSON/HTML. Without this check `parseSseStream` would
-    // silently produce zero frames — a confusing "no events" symptom
-    // that's easy to misdiagnose. Fail fast with the actual mime type.
-    //
-    // Cancel the body before throwing so undici doesn't keep the
-    // underlying socket pinned waiting for the consumer. Same
-    // reasoning as `respondToPermission` — long-running clients
-    // hitting this path repeatedly would otherwise exhaust the
-    // connection pool.
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.toLowerCase().includes('text/event-stream')) {
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* body already consumed or no body */
-      }
-      throw new DaemonHttpError(
-        res.status,
-        ct,
-        `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
-      );
-    }
-    if (!res.body) {
-      throw new Error('SSE response has no body');
-    }
-    // Forward the abort signal so post-200 aborts stop the iteration.
-    // Without this, callers who `controller.abort()` after the response
-    // arrives keep receiving frames until the upstream closes.
-    yield* parseSseStream(res.body, opts.signal);
+    // Delegate entirely to the transport. The transport handles
+    // connect-phase timeout, Last-Event-ID, maxQueued, content-type
+    // validation, and SSE parsing (for REST) or JSON-RPC notification
+    // filtering (for ACP transports).
+    yield* this.transport.subscribeEvents(sessionId, {
+      lastEventId: opts.lastEventId,
+      maxQueued: opts.maxQueued,
+      signal: opts.signal,
+      connectTimeoutMs: this.fetchTimeoutMs || undefined,
+    });
   }
 
   // -- Permissions -------------------------------------------------------
@@ -1208,7 +2829,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/permission/${encodeURIComponent(requestId)}`,
+      `${this.baseUrl}/permission/${urlEncode(requestId)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1255,7 +2876,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/permission/${urlEncode(requestId)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1294,7 +2915,7 @@ export class DaemonClient {
    */
   async closeSession(sessionId: string, clientId?: string): Promise<void> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, clientId),
@@ -1313,7 +2934,97 @@ export class DaemonClient {
     );
   }
 
-  // -- Auth device-flow (issue #4175 PR 21) -------------------------------
+  async detachSession(sessionId: string, clientId?: string): Promise<void> {
+    if (!clientId) return;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/detach`,
+      {
+        method: 'POST',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'POST /session/:id/detach');
+      },
+    );
+  }
+
+  async deleteSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<{
+    removed: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: string }>;
+  }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/delete`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as {
+            removed: string[];
+            notFound: string[];
+            errors: Array<{ sessionId: string; error: string }>;
+          };
+        }
+        throw await this.failOnError(res, 'POST /sessions/delete');
+      },
+    );
+  }
+
+  async archiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonArchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/archive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonArchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/archive');
+      },
+    );
+  }
+
+  async unarchiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonUnarchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/unarchive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonUnarchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/unarchive');
+      },
+    );
+  }
+
+  // -- Auth device-flow ---------------------------------------------------
 
   /**
    * Start an OAuth device-flow login for the given provider. The daemon
@@ -1352,15 +3063,14 @@ export class DaemonClient {
     deviceFlowId: string,
     opts: { clientId?: string; signal?: AbortSignal } = {},
   ): Promise<DaemonDeviceFlowState> {
-    // PR #4255 fold-in 7 review thread #6: forward `signal` into
-    // `fetchWithTimeout`, which composes it with the per-request
-    // `fetchTimeoutMs` controller. Without this, an `awaitCompletion`
-    // caller that aborts mid-poll could not cancel the in-flight GET
-    // — only the post-await guard would notice, but that runs only
-    // after the body is already settled (or the daemon-side
-    // `fetchTimeoutMs` fires, which can be 30s+).
+    // Forward `signal` into `fetchWithTimeout`, which composes it
+    // with the per-request `fetchTimeoutMs` controller. Without this,
+    // an `awaitCompletion` caller that aborts mid-poll could not cancel
+    // the in-flight GET -- only the post-await guard would notice, but
+    // that runs only after the body is already settled (or the
+    // daemon-side `fetchTimeoutMs` fires, which can be 30s+).
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      `${this.baseUrl}/workspace/auth/device-flow/${urlEncode(deviceFlowId)}`,
       { headers: this.headers({}, opts.clientId), signal: opts.signal },
       async (res) => {
         if (!res.ok) {
@@ -1384,7 +3094,7 @@ export class DaemonClient {
     opts: { clientId?: string } = {},
   ): Promise<void> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      `${this.baseUrl}/workspace/auth/device-flow/${urlEncode(deviceFlowId)}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts.clientId),
@@ -1422,6 +3132,93 @@ export class DaemonClient {
     );
   }
 
+  async getAuthProviders(): Promise<DaemonAuthProviderCatalog> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/providers`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auth/providers');
+        }
+        return (await res.json()) as DaemonAuthProviderCatalog;
+      },
+    );
+  }
+
+  async installAuthProvider(
+    req: DaemonAuthProviderInstallRequest,
+  ): Promise<DaemonAuthProviderInstallResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/provider`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/auth/provider');
+        }
+        return (await res.json()) as DaemonAuthProviderInstallResult;
+      },
+    );
+  }
+
+  // -- Lifecycle / disposal ------------------------------------------------
+
+  /**
+   * Release transport resources (WS close, etc.). Idempotent.
+   * After `dispose()`, further calls to `fetch` / `subscribeEvents`
+   * on the underlying transport throw `DaemonTransportClosedError`.
+   */
+  dispose(): void {
+    this.transport.dispose();
+  }
+
+  // -- Session artifacts ---------------------------------------------------
+
+  async listSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.jsonRequest<DaemonSessionArtifactsEnvelope>(
+      `/session/${urlEncode(sessionId)}/artifacts`,
+      'GET /session/:id/artifacts',
+      { clientId },
+    );
+  }
+
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: DaemonSessionArtifactInput,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${urlEncode(sessionId)}/artifacts`,
+      'POST /session/:id/artifacts',
+      {
+        method: 'POST',
+        body: artifact,
+        clientId,
+      },
+    );
+  }
+
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}`,
+      'DELETE /session/:id/artifacts/:artifactId',
+      {
+        method: 'DELETE',
+        clientId,
+      },
+    );
+  }
+
   // -- Session metadata ----------------------------------------------------
 
   /**
@@ -1434,7 +3231,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/metadata`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/metadata`,
       {
         method: 'PATCH',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -1487,8 +3284,7 @@ export function abortTimeout(ms: number): AbortSignal {
   // `if (err.name === 'TimeoutError')` would see the polyfill
   // differently from the native runtime.
   const handle = setTimeout(
-    () =>
-      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError')),
+    () => ctrl.abort(new DOMException('timeout', 'TimeoutError')),
     ms,
   );
   if (typeof handle === 'object' && handle && 'unref' in handle) {
@@ -1558,4 +3354,50 @@ export function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
   // (e.g. its consumer aborted independently — defense-in-depth).
   ctrl.signal.addEventListener('abort', detachAll, { once: true });
   return ctrl.signal;
+}
+
+/**
+ * Check whether a daemon SSE event is a `turn_complete` or
+ * `turn_error` matching `promptId`. Returns `PromptResult` on
+ * `turn_complete`, throws `DaemonHttpError` on `turn_error`,
+ * returns `undefined` for non-matching / unrelated events.
+ *
+ * Extracted so both `DaemonClient._awaitTurnComplete` (temporary SSE
+ * fallback) and `DaemonSessionClient.prompt` (existing subscription
+ * path) share the same matching logic.
+ */
+export function matchTurnEvent(
+  event: DaemonEvent,
+  promptId: string,
+): PromptResult | undefined {
+  if (event.type === 'turn_complete') {
+    const data = event.data as { promptId?: string; stopReason?: string };
+    if (data.promptId === promptId) {
+      return { stopReason: data.stopReason ?? 'end_turn' };
+    }
+  }
+  if (event.type === 'turn_error') {
+    const data = event.data as {
+      promptId?: string;
+      message?: string;
+      code?: string;
+    };
+    if (data.promptId === promptId) {
+      throw Object.assign(
+        new DaemonHttpError(
+          500,
+          data.code ?? 'turn_error',
+          data.message ?? 'Prompt failed',
+        ),
+        { _daemonTurnError: true as const },
+      );
+    }
+  }
+  return undefined;
+}
+
+export function isNonBlockingAccepted(
+  result: NonBlockingPromptAccepted | PromptResult,
+): result is NonBlockingPromptAccepted {
+  return 'promptId' in result && 'lastEventId' in result;
 }

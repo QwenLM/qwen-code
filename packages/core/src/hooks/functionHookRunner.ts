@@ -234,7 +234,7 @@ export class FunctionHookRunner {
           abortHandler = () => {
             reject(new Error('Function hook execution aborted'));
           };
-          signal.addEventListener('abort', abortHandler);
+          signal.addEventListener('abort', abortHandler, { once: true });
         }
       });
 

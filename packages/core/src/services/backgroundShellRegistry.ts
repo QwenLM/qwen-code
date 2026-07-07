@@ -18,10 +18,137 @@
  * status.
  */
 
-import { createDebugLogger } from '../utils/debugLogger.js';
+import * as fs from 'node:fs';
+
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
+const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
+const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
+export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
+
+/**
+ * Strip C0 control characters (except tab) and C1 control characters from
+ * terminal/UI display strings. Shell commands and errors are usually
+ * user-authored, but this keeps escape sequences out of the visible
+ * notification surface if a caller passes unsanitized text.
+ */
+function stripDisplayControlChars(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09) {
+      out += text[i];
+      continue;
+    }
+    if (code < 0x20) continue;
+    if (code >= 0x80 && code <= 0x9f) continue;
+    out += text[i];
+  }
+  return out;
+}
+
+function stripOutputControlChars(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      out += text[i];
+      continue;
+    }
+    if (code < 0x20) continue;
+    if (code >= 0x80 && code <= 0x9f) continue;
+    out += text[i];
+  }
+  return out;
+}
+
+type OutputTailResult =
+  | { text: string; truncated: boolean }
+  | { error: string }
+  | undefined;
+
+function readOutputTail(outputFile: string): OutputTailResult {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(outputFile, getReadOutputOpenFlags());
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0) return undefined;
+
+    const length = Math.min(stat.size, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES);
+    const start = stat.size - length;
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+
+    // When the read offset lands mid-codepoint (truncated read), skip
+    // leading UTF-8 continuation bytes to avoid U+FFFD replacement chars.
+    let sliceOffset = 0;
+    if (start > 0) {
+      while (
+        sliceOffset < bytesRead &&
+        (buffer[sliceOffset]! & 0xc0) === 0x80
+      ) {
+        sliceOffset++;
+      }
+    }
+
+    const text = stripOutputControlChars(
+      buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
+    ).trimEnd();
+
+    if (!text) return undefined;
+    return {
+      text,
+      truncated: start > 0,
+    };
+  } catch (error) {
+    debugLogger.warn(`Failed to read shell output tail:`, error);
+    return {
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+}
+
+function getReadOutputOpenFlags(): number {
+  const constants = fs.constants;
+  return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
+}
+
+function truncateCommandForDisplay(command: string): string {
+  const normalized = stripDisplayControlChars(command).replace(/\s+/g, ' ');
+  if (normalized.length <= MAX_NOTIFICATION_COMMAND_LENGTH) {
+    return normalized;
+  }
+  return normalized.slice(0, MAX_NOTIFICATION_COMMAND_LENGTH - 3) + '...';
+}
+
+function truncateCommandForModel(command: string): {
+  text: string;
+  truncated: boolean;
+} {
+  const sanitized = stripDisplayControlChars(command);
+  if (sanitized.length <= MAX_NOTIFICATION_MODEL_COMMAND_LENGTH) {
+    return {
+      text: sanitized,
+      truncated: false,
+    };
+  }
+
+  return {
+    text: sanitized.slice(0, MAX_NOTIFICATION_MODEL_COMMAND_LENGTH - 3) + '...',
+    truncated: true,
+  };
+}
 
 /**
  * Cap on how many terminal (completed/failed/cancelled) entries the
@@ -100,6 +227,18 @@ export type ShellTaskRegistration = Omit<
 /** Fires when a new entry is registered. */
 export type BackgroundShellRegisterCallback = (entry: ShellTask) => void;
 
+export interface ShellNotificationMeta {
+  shellId: string;
+  status: BackgroundShellStatus;
+  exitCode?: number;
+}
+
+export type BackgroundShellNotificationCallback = (
+  displayText: string,
+  modelText: string,
+  meta: ShellNotificationMeta,
+) => void;
+
 /**
  * Fires on every status transition (running → terminal). Symmetric with
  * `BackgroundTaskRegistry.setStatusChangeCallback` so the same UI hook can
@@ -111,6 +250,7 @@ export class BackgroundShellRegistry {
   private readonly entries = new Map<string, ShellTask>();
 
   private registerCallback: BackgroundShellRegisterCallback | undefined;
+  private notificationCallback: BackgroundShellNotificationCallback | undefined;
   private statusChangeCallback: BackgroundShellStatusChangeCallback | undefined;
 
   /**
@@ -121,6 +261,12 @@ export class BackgroundShellRegistry {
    */
   setRegisterCallback(cb: BackgroundShellRegisterCallback | undefined): void {
     this.registerCallback = cb;
+  }
+
+  setNotificationCallback(
+    cb: BackgroundShellNotificationCallback | undefined,
+  ): void {
+    this.notificationCallback = cb;
   }
 
   /**
@@ -181,6 +327,7 @@ export class BackgroundShellRegistry {
     entry.status = 'completed';
     entry.exitCode = exitCode;
     entry.endTime = endTime;
+    this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
   }
@@ -191,6 +338,7 @@ export class BackgroundShellRegistry {
     entry.status = 'failed';
     entry.error = error;
     entry.endTime = endTime;
+    this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
   }
@@ -199,6 +347,7 @@ export class BackgroundShellRegistry {
     const entry = this.entries.get(shellId);
     if (!entry || entry.status !== 'running') return;
     this.settleAsCancelled(entry, endTime);
+    this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
   }
@@ -266,6 +415,77 @@ export class BackgroundShellRegistry {
       this.statusChangeCallback(entry);
     } catch (error) {
       debugLogger.error('statusChange callback failed:', error);
+    }
+  }
+
+  private emitNotification(entry: ShellTask): void {
+    if (entry.notified) return;
+    entry.notified = true;
+
+    if (!this.notificationCallback) {
+      debugLogger.debug(
+        `Notification dropped for shell ${entry.shellId}: no callback registered`,
+      );
+      return;
+    }
+
+    const statusText =
+      entry.status === 'completed'
+        ? 'completed'
+        : entry.status === 'failed'
+          ? 'failed'
+          : 'was cancelled';
+    const commandLabel = truncateCommandForDisplay(entry.command);
+    const commandForModel = truncateCommandForModel(entry.command);
+    const displayText = `Background shell "${commandLabel}" ${statusText}.`;
+
+    const xmlParts: string[] = [
+      '<task-notification>',
+      `<task-id>${escapeXml(entry.shellId)}</task-id>`,
+      '<kind>shell</kind>',
+      `<status>${escapeXml(entry.status)}</status>`,
+      `<summary>Shell command "${escapeXml(commandLabel)}" ${statusText}.</summary>`,
+      commandForModel.truncated
+        ? `<command truncated="true">${escapeXml(commandForModel.text)}</command>`
+        : `<command>${escapeXml(commandForModel.text)}</command>`,
+      `<cwd>${escapeXml(stripDisplayControlChars(entry.cwd))}</cwd>`,
+    ];
+    if (entry.pid !== undefined) {
+      xmlParts.push(`<pid>${entry.pid}</pid>`);
+    }
+    if (entry.exitCode !== undefined) {
+      xmlParts.push(`<exit-code>${entry.exitCode}</exit-code>`);
+    }
+    if (entry.error) {
+      xmlParts.push(
+        `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
+      );
+    }
+    const outputTail = readOutputTail(entry.outputFile);
+    if (outputTail) {
+      if ('error' in outputTail) {
+        xmlParts.push(`<output-tail error="unreadable" />`);
+      } else {
+        xmlParts.push(
+          `<output-tail truncated="${outputTail.truncated ? 'true' : 'false'}">${escapeXml(outputTail.text)}</output-tail>`,
+        );
+      }
+    }
+    xmlParts.push(
+      `<output-file>${escapeXml(stripDisplayControlChars(entry.outputFile))}</output-file>`,
+      '</task-notification>',
+    );
+
+    const meta: ShellNotificationMeta = {
+      shellId: entry.shellId,
+      status: entry.status,
+      exitCode: entry.exitCode,
+    };
+
+    try {
+      this.notificationCallback(displayText, xmlParts.join('\n'), meta);
+    } catch (error) {
+      debugLogger.error('Failed to emit shell notification:', error);
     }
   }
 

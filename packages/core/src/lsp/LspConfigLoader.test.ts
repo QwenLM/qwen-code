@@ -12,6 +12,10 @@ import type { Extension } from '../extension/extensionManager.js';
 describe('LspConfigLoader config-driven behavior', () => {
   const workspaceRoot = '/workspace';
 
+  afterEach(() => {
+    mock.restore();
+  });
+
   it('does not generate any presets when no user or extension config provided', () => {
     const loader = new LspConfigLoader(workspaceRoot);
     // Even if languages are detected, no built-in presets should be generated
@@ -104,6 +108,154 @@ describe('LspConfigLoader config-driven behavior', () => {
     expect(configs).toHaveLength(1);
     expect(configs[0]?.command).toBe('/custom/path/jdtls');
     expect(configs[0]?.args).toEqual(['--custom-flag']);
+  });
+
+  it('accepts valid string socket ports from .lsp.json', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            transport: 'tcp',
+            host: '127.0.0.1',
+            port: '1234',
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.socket).toEqual({
+      host: '127.0.0.1',
+      port: 1234,
+    });
+  });
+
+  it('rejects malformed socket ports from .lsp.json', async () => {
+    for (const port of ['1.5', '0x10', 1.5, 0, 65_536]) {
+      mock({
+        [workspaceRoot]: {
+          '.lsp.json': JSON.stringify({
+            typescript: {
+              transport: 'tcp',
+              host: '127.0.0.1',
+              port,
+            },
+          }),
+        },
+      });
+
+      const loader = new LspConfigLoader(workspaceRoot);
+      const configs = await loader.loadUserConfigs();
+
+      expect(configs, `port ${JSON.stringify(port)}`).toHaveLength(0);
+      mock.restore();
+    }
+  });
+
+  it('strict user config loading rejects invalid server entries', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            transport: 'stdio',
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const result = await loader.loadUserConfigsStrict();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain(
+        'Invalid LSP server config in /workspace/.lsp.json: typescript',
+      );
+    }
+  });
+
+  it('strict user config loading accepts empty object as explicit empty config', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({}),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const result = await loader.loadUserConfigsStrict();
+
+    expect(result).toEqual({ ok: true, configs: [] });
+  });
+
+  it('strict user config loading treats deleted config as empty', async () => {
+    mock({
+      [workspaceRoot]: {},
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const result = await loader.loadUserConfigsStrict();
+
+    expect(result).toEqual({ ok: true, configs: [] });
+  });
+
+  it('non-strict user config loading skips invalid entries without rejecting all configs', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+          invalid: {
+            transport: 'stdio',
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.name).toBe('typescript-language-server');
+  });
+
+  it('non-strict user config loading returns empty configs for malformed JSON', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': '{',
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const configs = await loader.loadUserConfigs();
+
+    expect(configs).toEqual([]);
+  });
+
+  it('forces user configs to require trusted workspaces', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json': JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+            trustRequired: false,
+          },
+        }),
+      },
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+
+    await expect(loader.loadUserConfigs()).resolves.toEqual([
+      expect.objectContaining({ trustRequired: true }),
+    ]);
+    await expect(loader.loadUserConfigsStrict()).resolves.toEqual({
+      ok: true,
+      configs: [expect.objectContaining({ trustRequired: true })],
+    });
   });
 });
 

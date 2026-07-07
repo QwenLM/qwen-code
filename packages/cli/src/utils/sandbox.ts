@@ -8,7 +8,6 @@ import { exec, execSync, spawn, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { quote, parse } from 'shell-quote';
 import {
   getUserSettingsDir,
@@ -20,9 +19,13 @@ import {
   FatalSandboxError,
   Storage,
   isSubpath,
+  resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
+import { parseSandboxImageName } from './sandboxImageName.js';
+import { isContainerPathWithinWorkdir } from './sandbox-path.js';
+import { parseSandboxMountSpec } from './sandboxMounts.js';
 
 const execAsync = promisify(exec);
 
@@ -57,6 +60,20 @@ const BUILTIN_SEATBELT_PROFILES = [
   'restrictive-closed',
   'restrictive-proxied',
 ];
+
+export function resolveSeatbeltProfileFile(
+  profile: string,
+  importMetaUrl = import.meta.url,
+): string {
+  if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
+    return path.join(SETTINGS_DIRECTORY_NAME, `sandbox-macos-${profile}.sb`);
+  }
+
+  return path.join(
+    resolveBundleDir(importMetaUrl),
+    `sandbox-macos-${profile}.sb`,
+  );
+}
 
 /**
  * Determines whether the sandbox container should be run with the current user's UID and GID.
@@ -102,14 +119,6 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   return false;
 }
 
-// docker does not allow container names to contain ':' or '/', so we
-// parse those out to shorten the name
-function parseImageName(image: string): string {
-  const [fullName, tag] = image.split(':');
-  const name = fullName.split('/').at(-1) ?? 'unknown-image';
-  return tag ? `${name}-${tag}` : name;
-}
-
 function ports(): string[] {
   return (process.env['SANDBOX_PORTS'] ?? '')
     .split(',')
@@ -128,9 +137,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pathSuffix += `:${containerPath}`;
       }
     }
@@ -144,9 +151,7 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
     const paths = process.env['PYTHONPATH'].split(pathSeparator);
     for (const p of paths) {
       const containerPath = getContainerPath(p);
-      if (
-        containerPath.toLowerCase().startsWith(containerWorkdir.toLowerCase())
-      ) {
+      if (isContainerPathWithinWorkdir(containerWorkdir, containerPath)) {
         pythonPathSuffix += `:${containerPath}`;
       }
     }
@@ -198,16 +203,7 @@ export async function start_sandbox(
     }
 
     const profile = (process.env['SEATBELT_PROFILE'] ??= 'permissive-open');
-    let profileFile = fileURLToPath(
-      new URL(`sandbox-macos-${profile}.sb`, import.meta.url),
-    );
-    // if profile name is not recognized, then look for file under project settings directory
-    if (!BUILTIN_SEATBELT_PROFILES.includes(profile)) {
-      profileFile = path.join(
-        SETTINGS_DIRECTORY_NAME,
-        `sandbox-macos-${profile}.sb`,
-      );
-    }
+    const profileFile = resolveSeatbeltProfileFile(profile);
     if (!fs.existsSync(profileFile)) {
       throw new FatalSandboxError(
         `Missing macos seatbelt profile file '${profileFile}'`,
@@ -325,10 +321,7 @@ export async function start_sandbox(
       process.on('SIGINT', stopProxy);
       process.on('SIGTERM', stopProxy);
 
-      // commented out as it disrupts ink rendering
-      // proxyProcess.stdout?.on('data', (data) => {
-      //   console.info(data.toString());
-      // });
+      // Proxy stdout is intentionally not piped — it disrupts ink rendering.
       proxyProcess.stderr?.on('data', (data) => {
         writeStderrLine(data.toString());
       });
@@ -532,9 +525,7 @@ export async function start_sandbox(
     for (let mount of process.env['SANDBOX_MOUNTS'].split(',')) {
       if (mount.trim()) {
         // parse mount as from:to:opts
-        let [from, to, opts] = mount.trim().split(':');
-        to = to || from; // default to mount at same path inside container
-        opts = opts || 'ro'; // default to read-only
+        const { from, to, opts } = parseSandboxMountSpec(mount);
         mount = `${from}:${to}:${opts}`;
         // check that from path is absolute
         if (!path.isAbsolute(from)) {
@@ -606,7 +597,7 @@ export async function start_sandbox(
   }
 
   // name container after image, plus random suffix to avoid conflicts
-  const imageName = parseImageName(image);
+  const imageName = parseSandboxImageName(image);
   const isIntegrationTest =
     process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
@@ -635,6 +626,22 @@ export async function start_sandbox(
     args.push(
       '--env',
       `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
+    );
+  }
+  for (const envVar of [
+    'QWEN_DEBUG_LOG_FILE',
+    'QWEN_CODE_LEGACY_MCP_BLOCKING',
+  ] as const) {
+    if (process.env[envVar]) {
+      args.push('--env', `${envVar}=${process.env[envVar]}`);
+    }
+  }
+  if (process.env['QWEN_CODE_MCP_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
     );
   }
 
@@ -717,8 +724,13 @@ export async function start_sandbox(
   // also mount-replace VIRTUAL_ENV directory with <project_settings>/sandbox.venv
   // sandbox can then set up this new VIRTUAL_ENV directory using sandbox.bashrc (see below)
   // directory will be empty if not set up, which is still preferable to having host binaries
+  const virtualEnv = process.env['VIRTUAL_ENV'];
   if (
-    process.env['VIRTUAL_ENV']?.toLowerCase().startsWith(workdir.toLowerCase())
+    virtualEnv &&
+    isContainerPathWithinWorkdir(
+      getContainerPath(workdir),
+      getContainerPath(virtualEnv),
+    )
   ) {
     const sandboxVenvPath = path.resolve(
       SETTINGS_DIRECTORY_NAME,
@@ -727,14 +739,8 @@ export async function start_sandbox(
     if (!fs.existsSync(sandboxVenvPath)) {
       fs.mkdirSync(sandboxVenvPath, { recursive: true });
     }
-    args.push(
-      '--volume',
-      `${sandboxVenvPath}:${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
-    args.push(
-      '--env',
-      `VIRTUAL_ENV=${getContainerPath(process.env['VIRTUAL_ENV'])}`,
-    );
+    args.push('--volume', `${sandboxVenvPath}:${getContainerPath(virtualEnv)}`);
+    args.push('--env', `VIRTUAL_ENV=${getContainerPath(virtualEnv)}`);
   }
 
   // copy additional environment variables from SANDBOX_ENV
@@ -863,10 +869,7 @@ export async function start_sandbox(
     process.on('SIGINT', stopProxy);
     process.on('SIGTERM', stopProxy);
 
-    // commented out as it disrupts ink rendering
-    // proxyProcess.stdout?.on('data', (data) => {
-    //   console.info(data.toString());
-    // });
+    // Proxy stdout is intentionally not piped — it disrupts ink rendering.
     proxyProcess.stderr?.on('data', (data) => {
       writeStderrLine(data.toString().trim());
     });
@@ -933,12 +936,9 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
       resolve(false);
     });
 
-    checkProcess.on('close', (code) => {
-      // Non-zero code might indicate docker daemon not running, etc.
+    checkProcess.on('close', () => {
+      // Non-zero exit code may indicate docker daemon not running, etc.
       // The primary success indicator is non-empty stdoutData.
-      if (code !== 0) {
-        // console.warn(`'${sandbox} images -q ${image}' exited with code ${code}.`);
-      }
       resolve(stdoutData.trim() !== '');
     });
   });

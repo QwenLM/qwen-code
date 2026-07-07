@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod';
+import { createChildAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   PromptHookConfig,
@@ -229,20 +230,13 @@ export class PromptHookRunner {
       },
     ];
 
-    // Create internal AbortController to abort the request on timeout
-    const internalAbortController = new AbortController();
+    // Internal AbortController to abort the request on timeout. Use
+    // createChildAbortController so parent-signal propagation gets `{once:true}`
+    // + reverse cleanup automatically — the old manual addEventListener path
+    // had no `{once:true}` and never removed the listener, leaking one
+    // listener per prompt-hook invocation on the long-lived parent.
+    const internalAbortController = createChildAbortController(signal);
     const internalSignal = internalAbortController.signal;
-
-    // Chain external signal to internal abort controller
-    if (signal) {
-      if (signal.aborted) {
-        internalAbortController.abort();
-      } else {
-        signal.addEventListener('abort', () => {
-          internalAbortController.abort();
-        });
-      }
-    }
 
     // Create timeout promise that also aborts the request
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -320,6 +314,9 @@ export class PromptHookRunner {
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
+      // Trigger reverse-cleanup of the parent-signal listener on the
+      // success path; no-op if already aborted via parent/timeout.
+      internalAbortController.abort();
     }
   }
 

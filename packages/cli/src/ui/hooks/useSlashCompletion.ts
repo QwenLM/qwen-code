@@ -237,10 +237,18 @@ function compareRankedCommandMatches(
   left: RankedCommandMatch,
   right: RankedCommandMatch,
 ): number {
+  // Name match beats alias match — e.g. /re should prefer `resume` (name)
+  // over `clear` via its `reset` alias, since users type the primary name
+  // more often than obscure alternates.
+  const leftIsName = left.matchedAlias === undefined ? 1 : 0;
+  const rightIsName = right.matchedAlias === undefined ? 1 : 0;
+  const nameVsAlias = rightIsName - leftIsName;
+
   return (
     right.matchStrength - left.matchStrength ||
     right.completionPriority - left.completionPriority ||
     right.recentScore - left.recentScore ||
+    nameVsAlias ||
     right.score - left.score ||
     left.start - right.start ||
     left.itemLength - right.itemLength ||
@@ -309,6 +317,7 @@ function toCommandSuggestion(
     matchedAlias,
     supportedModes: command.supportedModes,
     modelInvocable: command.modelInvocable,
+    submitOnAccept: command.submitOnAccept,
   };
 }
 
@@ -521,6 +530,7 @@ function toSuggestion(item: string | CommandCompletionItem): Suggestion | null {
     label: item.label ?? item.value,
     value: item.value,
     description: item.description,
+    ...(item.isDirectory !== undefined && { isDirectory: item.isDirectory }),
   };
 }
 

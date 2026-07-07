@@ -17,6 +17,7 @@ import {
 import * as actualNodeFs from 'node:fs'; // For setup/teardown
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import mime from 'mime/lite';
@@ -35,6 +36,8 @@ import {
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+import { resetPdftotextCache } from './pdf.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
@@ -76,6 +79,34 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const mockMimeGetType = mime.getType as Mock;
+const mockExecFile = vi.mocked(execFile);
+
+function mockExecResult(result: {
+  stdout: string;
+  stderr: string;
+  code: number;
+}) {
+  mockExecFile.mockImplementationOnce(
+    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+      const callback = cb as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      if (result.code !== 0) {
+        const err = new Error('command failed') as Error & { code: number };
+        err.code = result.code;
+        callback(err, result.stdout, result.stderr);
+      } else {
+        callback(null, result.stdout, result.stderr);
+      }
+      return {
+        kill: vi.fn(),
+        on: vi.fn(),
+      } as unknown as import('node:child_process').ChildProcess;
+    },
+  );
+}
 
 describe('fileUtils', () => {
   let tempRootDir: string;
@@ -103,6 +134,7 @@ describe('fileUtils', () => {
 
   beforeEach(() => {
     vi.resetAllMocks(); // Reset all mocks, including mime.getType
+    resetPdftotextCache();
 
     tempRootDir = actualNodeFs.mkdtempSync(
       path.join(os.tmpdir(), 'fileUtils-test-'),
@@ -872,6 +904,31 @@ describe('fileUtils', () => {
       expect(await detectFileType(filePathForDetectTest)).toBe('text');
     });
 
+    it('uses content detection for text-looking .dat files', async () => {
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'controller.dat');
+      actualNodeFs.writeFileSync(
+        filePath,
+        '<?php\nfunction handleRequest() {\n  return true;\n}\n',
+      );
+      try {
+        expect(await detectFileType(filePath)).toBe('text');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
+    it('still treats binary-looking .dat files as binary', async () => {
+      mockMimeGetType.mockReturnValueOnce(null);
+      const filePath = path.join(tempRootDir, 'payload.dat');
+      actualNodeFs.writeFileSync(filePath, Buffer.from([0x00, 0xff, 0x00]));
+      try {
+        expect(await detectFileType(filePath)).toBe('binary');
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    });
+
     it('returns text for files with a text/* mime even when the content looks binary (issue #3964 encrypted FS)', async () => {
       // Frank-Shaw-FS reports `.cpp` / `.c` / `.h` source files on
       // Windows encrypted / DRM-protected file systems being
@@ -1030,6 +1087,50 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Simulated read error');
     });
 
+    it('should surface messages from plain object text read errors', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'content');
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
+        code: -32603,
+        message:
+          'path escapes workspace: /root/.qwen/skills/dataworks-di-data-processor/instructions/interaction_norms.md',
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      });
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+      );
+
+      expect(result.error).toContain('path escapes workspace');
+      expect(result.returnDisplay).toContain('path escapes workspace');
+      expect(result.error).not.toContain('[object Object]');
+      expect(result.returnDisplay).not.toContain('[object Object]');
+    });
+
+    it('should surface messages from plain object notebook read errors', async () => {
+      const notebookPath = path.join(tempRootDir, 'analysis.ipynb');
+      actualNodeFs.writeFileSync(notebookPath, '{}');
+      vi.spyOn(fs.promises, 'readFile').mockRejectedValueOnce({
+        code: -32603,
+        message: 'notebook is outside allowed roots',
+        data: {
+          errorKind: 'path_outside_workspace',
+          status: 400,
+        },
+      });
+
+      const result = await processSingleFileContent(notebookPath, mockConfig);
+
+      expect(result.error).toContain('notebook is outside allowed roots');
+      expect(result.returnDisplay).toContain('Error reading notebook');
+      expect(result.llmContent).toContain('notebook is outside allowed roots');
+      expect(result.error).not.toContain('[object Object]');
+      expect(result.llmContent).not.toContain('[object Object]');
+    });
+
     it('should handle read errors for image/pdf files', async () => {
       actualNodeFs.writeFileSync(testImageFilePath, 'content'); // File must exist
       mockMimeGetType.mockReturnValue('image/png');
@@ -1089,6 +1190,68 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
+    it('keeps image inline when preserveUnsupportedImage is true', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigNoImage,
+        { preserveUnsupportedImage: true },
+      );
+      expect(typeof result.llmContent).toBe('object');
+      expect(
+        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
+          .mimeType,
+      ).toBe('image/png');
+      expect(result.returnDisplay).toContain('Read image file');
+    });
+
+    it('still strips image for agent reads without the preserve flag', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      // No preserve flag (default false) — agent tool read / headless path.
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigNoImage,
+      );
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('does not support image input');
+    });
+
+    it('still strips audio when preserveUnsupportedImage is true', async () => {
+      const fakeAudio = Buffer.from('fake audio data');
+      const testAudioPath = path.join(tempRootDir, 'clip.mp3');
+      actualNodeFs.writeFileSync(testAudioPath, fakeAudio);
+      mockMimeGetType.mockReturnValue('audio/mpeg');
+
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testAudioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedImage: true },
+      );
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('does not support audio input');
+    });
+
     it('should fall back to pdftotext when model does not support PDF', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
@@ -1110,6 +1273,431 @@ describe('fileUtils', () => {
       // rather than silently skipping
       expect(result.llmContent).toContain('Cannot extract text from PDF');
       expect(result.returnDisplay).toContain('Failed to read pdf');
+    });
+
+    it('rejects large full-PDF text fallback before extracting text', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          42\n',
+        stderr: '',
+        code: 0,
+      });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain("Use the 'pages' parameter");
+      expect(result.returnDisplay).toContain('PDF requires page range');
+      expect(mockExecFile).toHaveBeenCalledTimes(2);
+      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
+      expect(mockExecFile.mock.calls[1]![0]).toBe('pdftotext');
+    });
+
+    it('rejects compact PDFs when pdfinfo reports too many pages', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.alloc(64 * 1024));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          42\n',
+        stderr: '',
+        code: 0,
+      });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('has 42 pages');
+      expect(result.returnDisplay).toContain('PDF requires page range');
+      expect(mockExecFile).toHaveBeenCalledTimes(2);
+      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
+      expect(mockExecFile.mock.calls[1]![0]).toBe('pdftotext');
+    });
+
+    it('uses size-heuristic page guidance when pdfinfo is unavailable', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('appears to have about 21 pages');
+      expect(result.returnDisplay).toContain('PDF requires page range');
+      expect(mockExecFile).toHaveBeenCalledTimes(2);
+      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
+      expect(mockExecFile.mock.calls[1]![0]).toBe('pdftotext');
+    });
+
+    it('surfaces missing pdftotext before page-range guidance', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          42\n',
+        stderr: '',
+        code: 0,
+      });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+      expect(result.llmContent).toContain('pdftotext is not installed');
+      expect(result.llmContent).not.toContain("Use the 'pages' parameter");
+      expect(result.returnDisplay).toContain('Failed to read pdf');
+      expect(result.stats).toBeDefined();
+    });
+
+    it('returns a reference instead of an error for large @-attached PDFs', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          42\n',
+        stderr: '',
+        code: 0,
+      });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { largePdfBehavior: 'reference' },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain("Use the 'pages' parameter");
+      expect(result.returnDisplay).toContain('Referenced large PDF');
+      expect(result.stats).toBeDefined();
+    });
+
+    it('returns a reference for large @-attached PDFs when pdftotext is unavailable', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          42\n',
+        stderr: '',
+        code: 0,
+      });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { largePdfBehavior: 'reference' },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain("Use the 'pages' parameter");
+      expect(result.returnDisplay).toContain('Referenced large PDF');
+      expect(result.stats).toBeDefined();
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
+      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
+    });
+
+    it('keeps explicit pages reads on the pdftotext path', async () => {
+      actualNodeFs.writeFileSync(
+        testPdfFilePath,
+        Buffer.alloc(2 * 1024 * 1024),
+      );
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'page one text', stderr: '', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { pages: '1' },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBe('page one text');
+      expect(
+        mockExecFile.mock.calls.some((call) => call[0] === 'pdftotext'),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['abc', 'Invalid pages parameter'],
+      ['1-', 'Open-ended page ranges'],
+      ['1-21', 'Pages range exceeds maximum of 20'],
+    ])(
+      'rejects unsafe internal pages value %s before extracting text',
+      async (pages, expectedMessage) => {
+        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+        mockMimeGetType.mockReturnValue('application/pdf');
+
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          { pages },
+        );
+
+        expect(result.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+        expect(result.llmContent).toContain(expectedMessage);
+        expect(mockExecFile).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects overly dense page-range extraction with a short error', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { pages: '1' },
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(String(result.llmContent).length).toBeLessThan(1000);
+      expect(result.llmContent).toContain('too large to return safely');
+      expect(result.llmContent).toContain('selected page exceeds');
+    });
+
+    it('rejects dense non-ASCII PDF extraction with a short error', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({
+        stdout: '\u4e00'.repeat(11_000),
+        stderr: '',
+        code: 0,
+      });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { pages: '1' },
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(String(result.llmContent).length).toBeLessThan(1000);
+      expect(result.llmContent).toContain('too large to return safely');
+    });
+
+    it('rejects dense no-pages PDF extraction after exact page count allows full reads', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          2\n',
+        stderr: '',
+        code: 0,
+      });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.returnDisplay).toContain('PDF text too large');
+      expect(String(result.llmContent).length).toBeLessThan(1000);
+      expect(
+        mockExecFile.mock.calls.some((call) => call[0] === 'pdfinfo'),
+      ).toBe(true);
+    });
+
+    it('references dense no-pages PDFs for @ attachments', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          2\n',
+        stderr: '',
+        code: 0,
+      });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { largePdfBehavior: 'reference' },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.returnDisplay).toContain('Referenced large PDF');
+      expect(result.llmContent).toContain('too large to return safely');
+    });
+
+    it('rejects dense page-range PDF extraction for @ attachments', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigNoPdf,
+        { pages: '1-5', largePdfBehavior: 'reference' },
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.returnDisplay).toContain('PDF text too large');
+      expect(String(result.llmContent).length).toBeLessThan(1000);
+      expect(result.stats).toBeDefined();
+    });
+
+    it('allows full PDF text extraction at the full-text size cap', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({
+        stdout: 'Pages:          2\n',
+        stderr: '',
+        code: 0,
+      });
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'full text at cap', stderr: '', code: 0 });
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 100 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe('full text at cap');
+        expect(mockExecFile).toHaveBeenCalledTimes(3);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('rejects huge no-pages PDFs before returning page guidance', async () => {
+      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
+      mockMimeGetType.mockReturnValue('application/pdf');
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 200 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          { largePdfBehavior: 'reference' },
+        );
+
+        expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(result.returnDisplay).toContain('PDF file too large');
+        expect(result.llmContent).toContain("Use the 'pages' parameter");
+        expect(result.llmContent).toContain('split the document');
+        expect(result.stats).toBeDefined();
+        expect(mockExecFile).not.toHaveBeenCalled();
+      } finally {
+        statSpy.mockRestore();
+      }
     });
 
     it('should skip the 10MB size gate when extracting PDF text by pages', async () => {
@@ -1138,9 +1726,7 @@ describe('fileUtils', () => {
         const result = await processSingleFileContent(
           testPdfFilePath,
           mockConfigNoPdf,
-          undefined,
-          undefined,
-          '1-5',
+          { pages: '1-5' },
         );
 
         // Must not be rejected by the generic 10MB gate.
@@ -1149,6 +1735,75 @@ describe('fileUtils', () => {
         // Routed into the pdftotext path — either success or the
         // install-guidance error, never "File size exceeds the 10MB limit".
         expect(result.returnDisplay ?? '').toMatch(/pdf/i);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('allows explicit page ranges at the paged text-extraction size cap', async () => {
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'paged text at cap', stderr: '', code: 0 });
+
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 512 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          { pages: '1-5' },
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe('paged text at cap');
+        expect(mockExecFile).toHaveBeenCalledTimes(2);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('rejects explicit page ranges above the paged text-extraction size cap', async () => {
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 600 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          { pages: '1-5' },
+        );
+
+        expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(result.llmContent).toContain('page-range text extraction');
+        expect(result.stats).toBeDefined();
+        expect(mockExecFile).not.toHaveBeenCalled();
       } finally {
         statSpy.mockRestore();
       }
@@ -1248,6 +1903,19 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped binary file: app.exe');
     });
 
+    it('should read text-looking .dat files as text', async () => {
+      const filePath = path.join(tempRootDir, 'legacy-controller.dat');
+      const content = '<?php echo "ok";\n';
+      actualNodeFs.writeFileSync(filePath, content);
+      mockMimeGetType.mockReturnValueOnce(null);
+
+      const result = await processSingleFileContent(filePath, mockConfig);
+
+      expect(result.llmContent).toBe(content);
+      expect(result.returnDisplay).toBe('');
+      expect(result.error).toBeUndefined();
+    });
+
     it('should handle path being a directory', async () => {
       const result = await processSingleFileContent(directoryPath, mockConfig);
       expect(result.error).toContain('Path is a directory');
@@ -1261,8 +1929,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        5,
-        5,
+        { offset: 5, limit: 5 },
       ); // Read lines 6-10
       const expectedContent = lines.slice(5, 10).join('\n');
 
@@ -1270,6 +1937,22 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');
       expect(result.isTruncated).toBe(true);
       expect(result.originalLineCount).toBe(20);
+      expect(result.linesShown).toEqual([6, 10]);
+    });
+
+    it('should preserve legacy positional pagination arguments', async () => {
+      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
+      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
+
+      const result = await processSingleFileContent(
+        testTextFilePath,
+        mockConfig,
+        5,
+        5,
+      );
+
+      expect(result.llmContent).toBe(lines.slice(5, 10).join('\n'));
+      expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');
       expect(result.linesShown).toEqual([6, 10]);
     });
 
@@ -1281,8 +1964,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        10,
-        10,
+        { offset: 10, limit: 10 },
       );
       const expectedContent = lines.slice(10, 20).join('\n');
 
@@ -1300,8 +1982,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        10,
+        { offset: 0, limit: 10 },
       );
       const expectedContent = lines.join('\n');
 
@@ -1343,8 +2024,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        5,
+        { offset: 0, limit: 5 },
       );
 
       expect(result.isTruncated).toBe(true);
@@ -1361,8 +2041,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        11,
+        { offset: 0, limit: 11 },
       );
 
       expect(result.isTruncated).toBe(true);
@@ -1386,8 +2065,7 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testTextFilePath,
         mockConfig,
-        0,
-        10,
+        { offset: 0, limit: 10 },
       );
       expect(result.isTruncated).toBe(true);
       expect(result.returnDisplay).toBe(
@@ -1422,14 +2100,13 @@ describe('fileUtils', () => {
       }
     });
 
-    it('should reject PDFs that exceed the text-extraction size cap (100MB)', async () => {
+    it('should allow explicit page ranges above the full-PDF text-extraction size cap', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
+      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
+      mockExecResult({ stdout: 'selected page text', stderr: '', code: 0 });
 
-      // 200MB PDF — text-extraction path skips the 10MB gate but still
-      // needs a sane ceiling so pdftotext can't be asked to stream GBs
-      // until the 30s timeout fires.
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
         size: 200 * 1024 * 1024,
         isDirectory: () => false,
@@ -1447,14 +2124,12 @@ describe('fileUtils', () => {
         const result = await processSingleFileContent(
           testPdfFilePath,
           mockConfigNoPdf,
-          undefined,
-          undefined,
-          '1-5',
+          { pages: '1-5' },
         );
 
-        expect(result.error).toMatch(/exceeds extraction size limit/i);
-        expect(result.returnDisplay).toMatch(/PDF file too large/i);
-        expect(result.errorType).toBeDefined();
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe('selected page text');
+        expect(result.returnDisplay).toContain('Read pdf as text (pages 1-5)');
       } finally {
         statSpy.mockRestore();
       }

@@ -43,25 +43,44 @@ Use this index to locate the right document for the user's question. Load only t
 | Model providers (OpenAI-compatible, etc.) | `docs/configuration/model-providers.md` |
 | .qwenignore file                          | `docs/configuration/qwen-ignore.md`     |
 | Themes                                    | `docs/configuration/themes.md`          |
-| Memory                                    | `docs/configuration/memory.md`          |
 | Trusted folders                           | `docs/configuration/trusted-folders.md` |
 
 ### Features
 
-| Topic                                       | Doc Path                         |
-| ------------------------------------------- | -------------------------------- |
-| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md` |
-| MCP (Model Context Protocol)                | `docs/features/mcp.md`           |
-| Skills system                               | `docs/features/skills.md`        |
-| Sub-agents                                  | `docs/features/sub-agents.md`    |
-| Sandbox / security                          | `docs/features/sandbox.md`       |
-| Slash commands                              | `docs/features/commands.md`      |
-| Headless / non-interactive mode             | `docs/features/headless.md`      |
-| LSP integration                             | `docs/features/lsp.md`           |
-| Checkpointing                               | `docs/features/checkpointing.md` |
-| Token caching                               | `docs/features/token-caching.md` |
-| Language / i18n                             | `docs/features/language.md`      |
-| Arena mode                                  | `docs/features/arena.md`         |
+| Topic                                       | Doc Path                                |
+| ------------------------------------------- | --------------------------------------- |
+| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md`        |
+| Auto mode (AI-driven approval)              | `docs/features/auto-mode.md`            |
+| Hooks (lifecycle hooks)                     | `docs/features/hooks.md`                |
+| MCP (Model Context Protocol)                | `docs/features/mcp.md`                  |
+| Memory                                      | `docs/features/memory.md`               |
+| Skills system                               | `docs/features/skills.md`               |
+| Sub-agents                                  | `docs/features/sub-agents.md`           |
+| Sandbox / security                          | `docs/features/sandbox.md`              |
+| Slash commands                              | `docs/features/commands.md`             |
+| Headless / non-interactive mode             | `docs/features/headless.md`             |
+| LSP integration                             | `docs/features/lsp.md`                  |
+| Token caching                               | `docs/features/token-caching.md`        |
+| Language / i18n                             | `docs/features/language.md`             |
+| Arena mode                                  | `docs/features/arena.md`                |
+| Status line                                 | `docs/features/status-line.md`          |
+| Scheduled tasks (cron/loop)                 | `docs/features/scheduled-tasks.md`      |
+| Worktree                                    | `docs/features/worktree.md`             |
+| Code review (`/review`)                     | `docs/features/code-review.md`          |
+| Structured output (JSON schema)             | `docs/features/structured-output.md`    |
+| Dual output                                 | `docs/features/dual-output.md`          |
+| Tool-use summaries                          | `docs/features/tool-use-summaries.md`   |
+| Followup suggestions                        | `docs/features/followup-suggestions.md` |
+| Markdown rendering                          | `docs/features/markdown-rendering.md`   |
+| Contextual tips                             | `docs/features/tips.md`                 |
+| Channels (Telegram/WeChat/DingTalk/etc.)    | `docs/features/channels/overview.md`    |
+
+### Daemon Mode
+
+| Topic                             | Doc Path                          |
+| --------------------------------- | --------------------------------- |
+| qwen serve (daemon mode overview) | `docs/qwen-serve.md`              |
+| Local launch templates            | `docs/qwen-serve-deploy-local.md` |
 
 ### IDE Integration
 
@@ -99,11 +118,11 @@ When the user asks about configuration, the primary reference is `docs/configura
 
 ### Config File Locations & Priority
 
-| Level   | Path                                                         | Description                            |
-| ------- | ------------------------------------------------------------ | -------------------------------------- |
-| User    | `~/.qwen/settings.json`                                      | Personal global config                 |
-| Project | `<project>/.qwen/settings.json`                              | Project-specific, overrides user level |
-| System  | macOS: `/Library/Application Support/QwenCode/settings.json` | Admin-level config                     |
+| Level   | Path                                                                                                                                                       | Description                            |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| User    | `~/.qwen/settings.json`                                                                                                                                    | Personal global config                 |
+| Project | `<project>/.qwen/settings.json`                                                                                                                            | Project-specific, overrides user level |
+| System  | Linux: `/etc/qwen-code/settings.json`<br>Windows: `C:\ProgramData\qwen-code\settings.json`<br>macOS: `/Library/Application Support/QwenCode/settings.json` | Admin-level config                     |
 
 **Priority** (highest to lowest): CLI args > env vars > system settings > project settings > user settings > defaults
 
@@ -111,15 +130,16 @@ When the user asks about configuration, the primary reference is `docs/configura
 
 ### Common Config Categories
 
-| Category      | Key Config Keys                                                               | Reference                                                                 |
-| ------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Permissions   | `permissions.allow/ask/deny`                                                  | `docs/configuration/settings.md`, `docs/features/approval-mode.md`        |
-| MCP Servers   | `mcpServers.*`, `mcp.*`                                                       | `docs/configuration/settings.md`, `docs/features/mcp.md`                  |
-| Tool Approval | `tools.approvalMode`                                                          | `docs/configuration/settings.md`, `docs/features/approval-mode.md`        |
-| Model         | `model.name`, `modelProviders`                                                | `docs/configuration/settings.md`, `docs/configuration/model-providers.md` |
-| General/UI    | `general.*`, `ui.*`, `ide.*`, `output.*`                                      | `docs/configuration/settings.md`                                          |
-| Context       | `context.*`                                                                   | `docs/configuration/settings.md`                                          |
-| Advanced      | `hooks`, `env`, `webSearch`, `security`, `privacy`, `telemetry`, `advanced.*` | `docs/configuration/settings.md`                                          |
+| Category      | Key Config Keys                                                      | Reference                                                                                        |
+| ------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Permissions   | `permissions.allow/ask/deny`                                         | `docs/configuration/settings.md`, `docs/features/approval-mode.md`                               |
+| MCP Servers   | `mcpServers.*`, `mcp.*`                                              | `docs/configuration/settings.md`, `docs/features/mcp.md`                                         |
+| Tool Approval | `tools.approvalMode`                                                 | `docs/configuration/settings.md`, `docs/features/approval-mode.md`, `docs/features/auto-mode.md` |
+| Hooks         | `hooks.*`                                                            | `docs/configuration/settings.md`, `docs/features/hooks.md`                                       |
+| Model         | `model.name`, `modelProviders`                                       | `docs/configuration/settings.md`, `docs/configuration/model-providers.md`                        |
+| General/UI    | `general.*`, `ui.*`, `ide.*`, `output.*`                             | `docs/configuration/settings.md`                                                                 |
+| Context       | `context.*`                                                          | `docs/configuration/settings.md`                                                                 |
+| Advanced      | `env`, `webSearch`, `security`, `privacy`, `telemetry`, `advanced.*` | `docs/configuration/settings.md`                                                                 |
 
 ---
 

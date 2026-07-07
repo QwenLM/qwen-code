@@ -237,6 +237,7 @@ describe('modelConfigResolver', () => {
         });
 
         expect(result.config.timeout).toBeUndefined();
+        expect(result.sources['timeout']).toBeUndefined();
       });
 
       it('negative QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
@@ -252,7 +253,7 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBeUndefined();
       });
 
-      it('zero QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+      it('zero QWEN_CODE_API_TIMEOUT_MS accepted in OAuth path (disables timeout downstream)', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {},
@@ -262,10 +263,14 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.timeout).toBeUndefined();
+        expect(result.config.timeout).toBe(0);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
       });
 
-      it('QWEN_CODE_API_TIMEOUT_MS works with float value in OAuth', () => {
+      it('fractional QWEN_CODE_API_TIMEOUT_MS ignored in OAuth', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {},
@@ -275,7 +280,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.timeout).toBe(12345);
+        expect(result.config.timeout).toBeUndefined();
       });
 
       it('QWEN_CODE_API_TIMEOUT_MS works with proxy in OAuth path', () => {
@@ -461,7 +466,7 @@ describe('modelConfigResolver', () => {
         expect(result.sources['timeout'].kind).toBe('settings');
       });
 
-      it('ignores negative or zero QWEN_CODE_API_TIMEOUT_MS values', () => {
+      it('accepts zero QWEN_CODE_API_TIMEOUT_MS and overrides settings (disables timeout downstream)', () => {
         const result = resolveModelConfig({
           authType: AuthType.USE_OPENAI,
           cli: {},
@@ -477,9 +482,12 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        // Should fall back to settings value
-        expect(result.config.timeout).toBe(30000);
-        expect(result.sources['timeout'].kind).toBe('settings');
+        // 0 is a valid disable sentinel; env overrides settings.
+        expect(result.config.timeout).toBe(0);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
       });
 
       it('timeout is undefined when not configured, default applied in buildClient', () => {
@@ -573,7 +581,6 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        // Number() implicitly trims whitespace, so this should parse correctly
         expect(result.config.timeout).toBe(300000);
         expect(result.sources['timeout'].kind).toBe('env');
       });
@@ -782,34 +789,24 @@ describe('modelConfigResolver', () => {
   });
 
   describe('[Additional] timeout env override edge cases', () => {
-    it('handles scientific notation in QWEN_CODE_API_TIMEOUT_MS', () => {
-      const result = resolveModelConfig({
-        authType: AuthType.USE_OPENAI,
-        cli: {},
-        settings: { apiKey: 'key' },
-        env: {
-          OPENAI_API_KEY: 'key',
-          QWEN_CODE_API_TIMEOUT_MS: '1.5e5',
-        },
-      });
-
-      expect(result.config.timeout).toBe(150000);
-      expect(result.sources['timeout'].kind).toBe('env');
-    });
-
-    it('handles hex values in QWEN_CODE_API_TIMEOUT_MS', () => {
+    it.each([
+      ['scientific notation', '1.5e5'],
+      ['hex values', '0x2BF20'],
+      ['fractional values', '12345.67'],
+      ['unsafe integers', String(Number.MAX_SAFE_INTEGER + 1)],
+    ])('ignores %s in QWEN_CODE_API_TIMEOUT_MS', (_label, value) => {
       const result = resolveModelConfig({
         authType: AuthType.USE_OPENAI,
         cli: {},
         settings: { apiKey: 'key', generationConfig: { timeout: 30000 } },
         env: {
           OPENAI_API_KEY: 'key',
-          QWEN_CODE_API_TIMEOUT_MS: '0x2BF20', // 180000 in hex
+          QWEN_CODE_API_TIMEOUT_MS: value,
         },
       });
 
-      expect(result.config.timeout).toBe(180000);
-      expect(result.sources['timeout'].kind).toBe('env');
+      expect(result.config.timeout).toBe(30000);
+      expect(result.sources['timeout'].kind).toBe('settings');
     });
 
     it('ignores empty string QWEN_CODE_API_TIMEOUT_MS', () => {
@@ -960,6 +957,85 @@ describe('modelConfigResolver', () => {
       expect(result.config.modalities?.image).toBe(false);
       expect(result.config.modalities?.video).toBe(false);
       expect(result.sources['modalities'].kind).toBe('settings');
+    });
+  });
+
+  describe('[Regression] env-var-only path must apply model context defaults', () => {
+    it('env-var-only path: contextWindowSize auto-detected for claude-opus-4-6', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'claude-opus-4-6',
+        },
+      });
+
+      expect(result.config.model).toBe('claude-opus-4-6');
+      expect(result.config.contextWindowSize).toBe(200_000);
+      expect(result.sources['contextWindowSize'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: contextWindowSize auto-detected for a model whose limit differs from the global default', () => {
+      // gpt-4o resolves to 131,072 ≠ DEFAULT_TOKEN_LIMIT (200,000), so this
+      // assertion fails if the fallback applies the generic default instead
+      // of the model-specific limit.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'gpt-4o',
+        },
+      });
+
+      expect(result.config.model).toBe('gpt-4o');
+      expect(result.config.contextWindowSize).toBe(131_072);
+      expect(result.sources['contextWindowSize'].kind).toBe('computed');
+    });
+
+    it('env-var-only path: unknown model keeps contextWindowSize undefined', () => {
+      // Unknown models must not be stamped with an explicit window and an
+      // 'auto-detected' source — downstream `?? DEFAULT_TOKEN_LIMIT`
+      // consumers apply the generic default instead.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'totally-unknown-model-xyz',
+        },
+      });
+
+      expect(result.config.model).toBe('totally-unknown-model-xyz');
+      expect(result.config.contextWindowSize).toBeUndefined();
+      expect(result.sources['contextWindowSize']).toBeUndefined();
+    });
+
+    it('env-var-only path: explicit settings contextWindowSize is not overridden by fallback', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          generationConfig: {
+            contextWindowSize: 32_000,
+          },
+        },
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'claude-opus-4-6',
+        },
+      });
+
+      expect(result.config.contextWindowSize).toBe(32_000);
+      expect(result.sources['contextWindowSize'].kind).toBe('settings');
     });
   });
 });

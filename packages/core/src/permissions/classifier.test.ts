@@ -4,27 +4,39 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const runSideQueryMock = vi.fn();
+const debugLoggerMock = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+}));
 
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
 
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLoggerMock,
+}));
+
 import {
   classifyAction,
   sanitizeClassifierReason,
+  STAGE1_TIMEOUT_MS,
+  STAGE2_TIMEOUT_MS,
   type ClassifierInput,
 } from './classifier.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 
-function makeConfig(): Config {
+function makeConfig(
+  autoModeSettings: ReturnType<Config['getAutoModeSettings']> = {},
+): Config {
   return {
     getFastModel: () => 'qwen-turbo-test',
     getModel: () => 'qwen-max-test',
-    getAutoModeSettings: () => ({}),
+    getAutoModeSettings: () => autoModeSettings,
     getToolRegistry: () =>
       ({ getTool: () => undefined }) as unknown as ToolRegistry,
   } as unknown as Config;
@@ -43,6 +55,12 @@ function makeInput(over: Partial<ClassifierInput> = {}): ClassifierInput {
 
 beforeEach(() => {
   runSideQueryMock.mockReset();
+  debugLoggerMock.debug.mockReset();
+  debugLoggerMock.warn.mockReset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('classifyAction — stage 1 happy path', () => {
@@ -174,6 +192,62 @@ describe('classifyAction — fail-closed on stage 2 failure', () => {
 });
 
 describe('classifier configuration', () => {
+  it('uses configured stage timeouts when provided', async () => {
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal);
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+    await classifyAction(
+      makeInput({
+        config: makeConfig({
+          classifier: {
+            timeouts: {
+              stage1Ms: 12_345,
+              stage2Ms: 67_890,
+            },
+          },
+        }),
+      }),
+    );
+
+    expect(timeoutSpy).toHaveBeenNthCalledWith(1, 12_345);
+    expect(timeoutSpy).toHaveBeenNthCalledWith(2, 67_890);
+  });
+
+  it('falls back when configured stage timeouts are too low', async () => {
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal);
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+    await classifyAction(
+      makeInput({
+        config: makeConfig({
+          classifier: {
+            timeouts: {
+              stage1Ms: 1,
+              stage2Ms: 999,
+            },
+          },
+        }),
+      }),
+    );
+
+    expect(timeoutSpy).toHaveBeenNthCalledWith(1, STAGE1_TIMEOUT_MS);
+    expect(timeoutSpy).toHaveBeenNthCalledWith(2, STAGE2_TIMEOUT_MS);
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      `Classifier timeout 1ms below 1000ms floor, using default ${STAGE1_TIMEOUT_MS}ms`,
+    );
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      `Classifier timeout 999ms below 1000ms floor, using default ${STAGE2_TIMEOUT_MS}ms`,
+    );
+  });
+
   it('uses temperature 0 and max_output_tokens=32 with thinking disabled for stage 1', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
@@ -189,7 +263,7 @@ describe('classifier configuration', () => {
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 
-  it('uses max_output_tokens=4096 with thinking enabled for stage 2', async () => {
+  it('uses max_output_tokens=4096 with thinking disabled for stage 2', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
       .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
@@ -201,7 +275,36 @@ describe('classifier configuration', () => {
       };
     };
     expect(opts.config?.maxOutputTokens).toBe(4096);
-    expect(opts.config?.thinkingConfig?.includeThoughts).toBe(true);
+    // Thinking is disabled in every stage (latency-sensitive permission gate).
+    expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
+  });
+
+  it('enables API thinking only for stage 2 when configured', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+    await classifyAction(
+      makeInput({
+        config: makeConfig({
+          classifier: {
+            thinking: {
+              stage2Enabled: true,
+            },
+          },
+        }),
+      }),
+    );
+
+    const stage1 = runSideQueryMock.mock.calls[0]?.[1] as {
+      config?: { thinkingConfig?: { includeThoughts?: boolean } };
+    };
+    const stage2 = runSideQueryMock.mock.calls[1]?.[1] as {
+      config?: { thinkingConfig?: { includeThoughts?: boolean } };
+    };
+
+    expect(stage1.config?.thinkingConfig?.includeThoughts).toBe(false);
+    expect(stage2.config?.thinkingConfig?.includeThoughts).toBe(true);
   });
 
   it('does not pin a model — defaults to the fast model via sideQuery', async () => {

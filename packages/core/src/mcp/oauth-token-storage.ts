@@ -7,6 +7,7 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
@@ -21,6 +22,24 @@ import {
 } from './token-storage/index.js';
 
 const debugLogger = createDebugLogger('MCP_OAUTH');
+
+let didWarnPlaintextTokenStorage = false;
+
+function warnPlaintextTokenStorage(tokenFile: string): void {
+  if (didWarnPlaintextTokenStorage) {
+    return;
+  }
+  didWarnPlaintextTokenStorage = true;
+  const message =
+    `MCP OAuth tokens are stored unencrypted at ${tokenFile}. ` +
+    `Set ${FORCE_ENCRYPTED_FILE_ENV_VAR}=true to require encrypted file storage.`;
+  debugLogger.warn(message);
+  try {
+    process.stderr.write(`Warning: ${message}\n`);
+  } catch {
+    // Stderr is best-effort; token persistence has already succeeded.
+  }
+}
 
 /**
  * Class for managing MCP OAuth token storage and retrieval.
@@ -99,11 +118,12 @@ export class MCPOAuthTokenStorage implements TokenStorage {
     const tokenFile = this.getTokenFilePath();
 
     try {
-      await fs.writeFile(
-        tokenFile,
-        JSON.stringify(tokenArray, null, 2),
-        { mode: 0o600 }, // Restrict file permissions
-      );
+      await atomicWriteFile(tokenFile, JSON.stringify(tokenArray, null, 2), {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
+      warnPlaintextTokenStorage(tokenFile);
     } catch (error) {
       debugLogger.error(
         `Failed to save MCP OAuth token: ${getErrorMessage(error)}`,
@@ -179,9 +199,12 @@ export class MCPOAuthTokenStorage implements TokenStorage {
           // Remove file if no tokens left
           await fs.unlink(tokenFile);
         } else {
-          await fs.writeFile(tokenFile, JSON.stringify(tokenArray, null, 2), {
-            mode: 0o600,
-          });
+          await atomicWriteFile(
+            tokenFile,
+            JSON.stringify(tokenArray, null, 2),
+            { mode: 0o600, forceMode: true, noFollow: true },
+          );
+          warnPlaintextTokenStorage(tokenFile);
         }
       } catch (error) {
         debugLogger.error(

@@ -25,29 +25,26 @@ export interface ServeCapabilityDescriptor {
    * more than one operating mode and clients benefit from feature-
    * detecting the active set. Optional — baseline tags (always-on,
    * single behavior) omit this field.
-   *
-   * Introduced for `mcp_guardrails` (issue #4175 PR 14) where the
-   * tag advertises `['warn', 'enforce']` so clients can pre-flight
-   * whether the daemon supports refusal-on-budget-exhausted before
-   * relying on `mcp_child_refused_batch` semantics.
    */
   modes?: readonly string[];
 }
 
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
+  daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
-  // ACP backs this with `connection.unstable_resumeSession`. Surface
-  // the unstable prefix so clients don't pin against a `v1` shape that
-  // the underlying ACP method may still change.
+  session_resume: { since: 'v1' },
+  // Deprecated alias — kept until @agentclientprotocol/sdk graduates
+  // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
+  session_artifacts: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -66,76 +63,77 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
-  // Issue #4175 PR 16: workspace memory CRUD (`GET/POST /workspace/memory`).
-  // Daemon exposes hierarchical QWEN.md state and accepts append/replace
-  // writes scoped to either the bound workspace or the global ~/.qwen
-  // directory. Mutation path is gated by the centralized mutation gate.
+  auth_provider_install: { since: 'v1' },
+  // Workspace memory CRUD (`GET/POST /workspace/memory`). Daemon exposes
+  // hierarchical QWEN.md state and accepts append/replace writes scoped
+  // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
-  // Issue #4175 PR 16: workspace agents CRUD (`GET/POST /workspace/agents`
-  // + `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
+  workspace_memory_remember: {
+    since: 'v1',
+    modes: ['workspace', 'clean'],
+  },
+  workspace_memory_forget: { since: 'v1' },
+  workspace_memory_dream: { since: 'v1' },
+  // Workspace agents CRUD (`GET/POST /workspace/agents` +
+  // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
   // create / update / delete project- and user-level subagent
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
+  workspace_agent_generate: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
+  session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
+  session_tasks: { since: 'v1' },
+  session_stats: { since: 'v1' },
+  session_lsp: { since: 'v1' },
+  session_status: { since: 'v1' },
   session_close: { since: 'v1' },
+  session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
-  // Issue #4175 PR 14. Daemon supports the MCP client guardrail
-  // surface: an in-process counter exposed on `GET /workspace/mcp`
-  // (`clientCount`, `clientBudget`, `budgetMode`, `budgets[]`), a
-  // `--mcp-client-budget=N` flag with `--mcp-budget-mode={enforce,
-  // warn, off}`, and a `disabledReason: 'budget'` tag on per-server
-  // cells when refused at discovery. `modes` enumerates the
-  // implemented behaviors — clients pre-flight `'enforce'` before
-  // relying on refusal semantics, since a future split (e.g. PR 23
-  // shared pool) could shift enforcement elsewhere. Listed BEFORE
-  // `require_auth` so always-on tags stay grouped together;
-  // `require_auth` is the only conditional tag, kept last for
-  // visibility in `Object.keys(SERVE_CAPABILITY_REGISTRY)`.
+  session_organization: { since: 'v1' },
+  session_export: { since: 'v1' },
+  // Daemon supports the MCP client guardrail surface: an in-process
+  // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
+  // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
+  // `disabledReason: 'budget'` tag on per-server cells when refused at
+  // discovery. `modes` enumerates the implemented behaviors.
   mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] },
-  // Issue #4175 PR 14b. Daemon emits typed push events for MCP budget
-  // state crossings: `mcp_budget_warning` (synthetic, fires once per
-  // upward 75% crossing with hysteresis re-arm at 37.5%) and
-  // `mcp_child_refused_batch` (coalesced, one per discovery pass /
-  // length-1 per readResource refusal, only in `enforce` mode). SDK
-  // reducer narrows both via `KnownDaemonEvent` (`DaemonSessionViewState`
-  // exposes `mcpBudgetWarningCount`, `lastMcpBudgetWarning`,
-  // `mcpChildRefusedBatchCount`, `lastMcpChildRefusedBatch`). Always-on once
-  // PR 14b lands; orthogonal to `mcp_guardrails` (the snapshot
-  // surface). Listed alongside `mcp_guardrails` to keep the MCP-related
-  // tags grouped.
+  workspace_mcp_manage: { since: 'v1' },
+  // Daemon emits typed push events for MCP budget state crossings:
+  // `mcp_budget_warning` and `mcp_child_refused_batch`. Always-on;
+  // orthogonal to `mcp_guardrails` (the snapshot surface).
   mcp_guardrail_events: { since: 'v1' },
-  // Issue #4175 PR 19. Daemon supports the read-only workspace file
-  // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`. The
-  // four routes are gated as a single feature because they share the
-  // same backing `WorkspaceFileSystem` boundary (PR 18) and the same
-  // failure shape — clients that pre-flight one of them get the
-  // others for free, and a future deprecation would have to coordinate
-  // across all four anyway. Per-route tags would force four
-  // simultaneous registry entries with no operator-meaningful
-  // difference between them.
+  // Always-on. Daemon supports runtime MCP server mutation via
+  // `POST /workspace/mcp/servers` (add) and
+  // `DELETE /workspace/mcp/servers/:name` (remove). SDK clients
+  // pre-flight this tag before calling those routes.
+  mcp_server_runtime_mutation: { since: 'v1' },
+  // Daemon supports the read-only workspace file surface:
+  // `GET /file`, `GET /list`, `GET /glob`, `GET /stat`. The four
+  // routes are gated as a single feature because they share the same
+  // backing `WorkspaceFileSystem` boundary and failure shape.
   workspace_file_read: { since: 'v1' },
-  // Issue #4175 PR 20. Daemon supports bounded raw byte reads via
-  // `GET /file/bytes`. This is separate from `workspace_file_read`
-  // because PR19 daemons already advertise the text/list/stat/glob
-  // surface without byte-window support.
+  // Daemon supports bounded raw byte reads via `GET /file/bytes`.
+  // Separate from `workspace_file_read` because older daemons may
+  // advertise the text/list/stat/glob surface without byte-window
+  // support.
   workspace_file_bytes: { since: 'v1' },
-  // Issue #4175 PR 20. Daemon supports hash-aware text mutation routes
+  // Daemon supports hash-aware text mutation routes
   // (`POST /file/write`, `POST /file/edit`) behind the strict mutation
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
-  // #4175 Wave 4 PR 17. Daemon hosts the session-level approval-mode
+  // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
   // `persist:true` also writes `tools.approvalMode` to workspace
   // settings via the daemon's `loadedSettings` handle. SDK helper:
   // `DaemonClient.setSessionApprovalMode`.
   session_approval_mode_control: { since: 'v1' },
-  // #4175 Wave 4 PR 17. `POST /workspace/tools/:name/enable` toggles a
+  // `POST /workspace/tools/:name/enable` toggles a
   // tool name in the workspace's `tools.disabled` settings list. The
   // bridge writes the settings file directly (no ACP roundtrip) and
   // fan-outs a `tool_toggled` event to all live session SSE buses.
@@ -143,7 +141,19 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
-  // #4175 Wave 4 PR 17. `POST /workspace/init` scaffolds an empty
+  workspace_settings: { since: 'v1' },
+  // `GET /workspace/permissions` is always available when this tag is
+  // advertised. `POST /workspace/permissions` updates the active ACP
+  // child and returns `permission_session_required` when no live ACP
+  // session exists; the tag means the route contract exists, not that
+  // the current daemon state can accept a write.
+  workspace_permissions: { since: 'v1' },
+  workspace_voice: { since: 'v1' },
+  workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
+  // Inspect bound workspace trust and request local operator action.
+  // Remote clients cannot directly write trustedFolders.json.
+  workspace_trust: { since: 'v1' },
+  // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
   // refuses with 409 when the file already exists; `force: true`
@@ -151,10 +161,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the file, the caller should follow up with
   // `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
-  // #4175 Wave 4 PR 17. `POST /workspace/mcp/:server/restart` performs
+  // `POST /workspace/setup-github` installs the fixed
+  // qwen-code-action workflow set into the bound workspace after
+  // explicit consent. The route reuses the interactive `/setup-github`
+  // release lookup, workflow download, and `.gitignore` update logic.
+  workspace_github_setup: { since: 'v1' },
+  // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
-  // budget snapshot from PR 14 v1: when the target server is not
+  // budget snapshot: when the target server is not
   // already in `reservedSlots` AND the live count would exceed the
   // configured budget under `enforce` mode, returns 200 with
   // `{restarted:false, skipped:true, reason:'budget_would_exceed'}`
@@ -162,7 +177,44 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `'in_flight'` (concurrent discovery in progress), `'disabled'`
   // (server is configured but explicitly disabled).
   workspace_mcp_restart: { since: 'v1' },
-  // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
+  // Daemon hosts `POST /session/:id/recap`, which
+  // generates a one-sentence "where did I leave off" summary by
+  // running `generateSessionRecap` (`core/services/sessionRecap.ts`) as
+  // a side-query against the fast model. Non-strict mutation gate —
+  // posture mirrors `/session/:id/prompt` (token cost, not state
+  // mutation). The route returns `{sessionId, recap}` where `recap`
+  // may be `null` for too-short histories or transient model failures
+  // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
+  session_recap: { since: 'v1' },
+  // Side question (/btw) against the session's conversation context.
+  // Single-turn, tool-free LLM call via runForkedAgent (cache path).
+  session_btw: { since: 'v1' },
+  // Direct daemon-side shell execution for an existing session.
+  // Advertised CONDITIONALLY: operators must explicitly enable it and
+  // configure bearer auth. Clients must still send a session-bound
+  // X-Qwen-Client-Id when calling the route.
+  session_shell_command: { since: 'v1' },
+  // Daemon hosts a workspace-shared MCP transport
+  // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
+  // accounting (`entryCount`, `entrySummary` on each per-server cell).
+  // Advertised CONDITIONALLY — the kill switch
+  // `QWEN_SERVE_NO_MCP_POOL=1` env var falls back to per-session MCP
+  // clients and the tag is omitted so SDK consumers
+  // pre-flighting on the tag get accurate "pool is on" semantics.
+  mcp_workspace_pool: { since: 'v1' },
+  // `POST /workspace/mcp/:server/restart`
+  // accepts an optional `?entryIndex=N` (or `*`) query parameter
+  // and may return the new `{entries: RestartResult[]}` shape when
+  // the pool holds multiple entries for the same server name (e.g.
+  // sessions injected divergent OAuth headers). Single-entry
+  // restarts continue to return the legacy `{restarted, durationMs}`
+  // shape for compatibility with pre-F2 SDK clients. Advertised
+  // CONDITIONALLY in lockstep with `mcp_workspace_pool`: pool
+  // off → both tags absent, pool on → both tags present. Operators
+  // pre-flighting on this tag can branch on whether the response
+  // shape may include `entries[]`.
+  mcp_pool_restart: { since: 'v1' },
+  // Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so
   // SDK clients can branch on its presence to surface a clear "this
@@ -171,7 +223,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // defaults (no flag) omit the tag, preserving the bit-for-bit shape
   // older clients expect.
   require_auth: { since: 'v1' },
-  // Issue #4175 PR 21. Daemon exposes the device-flow auth surface
+  // Daemon was booted with `--allow-origin <pattern>`
+  // (at least one entry, including the `*` literal). Advertised
+  // CONDITIONALLY — only when the flag is set — so browser SDK clients
+  // can pre-flight whether the daemon will honor their cross-origin
+  // request before issuing it (and parsing a 403). The configured
+  // pattern list is intentionally NOT echoed in the capabilities
+  // envelope — browser webui knows its own origin, and surfacing the
+  // list would let an unauthenticated `/capabilities` reader
+  // enumerate every trusted origin, which is useful recon for a
+  // misconfigured deployment.
+  allow_origin: { since: 'v1' },
+  // Daemon exposes the device-flow auth surface
   // (`POST /workspace/auth/device-flow`, GET/DELETE on `/:id`, and
   // `GET /workspace/auth/status`). Advertised UNCONDITIONALLY: the
   // routes themselves return `400 unsupported_provider` if the daemon
@@ -180,6 +243,47 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // status route (extension data on `/capabilities` would inflate the
   // descriptor shape; we keep the registry uniform).
   auth_device_flow: { since: 'v1' },
+  permission_mediation: {
+    since: 'v1',
+    modes: ['first-responder', 'designated', 'consensus', 'local-only'],
+  },
+  prompt_absolute_deadline: { since: 'v1' },
+  writer_idle_timeout: { since: 'v1' },
+  non_blocking_prompt: { since: 'v1' },
+  session_language: { since: 'v1' },
+  session_rewind: { since: 'v1' },
+  workspace_hooks: { since: 'v1' },
+  session_hooks: { since: 'v1' },
+  workspace_extensions: { since: 'v1' },
+  session_branch: { since: 'v1' },
+  rate_limit: { since: 'v1' },
+  workspace_reload: { since: 'v1' },
+  // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
+  // the Chrome extension) can host an MCP server that the daemon's agent
+  // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
+  // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
+  // `mcp_register` { server }, `mcp_message` { id, server, payload }
+  // (bidirectional, request/response correlated by `id`), `mcp_unregister`
+  // { server }. Advertised CONDITIONALLY so clients pre-flight this tag before
+  // attempting to register a client-hosted server. `runQwenServe` enables it
+  // only when explicitly requested by option or env.
+  client_mcp_over_ws: { since: 'v1' },
+  // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
+  // where a loopback CDP client drives ONE real tab
+  // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
+  // frames. Advertised when explicitly enabled or when the daemon is serving a
+  // Chrome extension origin.
+  cdp_tunnel_over_ws: { since: 'v1' },
+  // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
+  // streams raw PCM, the daemon transcribes server-side via the configured
+  // `voiceModel` (credentials never reach the client). Advertised
+  // UNCONDITIONALLY (like `auth_device_flow`): presence means the endpoint
+  // exists, not that a voice model is configured. The WS returns an `error`
+  // frame when no transcribable `voiceModel` is set, so clients probe by
+  // connecting rather than reading ambient settings into `/capabilities` (which
+  // would make the envelope depend on the user's home config). `modes`
+  // enumerates the two transcription paths (realtime vs. on-stop batch).
+  voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -187,12 +291,30 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 /**
  * Per-deployment feature toggles surfaced through `/capabilities`.
  *
- * `requireAuth` controls whether the conditional `require_auth` tag is
- * advertised. Other Wave 4 follow-ups can extend this object as more
- * deployment-shape capability tags appear (e.g. `redact_errors`).
+ * advertised.
  */
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
+  mcpPoolActive?: boolean;
+  allowOriginActive?: boolean;
+  promptDeadlineMs?: number;
+  writerIdleTimeoutMs?: number;
+  persistSettingAvailable?: boolean;
+  voiceTranscriptionAvailable?: boolean;
+  sessionShellCommandEnabled?: boolean;
+  rateLimit?: boolean;
+  reloadAvailable?: boolean;
+  /**
+   * Whether the daemon will accept client-hosted MCP servers over the WS
+   * (`client_mcp_over_ws`, issue #5626).
+   */
+  clientMcpOverWsEnabled?: boolean;
+  /**
+   * Whether the daemon exposes the Plan C `/cdp` tunnel endpoint
+   * (`cdp_tunnel_over_ws`, issue #5626).
+   */
+  cdpTunnelOverWsEnabled?: boolean;
+  voiceWsAvailable?: boolean;
 }
 
 /**
@@ -232,6 +354,44 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
+  ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  ['allow_origin', (toggles) => toggles.allowOriginActive === true],
+  [
+    'prompt_absolute_deadline',
+    (toggles) =>
+      typeof toggles.promptDeadlineMs === 'number' &&
+      toggles.promptDeadlineMs > 0,
+  ],
+  [
+    'writer_idle_timeout',
+    (toggles) =>
+      typeof toggles.writerIdleTimeoutMs === 'number' &&
+      toggles.writerIdleTimeoutMs > 0,
+  ],
+  ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'workspace_voice_transcription',
+    (toggles) => toggles.voiceTranscriptionAvailable === true,
+  ],
+  [
+    'session_shell_command',
+    (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
+  ['rate_limit', (toggles) => toggles.rateLimit === true],
+  ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
+  ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
+  [
+    // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
+    // token (or `--require-auth`) no longer suppresses it: browsers can't set
+    // an `Authorization` header on a WebSocket, so the Web Shell carries the
+    // bearer token in the `Sec-WebSocket-Protocol` subprotocol, which the ACP
+    // upgrade listener verifies (see acp-http/index.ts).
+    'voice_transcribe',
+    (toggles) => toggles.voiceWsAvailable !== false,
+  ],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

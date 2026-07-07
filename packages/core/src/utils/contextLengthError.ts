@@ -103,6 +103,32 @@ function tryParseEmbeddedJson(text: string): unknown | undefined {
   }
 }
 
+function safeReadProperty(value: object, key: string): unknown {
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function enumerableValues(value: object): unknown[] {
+  try {
+    return Object.values(value);
+  } catch {
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      return Object.values(descriptors)
+        .filter(
+          (descriptor): descriptor is PropertyDescriptor & { value: unknown } =>
+            'value' in descriptor && descriptor.enumerable === true,
+        )
+        .map((descriptor) => descriptor.value);
+    } catch {
+      return [];
+    }
+  }
+}
+
 function collectStrings(
   value: unknown,
   seen: Set<object>,
@@ -135,11 +161,21 @@ function collectStrings(
 
   const strings: string[] = [];
   if (value instanceof Error) {
-    strings.push(value.name, value.message);
-    strings.push(...collectStrings(value.cause, seen, depth + 1));
+    const name = safeReadProperty(value, 'name');
+    const message = safeReadProperty(value, 'message');
+
+    if (typeof name === 'string') {
+      strings.push(name);
+    }
+    if (typeof message === 'string') {
+      strings.push(message);
+    }
+    strings.push(
+      ...collectStrings(safeReadProperty(value, 'cause'), seen, depth + 1),
+    );
   }
 
-  for (const [, nested] of Object.entries(value)) {
+  for (const nested of enumerableValues(value)) {
     strings.push(...collectStrings(nested, seen, depth + 1));
   }
 

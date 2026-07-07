@@ -58,6 +58,9 @@ describe('EnterWorktreeTool — WorktreeSession sidecar', () => {
       getTargetDir: () => repoRoot,
       getSessionId: () => sessionId,
       getSessionService: () => sessionService,
+      // Phase D-2: createUserWorktree reads this for the symlink loop.
+      // Return empty so the loop is a no-op in these tests.
+      getWorktreeSymlinkDirectories: () => [],
     } as unknown as Config;
   }
 

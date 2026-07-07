@@ -10,6 +10,7 @@
  */
 export const SUPPORTED_IMAGE_MIME_TYPES = [
   'image/bmp',
+  'image/gif',
   'image/jpeg',
   'image/jpg', // Alternative MIME type for JPEG
   'image/png',

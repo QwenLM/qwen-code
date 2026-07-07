@@ -6,7 +6,11 @@
 
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
-import { STARTUP_CONTEXT_MODEL_ACK } from '@qwen-code/qwen-code-core';
+import {
+  CompressionStatus,
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
 /**
@@ -23,6 +27,11 @@ export function isRealUserTurn(
   item: HistoryItem,
 ): item is HistoryItem & HistoryItemUser {
   if (item.type !== 'user' || !item.text) return false;
+  if (typeof item.sentToModel === 'boolean') return item.sentToModel;
+  // Legacy resumed sessions do not have sentToModel, so this fallback is
+  // intentionally coupled to isSlashCommand's current lexical classifier.
+  // Changes to slash-command classification must account for old sessions that
+  // still rely on this inference.
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 
@@ -39,22 +48,22 @@ function isUserTextContent(content: Content): boolean {
   );
   if (hasFunctionResponse) return false;
 
+  // Exclude pure <system-reminder> entries (the startup prelude and the
+  // mid-history MCP added-tool reminders). They are structural, not real user
+  // prompts; counting them here would shift the rewind truncation index and
+  // silently drop a real turn's context. A genuine user turn that merely has
+  // a per-turn reminder prepended still has a non-reminder prompt part, so it
+  // is NOT excluded.
+  if (isSystemReminderContent(content)) return false;
+
   return content.parts.some((part) => 'text' in part && part.text);
 }
 
-/**
- * Detects whether the API history starts with the startup context pair
- * (user env context + model acknowledgment).
- */
-function hasStartupContext(apiHistory: Content[]): boolean {
-  if (apiHistory.length < 2) return false;
-  const first = apiHistory[0];
-  const second = apiHistory[1];
-  if (first?.role !== 'user' || second?.role !== 'model') return false;
-  return (
-    second.parts?.some(
-      (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
-    ) ?? false
+function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
+  return history.findLastIndex(
+    (item) =>
+      item.type === 'compression' &&
+      item.compression.compressionStatus === CompressionStatus.COMPRESSED,
   );
 }
 
@@ -63,13 +72,13 @@ function hasStartupContext(apiHistory: Content[]): boolean {
  * to a specific user turn in the UI history.
  *
  * The API history may include:
- * - A startup context pair: [user(env), model(ack)] at the beginning
+ * - A startup context entry at the beginning
  * - User text prompts (corresponding to UI user turns)
  * - Model responses (with optional functionCall parts)
  * - Tool result entries: user(functionResponse) + model(response)
  *
  * This function counts user text Content entries (skipping tool results
- * and the startup context pair) to find the API boundary corresponding
+ * and the startup context entry) to find the API boundary corresponding
  * to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
@@ -88,19 +97,31 @@ export function computeApiTruncationIndex(
   targetUserItemId: number,
   apiHistory: Content[],
 ): number {
+  const targetIndex = uiHistory.findIndex(
+    (item) => item.id === targetUserItemId,
+  );
+  if (targetIndex === -1) return -1;
+
+  const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
+  if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
+
   // Count how many UI user turns exist before the target
   let uiUserTurnCount = 0;
-  for (const item of uiHistory) {
-    if (item.id === targetUserItemId) {
-      break;
-    }
+  for (
+    let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
+    i < targetIndex;
+    i++
+  ) {
+    const item = uiHistory[i]!;
     if (isRealUserTurn(item)) {
       uiUserTurnCount++;
     }
   }
 
   // Determine the starting index in the API history (skip startup context)
-  const startIndex = hasStartupContext(apiHistory) ? 2 : 0;
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
 
   if (uiUserTurnCount === 0) {
     // Rewinding to the first user turn: keep only startup context (if any)

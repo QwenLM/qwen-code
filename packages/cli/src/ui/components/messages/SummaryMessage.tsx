@@ -44,7 +44,7 @@ export const SummaryMessage: React.FC<SummaryDisplayProps> = ({ summary }) => {
     if (summary.isPending) {
       return <Spinner type="dots" />;
     }
-    return <Text color={Colors.AccentGreen}>✅</Text>;
+    return <Text color={Colors.AccentGreen}>✓</Text>;
   };
 
   return (

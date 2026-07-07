@@ -5,12 +5,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as https from 'node:https';
-import * as http from 'node:http';
 import * as tar from 'tar';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { ExtensionUpdateState } from './extensionManager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { redactUrlCredentials } from './redaction.js';
+import { clientForUrl } from './http-client.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
 
@@ -47,7 +47,9 @@ export function parseNpmPackageSource(source: string): {
   // First @ is the scope prefix, last @ (after scope/) is the version delimiter
   const match = source.match(/^(@[^/]+\/[^@]+)(?:@(.+))?$/);
   if (!match) {
-    throw new Error(`Invalid scoped npm package source: ${source}`);
+    throw new Error(
+      `Invalid scoped npm package source: ${redactUrlCredentials(source)}`,
+    );
   }
   return {
     name: match[1],
@@ -176,9 +178,6 @@ function getNpmAuthToken(registryUrl: string): string | undefined {
   return undefined;
 }
 
-/**
- * Fetch JSON from a URL, handling both https and http.
- */
 function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -187,7 +186,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = url.startsWith('https://') ? https : http;
+  const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
     client
@@ -208,7 +207,7 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
         if (res.statusCode !== 200) {
           return reject(
             new Error(
-              `npm registry request failed with status ${res.statusCode}: ${url}`,
+              `npm registry request failed with status ${res.statusCode}: ${redactUrlCredentials(url)}`,
             ),
           );
         }
@@ -239,7 +238,7 @@ function downloadNpmFile(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const client = url.startsWith('https://') ? https : http;
+  const client = clientForUrl(url);
 
   return new Promise((resolve, reject) => {
     client
@@ -294,7 +293,9 @@ export async function downloadFromNpmRegistry(
   // Fetch package metadata
   const encodedName = name.replaceAll('/', '%2f');
   const metadataUrl = `${registryUrl}/${encodedName}`;
-  debugLogger.debug(`Fetching npm package metadata from ${metadataUrl}`);
+  debugLogger.debug(
+    `Fetching npm package metadata from ${redactUrlCredentials(metadataUrl)}`,
+  );
 
   const metadata = await fetchNpmJson<NpmPackageMetadata>(
     metadataUrl,
@@ -329,7 +330,7 @@ export async function downloadFromNpmRegistry(
 
   const tarballUrl = versionData.dist.tarball;
   debugLogger.debug(
-    `Downloading ${name}@${resolvedVersion} from ${tarballUrl}`,
+    `Downloading ${name}@${resolvedVersion} from ${redactUrlCredentials(tarballUrl)}`,
   );
 
   // Only send auth token if the tarball is hosted on the same registry host.
@@ -425,7 +426,7 @@ export async function checkNpmUpdate(
     return ExtensionUpdateState.UP_TO_DATE;
   } catch (error) {
     debugLogger.error(
-      `Failed to check npm update for "${installMetadata.source}": ${error}`,
+      `Failed to check npm update for "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(String(error))}`,
     );
     return ExtensionUpdateState.ERROR;
   }

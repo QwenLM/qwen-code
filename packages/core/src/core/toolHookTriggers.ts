@@ -18,11 +18,14 @@ import {
   type NotificationType,
   type PermissionRequestHookOutput,
   type PermissionSuggestion,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { ToolArtifact } from '../tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
+const POST_TOOL_BATCH_HOOK_TIMEOUT_MS = 15_000;
 
 /**
  * Generate a unique tool_use_id for tracking tool executions
@@ -63,6 +66,8 @@ export interface PostToolUseHookResult {
   stopReason?: string;
   /** Additional context to append to tool response */
   additionalContext?: string;
+  /** Structured artifacts returned by post-tool hooks. */
+  artifacts?: ToolArtifact[];
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
 }
@@ -73,6 +78,24 @@ export interface PostToolUseHookResult {
 export interface PostToolUseFailureHookResult {
   /** Additional context about the failure */
   additionalContext?: string;
+  /** Structured artifacts returned by failure hooks. */
+  artifacts?: ToolArtifact[];
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
+}
+
+/**
+ * Result of PostToolBatch hook execution
+ */
+export interface PostToolBatchHookResult {
+  /** Whether execution should stop before the next model request */
+  shouldStop: boolean;
+  /** Stop reason if applicable */
+  stopReason?: string;
+  /** Additional context to append once for the whole batch */
+  additionalContext?: string;
+  /** Structured artifacts returned by batch hooks. */
+  artifacts?: ToolArtifact[];
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
 }
@@ -83,8 +106,9 @@ export interface PostToolUseFailureHookResult {
  * @param messageBus - The message bus instance
  * @param toolName - Name of the tool being executed
  * @param toolInput - Input parameters for the tool
- * @param toolUseId - Unique identifier for this tool use
+ * @param toolUseId - Unique identifier for this tool use (internal format, e.g., toolu_xxx)
  * @param permissionMode - Current permission mode
+ * @param tool_call_id - Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
  * @returns PreToolUseHookResult indicating whether to proceed and any modifications
  */
 export async function firePreToolUseHook(
@@ -94,6 +118,7 @@ export async function firePreToolUseHook(
   toolUseId: string,
   permissionMode: string,
   signal?: AbortSignal,
+  tool_call_id?: string,
 ): Promise<PreToolUseHookResult> {
   if (!messageBus) {
     return { shouldProceed: true };
@@ -112,6 +137,7 @@ export async function firePreToolUseHook(
           tool_name: toolName,
           tool_input: toolInput,
           tool_use_id: toolUseId,
+          ...(tool_call_id && { tool_call_id }),
         },
         signal,
       },
@@ -200,8 +226,9 @@ export async function firePreToolUseHook(
  * @param toolName - Name of the tool that was executed
  * @param toolInput - Input parameters that were used
  * @param toolResponse - Response from the tool execution
- * @param toolUseId - Unique identifier for this tool use
+ * @param toolUseId - Unique identifier for this tool use (internal format, e.g., toolu_xxx)
  * @param permissionMode - Current permission mode
+ * @param tool_call_id - Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
  * @returns PostToolUseHookResult with any additional context
  */
 export async function firePostToolUseHook(
@@ -212,6 +239,7 @@ export async function firePostToolUseHook(
   toolUseId: string,
   permissionMode: string,
   signal?: AbortSignal,
+  tool_call_id?: string,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -231,6 +259,7 @@ export async function firePostToolUseHook(
           tool_input: toolInput,
           tool_response: toolResponse,
           tool_use_id: toolUseId,
+          ...(tool_call_id && { tool_call_id }),
         },
         signal,
       },
@@ -257,20 +286,23 @@ export async function firePostToolUseHook(
       response.output,
     ) as PostToolUseHookOutput;
 
+    const additionalContext = postToolOutput.getAdditionalContext();
+    const artifacts = postToolOutput.getArtifacts();
+
     // Check if execution should stop
     if (postToolOutput.shouldStopExecution()) {
       return {
         shouldStop: true,
         stopReason: postToolOutput.getEffectiveReason(),
+        ...(additionalContext !== undefined ? { additionalContext } : {}),
+        ...(artifacts.length > 0 ? { artifacts } : {}),
       };
     }
 
-    // Get additional context
-    const additionalContext = postToolOutput.getAdditionalContext();
-
     return {
       shouldStop: false,
-      additionalContext,
+      ...(additionalContext !== undefined ? { additionalContext } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     };
   } catch (error) {
     // Hook errors should not affect tool result
@@ -284,12 +316,13 @@ export async function firePostToolUseHook(
  * Fire PostToolUseFailure hook via MessageBus and process the result
  *
  * @param messageBus - The message bus instance
- * @param toolUseId - Unique identifier for this tool use
+ * @param toolUseId - Unique identifier for this tool use (internal format, e.g., toolu_xxx)
  * @param toolName - Name of the tool that failed
  * @param toolInput - Input parameters that were used
  * @param errorMessage - Error message describing the failure
  * @param errorType - Optional error type classification
  * @param isInterrupt - Whether the failure was caused by user interruption
+ * @param tool_call_id - Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
  * @returns PostToolUseFailureHookResult with any additional context
  */
 export async function firePostToolUseFailureHook(
@@ -301,6 +334,7 @@ export async function firePostToolUseFailureHook(
   isInterrupt?: boolean,
   permissionMode?: string,
   signal?: AbortSignal,
+  tool_call_id?: string,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -317,6 +351,7 @@ export async function firePostToolUseFailureHook(
         input: {
           permission_mode: permissionMode,
           tool_use_id: toolUseId,
+          ...(tool_call_id && { tool_call_id }),
           tool_name: toolName,
           tool_input: toolInput,
           error: errorMessage,
@@ -347,9 +382,11 @@ export async function firePostToolUseFailureHook(
       response.output,
     ) as PostToolUseFailureHookOutput;
     const additionalContext = failureOutput.getAdditionalContext();
+    const artifacts = failureOutput.getArtifacts();
 
     return {
-      additionalContext,
+      ...(additionalContext !== undefined ? { additionalContext } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     };
   } catch (error) {
     // Hook errors should not affect error handling
@@ -362,11 +399,74 @@ export async function firePostToolUseFailureHook(
 }
 
 /**
+ * Fire PostToolBatch hook via MessageBus and process the result
+ *
+ * @param messageBus - The message bus instance
+ * @param toolCalls - Resolved tool calls in the batch
+ * @returns PostToolBatchHookResult with stop/additional-context decisions
+ */
+export async function firePostToolBatchHook(
+  messageBus: MessageBus | undefined,
+  toolCalls: PostToolBatchToolCall[],
+  permissionMode = 'default',
+  signal?: AbortSignal,
+): Promise<PostToolBatchHookResult> {
+  if (!messageBus) {
+    return { shouldStop: false };
+  }
+
+  try {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'PostToolBatch',
+        input: {
+          permission_mode: permissionMode,
+          tool_calls: toolCalls,
+        },
+        signal,
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+      POST_TOOL_BATCH_HOOK_TIMEOUT_MS,
+      signal,
+    );
+
+    if (!response.success || !response.output) {
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      debugLogger.warn(`PostToolBatch hook returned failure: ${message}`);
+      return { shouldStop: false, hookError: message };
+    }
+
+    const batchOutput = createHookOutput('PostToolBatch', response.output);
+    const shouldStop = batchOutput.shouldStopExecution();
+    const artifacts = batchOutput.getArtifacts();
+
+    return {
+      shouldStop,
+      stopReason: shouldStop ? batchOutput.getEffectiveReason() : undefined,
+      additionalContext: batchOutput.getAdditionalContext(),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PostToolBatch hook error: ${message}`);
+    return { shouldStop: false, hookError: message };
+  }
+}
+
+/**
  * Result of Notification hook execution
  */
 export interface NotificationHookResult {
   /** Additional context from the hook */
   additionalContext?: string;
+  /** Terminal escape sequence requested by the hook */
+  terminalSequence?: string;
 }
 
 /**
@@ -410,11 +510,16 @@ export async function fireNotificationHook(
       'Notification',
       response.output,
     );
+    const result: NotificationHookResult = {};
     const additionalContext = notificationOutput.getAdditionalContext();
+    if (additionalContext !== undefined) {
+      result.additionalContext = additionalContext;
+    }
+    if (notificationOutput.terminalSequence !== undefined) {
+      result.terminalSequence = notificationOutput.terminalSequence;
+    }
 
-    return {
-      additionalContext,
-    };
+    return result;
   } catch (error) {
     // Notification hook errors should not affect the notification flow
     debugLogger.warn(

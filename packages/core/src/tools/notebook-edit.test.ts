@@ -136,6 +136,107 @@ describe('NotebookEditTool', () => {
     }
   });
 
+  it('blocks writing a secret into a team-memory notebook', async () => {
+    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
+    fs.mkdirSync(teamDir, { recursive: true });
+    const filePath = path.join(teamDir, 'analysis.ipynb');
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            {
+              cell_type: 'code',
+              id: 'load-data',
+              source: ['x = 1\n'],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+          ],
+          metadata: { language_info: { name: 'python' } },
+        },
+        null,
+        1,
+      ),
+      'utf-8',
+    );
+    seedNotebookRead(filePath);
+    const originalContent = fs.readFileSync(filePath, 'utf-8');
+
+    // Rejected at validate/build time (parity with edit/write-file), before any
+    // invocation is created — so the serialized notebook never reaches disk.
+    expect(() =>
+      buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'load-data',
+        new_source: `token = "ghp_${'a'.repeat(36)}"`,
+      }),
+    ).toThrow(/shared with all repository collaborators/i);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
+  });
+
+  it('blocks a secret in a sibling cell at execute time (full-notebook backstop)', async () => {
+    // A team-memory notebook that already carries a secret in one cell. Editing
+    // a DIFFERENT, clean cell passes the validate-time single-cell scan (its
+    // new_source has no secret), so only execute()'s scan of the whole
+    // serialized notebook — the backstop edit/write-file can't run on an
+    // .ipynb — catches it. Exercises the execute-time path, not the build-time one.
+    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
+    fs.mkdirSync(teamDir, { recursive: true });
+    const filePath = path.join(teamDir, 'analysis.ipynb');
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          nbformat: 4,
+          nbformat_minor: 5,
+          cells: [
+            {
+              cell_type: 'code',
+              id: 'creds',
+              source: [`token = "ghp_${'a'.repeat(36)}"`],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+            {
+              cell_type: 'code',
+              id: 'clean',
+              source: ['x = 1\n'],
+              execution_count: null,
+              outputs: [],
+              metadata: {},
+            },
+          ],
+          metadata: { language_info: { name: 'python' } },
+        },
+        null,
+        1,
+      ),
+      'utf-8',
+    );
+    seedNotebookRead(filePath);
+    const originalContent = fs.readFileSync(filePath, 'utf-8');
+
+    // new_source is clean, so build() succeeds; the rejection comes from
+    // execute()'s full-notebook scan, returned as an error result (not a throw).
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'clean',
+      new_source: 'x = 2\n',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    expect(result.llmContent).toMatch(
+      /shared with all repository collaborators/i,
+    );
+    // Blocked before any disk write — the notebook is untouched.
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
+  });
+
   it('replaces a code cell in a UTF-8 BOM notebook and preserves the BOM', async () => {
     const filePath = path.join(tempDir, 'bom-replace.ipynb');
     fs.writeFileSync(
@@ -494,6 +595,76 @@ describe('NotebookEditTool', () => {
     expect(result.llmContent).not.toContain('without offset or limit');
   });
 
+  it('rejects notebook directory targets with TARGET_IS_DIRECTORY', async () => {
+    const dirPath = path.join(tempDir, 'directory.ipynb');
+    fs.mkdirSync(dirPath);
+
+    const result = await buildInvocation({
+      notebook_path: dirPath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(result.llmContent).toContain('is a directory');
+  });
+
+  it('returns FILE_CHANGED_SINCE_READ when a notebook disappears after content read', async () => {
+    const filePath = writeNotebook('disappears-after-read.ipynb', {
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+    const realFileSystemService = new StandardFileSystemService();
+    const fileSystemService = new StandardFileSystemService();
+    vi.spyOn(fileSystemService, 'readTextFile').mockImplementation(
+      async (args) => {
+        const result = await realFileSystemService.readTextFile(args);
+        fs.unlinkSync(filePath);
+        return result;
+      },
+    );
+    vi.spyOn(config, 'getFileSystemService').mockReturnValue(fileSystemService);
+
+    const result = await buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortSignal);
+
+    expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+    expect(result.llmContent).toContain('disappeared after it was read');
+  });
+
+  it('returns PRIOR_READ_VERIFICATION_FAILED when notebook stat verification fails', async () => {
+    const filePath = writeNotebook('stat-fails.ipynb', {
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+    const statSpy = vi
+      .spyOn(fs.promises, 'stat')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+    let result: ToolResult | undefined;
+
+    try {
+      result = await buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+      }).execute(abortSignal);
+    } finally {
+      statSpy.mockRestore();
+    }
+
+    expect(result?.error?.type).toBe(
+      ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+    );
+    expect(result?.llmContent).toContain('Could not stat');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'rejects non-regular notebook paths with a dedicated error type',
     async () => {
@@ -635,6 +806,22 @@ describe('NotebookEditTool', () => {
         new_source: 'x = 1',
       }),
     ).toThrow(/ignored by \.qwenignore/);
+  });
+
+  it('rejects notebooks ignored by .agentignore during validation', () => {
+    fs.writeFileSync(path.join(tempDir, '.agentignore'), '*.ipynb\n', 'utf-8');
+    const filePath = writeNotebook('agent-ignored.ipynb', {
+      cells: [],
+      metadata: {},
+    });
+
+    expect(() =>
+      tool.build({
+        notebook_path: filePath,
+        edit_mode: 'insert',
+        new_source: 'x = 1',
+      }),
+    ).toThrow(/ignored by \.agentignore/);
   });
 
   it('returns a notebook diff for confirmation', async () => {

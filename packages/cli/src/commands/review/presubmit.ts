@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Pre-submission checks for /review Step 9. Runs three deterministic
+// Pre-submission checks for /review Step 7. Runs three deterministic
 // gh-API queries and emits a single JSON report describing self-PR status,
 // CI / build status, existing Qwen Code comment classification, and the
 // downgrade decisions the LLM should apply when constructing the review
@@ -47,6 +47,8 @@ interface CheckRun {
   name: string;
   status: string;
   conclusion: string | null;
+  details_url?: string;
+  html_url?: string;
 }
 
 interface CommitStatus {
@@ -63,6 +65,16 @@ const FAIL_CONCLUSIONS = new Set([
 const FAIL_STATUS_STATES = new Set(['failure', 'error']);
 const PENDING_STATES = new Set(['queued', 'in_progress', 'pending']);
 
+function isCurrentActionsRunCheck(run: CheckRun): boolean {
+  const runId = process.env['GITHUB_RUN_ID'];
+  if (!runId) return false;
+
+  const runUrlMarker = `/actions/runs/${runId}/`;
+  return [run.details_url, run.html_url].some(
+    (url) => typeof url === 'string' && url.includes(runUrlMarker),
+  );
+}
+
 interface PresubmitArgs {
   pr_number: string;
   commit_sha: string;
@@ -74,8 +86,11 @@ interface PresubmitArgs {
 function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   const failedCheckNames: string[] = [];
   let hasPending = false;
+  const relevantCheckRuns = checkRuns.filter(
+    (run) => !isCurrentActionsRunCheck(run),
+  );
 
-  for (const run of checkRuns) {
+  for (const run of relevantCheckRuns) {
     if (run.status === 'completed') {
       if (run.conclusion && FAIL_CONCLUSIONS.has(run.conclusion)) {
         failedCheckNames.push(run.name);
@@ -95,7 +110,7 @@ function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   let cls: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
   if (failedCheckNames.length > 0) {
     cls = 'any_failure';
-  } else if (checkRuns.length === 0 && statuses.length === 0) {
+  } else if (relevantCheckRuns.length === 0 && statuses.length === 0) {
     cls = 'no_checks';
   } else if (hasPending) {
     cls = 'all_pending';
@@ -106,7 +121,7 @@ function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   return {
     class: cls,
     failedCheckNames,
-    totalChecks: checkRuns.length + statuses.length,
+    totalChecks: relevantCheckRuns.length + statuses.length,
   };
 }
 
@@ -257,7 +272,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
 export const presubmitCommand: CommandModule = {
   command: 'presubmit <pr_number> <commit_sha> <owner_repo> <out_path>',
   describe:
-    'Pre-submission checks for /review Step 9 (self-PR detection, CI status, existing-comments classification)',
+    'Pre-submission checks for /review Step 7 (self-PR detection, CI status, existing-comments classification)',
   builder: (yargs) =>
     yargs
       .positional('pr_number', {

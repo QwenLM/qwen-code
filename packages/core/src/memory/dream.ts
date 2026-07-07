@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getAutoMemoryMetadataPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
@@ -27,11 +28,13 @@ async function runDreamByAgent(
   projectRoot: string,
   config: Config,
   abortSignal?: AbortSignal,
+  options: { suppressChatRecording?: boolean } = {},
 ): Promise<AutoMemoryDreamResult> {
   const result = await planManagedAutoMemoryDreamByAgent(
     config,
     projectRoot,
     abortSignal,
+    { suppressChatRecording: options.suppressChatRecording },
   );
 
   // Infer which topics were touched from the file paths
@@ -61,6 +64,11 @@ export async function runManagedAutoMemoryDream(
   now = new Date(),
   config?: Config,
   abortSignal?: AbortSignal,
+  options: {
+    trigger?: 'auto' | 'manual';
+    recordMetadata?: boolean;
+    suppressChatRecording?: boolean;
+  } = {},
 ): Promise<AutoMemoryDreamResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
   const t0 = Date.now();
@@ -71,7 +79,9 @@ export async function runManagedAutoMemoryDream(
     );
   }
 
-  const agentResult = await runDreamByAgent(projectRoot, config, abortSignal);
+  const agentResult = await runDreamByAgent(projectRoot, config, abortSignal, {
+    suppressChatRecording: options.suppressChatRecording,
+  });
   // Cancel-aware ordering:
   //   1. If aborted before this point, return the agent's partial result
   //      WITHOUT rebuilding the index — index rebuild can be expensive
@@ -90,11 +100,18 @@ export async function runManagedAutoMemoryDream(
   if (agentResult.touchedTopics.length > 0) {
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
+  if (options.recordMetadata) {
+    await updateDreamMetadataResult(
+      projectRoot,
+      now,
+      agentResult.touchedTopics,
+    );
+  }
 
   logMemoryDream(
     config,
     new MemoryDreamEvent({
-      trigger: 'auto',
+      trigger: options.trigger ?? 'auto',
       status: agentResult.touchedTopics.length > 0 ? 'updated' : 'noop',
       deduped_entries: agentResult.dedupedEntries,
       touched_topics: agentResult.touchedTopics,
@@ -122,10 +139,10 @@ async function updateDreamMetadataResult(
       metadata.lastDreamSessionId = sessionId;
       metadata.recentSessionIdsSinceDream = [];
     }
-    await fs.writeFile(
+    await atomicWriteFile(
       metadataPath,
       `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
+      { encoding: 'utf-8' },
     );
   } catch {
     // Best-effort metadata bump.

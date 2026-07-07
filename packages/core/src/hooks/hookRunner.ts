@@ -5,13 +5,14 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName, HookType } from './types.js';
+import { createHookOutput, HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
   PreToolUseInput,
+  UserPromptExpansionInput,
   UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
@@ -29,6 +30,7 @@ import { FunctionHookRunner } from './functionHookRunner.js';
 import { PromptHookRunner } from './promptHookRunner.js';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -485,15 +487,28 @@ export class HookRunner {
     if (hookOutput.hookSpecificOutput) {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
-          if ('additionalContext' in hookOutput.hookSpecificOutput) {
-            // For UserPromptSubmit, we could modify the prompt with additional context
+          {
             const additionalContext =
               hookOutput.hookSpecificOutput['additionalContext'];
             if (
               typeof additionalContext === 'string' &&
+              additionalContext &&
               'prompt' in modifiedInput
             ) {
               (modifiedInput as UserPromptSubmitInput).prompt +=
+                '\n\n' + additionalContext;
+            }
+          }
+          break;
+
+        case HookEventName.UserPromptExpansion:
+          {
+            const additionalContext = createHookOutput(
+              eventName,
+              hookOutput,
+            ).getAdditionalContext();
+            if (additionalContext && 'prompt' in modifiedInput) {
+              (modifiedInput as UserPromptExpansionInput).prompt +=
                 '\n\n' + additionalContext;
             }
           }
@@ -573,6 +588,7 @@ export class HookRunner {
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
+        ...getShellContextEnvVars(),
         ...hookConfig.env,
       };
 
@@ -614,7 +630,7 @@ export class HookRunner {
       };
 
       if (signal) {
-        signal.addEventListener('abort', abortHandler);
+        signal.addEventListener('abort', abortHandler, { once: true });
       }
 
       // Send input to stdin

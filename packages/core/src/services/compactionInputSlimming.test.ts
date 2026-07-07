@@ -8,20 +8,33 @@ import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  DEFAULT_MAX_RECENT_FILES,
+  DEFAULT_MAX_RECENT_IMAGES,
+  DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
+  DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
   estimateContentChars,
   estimatePartChars,
+  resolveCompactionTuning,
   resolveSlimmingConfig,
   sanitizeMimeForPlaceholder,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 
+const COMPACTION_ENV_KEYS = [
+  'QWEN_IMAGE_TOKEN_ESTIMATE',
+  'QWEN_COMPACT_MAX_RECENT_FILES',
+  'QWEN_COMPACT_MAX_RECENT_IMAGES',
+  'QWEN_COMPACT_SCREENSHOT_TRIGGER',
+  'QWEN_COMPACT_SCREENSHOT_THRESHOLD',
+];
+
 describe('compactionInputSlimming', () => {
   beforeEach(() => {
-    delete process.env['QWEN_IMAGE_TOKEN_ESTIMATE'];
+    for (const k of COMPACTION_ENV_KEYS) delete process.env[k];
   });
 
   afterEach(() => {
-    delete process.env['QWEN_IMAGE_TOKEN_ESTIMATE'];
+    for (const k of COMPACTION_ENV_KEYS) delete process.env[k];
   });
 
   describe('resolveSlimmingConfig', () => {
@@ -55,6 +68,152 @@ describe('compactionInputSlimming', () => {
       const cfg = resolveSlimmingConfig(undefined);
       // Falls through to default.
       expect(cfg.imageTokenEstimate).toBe(DEFAULT_IMAGE_TOKEN_ESTIMATE);
+    });
+  });
+
+  describe('resolveCompactionTuning', () => {
+    it('returns defaults when nothing is set', () => {
+      const t = resolveCompactionTuning(undefined);
+      expect(t.maxRecentFiles).toBe(DEFAULT_MAX_RECENT_FILES);
+      expect(t.maxRecentImages).toBe(DEFAULT_MAX_RECENT_IMAGES);
+      expect(t.enableScreenshotTrigger).toBe(
+        DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
+      );
+      expect(t.screenshotTriggerThreshold).toBe(
+        DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+      );
+    });
+
+    it('honors settings when env is unset', () => {
+      const t = resolveCompactionTuning({
+        maxRecentFilesToRetain: 2,
+        maxRecentImagesToRetain: 1,
+        enableScreenshotTrigger: false,
+        screenshotTriggerThreshold: 12,
+      });
+      expect(t.maxRecentFiles).toBe(2);
+      expect(t.maxRecentImages).toBe(1);
+      expect(t.enableScreenshotTrigger).toBe(false);
+      expect(t.screenshotTriggerThreshold).toBe(12);
+    });
+
+    it('accepts 0 for the retention caps (restore none)', () => {
+      const t = resolveCompactionTuning({
+        maxRecentFilesToRetain: 0,
+        maxRecentImagesToRetain: 0,
+      });
+      expect(t.maxRecentFiles).toBe(0);
+      expect(t.maxRecentImages).toBe(0);
+    });
+
+    it('env overrides settings for every knob', () => {
+      process.env['QWEN_COMPACT_MAX_RECENT_FILES'] = '7';
+      process.env['QWEN_COMPACT_MAX_RECENT_IMAGES'] = '9';
+      process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = '0';
+      process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'] = '99';
+      const t = resolveCompactionTuning({
+        maxRecentFilesToRetain: 1,
+        maxRecentImagesToRetain: 1,
+        enableScreenshotTrigger: true,
+        screenshotTriggerThreshold: 5,
+      });
+      expect(t.maxRecentFiles).toBe(7);
+      expect(t.maxRecentImages).toBe(9);
+      expect(t.enableScreenshotTrigger).toBe(false);
+      expect(t.screenshotTriggerThreshold).toBe(99);
+    });
+
+    it('rejects fractional count-like env values', () => {
+      const cases = [
+        {
+          envKey: 'QWEN_COMPACT_MAX_RECENT_FILES',
+          value: '1.5',
+          settings: { maxRecentFilesToRetain: 4 },
+          get: (t: ReturnType<typeof resolveCompactionTuning>) =>
+            t.maxRecentFiles,
+          expected: 4,
+        },
+        {
+          envKey: 'QWEN_COMPACT_MAX_RECENT_IMAGES',
+          value: '2.5',
+          settings: { maxRecentImagesToRetain: 5 },
+          get: (t: ReturnType<typeof resolveCompactionTuning>) =>
+            t.maxRecentImages,
+          expected: 5,
+        },
+        {
+          envKey: 'QWEN_COMPACT_SCREENSHOT_THRESHOLD',
+          value: '9007199254740990.5',
+          settings: { screenshotTriggerThreshold: 6 },
+          get: (t: ReturnType<typeof resolveCompactionTuning>) =>
+            t.screenshotTriggerThreshold,
+          expected: 6,
+        },
+      ] as const;
+
+      for (const c of cases) {
+        for (const k of COMPACTION_ENV_KEYS) delete process.env[k];
+        process.env[c.envKey] = c.value;
+        expect(c.get(resolveCompactionTuning(c.settings))).toBe(c.expected);
+      }
+    });
+
+    it('rejects fractional count-like settings values', () => {
+      const t = resolveCompactionTuning({
+        maxRecentFilesToRetain: 1.5,
+        maxRecentImagesToRetain: 2.5,
+        screenshotTriggerThreshold: 3.5,
+      });
+      expect(t.maxRecentFiles).toBe(DEFAULT_MAX_RECENT_FILES);
+      expect(t.maxRecentImages).toBe(DEFAULT_MAX_RECENT_IMAGES);
+      expect(t.screenshotTriggerThreshold).toBe(
+        DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+      );
+    });
+
+    it('rejects unsafe integer count-like values', () => {
+      process.env['QWEN_COMPACT_MAX_RECENT_FILES'] = String(
+        Number.MAX_SAFE_INTEGER + 1,
+      );
+      const envFallback = resolveCompactionTuning({
+        maxRecentFilesToRetain: 4,
+      });
+      expect(envFallback.maxRecentFiles).toBe(4);
+
+      const settingsFallback = resolveCompactionTuning({
+        maxRecentImagesToRetain: Number.MAX_SAFE_INTEGER + 1,
+      });
+      expect(settingsFallback.maxRecentImages).toBe(DEFAULT_MAX_RECENT_IMAGES);
+    });
+
+    it('parses the boolean env both ways and ignores typos', () => {
+      process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = 'false';
+      expect(resolveCompactionTuning(undefined).enableScreenshotTrigger).toBe(
+        false,
+      );
+      process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = '1';
+      expect(resolveCompactionTuning(undefined).enableScreenshotTrigger).toBe(
+        true,
+      );
+      // Unrecognized env string falls through to the settings value.
+      process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = 'yes-please';
+      expect(
+        resolveCompactionTuning({ enableScreenshotTrigger: false })
+          .enableScreenshotTrigger,
+      ).toBe(false);
+    });
+
+    it('falls through invalid numeric env to settings, then defaults', () => {
+      process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'] = 'not-a-number';
+      expect(
+        resolveCompactionTuning({ screenshotTriggerThreshold: 33 })
+          .screenshotTriggerThreshold,
+      ).toBe(33);
+      // Threshold has a min of 1, so 0 is rejected → default.
+      process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'] = '0';
+      expect(
+        resolveCompactionTuning(undefined).screenshotTriggerThreshold,
+      ).toBe(DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD);
     });
   });
 

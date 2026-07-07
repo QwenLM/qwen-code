@@ -241,6 +241,7 @@ async function runSpeculativeLoop(
           if (part.functionCall && part.functionCall.name) {
             modelParts.push({
               functionCall: {
+                ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
                 name: part.functionCall.name,
                 args: part.functionCall.args,
               },
@@ -273,6 +274,7 @@ async function runSpeculativeLoop(
       for (const part of functionCalls) {
         const fc = part.functionCall;
         const name = fc.name ?? '';
+        const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
         const gate = await evaluateToolCall(
           name,
@@ -304,6 +306,7 @@ async function runSpeculativeLoop(
           if (!tool) {
             functionResponses.push({
               functionResponse: {
+                ...(id ? { id } : {}),
                 name,
                 response: { error: `Tool '${name}' not found` },
               },
@@ -322,11 +325,16 @@ async function runSpeculativeLoop(
               ? { output: result.llmContent }
               : { output: JSON.stringify(result.llmContent) };
           functionResponses.push({
-            functionResponse: { name, response: responseContent },
+            functionResponse: {
+              ...(id ? { id } : {}),
+              name,
+              response: responseContent,
+            },
           });
         } catch (error: unknown) {
           functionResponses.push({
             functionResponse: {
+              ...(id ? { id } : {}),
               name,
               response: {
                 error:
@@ -546,6 +554,7 @@ ${SUGGESTION_PROMPT}`;
     const cacheSafeParams = getCacheSafeParams();
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
+    const resolvedModel = model ?? cacheSafeParams.model;
     const result = await runForkedAgent({
       config,
       userMessage: augmentedPrompt,
@@ -553,6 +562,7 @@ ${SUGGESTION_PROMPT}`;
       jsonSchema: PIPELINED_SCHEMA,
       ...(model !== undefined ? { model } : {}),
       abortSignal,
+      preserveTools: resolvedModel === cacheSafeParams.model,
     });
 
     if (abortSignal.aborted) return null;

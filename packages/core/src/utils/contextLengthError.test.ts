@@ -116,4 +116,45 @@ describe('contextLengthError', () => {
 
     expect(info.isExceeded).toBe(false);
   });
+
+  it('skips accessor properties that throw while collecting error text', () => {
+    const error = new Error('Connection error.');
+
+    Object.defineProperty(error, 'name', {
+      enumerable: true,
+      get() {
+        throw new TypeError('Value of "this" must be of DOMException');
+      },
+    });
+    Object.defineProperty(error, 'details', {
+      enumerable: true,
+      get() {
+        throw new TypeError('Value of "this" must be of DOMException');
+      },
+    });
+
+    const info = getContextLengthExceededInfo(error);
+
+    expect(info.isExceeded).toBe(false);
+    expect(info.message).toContain('Connection error.');
+  });
+
+  it('skips throwing accessors on plain objects', () => {
+    const errorLike: Record<string, unknown> = {};
+    Object.defineProperty(errorLike, 'detail', {
+      enumerable: true,
+      get() {
+        throw new TypeError('accessor refused');
+      },
+    });
+    Object.defineProperty(errorLike, 'message', {
+      enumerable: true,
+      value: 'context_length_exceeded: too many tokens',
+    });
+
+    const info = getContextLengthExceededInfo(errorLike);
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.message).toContain('context_length_exceeded');
+  });
 });

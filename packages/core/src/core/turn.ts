@@ -6,6 +6,7 @@
 
 import {
   FinishReason,
+  type Content,
   type Part,
   type PartListUnion,
   type GenerateContentResponse,
@@ -15,10 +16,11 @@ import {
 } from '@google/genai';
 import type {
   ToolCallConfirmationDetails,
+  ToolArtifact,
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
-import type { ToolErrorType } from '../tools/tool-error.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
@@ -29,12 +31,15 @@ import {
 import type { GeminiChat } from './geminiChat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
 import {
-  getThoughtText,
-  parseThought,
+  getThoughtSummary,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import { getProviderToolCallId } from './toolCallIdUtils.js';
+
+const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
+const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -66,6 +71,9 @@ export enum GeminiEventType {
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   ActiveGoal = 'active_goal',
+  /** The system switched to a fallback model after the primary (or prior
+   *  fallback) exhausted retries on a capacity/availability error. */
+  ModelFallback = 'model_fallback',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -74,6 +82,18 @@ export type ServerGeminiRetryEvent = {
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+};
+
+export type ServerGeminiModelFallbackEvent = {
+  type: GeminiEventType.ModelFallback;
+  /** The model that exhausted its retry budget. */
+  fromModel: string;
+  /** The model the system is switching to. */
+  toModel: string;
+  /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
+  statusCode?: number;
+  /** 1-based index of the fallback in the configured chain. */
+  fallbackIndex: number;
 };
 
 export interface StructuredError {
@@ -98,6 +118,11 @@ export interface GeminiFinishedEventValue {
 
 export interface ToolCallRequestInfo {
   callId: string;
+  /**
+   * Original tool-call id emitted by the provider/model. When present, this is
+   * the idempotency key for suppressing duplicate provider tool calls.
+   */
+  providerCallId?: string;
   name: string;
   args: Record<string, unknown>;
   isClientInitiated: boolean;
@@ -115,6 +140,126 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+  artifacts?: ToolArtifact[];
+}
+
+function normalizeRequestParts(req: PartListUnion): Part[] {
+  const parts = Array.isArray(req) ? req : [req];
+  return parts.map((part) =>
+    typeof part === 'string' ? { text: part } : (part as Part),
+  );
+}
+
+function summarizeParts(parts: Part[]): {
+  partCount: number;
+  functionCalls: string[];
+  functionResponses: string[];
+  textPreview: string;
+} {
+  return {
+    partCount: parts.length,
+    functionCalls: parts
+      .map((part) => part.functionCall?.name)
+      .filter((name): name is string => typeof name === 'string'),
+    functionResponses: parts
+      .map((part) => part.functionResponse?.name)
+      .filter((name): name is string => typeof name === 'string'),
+    textPreview: (() => {
+      let textPreview = '';
+      for (const part of parts) {
+        if (typeof part.text !== 'string' || part.thought) continue;
+        const remaining = ERROR_REPORT_TEXT_PREVIEW_CHARS - textPreview.length;
+        if (remaining <= 0) break;
+        textPreview += part.text.slice(0, remaining);
+      }
+      return textPreview;
+    })(),
+  };
+}
+
+function summarizeHistoryEntry(content: Content) {
+  return {
+    role: content.role,
+    ...summarizeParts(content.parts ?? []),
+  };
+}
+
+function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
+  const requestParts = normalizeRequestParts(req);
+  return {
+    history: {
+      rawLength: chat.getHistoryLength(),
+      tail: chat
+        .getHistoryTailShallow(
+          ERROR_REPORT_HISTORY_TAIL_COUNT,
+          /* curated */ true,
+        )
+        .map(summarizeHistoryEntry),
+    },
+    request: summarizeParts(requestParts),
+  };
+}
+
+function duplicateProviderToolCallMessage(providerCallId: string): string {
+  return `Duplicate provider tool call id "${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
+}
+
+export function createDuplicateProviderToolCallResponse(
+  request: ToolCallRequestInfo,
+): ToolCallResponseInfo {
+  const providerCallId = request.providerCallId ?? request.callId;
+  const message = duplicateProviderToolCallMessage(providerCallId);
+  return {
+    callId: request.callId,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: request.name,
+          response: { error: message },
+        },
+      },
+    ],
+    resultDisplay: message,
+    error: new Error(message),
+    errorType: ToolErrorType.EXECUTION_FAILED,
+  };
+}
+
+export function markDuplicateProviderToolCallResponseSent(
+  providerCallId: string,
+  duplicateProviderToolCallResponseIds: Set<string>,
+): void {
+  duplicateProviderToolCallResponseIds.add(providerCallId);
+}
+
+export function findRepeatedDuplicateProviderToolCall<T>(
+  items: readonly T[],
+  getProviderCallId: (item: T) => string | undefined,
+  handledProviderToolCallIds: ReadonlySet<string>,
+  duplicateProviderToolCallResponseIds: ReadonlySet<string>,
+): T | undefined {
+  const repeatedProviderIds = new Map<string, number>();
+  for (const item of items) {
+    const providerCallId = getProviderCallId(item);
+    if (!providerCallId || !handledProviderToolCallIds.has(providerCallId)) {
+      continue;
+    }
+    repeatedProviderIds.set(
+      providerCallId,
+      (repeatedProviderIds.get(providerCallId) ?? 0) + 1,
+    );
+  }
+
+  return items.find((item) => {
+    const providerCallId = getProviderCallId(item);
+    return (
+      providerCallId !== undefined &&
+      handledProviderToolCallIds.has(providerCallId) &&
+      (duplicateProviderToolCallResponseIds.has(providerCallId) ||
+        (repeatedProviderIds.get(providerCallId) ?? 0) > 1)
+    );
+  });
 }
 
 export interface ServerToolCallConfirmationDetails {
@@ -171,12 +316,36 @@ export enum CompressionStatus {
 
   /** The compression was not necessary and no action was taken */
   NOOP,
+
+  /**
+   * The compression call produced a summary, but the output hit
+   * COMPACT_MAX_OUTPUT_TOKENS, indicating likely truncation. The summary
+   * is dropped (newHistory=null) and the attempt is treated as a failure:
+   * `isCompressionFailureStatus` returns true so it counts toward the
+   * per-chat circuit breaker. Kept distinct from
+   * `COMPRESSION_FAILED_EMPTY_SUMMARY` so telemetry can separate
+   * prompt-quality failures (empty / nonsensical summary) from capacity
+   * failures (output cap hit, may need a higher cap or finer-grained
+   * splitter). (R5.2)
+   */
+  COMPRESSION_FAILED_OUTPUT_TRUNCATED,
 }
+
+/**
+ * Why an auto-compaction fired. Drives the user-facing notice so a
+ * screenshot-overflow trigger isn't mislabeled as "approached the token
+ * limit". Undefined on NOOP / failure paths and for callers that don't set it.
+ */
+export type CompactionTriggerReason =
+  | 'token_limit'
+  | 'image_overflow'
+  | 'manual';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
   compressionStatus: CompressionStatus;
+  triggerReason?: CompactionTriggerReason;
 }
 
 export type ServerGeminiChatCompressedEvent = {
@@ -253,6 +422,7 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiStopHookLoopEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
+  | ServerGeminiModelFallbackEvent
   | ServerGeminiThoughtEvent
   | ServerGeminiToolCallConfirmationEvent
   | ServerGeminiToolCallRequestEvent
@@ -264,7 +434,6 @@ export type ServerGeminiStreamEvent =
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
-  private debugResponses: GenerateContentResponse[] = [];
   private pendingCitations = new Set<string>();
   finishReason: FinishReason | undefined = undefined;
   private currentResponseId?: string;
@@ -304,7 +473,6 @@ export class Turn {
         if (streamEvent.type === 'retry') {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
-          this.debugResponses = [];
           this.finishReason = undefined;
           yield {
             type: GeminiEventType.Retry,
@@ -312,6 +480,25 @@ export class Turn {
             isContinuation: streamEvent.isContinuation,
           };
           continue; // Skip to the next event in the stream
+        }
+
+        // Surface model fallback transitions from the chat stream as the
+        // top-level ModelFallback event. The UI uses this to notify the user
+        // that the system switched to a different model due to capacity issues.
+        if (streamEvent.type === 'model_fallback') {
+          // Clear accumulated state from the failed model's partial response
+          this.pendingToolCalls.length = 0;
+          this.pendingCitations.clear();
+          this.finishReason = undefined;
+          this.currentResponseId = undefined;
+          yield {
+            type: GeminiEventType.ModelFallback,
+            fromModel: streamEvent.info.fromModel,
+            toModel: streamEvent.info.toModel,
+            statusCode: streamEvent.info.statusCode,
+            fallbackIndex: streamEvent.info.fallbackIndex,
+          };
+          continue;
         }
 
         // Surface auto-compaction that fired inside chat.sendMessageStream
@@ -331,18 +518,16 @@ export class Turn {
         const resp = streamEvent.value as GenerateContentResponse;
         if (!resp) continue; // Skip if there's no response body
 
-        this.debugResponses.push(resp);
-
         // Track the current response ID for tool call correlation
         if (resp.responseId) {
           this.currentResponseId = resp.responseId;
         }
 
-        const thoughtText = getThoughtText(resp);
-        if (thoughtText) {
+        const thoughtSummary = getThoughtSummary(resp);
+        if (thoughtSummary) {
           yield {
             type: GeminiEventType.Thought,
-            value: parseThought(thoughtText),
+            value: thoughtSummary,
           };
         }
 
@@ -407,12 +592,27 @@ export class Turn {
         throw error;
       }
 
-      const contextForReport = [...this.chat.getHistory(/*curated*/ true), req];
+      let contextForReport: Record<string, unknown>;
+      try {
+        contextForReport = buildApiErrorReportContext(this.chat, req);
+      } catch (diagError) {
+        contextForReport = {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause:
+              diagError instanceof Error
+                ? { message: diagError.message, stack: diagError.stack }
+                : String(diagError),
+          },
+          request: summarizeParts(normalizeRequestParts(req)),
+        };
+      }
       await reportError(
         error,
         'Error when talking to API',
         contextForReport,
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
       const status =
         typeof error === 'object' &&
@@ -437,11 +637,13 @@ export class Turn {
     const callId =
       fnCall.id ??
       `${fnCall.name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const providerCallId = getProviderToolCallId(fnCall) ?? fnCall.id;
     const name = fnCall.name || 'undefined_tool_name';
     const args = (fnCall.args || {}) as Record<string, unknown>;
 
     const toolCallRequest: ToolCallRequestInfo = {
       callId,
+      ...(providerCallId ? { providerCallId } : {}),
       name,
       args,
       isClientInitiated: false,
@@ -453,10 +655,6 @@ export class Turn {
 
     // Yield a request for the tool call, not the pending/confirming status
     return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };
-  }
-
-  getDebugResponses(): GenerateContentResponse[] {
-    return this.debugResponses;
   }
 }
 

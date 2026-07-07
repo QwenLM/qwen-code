@@ -7,23 +7,25 @@
  *
  * Protects users from infinite loops when the classifier persistently blocks
  * (LLM stuck in a dead-end) or persistently fails (infrastructure problem).
- * After the consecutive thresholds are exceeded the orchestrator falls back
- * to DEFAULT-mode confirmation flow for the next tool call. The session
- * itself stays in AUTO; only the single offending call is downgraded.
+ * After either the consecutive thresholds or the total denial cap are
+ * exceeded, the orchestrator falls back to DEFAULT-mode confirmation flow
+ * for the next tool call. The session itself stays in AUTO; only the single
+ * offending call is downgraded.
  *
  * Block and unavailable counters cross-reset: they represent different
  * failure modes and should not accumulate together. Switching ApprovalMode
  * resets all counters.
  *
- * `total*` counters are telemetry-only — they do NOT trigger fallback.
- * A long session naturally accumulates blocks; forcing manual approval after
- * an absolute total would harm UX.
+ * `total*` counters are cumulative for the session and trigger a total
+ * denial cap even when the model avoids consecutive-cap thresholds by
+ * alternating blocks, unavailable verdicts, and allowed calls.
  */
 
 /** Reasons the orchestrator may choose to fall back to manual approval. */
 export type DenialFallbackReason =
   | 'consecutive_block'
-  | 'consecutive_unavailable';
+  | 'consecutive_unavailable'
+  | 'total_denial';
 
 export interface AutoModeDenialState {
   consecutiveBlock: number;
@@ -35,7 +37,15 @@ export interface AutoModeDenialState {
 export const AUTO_MODE_DENIAL_LIMITS = {
   maxConsecutiveBlock: 3,
   maxConsecutiveUnavailable: 2,
+  maxTotalDenials: 20,
 } as const;
+
+function hasReachedTotalCap(state: AutoModeDenialState): boolean {
+  return (
+    state.totalBlock + state.totalUnavailable >=
+    AUTO_MODE_DENIAL_LIMITS.maxTotalDenials
+  );
+}
 
 /** Freshly-initialised state with all counters zero. */
 export function createDenialState(): AutoModeDenialState {
@@ -45,6 +55,27 @@ export function createDenialState(): AutoModeDenialState {
     totalBlock: 0,
     totalUnavailable: 0,
   };
+}
+
+/** Format denial counters for AUTO-mode debug logs. */
+export function formatDenialStateLog(state: AutoModeDenialState): string {
+  return (
+    `consecutiveBlock=${state.consecutiveBlock}, ` +
+    `consecutiveUnavailable=${state.consecutiveUnavailable}, ` +
+    `totalBlock=${state.totalBlock}, ` +
+    `totalUnavailable=${state.totalUnavailable}`
+  );
+}
+
+/** True when a fallback reason came from denial tracking. */
+export function isDenialFallbackReason(
+  reason: string,
+): reason is DenialFallbackReason {
+  return (
+    reason === 'consecutive_block' ||
+    reason === 'consecutive_unavailable' ||
+    reason === 'total_denial'
+  );
 }
 
 /** Record a successful (allow) decision. Resets both consecutive counters. */
@@ -91,11 +122,15 @@ export function recordUnavailable(
 /**
  * Decide whether the next tool call should bypass the classifier and fall
  * back to DEFAULT-mode confirmation. The fallback applies to a single call
- * only; the session remains in AUTO.
+ * only; the session remains in AUTO. The total denial cap takes precedence
+ * over consecutive caps so alternating denial modes cannot avoid fallback.
  */
 export function shouldFallback(
   state: AutoModeDenialState,
 ): { fallback: true; reason: DenialFallbackReason } | { fallback: false } {
+  if (hasReachedTotalCap(state)) {
+    return { fallback: true, reason: 'total_denial' };
+  }
   if (state.consecutiveBlock >= AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock) {
     return { fallback: true, reason: 'consecutive_block' };
   }
@@ -111,6 +146,8 @@ export function shouldFallback(
 /**
  * Called after the user manually approves a fallback-prompted tool call.
  * Resets BOTH consecutive counters so the agent can resume normal AUTO flow.
+ * If the total denial cap was reached, also clears total counters so the
+ * session does not stay permanently pinned to manual prompts.
  *
  * Symmetric with `recordAllow`: a manual approval signals the user accepted
  * the action, and the next call should re-engage the classifier. If the
@@ -126,6 +163,9 @@ export function shouldFallback(
 export function recordFallbackApprove(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
+  if (hasReachedTotalCap(state)) {
+    return createDenialState();
+  }
   if (state.consecutiveBlock === 0 && state.consecutiveUnavailable === 0) {
     return state;
   }

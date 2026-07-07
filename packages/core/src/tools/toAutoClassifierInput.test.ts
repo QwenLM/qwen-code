@@ -168,6 +168,18 @@ describe('SkillTool.toAutoClassifierInput', () => {
     ).call({}, { skill: 'my-skill' });
     expect(result).toEqual({ skill: 'my-skill' });
   });
+
+  it('forwards model-invocable command args when present', () => {
+    const result = (
+      SkillTool.prototype.toAutoClassifierInput as (
+        p: unknown,
+      ) => Record<string, unknown>
+    ).call({}, { skill: 'my-skill', args: 'dangerous input' });
+    expect(result).toEqual({
+      skill: 'my-skill',
+      args: 'dangerous input',
+    });
+  });
 });
 
 // AgentTool ──────────────────────────────────────────────────────────────

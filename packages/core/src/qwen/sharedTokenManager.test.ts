@@ -15,6 +15,7 @@ import {
   TokenManagerError,
   TokenError,
 } from './sharedTokenManager.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import type {
   IQwenOAuth2Client,
   QwenCredentials,
@@ -33,6 +34,10 @@ vi.mock('node:fs', () => ({
     rename: vi.fn(),
   },
   unlinkSync: vi.fn(),
+}));
+
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('node:os', () => ({
@@ -254,10 +259,10 @@ describe('SharedTokenManager', () => {
         .fn()
         .mockResolvedValue(refreshResponse);
 
-      // Mock file operations
+      // Mock file operations (writeFile still needed for the wx lock path;
+      // credential save now routes through the mocked atomicWriteFile).
       mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
       mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
       mockFs.mkdir.mockResolvedValue(undefined);
 
       const result = await tokenManager.getValidCredentials(mockClient);
@@ -265,6 +270,40 @@ describe('SharedTokenManager', () => {
       expect(result.access_token).toBe(refreshResponse.access_token);
       expect(mockClient.refreshAccessToken).toHaveBeenCalled();
       expect(mockClient.setCredentials).toHaveBeenCalled();
+    });
+
+    it('wraps atomicWriteFile failure in TokenManagerError(FILE_ACCESS_ERROR)', async () => {
+      // PR #4333 review fold-in: the catch block in saveCredentialsToFile
+      // that maps disk-full / permission-denied to TokenManagerError was
+      // never exercised — atomicWriteFile is mocked as always-successful.
+      // Verify the error path so a regression that swallowed the failure
+      // (or skipped the cache-mtime update on failure) would be caught.
+      const mockClient = createMockQwenClient(createExpiredCredentials());
+      const refreshResponse = createSuccessfulRefreshResponse();
+      mockClient.refreshAccessToken = vi
+        .fn()
+        .mockResolvedValue(refreshResponse);
+
+      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
+      mockFs.writeFile.mockResolvedValue(undefined); // wx lock path still needed
+      mockFs.mkdir.mockResolvedValue(undefined);
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(
+        Object.assign(new Error('ENOSPC: no space left on device'), {
+          code: 'ENOSPC',
+        }),
+      );
+
+      let caught: unknown;
+      try {
+        await tokenManager.getValidCredentials(mockClient);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(TokenManagerError);
+      expect((caught as TokenManagerError).type).toBe(
+        TokenError.FILE_ACCESS_ERROR,
+      );
+      expect((caught as Error).message).toContain('ENOSPC');
     });
 
     it('should force refresh when forceRefresh is true', async () => {
@@ -278,7 +317,6 @@ describe('SharedTokenManager', () => {
       // Mock file operations
       mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
       mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
       mockFs.mkdir.mockResolvedValue(undefined);
 
       const result = await tokenManager.getValidCredentials(mockClient, true);
@@ -448,9 +486,9 @@ describe('SharedTokenManager', () => {
 
       mockClient.refreshAccessToken = vi.fn().mockReturnValue(refreshPromise);
 
-      // Mock file operations for lock and save
+      // Mock file operations for lock and save (credential save now goes
+      // through atomicWriteFile mock; writeFile mock kept for the wx lock).
       mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
       mockFs.mkdir.mockResolvedValue(undefined);
 
       // Start refresh

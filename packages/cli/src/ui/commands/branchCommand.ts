@@ -10,7 +10,6 @@ import { t } from '../../i18n/index.js';
 
 export const branchCommand: SlashCommand = {
   name: 'branch',
-  altNames: ['fork'],
   kind: CommandKind.BUILT_IN,
   get description() {
     return t('Fork the current conversation into a new session');

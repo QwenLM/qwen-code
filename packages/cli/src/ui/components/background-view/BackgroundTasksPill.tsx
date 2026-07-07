@@ -14,13 +14,26 @@ import {
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
+import { t } from '../../../i18n/index.js';
 
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
   shell: { singular: 'shell', plural: 'shells' },
   monitor: { singular: 'monitor', plural: 'monitors' },
+  workflow: { singular: 'workflow', plural: 'workflows' },
   dream: { singular: 'dream', plural: 'dreams' },
 } as const;
+
+/**
+ * True if any background agent has a tool call parked awaiting user
+ * approval (permission bubbling). Drives the pill's "needs approval"
+ * marker so the user is nudged to open the dialog and answer.
+ */
+export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
+  return entries.some(
+    (e) => e.kind === 'agent' && (e.pendingApprovals?.length ?? 0) > 0,
+  );
+}
 
 /**
  * Pill label: prefer live running counts, then paused resumable agent counts;
@@ -49,16 +62,19 @@ export function getPillLabel(entries: readonly DialogEntry[]): string {
 }
 
 function groupAndFormat(entries: readonly DialogEntry[]): string {
-  const counts = { agent: 0, shell: 0, monitor: 0, dream: 0 };
+  const counts = { agent: 0, shell: 0, monitor: 0, workflow: 0, dream: 0 };
   for (const e of entries) counts[e.kind]++;
   const parts: string[] = [];
   // Order: shell first (matches Claude Code's pill convention), then
-  // agent, then monitor, then dream. Dream sits last because it is
+  // agent, then monitor, then workflow (user-initiated multi-phase
+  // orchestration), then dream. Dream sits last because it is
   // system-initiated (not user-triggered) and the user is least likely
-  // to need it at a glance.
+  // to need it at a glance; workflows are user-triggered so they sit
+  // immediately after monitors and before dream.
   if (counts.shell > 0) parts.push(formatCount('shell', counts.shell));
   if (counts.agent > 0) parts.push(formatCount('agent', counts.agent));
   if (counts.monitor > 0) parts.push(formatCount('monitor', counts.monitor));
+  if (counts.workflow > 0) parts.push(formatCount('workflow', counts.workflow));
   if (counts.dream > 0) parts.push(formatCount('dream', counts.dream));
   return parts.join(', ');
 }
@@ -112,11 +128,15 @@ export const BackgroundTasksPill: React.FC = () => {
   if (entries.length === 0) return null;
 
   const label = getPillLabel(entries);
+  const needsApproval = hasPendingApproval(entries);
 
   return (
     <>
       <Text color={theme.text.secondary}> · </Text>
       <Text inverse={pillFocused}>{label}</Text>
+      {needsApproval && (
+        <Text color={theme.status.warning}>{` ⚠ ${t('needs approval')}`}</Text>
+      )}
     </>
   );
 };

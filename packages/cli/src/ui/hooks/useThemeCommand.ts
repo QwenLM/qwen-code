@@ -7,7 +7,7 @@
 import { useState, useCallback } from 'react';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js'; // Import LoadedSettings, AppSettings, MergedSetting
-import { type HistoryItem, MessageType } from '../types.js';
+import { type HistoryItemWithoutId, MessageType } from '../types.js';
 import process from 'node:process';
 import { t } from '../../i18n/index.js';
 
@@ -24,7 +24,7 @@ interface UseThemeCommandReturn {
 export const useThemeCommand = (
   loadedSettings: LoadedSettings,
   setThemeError: (error: string | null) => void,
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   initialThemeError: string | null,
 ): UseThemeCommandReturn => {
   const [isThemeDialogOpen, setIsThemeDialogOpen] =

@@ -5,7 +5,6 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { useTextBuffer } from './text-buffer.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
@@ -15,12 +14,13 @@ import { cpSlice, cpLen } from '../../utils/textUtils.js';
 import { theme } from '../../semantic-colors.js';
 import { Colors } from '../../colors.js';
 import type { Key } from '../../hooks/useKeypress.js';
-import { useCallback, useRef, useEffect } from 'react';
+import { useCallback, useRef, useEffect, useState } from 'react';
+import { renderSoftwareCursor } from '../../utils/software-cursor.js';
 
 export interface TextInputProps {
   value: string;
   onChange: (text: string) => void;
-  onSubmit?: () => void;
+  onSubmit?: (text: string) => void;
   /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
   onTab?: (key: Key) => void;
   /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
@@ -66,6 +66,7 @@ export function TextInput({
   ellipsizeOverflow = false,
 }: TextInputProps) {
   const allowMultiline = height > 1;
+  const [cursorVisible, setCursorVisible] = useState(isActive);
 
   // Stabilize onChange to avoid triggering useTextBuffer's onChange effect every render
   const onChangeRef = useRef(onChange);
@@ -90,9 +91,22 @@ export function TextInput({
     preferredEditor,
   });
 
+  useEffect(() => {
+    if (!isActive) {
+      setCursorVisible(false);
+      return;
+    }
+
+    setCursorVisible(true);
+    const interval = setInterval(() => {
+      setCursorVisible((visible) => !visible);
+    }, 530);
+    return () => clearInterval(interval);
+  }, [isActive]);
+
   const handleSubmit = () => {
     if (!onSubmit) return;
-    onSubmit();
+    onSubmit(buffer.text);
   };
 
   useKeypress(
@@ -173,6 +187,7 @@ export function TextInput({
   const [cursorVisualRowAbsolute, cursorVisualColAbsolute] =
     buffer.visualCursor;
   const scrollVisualRow = buffer.visualScrollRow;
+  const shouldRenderCursor = isActive && cursorVisible;
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -180,10 +195,14 @@ export function TextInput({
         <Text color={theme.text.accent}>{'> '}</Text>
         <Box flexGrow={1} flexDirection="column">
           {buffer.text.length === 0 && placeholder ? (
-            <Text>
-              {chalk.inverse(placeholder.slice(0, 1))}
-              <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
-            </Text>
+            shouldRenderCursor ? (
+              <Text>
+                {renderSoftwareCursor(placeholder.slice(0, 1))}
+                <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
+              </Text>
+            ) : (
+              <Text color={Colors.Gray}>{placeholder}</Text>
+            )
           ) : ellipsizeOverflow && stringWidth(buffer.text) > inputWidth ? (
             <Text>{ellipsizeMiddle(buffer.text, inputWidth)}</Text>
           ) : (
@@ -195,7 +214,10 @@ export function TextInput({
                 display = display + ' '.repeat(inputWidth - currentVisualWidth);
               }
 
-              if (visualIdxInRenderedSet === cursorVisualRow) {
+              if (
+                shouldRenderCursor &&
+                visualIdxInRenderedSet === cursorVisualRow
+              ) {
                 const relativeVisualColForHighlight = cursorVisualColAbsolute;
                 if (relativeVisualColForHighlight >= 0) {
                   if (relativeVisualColForHighlight < cpLen(display)) {
@@ -205,7 +227,7 @@ export function TextInput({
                         relativeVisualColForHighlight,
                         relativeVisualColForHighlight + 1,
                       ) || ' ';
-                    const highlighted = chalk.inverse(charToHighlight);
+                    const highlighted = renderSoftwareCursor(charToHighlight);
                     display =
                       cpSlice(display, 0, relativeVisualColForHighlight) +
                       highlighted +
@@ -214,7 +236,7 @@ export function TextInput({
                     relativeVisualColForHighlight === cpLen(display) &&
                     cpLen(display) === inputWidth
                   ) {
-                    display = display + chalk.inverse(' ');
+                    display = display + renderSoftwareCursor(' ');
                   }
                 }
               }

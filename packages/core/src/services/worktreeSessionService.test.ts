@@ -13,8 +13,11 @@ import {
   writeWorktreeSession,
   clearWorktreeSession,
   restoreWorktreeContext,
+  isSessionRuntimeActive,
   type WorktreeSession,
 } from './worktreeSessionService.js';
+import { Storage } from '../config/storage.js';
+import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
 const sample: WorktreeSession = {
   slug: 'my-feature',
@@ -105,6 +108,69 @@ describe('clearWorktreeSession', () => {
 
   it('is a no-op when file does not exist', async () => {
     await expect(clearWorktreeSession(filePath)).resolves.not.toThrow();
+  });
+});
+
+describe('isSessionRuntimeActive', () => {
+  beforeEach(() => {
+    Storage.setRuntimeBaseDir(null);
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+  });
+
+  it('lets active runtime status win over a dead status found in an earlier root', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    const worktreePath = path.join(repoRoot, '.qwen', 'worktrees', 'feature');
+    await fs.mkdir(worktreePath, { recursive: true });
+
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    await writeRuntimeStatus(
+      new Storage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: 2147483647,
+      },
+    );
+    await writeRuntimeStatus(
+      new Storage(worktreePath).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: worktreePath,
+        pid: process.pid,
+      },
+    );
+
+    await expect(
+      isSessionRuntimeActive('owner-session', [repoRoot, worktreePath]),
+    ).resolves.toBe(true);
+  });
+
+  it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    const fakeRuntimeBase = path.join(repoRoot, 'src');
+    await fs.mkdir(fakeRuntimeBase, { recursive: true });
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'external-runtime'));
+    await writeRuntimeStatus(
+      path.join(
+        fakeRuntimeBase,
+        'projects',
+        'fake-project',
+        'chats',
+        'owner-session.runtime.json',
+      ),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: 2147483647,
+      },
+    );
+
+    await expect(
+      isSessionRuntimeActive('owner-session', repoRoot),
+    ).resolves.toBe(true);
   });
 });
 

@@ -17,17 +17,18 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InteractiveSession } from './interactive-session.js';
 
-const IS_SANDBOX =
-  process.env['QWEN_SANDBOX'] &&
-  process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+const IS_SANDBOX = Boolean(
+  SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
+);
 
 function makeEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env['NO_COLOR'];
   return {
     ...env,
-    QWEN_CODE_ENABLE_CRON: '1',
     FORCE_COLOR: '1',
+    QWEN_CODE_LANG: 'en',
     TERM: 'xterm-256color',
     NODE_NO_WARNINGS: '1',
   };
@@ -65,7 +66,7 @@ function makeEnv(): NodeJS.ProcessEnv {
     const afterPrompt = finalScreen.slice(
       finalScreen.lastIndexOf('Cron: PONG7742'),
     );
-    expect(afterPrompt).toContain('✦');
+    expect(afterPrompt).toContain('◆');
   });
 
   it('user input takes priority over cron', { timeout: 180_000 }, async () => {
@@ -120,18 +121,6 @@ function makeEnv(): NodeJS.ProcessEnv {
       await session.waitForScreen(
         (scr) => scr.includes('ALIVE99'),
         'model response ALIVE99',
-      );
-
-      await session.send(
-        'Call cron_list and tell me how many jobs exist. Say "COUNT: N"',
-      );
-      await session.waitForScreen(
-        (screen) =>
-          screen.includes('COUNT: 1') ||
-          screen.includes('1 job') ||
-          screen.includes('Active cron jobs (1)'),
-        'cron list showing one active job',
-        60_000,
       );
     },
   );

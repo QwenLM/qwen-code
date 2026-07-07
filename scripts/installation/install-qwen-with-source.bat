@@ -306,8 +306,11 @@ exit /b 1
 
 :ValidateVersion
 if /i "!VERSION!"=="latest" exit /b 0
-echo(!VERSION!| findstr /R /C:"^v*[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
+set "QWEN_VERSION_VALUE=!VERSION!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { exit 0 }; exit 1"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_VERSION_VALUE="
+if %PS_STATUS% EQU 0 exit /b 0
 echo ERROR: --version must be 'latest' or a semver string.
 exit /b 1
 
@@ -632,7 +635,7 @@ set "QWEN_ARCHIVE_FILE=%~1"
 REM Enumerate archive entries and reject any with path traversal indicators:
 REM empty names, leading '/', drive-rooted paths, '..' segments, or control chars.
 REM This prevents Zip Slip attacks before extraction.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); foreach ($entry in $archive.Entries) { $raw = $entry.FullName; if ($raw.IndexOfAny([char[]](10,13)) -ge 0) { [Console]::Error.WriteLine('Archive contains unsafe path with control character: ' + $raw); exit 1 }; $name = $raw -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); if ($archive.Entries.Count -eq 0) { [Console]::Error.WriteLine('Archive is empty: ' + $env:QWEN_ARCHIVE_FILE); exit 3 }; foreach ($entry in $archive.Entries) { $raw = $entry.FullName; if ($raw.IndexOfAny([char[]](10,13)) -ge 0) { [Console]::Error.WriteLine('Archive contains unsafe path with control character: ' + $raw); exit 1 }; $name = $raw -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_ARCHIVE_FILE="
 if %PS_STATUS% EQU 0 exit /b 0
@@ -642,6 +645,10 @@ if %PS_STATUS% EQU 1 (
 )
 if %PS_STATUS% EQU 2 (
     echo ERROR: Archive could not be inspected before extraction.
+    exit /b 1
+)
+if %PS_STATUS% EQU 3 (
+    echo ERROR: Archive is empty: %~1
     exit /b 1
 )
 echo ERROR: Archive validation failed before extraction.

@@ -86,7 +86,7 @@ export interface NotebookReadResult {
 }
 
 export interface NotebookJsonFormat {
-  indent?: number;
+  indent?: number | string;
   trailingNewline: boolean;
 }
 
@@ -118,9 +118,14 @@ export function parseNotebook(content: string): NotebookContent {
 }
 
 export function inferNotebookJsonFormat(content: string): NotebookJsonFormat {
-  const lineMatch = content.match(/\n( +)"/);
+  const lineMatch = content.match(/\n([ \t]+)"/);
+  const indent = lineMatch?.[1];
+  let inferredIndent: number | string | undefined;
+  if (indent !== undefined) {
+    inferredIndent = /^ +$/.test(indent) ? indent.length : indent;
+  }
   return {
-    indent: lineMatch?.[1]?.length,
+    indent: inferredIndent,
     trailingNewline: content.endsWith('\n'),
   };
 }

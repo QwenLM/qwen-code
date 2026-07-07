@@ -110,11 +110,9 @@ describe('markdownToPlainText', () => {
     );
   });
 
-  it('converts image syntax (link regex fires before image regex)', () => {
-    // In the current implementation, the link regex fires before the image regex,
-    // so `![alt](url)` becomes `!alt (url)` rather than `[alt]`
+  it('converts image syntax to alt text', () => {
     const result = markdownToPlainText('![alt](https://img.png)');
-    expect(result).toBe('!alt (https://img.png)');
+    expect(result).toBe('[alt]');
   });
 
   it('strips blockquote markers', () => {
@@ -164,9 +162,41 @@ describe('detectImageMime', () => {
     expect(detectImageMime(buf)).toBe('image/gif');
   });
 
-  it('detects WebP magic bytes (RIFF)', () => {
-    const buf = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+  it('detects WebP magic bytes (RIFF....WEBP)', () => {
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x1a,
+      0x00,
+      0x00,
+      0x00, // file size (little-endian)
+      0x57,
+      0x45,
+      0x42,
+      0x50, // "WEBP"
+    ]);
     expect(detectImageMime(buf)).toBe('image/webp');
+  });
+
+  it('does not misidentify a non-WebP RIFF container (e.g. WAV) as WebP', () => {
+    // WAV is also a RIFF container; only bytes 8-11 distinguish it from WebP.
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x24,
+      0x00,
+      0x00,
+      0x00, // file size
+      0x57,
+      0x41,
+      0x56,
+      0x45, // "WAVE", not "WEBP"
+    ]);
+    expect(() => detectImageMime(buf)).toThrow('Unrecognized image format');
   });
 
   it('detects JPEG magic bytes', () => {
@@ -236,6 +266,59 @@ describe('validateImagePath', () => {
   it('rejects paths outside allowed directories', () => {
     mockRealpathSync.mockImplementation((p: string) => p);
     expect(() => validateImagePath('/etc/passwd.png', workspaceDirs)).toThrow(
+      'Image path outside allowed directories',
+    );
+  });
+
+  it('allows Windows paths inside the workspace directory', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\002\\hello.png';
+    const workspaceDir = 'D:\\WorkGroup\\QwenCode\\002';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('QwenCode\\002')) return workspaceDir;
+      return p;
+    });
+
+    expect(validateImagePath(imagePath, [workspaceDir])).toBe(imagePath);
+  });
+
+  it('rejects Windows paths in a sibling directory with the same prefix', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\0022\\hello.png';
+    const workspaceDir = 'D:\\WorkGroup\\QwenCode\\002';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('QwenCode\\002')) return workspaceDir;
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
+      'Image path outside allowed directories',
+    );
+  });
+
+  it('reports the allowed directories when a Windows image path is rejected', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\002\\hello.png';
+    const workspaceDir = 'D:\\OtherProject';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('OtherProject')) return workspaceDir;
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
+      `Image path outside allowed directories: ${imagePath}. Allowed directories: /tmp, ${workspaceDir}`,
+    );
+  });
+
+  it('does not treat POSIX backslashes as directory separators', () => {
+    const imagePath = '/home/user/project\\escape.png';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('escape.png')) return imagePath;
+      if (p === '/home/user/project') return '/home/user/project';
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, workspaceDirs)).toThrow(
       'Image path outside allowed directories',
     );
   });
@@ -325,8 +408,13 @@ describe('sendImage', () => {
       expectedEncrypted,
     );
 
-    // Step 4: send message with image_item using CDN's x-encrypted-param
-    const expectedAesKeyBase64 = aesKeyBytes.toString('base64');
+    // Step 4: send message with image_item using CDN's x-encrypted-param.
+    // WeChat expects images to include the hex key both directly and
+    // base64-encoded in the media payload.
+    const expectedAesKeyBase64 = Buffer.from(
+      expectedAesKeyHex,
+      'ascii',
+    ).toString('base64');
     expect(mockSendMessage).toHaveBeenCalledWith(
       'https://api.example.com',
       'token-abc',
@@ -337,6 +425,8 @@ describe('sendImage', () => {
           expect.objectContaining({
             type: 2, // MessageItemType.IMAGE
             image_item: expect.objectContaining({
+              aeskey: expectedAesKeyHex,
+              mid_size: encryptedSize,
               media: {
                 encrypt_query_param: 'cdn-encrypt-param',
                 aes_key: expectedAesKeyBase64,

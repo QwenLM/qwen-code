@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render, cleanup } from '@testing-library/react';
+import { render, cleanup, act } from '@testing-library/react';
+import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ModelDialog } from './ModelDialog.js';
+import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -43,6 +45,7 @@ const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
+  settingsValue: Partial<LoadedSettings> | undefined = undefined,
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -54,6 +57,7 @@ const renderComponent = (
     user: { settings: {} },
     workspace: { settings: {} },
     setValue: vi.fn(),
+    ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
   const mockConfig = {
@@ -90,10 +94,20 @@ const renderComponent = (
     ...(contextValue ?? {}),
   } as unknown as Config;
 
+  // ModelDialog only reads historyManager off the UI state; mock just that so
+  // selection notices (e.g. the non-image-capable vision warning) are assertable.
+  const mockHistoryManager = {
+    addItem: vi.fn(),
+  } as unknown as UIState['historyManager'];
+
   const renderResult = render(
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={mockConfig}>
-        <ModelDialog {...combinedProps} />
+        <UIStateContext.Provider
+          value={{ historyManager: mockHistoryManager } as unknown as UIState}
+        >
+          <ModelDialog {...combinedProps} />
+        </UIStateContext.Provider>
       </ConfigContext.Provider>
     </SettingsContext.Provider>,
   );
@@ -103,6 +117,7 @@ const renderComponent = (
     props: combinedProps,
     mockConfig,
     mockSettings,
+    mockHistoryManager,
   };
 };
 
@@ -134,6 +149,176 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('caps visible model options to the available dialog height', () => {
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.items).toHaveLength(12);
+    expect(props.maxItemsToShow).toBe(6);
+    // The picker deliberately leaves the ▲/▼ scroll indicators off: they are
+    // two always-rendered chrome rows better spent on two more entries.
+    expect(props.showScrollArrows).toBeUndefined();
+  });
+
+  it('floors visible model options to 1 when the terminal is very short', () => {
+    renderComponent(
+      { availableTerminalHeight: 5 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(1);
+  });
+
+  it('accounts for the taller two-row option height when descriptions are present', () => {
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: `Description ${i + 1}`,
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(3);
+  });
+
+  it('falls back to the default max item count when no terminal height is given', () => {
+    renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(10);
+  });
+
+  it('clamps visible model options to the default max when the terminal is tall', () => {
+    renderComponent(
+      { availableTerminalHeight: 100 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    // floor((100 - 14) / 1) = 86 rows of budget, clamped to the 10-item max.
+    const props = mockedSelect.mock.calls[0][0];
+    expect(props.maxItemsToShow).toBe(10);
+  });
+
+  it('shrinks visible model options to leave room for a displayed error message', async () => {
+    const switchModel = vi.fn().mockRejectedValue(new Error('network down'));
+
+    renderComponent(
+      { availableTerminalHeight: 20 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() =>
+          Array.from({ length: 12 }, (_, i) => ({
+            id: `model-${i + 1}`,
+            label: `Model ${i + 1}`,
+            description: '',
+            authType: AuthType.USE_OPENAI,
+          })),
+        ),
+      },
+    );
+
+    const initialProps = mockedSelect.mock.calls[0][0];
+    expect(initialProps.maxItemsToShow).toBe(6);
+
+    await act(async () => {
+      await initialProps.onSelect(initialProps.items[0].value);
+    });
+
+    const propsAfterError =
+      mockedSelect.mock.calls[mockedSelect.mock.calls.length - 1][0];
+    // errorMessage = "Failed to switch model to 'model-1'.\n\nnetwork down"
+    // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
+    // max(1, floor((20 - 14 - 5) / 1)) = 1.
+    expect(propsAfterError.maxItemsToShow).toBe(1);
+  });
+
+  it('hides discontinued qwen-oauth models for other auth types', () => {
+    renderComponent(
+      {},
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: DEFAULT_QWEN_MODEL,
+            label: DEFAULT_QWEN_MODEL,
+            authType: AuthType.QWEN_OAUTH,
+          },
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+      },
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::gpt-4`);
   });
 
   it('initializes with the model from ConfigContext', () => {
@@ -280,12 +465,225 @@ describe('<ModelDialog />', () => {
       'model.name',
       'gpt-4',
     );
+    // The selected provider has no baseUrl, so the disambiguator must be
+    // cleared with an empty-string tombstone (overrides any lower-scope value).
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      '',
+    );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'security.auth.selectedType',
       AuthType.USE_OPENAI,
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists model.baseUrl alongside model.name when the selected provider has a baseUrl', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        baseUrl: 'https://idealab.example.com/v1',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3.7-max',
+      {
+        baseUrl: 'https://idealab.example.com/v1',
+      },
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://idealab.example.com/v1',
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the picker entry baseUrl when switchModel does not propagate it', async () => {
+    // Regression guard for the `after?.baseUrl ?? selectedEntry?.model.baseUrl`
+    // fallback: if switchModel succeeds but getContentGeneratorConfig returns a
+    // config WITHOUT baseUrl, the disambiguator must still be persisted from the
+    // selected picker entry's baseUrl — otherwise an empty-string tombstone would
+    // be written and the wrong same-id provider would resolve on next launch.
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const { props, mockSettings } = renderComponent({}, {
+      getModel: vi.fn(() => 'qwen3.7-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'qwen3.7-max',
+          label: '[Token Plan] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'TOKEN_PLAN_KEY',
+        },
+        {
+          id: 'qwen3.7-max',
+          label: '[IdeaLab] qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.example.com/v1',
+          envKey: 'IDEALAB_KEY',
+        },
+      ]),
+      // Resolved config has NO baseUrl, so `after?.baseUrl` is undefined and the
+      // `?? selectedEntry?.model.baseUrl` fallback must supply the disambiguator.
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    // Select the IdeaLab entry (second provider with the same id).
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-max\0https://idealab.example.com/v1`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      'qwen3.7-max',
+    );
+    // baseUrl comes from the picker entry, not the (baseUrl-less) resolved config.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.baseUrl',
+      'https://idealab.example.com/v1',
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows MiniMax-M3 image + video modality and 1M context details', () => {
+    const { getByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'MiniMax-M3'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'MiniMax-M3',
+          label: '[MiniMax] MiniMax-M3',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.minimaxi.com/v1',
+          envKey: 'MINIMAX_API_KEY',
+          modalities: { image: true, video: true },
+          contextWindowSize: 1000000,
+        },
+      ]),
+      getModelsConfig: vi.fn(() => ({
+        getGenerationConfig: vi.fn(() => ({
+          baseUrl: 'https://api.minimaxi.com/v1',
+        })),
+      })),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('Modality:')).toBeDefined();
+    expect(getByText('text · image · video')).toBeDefined();
+    expect(getByText('Context Window:')).toBeDefined();
+    expect(getByText('1,000,000 tokens')).toBeDefined();
+  });
+
+  it('hydrates provider API key env from settings.env before switching', async () => {
+    const previousMinimaxKey = process.env['MINIMAX_API_KEY'];
+    delete process.env['MINIMAX_API_KEY'];
+
+    try {
+      const switchModel = vi.fn().mockImplementation(async () => {
+        expect(process.env['MINIMAX_API_KEY']).toBe('sk-minimax-from-settings');
+      });
+
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'MiniMax-M2.7'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'MiniMax-M3',
+              label: '[MiniMax] MiniMax-M3',
+              description: '',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://api.minimaxi.com/v1',
+              envKey: 'MINIMAX_API_KEY',
+              modalities: { image: true, video: true },
+              contextWindowSize: 1000000,
+            },
+          ]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.minimaxi.com/v1',
+            })),
+          })),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'MiniMax-M3',
+            apiKey: 'sk-minimax-from-settings',
+            baseUrl: 'https://api.minimaxi.com/v1',
+          })),
+        } as unknown as Partial<Config>,
+        {
+          merged: {
+            env: { MINIMAX_API_KEY: 'sk-minimax-from-settings' },
+          },
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      const selected = mockedSelect.mock.calls[0][0].items[0].value;
+      await mockedSelect.mock.calls[0][0].onSelect(selected);
+
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'MiniMax-M3',
+        { baseUrl: 'https://api.minimaxi.com/v1' },
+      );
+    } finally {
+      if (previousMinimaxKey === undefined) {
+        delete process.env['MINIMAX_API_KEY'];
+      } else {
+        process.env['MINIMAX_API_KEY'] = previousMinimaxKey;
+      }
+    }
   });
 
   it('stores authType-qualified selectors in fast model mode', async () => {
@@ -322,6 +720,224 @@ describe('<ModelDialog />', () => {
     );
     expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores authType-qualified selectors in vision model mode without switching models', async () => {
+    const switchModel = vi.fn();
+    const setVisionModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+        getModel: vi.fn(() => 'claude-opus-4-7'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-vl-max',
+            label: 'qwen-vl-max',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4-7',
+            label: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+        })),
+        isCurrentPrimaryModel: (m: { id: string; authType?: string }) =>
+          m.id === 'claude-opus-4-7' && m.authType === AuthType.USE_ANTHROPIC,
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen-vl-max`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'visionModel',
+      'openai:qwen-vl-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      expect.any(String),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
+    const switchModel = vi.fn();
+    const setVisionModel = vi.fn();
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const { props, mockSettings } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3.7-plus',
+            label: '[ModelStudio Standard] qwen3.7-plus',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            modalities: { image: true, video: true },
+          },
+          {
+            id: 'qwen3.7-plus',
+            label: '[ModelStudio Token Plan] qwen3.7-plus',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: selectedBaseUrl,
+            modalities: { image: true, video: true },
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        })),
+        isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen3.7-max',
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'visionModel',
+      `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+    expect(setVisionModel).toHaveBeenCalledWith(
+      `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns in the history when a pinned vision model is not image-capable', async () => {
+    // qwen-plus is text-only by name default, so the pin is honored but flagged.
+    // The primary is a different model so the pin isn't rejected as the primary.
+    const setVisionModel = vi.fn();
+    const { mockHistoryManager } = renderComponent(
+      { isVisionModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-plus',
+            label: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+        isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen3.7-max',
+        setVisionModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen-plus`);
+
+    expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-plus');
+    expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'success',
+        text: expect.stringContaining('not a known image-capable model'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('stores the plain model id in voice model mode without switching models', async () => {
+    const switchModel = vi.fn();
+    const setFastModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVoiceModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'qwen3-asr-flash',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://dashscope.example/v1',
+          },
+          {
+            id: 'qwen3.7-max',
+            label: 'qwen3.7-max',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const selectProps = mockedSelect.mock.calls[0][0];
+    await selectProps.onSelect(selectProps.items[0].value);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'voiceModel',
+      'qwen3-asr-flash',
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      expect.any(String),
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not store a voice model without a transcription baseUrl', async () => {
+    const switchModel = vi.fn();
+    const { props, mockSettings } = renderComponent(
+      { isVoiceModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen3-coder',
+            label: 'qwen3-coder',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen3-coder`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it('highlights the cross-auth row for a bare fast-model setting', () => {
@@ -390,46 +1006,141 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(deepseekIndex);
   });
 
-  it('blocks switching to qwen-oauth from another authType (discontinued)', async () => {
-    const switchModel = vi.fn().mockResolvedValue(undefined);
-    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
-    const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
-      if (t === AuthType.USE_OPENAI) {
-        return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
-      }
-      if (t === AuthType.QWEN_OAUTH) {
-        return getFilteredQwenModels().map((m) => ({
-          id: m.id,
-          label: m.label,
-          authType: AuthType.QWEN_OAUTH,
-        }));
-      }
-      return [];
-    });
+  it('highlights the cross-auth row for a bare vision-model setting', () => {
+    // `/model --vision qwen-vl-max` validates across all providers and persists
+    // the bare model id. When the dialog re-opens in vision mode, the
+    // preferred-entry resolution must locate that row even though the setting
+    // carries no authType prefix — otherwise the highlight falls back to the
+    // current auth's first row and Enter would silently overwrite the setting.
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: { visionModel: 'qwen-vl-max' },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
 
-    const mockConfigWithSwitchAuthType = {
-      getAuthType,
-      getModel: vi.fn(() => 'gpt-4'),
-      getContentGeneratorConfig: vi.fn(() => ({
+    const allModels = [
+      {
+        id: 'claude-opus-4-7',
+        label: 'claude-opus-4-7',
+        description: '',
+        authType: AuthType.USE_ANTHROPIC,
+      },
+      {
+        id: 'qwen-vl-max',
+        label: 'qwen-vl-max',
+        description: '',
         authType: AuthType.USE_OPENAI,
-        model: 'gpt-4',
-      })),
-      switchModel,
-      getAvailableModelsForAuthType,
-    };
+      },
+    ];
 
-    const { props } = renderComponent(
-      {},
-      mockConfigWithSwitchAuthType as unknown as Partial<Config>,
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'claude-opus-4-7'),
+              getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_ANTHROPIC,
+                model: 'claude-opus-4-7',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isVisionModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
     );
 
-    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
+    const items = mockedSelect.mock.calls[0][0].items;
+    const visionIndex = items.findIndex((item) =>
+      String(item.value).includes('qwen-vl-max'),
+    );
+    expect(visionIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
+  });
 
-    // qwen-oauth is discontinued — switchModel should NOT be called
-    expect(switchModel).not.toHaveBeenCalled();
-    // Dialog should NOT close
-    expect(props.onClose).not.toHaveBeenCalled();
+  it('highlights the matching baseUrl for duplicate vision-model settings', () => {
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        visionModel: `openai:qwen3.7-plus\0${selectedBaseUrl}`,
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Standard] qwen3.7-plus',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      {
+        id: 'qwen3.7-plus',
+        label: '[ModelStudio Token Plan] qwen3.7-plus',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: selectedBaseUrl,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'qwen3.7-max'),
+              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_OPENAI,
+                model: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({
+                  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isVisionModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const visionIndex = items.findIndex(
+      (item) =>
+        String(item.value).includes('qwen3.7-plus') &&
+        String(item.value).includes(selectedBaseUrl),
+    );
+    expect(visionIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
   });
 
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
@@ -547,5 +1258,25 @@ describe('<ModelDialog />', () => {
       (m) => m.id === DEFAULT_QWEN_MODEL,
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
+  });
+});
+
+describe('encodeAuxModelSelector', () => {
+  it('encodes the "authType::modelId" key, dropping the baseUrl', () => {
+    expect(
+      encodeAuxModelSelector('openai::gpt-4o\0https://api.example.com'),
+    ).toBe('openai:gpt-4o');
+    expect(encodeAuxModelSelector('openai::gpt-4o')).toBe('openai:gpt-4o');
+  });
+
+  it('encodes the "$runtime|authType|modelId" key by positional split', () => {
+    expect(encodeAuxModelSelector('$runtime|openai|gpt-4o')).toBe(
+      'openai:gpt-4o',
+    );
+  });
+
+  it('passes a bare id (and a malformed runtime key) through unchanged', () => {
+    expect(encodeAuxModelSelector('gpt-4o')).toBe('gpt-4o');
+    expect(encodeAuxModelSelector('$runtime|openai')).toBe('$runtime|openai');
   });
 });

@@ -63,6 +63,16 @@ describe('resolveToolName', () => {
     expect(resolveToolName('TaskTool')).toBe('agent');
   });
 
+  it('resolves TodoList aliases (incl. legacy TodoWrite) to todo_write', async () => {
+    expect(resolveToolName('todo_write')).toBe('todo_write');
+    // The display name shown in the UI; a user writing allow: ["TodoList"]
+    // must resolve to the tool, not be silently dropped.
+    expect(resolveToolName('TodoList')).toBe('todo_write');
+    // Legacy display name (renamed from TodoWrite) keeps resolving.
+    expect(resolveToolName('TodoWrite')).toBe('todo_write');
+    expect(resolveToolName('TodoWriteTool')).toBe('todo_write');
+  });
+
   it('returns unknown names unchanged', async () => {
     expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
     expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
@@ -144,7 +154,7 @@ describe('parseRule', () => {
     expect(r.specifierKind).toBeUndefined();
   });
 
-  it('parses Bash alias (Claude Code compat)', async () => {
+  it('parses Bash alias', async () => {
     const r = parseRule('Bash');
     expect(r.toolName).toBe('run_shell_command');
   });
@@ -517,7 +527,7 @@ describe('resolvePathPattern', () => {
   });
 
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
-    // This is a gotcha from the Claude Code docs
+    // Leading slash patterns are project-root relative.
     expect(resolvePathPattern('/Users/alice/file', projectRoot, cwd)).toBe(
       '/project/Users/alice/file',
     );
@@ -867,6 +877,327 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__chrome__navigate')).toBe(false);
     expect(matchesRule(rule, 'mcp__other__use_browser')).toBe(false);
   });
+
+  // ─── Tool(param:value) syntax ───────────────────────────────────────────────
+
+  it('parseRule extracts key:value param matchers', async () => {
+    const r = parseRule('Agent(model:opus)');
+    expect(r.toolName).toBe('agent');
+    expect(r.specifier).toBeUndefined();
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+    ]);
+  });
+
+  it('parseRule extracts multiple key:value pairs', async () => {
+    const r = parseRule('Agent(model:opus,type:code)');
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+      { key: 'type', valuePattern: 'code' },
+    ]);
+  });
+
+  it('parseRule handles mixed specifier and param matchers', async () => {
+    const r = parseRule('Agent(coder,model:opus)');
+    expect(r.specifier).toBe('coder');
+    expect(r.toolParamMatchers).toEqual([
+      { key: 'model', valuePattern: 'opus' },
+    ]);
+  });
+
+  it('parseRule supports wildcard in value pattern', async () => {
+    const r = parseRule('Agent(model:*)');
+    expect(r.toolParamMatchers).toEqual([{ key: 'model', valuePattern: '*' }]);
+  });
+
+  it('parseRule does not treat WebFetch domain: as key:value', async () => {
+    const r = parseRule('WebFetch(domain:example.com)');
+    expect(r.specifierKind).toBe('domain');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('parseRule preserves legacy :* for command specifiers', async () => {
+    const r = parseRule('Bash(git:*)');
+    expect(r.specifier).toBe('git *');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('matchesRule matches tool with param matcher', async () => {
+    const rule = parseRule('Agent(model:opus)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('matchesRule fails when toolParams missing for param matcher rule', async () => {
+    const rule = parseRule('Agent(model:opus)');
+    expect(matchesRule(rule, 'agent')).toBe(false);
+  });
+
+  it('matchesRule supports wildcard value pattern', async () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'agent')).toBe(false); // no toolParams
+  });
+
+  it('matchesRule requires all param matchers to match', async () => {
+    const rule = parseRule('Agent(model:opus,type:code)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+          type: 'code',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+          type: 'chat',
+        },
+      ),
+    ).toBe(false);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(false); // missing 'type' param
+  });
+
+  it('matchesRule handles mixed specifier and param matchers', async () => {
+    const rule = parseRule('Agent(coder,model:opus)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'coder',
+        { model: 'opus' },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'coder',
+        { model: 'sonnet' },
+      ),
+    ).toBe(false); // param mismatch
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'explore',
+        { model: 'opus' },
+      ),
+    ).toBe(false); // specifier mismatch
+  });
+
+  it('parseRule does not extract key:value for MCP tools (backward compat)', async () => {
+    const r = parseRule('mcp__server__tool(server_name:myserver)');
+    expect(r.toolName).toBe('mcp__server__tool');
+    expect(r.specifier).toBe('server_name:myserver');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('matchesRule supports partial wildcard patterns', async () => {
+    const rule = parseRule('Agent(model:op*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opera',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('matchesRule handles multi-wildcard patterns without ReDoS', async () => {
+    const rule = parseRule('Agent(prompt:*x*x*x*x*x*y)');
+    // This should not hang (ReDoS) and should return false for non-matching input
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: 'a'.repeat(1000),
+        },
+      ),
+    ).toBe(false);
+    // Should match when pattern is present
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: 'xaxaxaxaxay',
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it('matchesRule coerces number values to string for matching', async () => {
+    const rule = parseRule('Agent(count:42)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          count: 42,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          count: 43,
+        },
+      ),
+    ).toBe(false);
+  });
 });
 
 // ─── PermissionManager ──────────────────────────────────────────────────────
@@ -996,6 +1327,86 @@ describe('PermissionManager', () => {
           command: 'npm install',
         }),
       ).toBe('ask');
+    });
+
+    // Regression coverage for issue #4093: command substitution must never
+    // produce a hard 'deny' from resolveDefaultPermission. Before the fix
+    // the L4 default branch returned 'deny' for any command containing
+    // $(), backticks, <(), or >(), which:
+    //   1. could not be overridden by YOLO mode, and
+    //   2. fired inconsistently — only when hasRelevantRules() happened to
+    //      be true (e.g. a compound command where another sub-command
+    //      matched an unrelated allow rule). Standalone substitution
+    //      commands with no relevant rule skipped L4 entirely and got
+    //      'ask' from L3, producing surprising asymmetry.
+    // Both shapes must now resolve to 'ask' regardless of rule shape.
+    describe('command substitution (issue #4093)', () => {
+      it('returns ask for a standalone command with $() substitution', async () => {
+        // No 'python3' rule is configured, but the substitution must not
+        // trip a deny — the only acceptable answer is 'ask'.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'python3 -c "print($(echo hello))"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for a compound command where one sub-command matches an allow rule and another contains $()', async () => {
+        // Structurally equivalent to the scenario reported in issue #4093:
+        // the first sub-command (`git status`) matches the surrounding
+        // describe's `Bash(git *)` allow rule, which makes
+        // hasRelevantRules() return true and triggers full PM evaluation;
+        // the second sub-command (`python3 -c "..."`) contains command
+        // substitution and does not match any rule, so it falls into
+        // resolveDefaultPermission. Before the fix, that path returned
+        // 'deny' for the substitution sub-command and the most-restrictive
+        // combine made the whole compound deny. After the fix it returns
+        // 'ask' and the compound resolves to 'ask'.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status && python3 -c "print($(echo hello))"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for backtick command substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo `whoami`',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for process substitution <()', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'diff <(ls /a) <(ls /b)',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for >() output process substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo data > >(tee log.txt)',
+          }),
+        ).toBe('ask');
+      });
+
+      it('still honors explicit deny rules over substitution-bearing commands', async () => {
+        // The 'ask' from substitution must never downgrade a real deny rule.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'rm -rf "$(pwd)/build"',
+          }),
+        ).toBe('deny');
+      });
     });
 
     it('isCommandAllowed delegates to evaluate', async () => {
@@ -1565,6 +1976,16 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('edit')).toBe(false);
     });
 
+    it('coreTools allowlist gates loop_wakeup as a core scheduling tool', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(false);
+
+      pm = new PermissionManager(makeConfig({ coreTools: ['loop_wakeup'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
+    });
+
     it('coreTools with specifier: tool-level check strips specifier', async () => {
       // "Bash(ls -l)" should register run_shell_command (specifier only affects runtime)
       pm = new PermissionManager(makeConfig({ coreTools: ['Bash(ls -l)'] }));
@@ -2065,6 +2486,90 @@ describe('buildPermissionRules', () => {
       expect(rules).toEqual(['mcp__puppeteer__navigate']);
     });
   });
+
+  describe('with toolParams (stable param serialization)', () => {
+    it('serializes stable params (model, subagent_type) for Agent', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: {
+          subagent_type: 'coder',
+          model: 'opus',
+          prompt: 'Fix the bug',
+        },
+      });
+      // prompt is not serialized (not in stableParamKeys)
+      // subagent_type is skipped because it matches specifier
+      expect(rules).toEqual(['Agent(coder,model:opus)']);
+    });
+
+    it('does not serialize volatile params like prompt or query', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: {
+          model: 'sonnet',
+          prompt: 'Some long prompt that should not be persisted',
+        },
+      });
+      expect(rules).toEqual(['Agent(model:sonnet)']);
+      // Verify prompt is NOT in the rule string
+      expect(rules[0]).not.toContain('prompt');
+    });
+
+    it('does not serialize sensitive params (no secret leakage)', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: {
+          model: 'opus',
+          api_key: 'sk-secret-123',
+          token: 'bearer-xyz',
+        },
+      });
+      // api_key and token are not in stableParamKeys, so not serialized
+      expect(rules).toEqual(['Agent(model:opus)']);
+      expect(rules[0]).not.toContain('secret');
+      expect(rules[0]).not.toContain('bearer');
+    });
+
+    it('generates bare MCP tool name without specifier or params', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'mcp__chrome__navigate',
+        toolParams: {
+          server_name: 'chrome',
+          url: 'https://example.com',
+        },
+      });
+      // MCP tools get bare name — specifier rejection in matchesRule
+      // would make any specifier-carrying rule a dead entry
+      expect(rules).toEqual(['mcp__chrome__navigate']);
+    });
+
+    it('round-trips Agent rule with stable params through parseRule', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'opus' },
+      });
+      expect(rules).toEqual(['Agent(coder,model:opus)']);
+
+      // Parse the generated rule back
+      const parsed = parseRule(rules[0]!);
+      expect(parsed.toolName).toBe('agent');
+      expect(parsed.specifier).toBe('coder');
+      expect(parsed.toolParamMatchers).toEqual([
+        { key: 'model', valuePattern: 'opus' },
+      ]);
+    });
+
+    it('handles number values in toolParams', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: { model: 'opus', count: 42 },
+      });
+      // count is not in stableParamKeys, so not serialized
+      expect(rules).toEqual(['Agent(model:opus)']);
+    });
+  });
 });
 
 // ─── buildHumanReadableRuleLabel ─────────────────────────────────────────────
@@ -2375,5 +2880,409 @@ describe('PermissionManager — strip/restore for AUTO mode', () => {
     pm.initialize();
     expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
     expect(pm.getStrippedDangerousRules()).toBeUndefined();
+  });
+});
+
+// ─── Compound shell + cd + wrapper → virtual-op rule matching ───────────────
+//
+// Regression coverage for compound shell writes reaching protected paths
+// through `cd` and shell wrappers.
+
+describe('PermissionManager — compound shell write attribution', () => {
+  it('deny rule matches a write after `cd` into a subdir', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && echo '{}' > settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('ask rule matches a write through nested shell wrappers', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['WriteFileTool(.mcp.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'bash -lc "sh -c \'echo hi > .mcp.json\'"',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
+
+  it('allow rule on the same shell command does NOT downgrade a virtual-op deny', async () => {
+    // The Bash allow rule covers the literal command, but the cross-command
+    // virtual-op pass surfaces the write target and the deny rule on
+    // .qwen/settings.json escalates the verdict. Allow + virtual-op deny
+    // → deny, matching the "deny > ask > allow" priority.
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd src && bash -lc 'echo ok > generated.txt'",
+        cwd: '/repo',
+      }),
+    ).toBe(false);
+  });
+
+  it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('hasRelevantRules sees protected writes after `cd` before compound recursion', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasMatchingAskRule({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('escalates dynamic-cd writes when path-specific deny rules may apply', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
+
+  it('preserves wildcard deny rules for dynamic-cd writes', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(*)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+});
+
+// ─── PermissionManager integration tests with toolParams ─────────────────────
+
+describe('PermissionManager — toolParams end-to-end', () => {
+  it('evaluate respects allow rule with param matcher', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder,model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'opus' },
+      }),
+    ).toBe('allow');
+  });
+
+  it('evaluate denies when param matcher does not match', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Agent(coder,model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'sonnet' },
+      }),
+    ).not.toBe('allow');
+  });
+
+  it('findMatchingDenyRule matches deny rule with param matcher', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:restricted)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'agent',
+        toolParams: { model: 'restricted' },
+      }),
+    ).toBe('Agent(model:restricted)');
+  });
+
+  it('findMatchingDenyRule returns undefined when param does not match', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:restricted)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('hasRelevantRules returns true when param matcher rule exists', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['Agent(model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBe(true);
+  });
+
+  it('hasMatchingAskRule returns true when param matcher ask rule matches', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['Agent(model:opus)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      pm.hasMatchingAskRule({
+        toolName: 'agent',
+        toolParams: { model: 'opus' },
+      }),
+    ).toBe(true);
+  });
+
+  it('case-insensitive param matching: deny rule blocks different casing', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Agent(model:Sonnet)'],
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'agent',
+        toolParams: { model: 'sonnet' },
+      }),
+    ).toBe('deny');
+  });
+});
+
+// ─── evaluateParamMatchers type guard tests ──────────────────────────────────
+
+describe('matchesRule — param matcher type guards', () => {
+  it('rejects boolean param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: true },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects null param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: null },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects undefined param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: undefined },
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects object param values', () => {
+    const rule = parseRule('Agent(model:*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { model: { nested: 'opus' } },
+      ),
+    ).toBe(false);
+  });
+
+  it('accepts number param values via coercion', () => {
+    const rule = parseRule('Agent(count:42)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { count: 42 },
+      ),
+    ).toBe(true);
   });
 });
