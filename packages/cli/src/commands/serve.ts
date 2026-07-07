@@ -268,7 +268,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Per-session in-memory compacted replay snapshot byte cap for ' +
           '`POST /session/:id/load` late attaches. Larger = more recent ' +
           'history in load snapshots at higher heap cost. Must be a positive ' +
-          'finite integer.',
+          'safe integer no larger than 256 MiB.',
       })
       .option('http-bridge', {
         type: 'boolean',
