@@ -20,12 +20,14 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
+import { resolveSingleWorkspaceInput } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -84,6 +86,7 @@ import {
   type DaemonStatusResponse,
 } from './daemon-status.js';
 import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -105,6 +108,22 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function daemonPipeDirection(
+  direction: NdJsonMessageObservation['direction'],
+): 'inbound' | 'outbound' {
+  switch (direction) {
+    case 'sent':
+      return 'outbound';
+    case 'received':
+      return 'inbound';
+    default: {
+      const exhaustive: never = direction;
+      return exhaustive;
+    }
+  }
+}
+
 // Daemon Status metrics ring: seal one bucket every SAMPLE_MS and retain
 // CAPACITY of them (5s × 180 ≈ 15 min of history), matching the dashboard's
 // own 5s poll so each poll surfaces roughly one fresh bucket.
@@ -135,6 +154,11 @@ const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
+
+type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
+  token?: string;
+  workspace?: string | string[];
+};
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 
@@ -1303,7 +1327,7 @@ function runSynchronousRequestGate(
  * hard rule, not a warning, per the threat model in the design issue.
  */
 export async function runQwenServe(
-  optsIn: Omit<ServeOptions, 'token'> & { token?: string },
+  optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
@@ -1363,11 +1387,13 @@ export async function runQwenServe(
   const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
     optsIn.allowOrigins,
   );
+  const rawWorkspace = resolveSingleWorkspaceInput(optsIn.workspace);
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
+    workspace: rawWorkspace,
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
       (!envFlagDisabled(clientMcpOverWsEnv) &&
@@ -1607,7 +1633,6 @@ export async function runQwenServe(
   // multiple daemon processes, not intra-daemon routing.
   //
   // Boot-loud validation: absolute path, exists, is a directory.
-  const rawWorkspace = opts.workspace ?? process.cwd();
   if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
       `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
@@ -2008,7 +2033,7 @@ export async function runQwenServe(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
-        `daemon:${daemonWorkspaceHash}:${process.pid}`,
+        `daemon:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
           telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
@@ -2058,6 +2083,10 @@ export async function runQwenServe(
       core.recordDaemonPipeMessage(direction, bytes);
       metricsRing.recordPipe(direction, bytes);
     };
+    const observeLargePipeFrame = createLargePipeFrameObserver({
+      daemonLog,
+      emitTelemetryLog: core.emitDaemonLog,
+    });
     const recordPromptQueueWait = (durationMs: number): void => {
       promptQueueWaitStats.count += 1;
       promptQueueWaitStats.totalMs += durationMs;
@@ -2178,6 +2207,12 @@ export async function runQwenServe(
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
         onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+        onMessageObserved: ({ direction, bytes, message }) =>
+          observeLargePipeFrame({
+            direction: daemonPipeDirection(direction),
+            bytes,
+            message,
+          }),
       },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }
@@ -2488,6 +2523,10 @@ export async function runQwenServe(
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
+      // The real long-running daemon keeps scheduled-task sessions resident
+      // (keepalive) and reloads them on boot (rehydration). Off by default so
+      // direct createServeApp embeds/tests don't spawn sessions.
+      manageScheduledTaskSessions: true,
       fsFactory: runtime.resolveBridgeFsFactory({
         // REST routes still return primary-relative paths, so keep their
         // filesystem boundary primary-only until responses carry root IDs.
@@ -2497,6 +2536,7 @@ export async function runQwenServe(
         pathLocks: sharedPathLocks,
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       }),
+      primaryWorkspaceTrusted: trustedWorkspace,
       daemonLog,
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({
@@ -2673,7 +2713,7 @@ export async function runQwenServe(
         performance.now() - runStartedAt,
       );
       profileCheckpoint('serve_listener_ready');
-      finalizeStartupProfile(daemonLog.getDaemonId() || 'serve');
+      finalizeStartupProfile(`serve-${process.pid}`);
 
       // Listener-level connection cap, set inside the listen callback
       // because Node only exposes the underlying `Server` after
@@ -3065,6 +3105,13 @@ export async function runQwenServe(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            // Stop the scheduled-task keepalive timer before tearing down the
+            // bridge it heartbeats. It's already unref()'d so it can't hold the
+            // process open, but stopping it here keeps it from firing against a
+            // disposed bridge (matters for embedders that don't process.exit).
+            (
+              app.locals as { stopScheduledTaskKeepalive?: () => void }
+            ).stopScheduledTaskKeepalive?.();
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();

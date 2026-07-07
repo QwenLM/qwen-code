@@ -48,6 +48,8 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
@@ -701,6 +703,28 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonStatusReport>(
       `/daemon/status${query}`,
       'GET /daemon/status',
+    );
+  }
+
+  /**
+   * Aggregate local token-usage dashboard (`GET /usage/dashboard`): the
+   * selected range's flattened totals plus a trailing per-day heatmap, read
+   * from the durable local usage history (global, cross-project). `range`
+   * scopes the summary (default `today`); `heatmapDays` sets the heatmap
+   * window (default ~6 months, server-clamped to 1..366).
+   */
+  async usageDashboard(
+    opts: { range?: DaemonUsageRange; heatmapDays?: number } = {},
+  ): Promise<DaemonUsageDashboard> {
+    const params = new URLSearchParams();
+    if (opts.range !== undefined) params.set('range', opts.range);
+    if (opts.heatmapDays !== undefined) {
+      params.set('heatmapDays', String(opts.heatmapDays));
+    }
+    const query = params.toString();
+    return await this.jsonRequest<DaemonUsageDashboard>(
+      `/usage/dashboard${query ? `?${query}` : ''}`,
+      'GET /usage/dashboard',
     );
   }
 

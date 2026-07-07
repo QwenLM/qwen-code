@@ -13,6 +13,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { trace, type Span } from '@opentelemetry/api';
 import {
+  computeKeepaliveIntervalMs,
   createServeApp,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
@@ -112,6 +113,15 @@ import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import {
+  createWorkspaceRegistry,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
+import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+} from './acp-http/client-mcp-sender-registry.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
@@ -1847,6 +1857,29 @@ function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
       else signal?.addEventListener('abort', onAbort, { once: true });
     });
 }
+
+describe('computeKeepaliveIntervalMs', () => {
+  it('keeps the heartbeat strictly under the reaper window (beats before reap)', () => {
+    // A small custom idle timeout must not get an interval ≥ the window, or the
+    // session is reaped before the first heartbeat. Half the window is the cap.
+    for (const idle of [1_000, 2_000, 10_000, 40_000, 60_000, 120_000]) {
+      const interval = computeKeepaliveIntervalMs(idle);
+      expect(interval).toBeLessThanOrEqual(Math.floor(idle / 2));
+      expect(interval).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('uses ~a third of a large window (default 30m → 10m cap)', () => {
+    expect(computeKeepaliveIntervalMs(30 * 60_000)).toBe(10 * 60_000); // MAX cap
+    expect(computeKeepaliveIntervalMs(15 * 60_000)).toBe(5 * 60_000); // /3
+  });
+
+  it('returns the relaxed max cadence when the reaper is disabled (≤ 0)', () => {
+    // No reaping → no heartbeat pressure, but the revive loop still runs.
+    expect(computeKeepaliveIntervalMs(0)).toBe(10 * 60_000);
+    expect(computeKeepaliveIntervalMs(-5)).toBe(10 * 60_000);
+  });
+});
 
 describe('createServeApp', () => {
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
@@ -7067,6 +7100,15 @@ describe('createServeApp', () => {
         'invalid_session_organization',
       );
 
+      const invalidColorBody = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ color: 'pink' });
+      expect(invalidColorBody.status).toBe(400);
+      expect(invalidColorBody.body).toMatchObject({
+        code: 'invalid_session_organization',
+        field: 'color',
+      });
+
       const unknownGroupFilter = await host(
         request(app).get(
           `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=missing-group`,
@@ -7087,6 +7129,52 @@ describe('createServeApp', () => {
         ),
       ).send({ isPinned: true });
       expect(missingSession.status).toBe(404);
+    });
+
+    it('assigns a quick color tag through REST and surfaces it in organized lists', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const assignRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ color: 'green' });
+      expect(assignRes.status).toBe(200);
+      expect(assignRes.body).toMatchObject({
+        sessionId,
+        color: 'green',
+        groupId: null,
+      });
+
+      const organized = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({ sessionId, color: 'green', groupId: null }),
+      ]);
+
+      // Picking "Ungrouped" (or a named group) clears the color tag.
+      const clearRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ color: null });
+      expect(clearRes.status).toBe(200);
+      expect(clearRes.body.color).toBeNull();
     });
 
     it('paginates organized sessions with opaque cursors', async () => {
@@ -12016,11 +12104,27 @@ describe('createServeApp', () => {
 
 describe('runQwenServe', () => {
   let handle: RunHandle | undefined;
+  let runtimeDir: string | undefined;
+
+  beforeEach(async () => {
+    // These tests spawn a real daemon bound to the repo cwd. Redirect the
+    // per-project runtime dir (where scheduled_tasks.json lives) into a temp
+    // dir so the daemon's scheduled-task rehydration reads an empty schedule
+    // instead of the developer's real ~/.qwen — otherwise it would try to
+    // reload a real bound session and hang these startup/shutdown tests.
+    runtimeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'run-qwen-serve-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
 
   afterEach(async () => {
     if (handle) {
       await handle.close();
       handle = undefined;
+    }
+    Storage.setRuntimeBaseDir(null);
+    if (runtimeDir) {
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+      runtimeDir = undefined;
     }
     // Scrub any env vars individual tests may have set so leftover
     // state can't leak into the next test in this worker.
@@ -13976,6 +14080,66 @@ describe('runQwenServe SIGINT handler', () => {
 });
 
 describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  function makeInjectedWorkspaceRuntime() {
+    const bridge = fakeBridge();
+    const fsFactory = {
+      forRequest: vi.fn(() => ({ marker: 'registry-fs' })),
+    } as unknown as WorkspaceFileSystemFactory;
+    const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    return {
+      workspaceId: 'ws-registry',
+      workspaceCwd: '/work/registry-primary',
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge,
+      workspaceService: {} as DaemonWorkspaceService,
+      routeFileSystemFactory: fsFactory,
+      clientMcpSenderRegistry,
+    } satisfies WorkspaceRuntime;
+  }
+
+  it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const locals = app.locals as {
+      boundWorkspace?: string;
+      workspaceRegistry?: WorkspaceRegistry;
+    };
+
+    expect(locals.workspaceRegistry).toBeDefined();
+    expect(locals.workspaceRegistry!.primary.workspaceCwd).toBe(
+      locals.boundWorkspace,
+    );
+    expect(locals.workspaceRegistry!.primary.workspaceId).toMatch(
+      /^[a-f0-9]{16}$/,
+    );
+    expect(locals.workspaceRegistry!.primary.primary).toBe(true);
+    expect(locals.workspaceRegistry!.primary.trusted).toBe(false);
+    expect(locals.workspaceRegistry!.primary.env).toEqual({
+      mode: 'parent-process',
+      overlayKeys: [],
+    });
+    expect(locals.workspaceRegistry!.list()).toEqual([
+      locals.workspaceRegistry!.primary,
+    ]);
+
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', '127.0.0.1:0')
+      .expect(200);
+    expect(res.body.workspaceCwd).toBe(
+      locals.workspaceRegistry!.primary.workspaceCwd,
+    );
+  });
+
   it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
     const { createServeApp } = await import('./server.js');
     const app = createServeApp(
@@ -14011,7 +14175,235 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       { fsFactory: sentinel as any },
     );
-    expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+    const locals = app.locals as {
+      fsFactory?: unknown;
+      workspaceRegistry?: WorkspaceRegistry;
+    };
+    expect(locals.fsFactory).toBe(sentinel);
+    expect(locals.workspaceRegistry!.primary.routeFileSystemFactory).toBe(
+      sentinel,
+    );
+  });
+
+  it('threads production-style primary trust into the default runtime metadata', async () => {
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { primaryWorkspaceTrusted: true } as Parameters<typeof createServeApp>[2],
+    );
+    const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
+
+    expect(locals.workspaceRegistry!.primary.trusted).toBe(true);
+  });
+
+  it('uses an injected workspace registry as the primary runtime source', async () => {
+    const { createServeApp } = await import('./server.js');
+    const runtime = makeInjectedWorkspaceRuntime();
+    const registry = createWorkspaceRegistry([runtime]);
+
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/ignored',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { workspaceRegistry: registry } as Parameters<typeof createServeApp>[2],
+    );
+    const locals = app.locals as {
+      boundWorkspace?: string;
+      fsFactory?: unknown;
+      workspaceRegistry?: WorkspaceRegistry;
+    };
+
+    expect(locals.workspaceRegistry).toBe(registry);
+    expect(locals.boundWorkspace).toBe('/work/registry-primary');
+    expect(locals.fsFactory).toBe(runtime.routeFileSystemFactory);
+
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', '127.0.0.1:0')
+      .expect(200);
+    expect(res.body.workspaceCwd).toBe('/work/registry-primary');
+    expect(res.body.features).toContain('workspace_reload');
+  });
+
+  it('accepts matching runtime deps when a workspace registry is injected', async () => {
+    const { createServeApp } = await import('./server.js');
+    const runtime = makeInjectedWorkspaceRuntime();
+    const registry = createWorkspaceRegistry([runtime]);
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          bridge: runtime.bridge,
+          workspace: runtime.workspaceService,
+          fsFactory: runtime.routeFileSystemFactory,
+          clientMcpSenderRegistry: runtime.clientMcpSenderRegistry,
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).not.toThrow();
+  });
+
+  it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
+    const { createServeApp } = await import('./server.js');
+    const runtime = makeInjectedWorkspaceRuntime();
+    const registry = createWorkspaceRegistry([runtime]);
+
+    expect(() => {
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+          clientMcpOverWs: true,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          bridge: runtime.bridge,
+        } as Parameters<typeof createServeApp>[2],
+      );
+    }).not.toThrow();
+
+    const provider = createClientMcpServerProvider(
+      runtime.clientMcpSenderRegistry,
+      runtime.bridge,
+      'connA',
+    );
+    const sendSdkMcpMessage: Parameters<
+      typeof provider.registerClientMcpServer
+    >[1] = vi.fn(async (_serverName, message) => message);
+
+    await expect(
+      provider.registerClientMcpServer('chrome-tools', sendSdkMcpMessage),
+    ).resolves.toEqual({ toolCount: 3 });
+
+    expect(runtime.clientMcpSenderRegistry.serverNames()).toEqual([
+      'chrome-tools',
+    ]);
+    expect(runtime.bridge.addRuntimeMcpServerCalls).toHaveLength(1);
+    expect(runtime.bridge.addRuntimeMcpServerCalls[0]).toMatchObject({
+      name: 'chrome-tools',
+      originatorClientId: 'connA',
+    });
+
+    const payload = { jsonrpc: '2.0', id: 1, method: 'ping' } as const;
+    const sender = runtime.clientMcpSenderRegistry.lookup('chrome-tools');
+    expect(sender).toBeDefined();
+    await expect(sender!(payload)).resolves.toEqual(payload);
+    expect(sendSdkMcpMessage).toHaveBeenCalledWith('chrome-tools', payload);
+
+    await provider.unregisterClientMcpServer('chrome-tools');
+    expect(runtime.clientMcpSenderRegistry.serverNames()).toEqual([]);
+    expect(runtime.bridge.removeRuntimeMcpServerCalls).toEqual([
+      { name: 'chrome-tools', originatorClientId: 'connA' },
+    ]);
+  });
+
+  it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
+    const { createServeApp } = await import('./server.js');
+    const runtime = makeInjectedWorkspaceRuntime();
+    const registry = createWorkspaceRegistry([runtime]);
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          boundWorkspace: '/work/other',
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.boundWorkspace: .*registry primary cwd="\/work\/registry-primary".*workspaceId="ws-registry".*deps\.boundWorkspace="\/work\/other"/,
+    );
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          bridge: fakeBridge(),
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.bridge: .*workspaceId="ws-registry".*deps\.bridge is a different object/,
+    );
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          workspace: {} as DaemonWorkspaceService,
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.workspace: .*workspaceId="ws-registry".*deps\.workspace is a different object/,
+    );
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          fsFactory: {
+            forRequest: vi.fn(() => ({ marker: 'other-fs' })),
+          } as unknown as WorkspaceFileSystemFactory,
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.fsFactory: .*workspaceId="ws-registry".*deps\.fsFactory is a different object/,
+    );
+
+    expect(() =>
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: '/work/ignored',
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+        {
+          workspaceRegistry: registry,
+          clientMcpSenderRegistry: {},
+        } as Parameters<typeof createServeApp>[2],
+      ),
+    ).toThrow(
+      /workspaceRegistry conflicts with deps\.clientMcpSenderRegistry: .*workspaceId="ws-registry".*deps\.clientMcpSenderRegistry is a different object/,
+    );
   });
 
   it('passes custom ignore files through resolveBridgeFsFactory', async () => {

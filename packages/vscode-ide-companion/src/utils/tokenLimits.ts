@@ -22,8 +22,8 @@ type TokenCount = number;
 // Public constants
 // ---------------------------------------------------------------------------
 
-/** Default input context window size: 128 K tokens (power-of-two). */
-export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072;
+/** Default input context window size: 200 K tokens. */
+export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000;
 
 // ---------------------------------------------------------------------------
 // Token limit types

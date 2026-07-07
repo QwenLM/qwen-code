@@ -25,25 +25,45 @@ import type {
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SESSION_ORGANIZATION_FEATURE,
+} from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_SESSION_PAGE_SIZE = 1000;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
-const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
 const GROUP_MENU_MARGIN = 8;
 
+/**
+ * Palette order for the quick color-grouping buckets. Mirrors core's
+ * `GROUP_COLOR_OPTIONS`; kept as a local constant so the client never imports
+ * from core. Used both to order the color sections and as a fallback when the
+ * daemon's color catalog has not loaded yet.
+ */
+const SESSION_GROUP_COLORS: DaemonSessionGroupColor[] = [
+  'red',
+  'orange',
+  'yellow',
+  'green',
+  'blue',
+  'purple',
+];
+
 type GroupEditorMode = 'create' | 'edit';
+
+type SessionSectionKind = 'color' | 'group' | 'recent';
 
 interface SessionSection {
   id: string;
+  kind: SessionSectionKind;
   label: string;
   countLabel?: string;
   color?: DaemonSessionGroupColor;
@@ -68,6 +88,17 @@ interface WebShellSidebarProps {
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
   onOpenDaemonStatus: () => void;
+  onOpenScheduledTasks: () => void;
+  onOpenSessions: () => void;
+  /**
+   * Whether to offer the Session Overview entry point. Gated to large screens
+   * by the app: below that there is no room to make managing several sessions
+   * side by side worthwhile.
+   */
+  canOpenSessionsOverview?: boolean;
+  onOpenSplitView: () => void;
+  /** Whether to offer the in-window split view (large screens only). */
+  canOpenSplitView?: boolean;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -171,6 +202,25 @@ function IconNewChat() {
   );
 }
 
+/**
+ * Qwen brand mark. Same artwork as the browser-tab favicon in index.html and
+ * the QwenLM GitHub avatar; inlined as an SVG rather than hot-linked because
+ * the Web Shell CSP is `img-src 'self' data: blob:` (see web-shell-static.ts),
+ * which blocks remote images. The purple #6D44E8 fill is legible on both the
+ * light and dark sidebar backgrounds. Filled (not stroked) so it opts out of
+ * the shared `.navIcon svg` stroke styling.
+ */
+function IconQwenLogo() {
+  return (
+    <svg viewBox="0 0 141.38 140" aria-hidden="true">
+      <path
+        fill="#6D44E8"
+        d="m140.93 85-16.35-28.33-1.93-3.34 8.66-15a3.323 3.323 0 0 0 0-3.34l-9.62-16.67c-.3-.51-.72-.93-1.22-1.22s-1.07-.45-1.67-.45H82.23l-8.66-15a3.33 3.33 0 0 0-2.89-1.67H51.43c-.59 0-1.17.16-1.66.45-.5.29-.92.71-1.22 1.22L32.19 29.98l-1.92 3.33H12.96c-.59 0-1.17.16-1.66.45-.5.29-.93.71-1.22 1.22L.45 51.66a3.323 3.323 0 0 0 0 3.34l18.28 31.67-8.66 15a3.32 3.32 0 0 0 0 3.34l9.62 16.67c.3.51.72.93 1.22 1.22s1.07.45 1.67.45h36.56l8.66 15a3.35 3.35 0 0 0 2.89 1.67h19.25a3.34 3.34 0 0 0 2.89-1.67l18.28-31.67h17.32c.6 0 1.17-.16 1.67-.45s.92-.71 1.22-1.22l9.62-16.67a3.323 3.323 0 0 0 0-3.34ZM51.44 3.33 61.07 20l-9.63 16.66h76.98l-9.62 16.66H45.67l-11.54-20zM57.21 120H22.58l9.63-16.67h19.25l-38.5-66.67h19.25l9.62 16.67L68.78 100l-11.55 20Zm61.59-33.34-9.62-16.67-38.49 66.67-9.63-16.67 9.63-16.66 26.94-46.67h23.1l17.32 30z"
+      />
+    </svg>
+  );
+}
+
 function IconFolder({ expanded }: { expanded: boolean }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -211,6 +261,35 @@ function IconPulse() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
+  );
+}
+
+function IconSchedule() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function IconGrid() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+function IconColumns() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="8" height="16" rx="1" />
+      <rect x="13" y="4" width="8" height="16" rx="1" />
     </svg>
   );
 }
@@ -404,6 +483,11 @@ export function WebShellSidebar({
   onCollapsedChange,
   onOpenSettings,
   onOpenDaemonStatus,
+  onOpenScheduledTasks,
+  onOpenSessions,
+  canOpenSessionsOverview,
+  onOpenSplitView,
+  canOpenSplitView,
   onNewSession,
   onLoadSession,
   onError,
@@ -427,7 +511,7 @@ export function WebShellSidebar({
     archiveSession,
   } = useSessions({
     autoLoad: true,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -444,7 +528,7 @@ export function WebShellSidebar({
   } = useSessions({
     autoLoad: true,
     enabled: archivedExpanded,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -1030,7 +1114,9 @@ export function WebShellSidebar({
             try {
               await workspaceActions.updateSessionOrganization(
                 groupEditor.targetSession.sessionId,
-                { groupId: group.id },
+                // Assigning a named group clears any color tag (single choice
+                // in the UI), matching assignSessionGroup.
+                { groupId: group.id, color: null },
               );
               void reload().catch(() => undefined);
             } catch (err) {
@@ -1169,7 +1255,10 @@ export function WebShellSidebar({
           : window.innerWidth;
       const viewportHeight =
         typeof window === 'undefined' ? rect.top + 320 : window.innerHeight;
-      const estimatedHeight = Math.min(320, 34 * (groups.length + 2) + 25);
+      const estimatedHeight = Math.min(
+        320,
+        34 * (groups.length + SESSION_GROUP_COLORS.length + 2) + 25,
+      );
       const left =
         rect.right + GROUP_MENU_MARGIN + GROUP_MENU_WIDTH <= viewportWidth
           ? rect.right + GROUP_MENU_MARGIN
@@ -1233,7 +1322,31 @@ export function WebShellSidebar({
       setGroupMenu(null);
       setSessionBusy(sessionId, true);
       workspaceActions
-        .updateSessionOrganization(sessionId, { groupId })
+        // Group and color are a single choice in the UI: assigning a named
+        // group (or "Ungrouped", groupId=null) clears any color tag.
+        .updateSessionOrganization(sessionId, { groupId, color: null })
+        .then(() => {
+          void reload().catch(() => undefined);
+        })
+        .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
+        .finally(() => {
+          setSessionBusy(sessionId, false);
+        });
+    },
+    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
+  );
+
+  const assignSessionColor = useCallback(
+    (session: DaemonSessionSummary, color: DaemonSessionGroupColor | null) => {
+      const sessionId = session.sessionId;
+      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+        return;
+      }
+      setGroupMenu(null);
+      setSessionBusy(sessionId, true);
+      workspaceActions
+        // Picking a color clears any named-group assignment (single choice).
+        .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
           void reload().catch(() => undefined);
         })
@@ -1275,37 +1388,68 @@ export function WebShellSidebar({
   const sessionSections = useMemo<SessionSection[]>(() => {
     if (!organizationEnabled) return [];
     const searching = searchQuery.trim().length > 0;
+    const validGroupIds = new Set(groups.map((group) => group.id));
+    const sessionsByColor = new Map<
+      DaemonSessionGroupColor,
+      DaemonSessionSummary[]
+    >();
     const sessionsByGroupId = new Map<string, DaemonSessionSummary[]>();
     for (const group of groups) {
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
     for (const session of filteredSessions) {
-      const groupSessions = session.groupId
-        ? sessionsByGroupId.get(session.groupId)
-        : undefined;
+      // Color takes precedence: the picker keeps color and group mutually
+      // exclusive, but stay defensive if a store somehow carries both.
+      if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
+        const bucket = sessionsByColor.get(session.color) ?? [];
+        bucket.push(session);
+        sessionsByColor.set(session.color, bucket);
+        continue;
+      }
+      const groupSessions =
+        session.groupId && validGroupIds.has(session.groupId)
+          ? sessionsByGroupId.get(session.groupId)
+          : undefined;
       if (groupSessions) {
         groupSessions.push(session);
       } else {
         recentSessions.push(session);
       }
     }
-    const sections: SessionSection[] = groups
-      .map((group) => {
-        const groupSessions = sessionsByGroupId.get(group.id) ?? [];
-        return {
-          id: `group:${group.id}`,
-          label: group.name,
-          countLabel: String(groupSessions.length),
-          color: group.color,
-          group,
-          sessions: groupSessions,
-        };
-      })
-      .filter((section) => !searching || section.sessions.length > 0);
+    const sections: SessionSection[] = [];
+    // Color buckets first, in palette order; only render non-empty ones so the
+    // sidebar never shows six empty color headers.
+    for (const color of SESSION_GROUP_COLORS) {
+      const colorSessions = sessionsByColor.get(color);
+      if (!colorSessions || colorSessions.length === 0) continue;
+      sections.push({
+        id: `color:${color}`,
+        kind: 'color',
+        label: t(`sidebar.groupColor.${color}`),
+        countLabel: String(colorSessions.length),
+        color,
+        sessions: colorSessions,
+      });
+    }
+    // Named groups next (kept visible even when empty, unless searching).
+    for (const group of groups) {
+      const groupSessions = sessionsByGroupId.get(group.id) ?? [];
+      if (searching && groupSessions.length === 0) continue;
+      sections.push({
+        id: `group:${group.id}`,
+        kind: 'group',
+        label: group.name,
+        countLabel: String(groupSessions.length),
+        color: group.color,
+        group,
+        sessions: groupSessions,
+      });
+    }
     if (recentSessions.length > 0) {
       sections.push({
         id: RECENT_SESSION_SECTION_ID,
+        kind: 'recent',
         label: t('sidebar.groupRecent'),
         sessions: recentSessions,
       });
@@ -1383,11 +1527,21 @@ export function WebShellSidebar({
   const deleteCandidateLabel = deleteCandidate
     ? getCompactSessionLabel(deleteCandidate)
     : '';
+  const groupMenuSelectedColor =
+    groupMenu?.session.color &&
+    SESSION_GROUP_COLORS.includes(groupMenu.session.color)
+      ? groupMenu.session.color
+      : null;
   const groupMenuSelectedGroupId =
+    !groupMenuSelectedColor &&
     groupMenu?.session.groupId &&
     groups.some((group) => group.id === groupMenu.session.groupId)
       ? groupMenu.session.groupId
       : null;
+  const menuColorOptions =
+    colorOptions.length > 0 ? colorOptions : SESSION_GROUP_COLORS;
+  const groupMenuUngroupedSelected =
+    groupMenuSelectedGroupId === null && groupMenuSelectedColor === null;
   const deleteGroupCandidateLabel = deleteGroupCandidate?.name ?? '';
   const canSaveGroup = groupName.trim().length > 0 && !groupBusy;
   const groupEditorTitle =
@@ -1590,8 +1744,8 @@ export function WebShellSidebar({
                             className={styles.sessionActionButton}
                             type="button"
                             disabled={busy}
-                            title={t('sidebar.organize')}
-                            aria-label={t('sidebar.organize')}
+                            title={t('sidebar.sessionGroup')}
+                            aria-label={t('sidebar.sessionGroup')}
                             onClick={(event) => openGroupMenu(event, session)}
                           >
                             <IconGroup />
@@ -1737,7 +1891,7 @@ export function WebShellSidebar({
               </span>
             </button>
             <div className={styles.sessionGroupHeaderActions}>
-              {group ? (
+              {section.kind === 'group' && group ? (
                 <>
                   <button
                     className={styles.sessionGroupActionButton}
@@ -1770,7 +1924,7 @@ export function WebShellSidebar({
                     <IconTrash />
                   </button>
                 </>
-              ) : (
+              ) : section.kind === 'recent' ? (
                 <button
                   className={styles.sessionGroupActionButton}
                   type="button"
@@ -1781,7 +1935,7 @@ export function WebShellSidebar({
                 >
                   <IconNewChat />
                 </button>
-              )}
+              ) : null}
             </div>
           </div>
           {expanded && (
@@ -1928,7 +2082,7 @@ export function WebShellSidebar({
             },
             {
               key: 'group',
-              label: t('sidebar.organize'),
+              label: t('sidebar.sessionGroup'),
               icon: <IconGroup />,
               disabled: sessionBusy,
               onSelect: () =>
@@ -2008,21 +2162,45 @@ export function WebShellSidebar({
           <button
             className={cx(
               styles.groupMenuItem,
-              groupMenuSelectedGroupId === null && styles.groupMenuItemActive,
+              groupMenuUngroupedSelected && styles.groupMenuItemActive,
             )}
             type="button"
             role="menuitemradio"
-            aria-checked={groupMenuSelectedGroupId === null}
+            aria-checked={groupMenuUngroupedSelected}
             onClick={() => assignSessionGroup(groupMenu.session, null)}
           >
             <span className={styles.groupMenuEmptyDot} />
             <span className={styles.groupMenuName}>
               {t('sidebar.groupUngrouped')}
             </span>
-            {groupMenuSelectedGroupId === null && (
+            {groupMenuUngroupedSelected && (
               <span className={styles.groupMenuCheck}>✓</span>
             )}
           </button>
+          {menuColorOptions.map((color) => {
+            const selected = groupMenuSelectedColor === color;
+            return (
+              <button
+                key={`color:${color}`}
+                className={cx(
+                  styles.groupMenuItem,
+                  selected && styles.groupMenuItemActive,
+                )}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selected}
+                onClick={() => assignSessionColor(groupMenu.session, color)}
+              >
+                <span
+                  className={cx(styles.groupMenuDot, getGroupColorClass(color))}
+                />
+                <span className={styles.groupMenuName}>
+                  {t(`sidebar.groupColor.${color}`)}
+                </span>
+                {selected && <span className={styles.groupMenuCheck}>✓</span>}
+              </button>
+            );
+          })}
           {groups.map((group) => {
             const selected = groupMenuSelectedGroupId === group.id;
             return (
@@ -2196,19 +2374,26 @@ export function WebShellSidebar({
           </div>
         </DialogShell>
       )}
-      <button
-        className={styles.newChatButton}
-        type="button"
-        title={t('sidebar.newChat')}
-        aria-label={t('sidebar.newChat')}
-        disabled={newSessionDisabled}
-        onClick={handleNewSession}
-      >
-        <span className={styles.navIcon}>
-          <IconNewChat />
-        </span>
-        {!collapsed && <span>{t('sidebar.newChat')}</span>}
-      </button>
+      <div className={styles.topRow}>
+        {!collapsed && (
+          <span className={styles.brandLogo} aria-hidden="true">
+            <IconQwenLogo />
+          </span>
+        )}
+        <button
+          className={styles.newChatButton}
+          type="button"
+          title={t('sidebar.newChat')}
+          aria-label={t('sidebar.newChat')}
+          disabled={newSessionDisabled}
+          onClick={handleNewSession}
+        >
+          <span className={styles.navIcon}>
+            <IconNewChat />
+          </span>
+          {!collapsed && <span>{t('sidebar.newChat')}</span>}
+        </button>
+      </div>
 
       <div className={styles.body}>
         {!collapsed && (
@@ -2338,6 +2523,37 @@ export function WebShellSidebar({
           <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
             {versionLabel}
           </span>
+        )}
+        <button
+          className={styles.collapseButton}
+          type="button"
+          title={t('sidebar.scheduledTasks')}
+          aria-label={t('sidebar.scheduledTasks')}
+          onClick={onOpenScheduledTasks}
+        >
+          <IconSchedule />
+        </button>
+        {canOpenSessionsOverview && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.sessionsOverview')}
+            aria-label={t('sidebar.sessionsOverview')}
+            onClick={onOpenSessions}
+          >
+            <IconGrid />
+          </button>
+        )}
+        {canOpenSplitView && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.splitView')}
+            aria-label={t('sidebar.splitView')}
+            onClick={onOpenSplitView}
+          >
+            <IconColumns />
+          </button>
         )}
         <button
           className={styles.collapseButton}

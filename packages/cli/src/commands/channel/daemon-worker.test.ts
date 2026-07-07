@@ -419,6 +419,25 @@ describe('createDaemonChannelBridgeFacade', () => {
 
     expect('listSessions' in facade).toBe(false);
   });
+
+  it('does not expose channel loop MCP registration through the daemon facade', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      registerChannelLoopToolHandler: vi.fn(),
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect('registerChannelLoopToolHandler' in facade).toBe(false);
+  });
 });
 
 describe('runChannelDaemonWorker', () => {

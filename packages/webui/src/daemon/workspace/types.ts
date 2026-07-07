@@ -63,6 +63,8 @@ import type {
   DaemonSessionExportResult,
   DaemonStatusReport,
   DaemonStatusReportDetail,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
 } from '@qwen-code/sdk/daemon';
@@ -152,6 +154,66 @@ export interface DaemonGlobResult {
   matches: string[];
 }
 
+// ── Scheduled Tasks (durable cron, server-only) ─────────────────────
+
+/** A durable scheduled task as returned by the daemon. `name`/`enabled` are
+ * normalized (never undefined): `name: null` = unnamed, `enabled` defaults to
+ * true for tasks created before the field existed. */
+/** One recorded fire of a recurring scheduled task, newest last in
+ * {@link DaemonScheduledTask.runs}. Mirrors the daemon's wire shape. */
+export interface DaemonScheduledTaskRun {
+  /** Fire time (epoch ms). */
+  at: number;
+  /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
+   * "run now"); absent = scheduled. */
+  kind?: 'scheduled' | 'catch-up' | 'manual';
+  /** The session the fire ran in, when the task is bound to one. Mirrors the
+   * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
+   * on the client (not surfaced in the UI yet). */
+  sessionId?: string;
+}
+
+export interface DaemonScheduledTask {
+  id: string;
+  name: string | null;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  enabled: boolean;
+  createdAt: number;
+  lastFiredAt: number | null;
+  /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
+   * snapshot the UI counts down against; it advances on the next reload. */
+  nextRunAt: number | null;
+  /** Id of the dedicated session this task is bound to — its transcript is the
+   * task's run history. Null for unbound tool-created/legacy tasks. */
+  sessionId: string | null;
+  /** Bounded, newest-last history of recent fires. Empty for tasks that have
+   * not fired (and, by nature, for one-shots — they are deleted on fire). */
+  runs: DaemonScheduledTaskRun[];
+}
+
+export interface DaemonCreateScheduledTaskRequest {
+  cron: string;
+  prompt: string;
+  /** Omit or null for an unnamed task. */
+  name?: string | null;
+  /** Defaults to true (fire on every match until deleted/expired). */
+  recurring?: boolean;
+  /** Defaults to true. */
+  enabled?: boolean;
+}
+
+/** Partial update. `name: null` (or '') clears the name. Omitted fields are
+ * left unchanged. */
+export interface DaemonUpdateScheduledTaskRequest {
+  cron?: string;
+  prompt?: string;
+  name?: string | null;
+  recurring?: boolean;
+  enabled?: boolean;
+}
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -209,6 +271,12 @@ export interface DaemonWorkspaceActions {
     detail?: DaemonStatusReportDetail,
   ): Promise<DaemonStatusReport>;
 
+  // Token-usage dashboard (read-only)
+  loadUsageDashboard(opts?: {
+    range?: DaemonUsageRange;
+    heatmapDays?: number;
+  }): Promise<DaemonUsageDashboard>;
+
   // Skills (read-only)
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
 
@@ -258,6 +326,20 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonWorkspaceFileEditResult>;
   stat(filePath: string): Promise<DaemonFileStat>;
   listDirectory(dirPath: string): Promise<DaemonDirectoryListing>;
+
+  // Scheduled tasks (durable cron)
+  listScheduledTasks(): Promise<DaemonScheduledTask[]>;
+  createScheduledTask(
+    req: DaemonCreateScheduledTaskRequest,
+  ): Promise<DaemonScheduledTask>;
+  updateScheduledTask(
+    id: string,
+    patch: DaemonUpdateScheduledTaskRequest,
+  ): Promise<DaemonScheduledTask>;
+  /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
+   * prompt itself is executed by the caller in the task's bound session. */
+  runScheduledTask(id: string): Promise<DaemonScheduledTask>;
+  deleteScheduledTask(id: string): Promise<void>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;

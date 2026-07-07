@@ -127,5 +127,7 @@ tmp/
 .venv
 .codegraph
 .qwen/computer-use/installed.json
+# Auto-generated computer-use marker can also appear under nested packages.
+**/.qwen/computer-use/
 .playwright-mcp/
 pnpm-lock.yaml

@@ -486,6 +486,8 @@ export interface DaemonSessionSummary {
   isPinned?: boolean;
   pinnedAt?: string;
   groupId?: string | null;
+  /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
+  color?: DaemonSessionGroupColor | null;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -535,6 +537,7 @@ export interface DaemonSessionGroupUpdate {
 export interface DaemonSessionOrganizationUpdate {
   isPinned?: boolean;
   groupId?: string | null;
+  color?: DaemonSessionGroupColor | null;
 }
 
 export interface DaemonSessionOrganizationResult {
@@ -542,6 +545,7 @@ export interface DaemonSessionOrganizationResult {
   groupId: string | null;
   isPinned: boolean;
   pinnedAt?: string;
+  color?: DaemonSessionGroupColor | null;
   updatedAt: string;
 }
 
@@ -1647,6 +1651,83 @@ export interface DaemonSessionStatsStatus {
     totalFail: number;
     byName: Record<string, DaemonSessionStatsSkillByName>;
   };
+}
+
+/**
+ * Summary window the usage dashboard aggregates over (UI: Today / 7D / 30D).
+ * `week` = trailing 7 days, `month` = trailing 30 days. Mirrors the subset of
+ * core's `TimeRange` the route accepts.
+ */
+export type DaemonUsageRange = 'today' | 'week' | 'month';
+
+/**
+ * Flattened summary totals for the usage dashboard hero + breakdown tiles.
+ * Mirrors core's `UsageDashboardTotals`.
+ */
+export interface DaemonUsageDashboardTotals {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  thoughtsTokens: number;
+  requests: number;
+  sessions: number;
+  toolCalls: number;
+  linesAdded: number;
+  linesRemoved: number;
+  /** cachedTokens / inputTokens as a 0..1 fraction (0 when there is no input). */
+  cacheReadRate: number;
+}
+
+/** One model's token share of the range. Mirrors core's `UsageModelShare`. */
+export interface DaemonUsageModelShare {
+  model: string;
+  totalTokens: number;
+  /** cachedTokens / inputTokens, 0..1. */
+  cacheReadRate: number;
+  /** totalTokens / range total, 0..1. */
+  share: number;
+}
+
+/** One skill's invocation count over the range. Mirrors `UsageSkillCall`. */
+export interface DaemonUsageSkillCall {
+  name: string;
+  count: number;
+}
+
+/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+export interface DaemonUsageDailyPoint {
+  date: string;
+  tokens: number;
+  sessions: number;
+}
+
+/** One heatmap cell: tokens (intensity) + cache rate. Mirrors `UsageHeatmapDay`. */
+export interface DaemonUsageHeatmapDay {
+  tokens: number;
+  /** cachedTokens / inputTokens for that day, 0..1. */
+  cacheReadRate: number;
+}
+
+/**
+ * Returned from `GET /usage/dashboard`. Aggregate local token usage across all
+ * projects, powering the Daemon Status "统计 / Usage" tab. Mirrors core's
+ * `UsageDashboard`.
+ */
+export interface DaemonUsageDashboard {
+  generatedAt: string;
+  /** The window `summary` covers; the heatmap below is always ~6 months. */
+  range: DaemonUsageRange;
+  summary: DaemonUsageDashboardTotals;
+  /** Per-model token share for the range, sorted by tokens desc. */
+  models: DaemonUsageModelShare[];
+  /** Skill invocations for the range, sorted by count desc. */
+  skills: DaemonUsageSkillCall[];
+  /** Per-day tokens + sessions across the range window. */
+  daily: DaemonUsageDailyPoint[];
+  /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
+  heatmap: Record<string, DaemonUsageHeatmapDay>;
+  heatmapDays: number;
 }
 
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */

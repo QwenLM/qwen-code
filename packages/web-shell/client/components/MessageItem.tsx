@@ -30,7 +30,7 @@ interface MessageItemProps {
   onBranchSession?: () => void;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
-  shellOutputMaxLines: number;
+  isLocateFlashing?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -44,13 +44,17 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   showAssistantActions = false,
   showAssistantBranch = false,
-  shellOutputMaxLines,
+  isLocateFlashing = false,
 }: MessageItemProps) {
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
         return (
-          <UserMessage content={message.content} images={message.images} />
+          <UserMessage
+            content={message.content}
+            images={message.images}
+            isLocateFlashing={isLocateFlashing}
+          />
         );
       case 'assistant':
         return (
@@ -61,6 +65,7 @@ export const MessageItem = memo(function MessageItem({
             onBranchSession={onBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'thinking':
@@ -69,6 +74,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'tool_group':
@@ -77,11 +83,17 @@ export const MessageItem = memo(function MessageItem({
             tools={message.tools}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
-            shellOutputMaxLines={shellOutputMaxLines}
+            isLocateFlashing={isLocateFlashing}
           />
         );
       case 'plan':
-        return <PlanMessage id={message.id} todos={message.todos} />;
+        return (
+          <PlanMessage
+            id={message.id}
+            todos={message.todos}
+            isLocateFlashing={isLocateFlashing}
+          />
+        );
       case 'system':
         return (
           <SystemMessage
@@ -239,7 +251,7 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
-  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 

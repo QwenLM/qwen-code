@@ -19,7 +19,7 @@ import {
   getSpecificMimeType,
   isCacheableReadResult,
 } from '../utils/fileUtils.js';
-import { parsePDFPageRange } from '../utils/pdf.js';
+import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
@@ -54,8 +54,7 @@ export interface ReadFileToolParams {
 
   /**
    * For PDF files, the page range to extract as text (e.g. "1-5", "3", "10-20").
-   * Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like "3-"
-   * are not supported.
+   * Pages are 1-indexed. Open-ended ranges like "3-" are not supported.
    */
   pages?: string;
 }
@@ -106,8 +105,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
 
-    // SYNC: Keep these roots and the auto-memory check below aligned with
-    // AcpAgent.setupFileSystem's localReadRoots.
+    // SYNC: Keep these base roots and the auto-memory check below aligned with
+    // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
+    // append fallback-only roots after that group.
     const allowedRoots = [
       this.config.storage.getProjectTempDir(),
       // Background subagent transcripts live under <projectDir>/subagents/ and
@@ -393,7 +393,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
@@ -405,16 +405,16 @@ export class ReadFileTool extends BaseDeclarativeTool<
           offset: {
             description:
               "Optional: For text files, the 0-based line number to start reading from. Requires 'limit' to be set. Use for paginating through large files.",
-            type: 'number',
+            type: 'integer',
           },
           limit: {
             description:
               "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit).",
-            type: 'number',
+            type: 'integer',
           },
           pages: {
             description:
-              "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like '3-' are not supported. When provided, PDF content is extracted as text regardless of model capabilities.",
+              `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
             type: 'string',
           },
         },
@@ -440,11 +440,17 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
-    if (params.offset !== undefined && params.offset < 0) {
-      return 'Offset must be a non-negative number';
+    if (
+      params.offset !== undefined &&
+      (!Number.isInteger(params.offset) || params.offset < 0)
+    ) {
+      return 'Offset must be a non-negative integer';
     }
-    if (params.limit !== undefined && params.limit <= 0) {
-      return 'Limit must be a positive number';
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'Limit must be a positive integer';
     }
 
     if (params.pages !== undefined) {
@@ -470,9 +476,9 @@ export class ReadFileTool extends BaseDeclarativeTool<
         return `Invalid pages parameter: '${params.pages}'. Use formats like '5' or '1-10'.`;
       }
       if (parsed.lastPage === Infinity) {
-        return `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the 20-page limit (e.g. '3-22').`;
+        return `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the ${PDF_MAX_PAGES_PER_READ}-page limit (e.g. '3-22').`;
       }
-      const maxPages = 20;
+      const maxPages = PDF_MAX_PAGES_PER_READ;
       if (parsed.lastPage - parsed.firstPage + 1 > maxPages) {
         return `Pages range exceeds maximum of ${maxPages} pages per request.`;
       }

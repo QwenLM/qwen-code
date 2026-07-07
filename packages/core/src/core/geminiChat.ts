@@ -70,7 +70,10 @@ import {
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
-  prepareImagePayloadsForRequest,
+  buildReattachParts,
+  countAllInlineImages,
+  replaceImagePayloadsInPlace,
+
 } from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
@@ -1543,28 +1546,37 @@ export class GeminiChat {
    */
   private getRequestHistory(currentUserContent?: Content): Content[] {
     const curatedHistory = extractCuratedHistory(this.history);
-    const preserveImagePartsForContentIndex = currentUserContent
-      ? curatedHistory.findIndex((content) => content === currentUserContent)
-      : -1;
-    const requestHistory = curatedHistory.map(copyContentContainer);
-    const preserveLastUserImagePartCount =
-      preserveImagePartsForContentIndex === -1
-        ? (currentUserContent?.parts?.length ?? 0)
-        : 0;
-    const preserveImagePartsForContentIndexOption =
-      preserveImagePartsForContentIndex === -1
-        ? undefined
-        : preserveImagePartsForContentIndex;
-    const { maxRecentImages } = resolveCompactionTuning(
+    const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
-    return prepareImagePayloadsForRequest(requestHistory, {
-      maxRecentImages,
-      preserveImagePartsForContentIndex:
-        preserveImagePartsForContentIndexOption,
-      preserveLastUserImagePartCount,
-      store: this.imagePayloadStore,
-    });
+    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
+      const skipEntry = currentUserContent
+        ? curatedHistory.find(
+            (c) =>
+              c === currentUserContent ||
+              (c.role === 'user' &&
+                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+          )
+        : undefined;
+      const replaced = replaceImagePayloadsInPlace(
+        curatedHistory,
+        this.imagePayloadStore,
+        skipEntry,
+      );
+      const requestHistory = curatedHistory.map(copyContentContainer);
+      const reattachParts = buildReattachParts(replaced, maxRecentImages);
+      if (reattachParts.length > 0) {
+        const last = requestHistory.at(-1);
+        if (last?.role === 'user') {
+          last.parts = [...(last.parts ?? []), ...reattachParts];
+        } else {
+          requestHistory.push({ role: 'user', parts: reattachParts });
+        }
+      }
+      return requestHistory;
+    }
+    return curatedHistory.map(copyContentContainer);
+
   }
 
   /**
@@ -1857,6 +1869,7 @@ export class GeminiChat {
             model,
             cgConfigForThresholds?.contextWindowSize,
           ));
+
     let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
@@ -2320,6 +2333,7 @@ export class GeminiChat {
                     // other retry branches in case a future in-place
                     // tryCompress stops resetting it.
                     self.popPendingPartialAssistantTurn();
+
                     requestContents =
                       self.getRequestHistory(currentUserContent);
                     debugLogger.info(
@@ -2583,6 +2597,7 @@ export class GeminiChat {
             // Re-send with the updated history (includes partial + recovery)
             const recoveryContents = self.getRequestHistory(currentUserContent);
             recoveryFinishReason = undefined;
+
             try {
               const recoveryStream = await self.makeApiCallAndProcessStream(
                 model,

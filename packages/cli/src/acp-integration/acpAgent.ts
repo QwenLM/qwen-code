@@ -263,11 +263,45 @@ import {
 import type { HistoryItemContextUsage } from '../ui/types.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
+const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
+const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function parseAcpLocalReadRootsEnv(
+  raw = process.env[QWEN_ACP_LOCAL_READ_ROOTS_ENV],
+): string[] {
+  if (!raw) return [];
+
+  return raw
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && path.isAbsolute(entry));
+}
+
+function defaultAcpOnlyLocalReadRoots(): string[] {
+  return process.platform === 'win32' ? [] : [POSIX_TMP_LOCAL_READ_ROOT];
+}
+
+function buildAcpLocalReadRoots(config: Config): string[] {
+  return [
+    // SYNC: The first group mirrors ReadFileTool's default allowed local roots,
+    // including auto-memory roots. The ACP-only additions below expand only
+    // local read fallback, not read_file's default permission.
+    config.storage.getProjectTempDir(),
+    path.join(config.storage.getProjectDir(), 'subagents'),
+    Storage.getGlobalTempDir(),
+    getAutoMemoryRoot(config.getTargetDir()),
+    getUserAutoMemoryRoot(),
+    ...config.storage.getUserSkillsDirs(),
+    Storage.getUserExtensionsDir(),
+    ...defaultAcpOnlyLocalReadRoots(),
+    ...parseAcpLocalReadRootsEnv(),
+  ];
+}
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -2363,6 +2397,7 @@ export async function deliverClientMcpMessage(
   connection: AgentSideConnection | undefined,
   serverName: string,
   message: JSONRPCMessage,
+  sessionId?: string,
 ): Promise<JSONRPCMessage> {
   if (!connection) {
     throw new Error(
@@ -2371,7 +2406,11 @@ export async function deliverClientMcpMessage(
   }
   const response = await connection.extMethod(
     SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
-    { server: serverName, payload: message },
+    {
+      server: serverName,
+      payload: message,
+      ...(sessionId ? { sessionId } : {}),
+    },
   );
   const payload = (response as { payload?: unknown })['payload'];
   if (payload === undefined || payload === null) {
@@ -7964,9 +8003,9 @@ class QwenAgent implements Agent {
    * servers in this session share one callback — the `serverName` argument
    * routes to the right client-hosted server in the parent.
    */
-  private buildClientMcpSender(): SendSdkMcpMessage {
+  private buildClientMcpSender(sessionId?: string): SendSdkMcpMessage {
     return (serverName: string, message: JSONRPCMessage) =>
-      deliverClientMcpMessage(this.connection, serverName, message);
+      deliverClientMcpMessage(this.connection, serverName, message, sessionId);
   }
 
   private async newSessionConfig(
@@ -8144,7 +8183,7 @@ class QwenAgent implements Agent {
       // client-hosted (extension) MCP server added at runtime reaches the
       // daemon WS. Servers that aren't client-hosted never use this callback
       // (the daemon only adds SDK-type runtime servers for client MCP).
-      sendSdkMcpMessage: this.buildClientMcpSender(),
+      sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
     });
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
@@ -8206,17 +8245,7 @@ class QwenAgent implements Agent {
       this.clientCapabilities.fs,
       config.getFileSystemService(),
       {
-        // SYNC: Mirrors ReadFileTool's default allowed local roots, including
-        // auto-memory roots, so ACP-local read fallback follows the same policy.
-        localReadRoots: [
-          config.storage.getProjectTempDir(),
-          path.join(config.storage.getProjectDir(), 'subagents'),
-          Storage.getGlobalTempDir(),
-          getAutoMemoryRoot(config.getTargetDir()),
-          getUserAutoMemoryRoot(),
-          ...config.storage.getUserSkillsDirs(),
-          Storage.getUserExtensionsDir(),
-        ],
+        localReadRoots: buildAcpLocalReadRoots(config),
       },
     );
     config.setFileSystemService(acpFileSystemService);

@@ -39,6 +39,7 @@ import {
   escalatedOutputTokenLimit,
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
+import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -1231,7 +1232,19 @@ export class GeminiClient {
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
+    const profiler = createSessionStartProfiler(sessionStartSource);
     let history: Content[] = [];
+    let snapshotEntries: AvailableSkillEntry[] = [];
+    let deferredReminderCount = 0;
+    const finishProfile = (ok: boolean) => {
+      profiler.finish({
+        ok,
+        extraHistoryLength: extraHistory?.length ?? 0,
+        historyLength: history.length,
+        snapshotEntryCount: snapshotEntries.length,
+        deferredReminderCount,
+      });
+    };
 
     try {
       // Warm the tool registry before building startup reminders and tool
@@ -1240,7 +1253,7 @@ export class GeminiClient {
       // session); `/clear` clears the revealed set via resetChat() before
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
-      await toolRegistry.warmAll();
+      await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
@@ -1248,41 +1261,57 @@ export class GeminiClient {
       // call to foo_tool because the schema is absent. This must happen
       // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
       // are correctly filtered out of the startup reminder built below.
-      if (extraHistory && extraHistory.length > 0) {
-        const deferredNames = new Set(
-          toolRegistry.getDeferredToolSummary().map((t) => t.name),
-        );
-        if (deferredNames.size > 0) {
-          for (const entry of extraHistory) {
-            for (const part of entry.parts ?? []) {
-              const callName = part.functionCall?.name;
-              if (callName && deferredNames.has(callName)) {
-                toolRegistry.revealDeferredTool(callName);
+      profiler.timeSync('resume_deferred_tool_reveal', () => {
+        if (extraHistory && extraHistory.length > 0) {
+          const deferredNames = new Set(
+            toolRegistry.getDeferredToolSummary().map((t) => t.name),
+          );
+          if (deferredNames.size > 0) {
+            for (const entry of extraHistory) {
+              for (const part of entry.parts ?? []) {
+                const callName = part.functionCall?.name;
+                if (callName && deferredNames.has(callName)) {
+                  toolRegistry.revealDeferredTool(callName);
+                }
               }
             }
           }
         }
-      }
-      const deferredTools = this.resolveDeferredToolsForReminder();
-      this.rememberAnnouncedDeferredTools(deferredTools);
-      let snapshotEntries: AvailableSkillEntry[];
-      [history, snapshotEntries] = await getInitialChatHistory(
-        this.config,
-        extraHistory,
+      });
+      const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
+        const resolved = this.resolveDeferredToolsForReminder();
+        this.rememberAnnouncedDeferredTools(resolved);
+        return resolved;
+      });
+      deferredReminderCount = deferredTools?.length ?? 0;
+      [history, snapshotEntries] = await profiler.time(
+        'initial_chat_history',
+        () => getInitialChatHistory(this.config, extraHistory),
       );
-      this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
-      await this.seedAgentReminderDedupFromCurrent();
-      const systemInstruction = this.getMainSessionSystemInstruction();
+      profiler.timeSync('skill_reminder_seed', () => {
+        this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+      });
+      await profiler.time('agent_reminder_seed', () =>
+        this.seedAgentReminderDedupFromCurrent(),
+      );
+      const systemInstruction = profiler.timeSync('system_instruction', () =>
+        this.getMainSessionSystemInstruction(),
+      );
 
-      this.chat = new GeminiChat(
-        this.config,
-        {
-          systemInstruction,
-        },
-        history,
-        this.config.getChatRecordingService(),
-        uiTelemetryService,
+      const chat = profiler.timeSync(
+        'gemini_chat_construct',
+        () =>
+          new GeminiChat(
+            this.config,
+            {
+              systemInstruction,
+            },
+            history,
+            this.config.getChatRecordingService(),
+            uiTelemetryService,
+          ),
       );
+      this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
       // never made it back into the transcript before we wrote the JSONL.
@@ -1297,26 +1326,36 @@ export class GeminiClient {
       // compaction reordering is also caught — but doing it here keeps
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
-      this.repairOrphanedToolUseTurnsInHistory();
+      profiler.timeSync('orphan_tool_use_repair', () => {
+        this.repairOrphanedToolUseTurnsInHistory();
+      });
 
-      const sessionStartAdditionalContext =
-        await this.fireSessionStartHook(sessionStartSource);
+      const sessionStartAdditionalContext = await profiler.time(
+        'session_start_hook',
+        () => this.fireSessionStartHook(sessionStartSource),
+      );
       this.lastSessionStartContext = sessionStartAdditionalContext;
       this.lastSessionStartSource = sessionStartAdditionalContext
         ? sessionStartSource
         : undefined;
 
       if (sessionStartAdditionalContext) {
-        this.chat.applySessionStartContext(
-          sessionStartAdditionalContext,
-          sessionStartSource,
-        );
+        profiler.timeSync('session_start_context_apply', () => {
+          chat.applySessionStartContext(
+            sessionStartAdditionalContext,
+            sessionStartSource,
+          );
+        });
       }
 
-      await this.setTools();
+      // setTools() intentionally keeps its own warmAll() guard, so this stage
+      // overlaps with tool_registry_warm while preserving the startup path.
+      await profiler.time('set_tools', () => this.setTools());
 
+      finishProfile(true);
       return this.chat;
     } catch (error) {
+      finishProfile(false);
       await reportError(
         error,
         'Error initializing chat session.',

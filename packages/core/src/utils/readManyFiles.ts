@@ -194,6 +194,7 @@ async function readFileContent(
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
       preserveUnsupportedImage,
+      largePdfBehavior: 'reference',
     });
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
