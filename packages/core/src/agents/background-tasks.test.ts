@@ -571,6 +571,55 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-2')?.status).toBe('running');
     });
 
+    it('throws immediately when the slot wait signal is already aborted', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+      const abortController = new AbortController();
+      abortController.abort();
+
+      await expect(
+        registry.waitForBackgroundSlot(abortController.signal),
+      ).rejects.toThrow(
+        'Agent launch cancelled while waiting for a background slot.',
+      );
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
+    it('resolves immediately when a background slot is available', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      registry.register(makeRegistration('bg-1'));
+
+      const reservation = await registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+
+      expect(reservation).toBeDefined();
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
+    it('releases a reserved slot and drains the wait queue', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      const reservation = registry.tryReserveBackgroundSlot();
+      expect(reservation).toBeDefined();
+
+      const waiterPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.releaseBackgroundSlot(reservation!);
+      const nextReservation = await waiterPromise;
+
+      expect(nextReservation).toBeDefined();
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
     it('keeps a cancelled background agent in its slot until it settles', async () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,
