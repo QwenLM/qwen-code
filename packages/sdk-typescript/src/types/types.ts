@@ -46,6 +46,11 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * List of extensions to use. If not provided, all extensions are used.
+   * Equivalent to CLI's `--extensions` (`-e`) flag.
+   */
+  extensions?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -503,4 +508,10 @@ export interface QueryOptions {
      */
     streamClose?: number;
   };
+
+  /**
+   * List of extensions to use. If not provided, all extensions are used.
+   * Equivalent to CLI's `--extensions` (`-e`) flag.
+   */
+  extensions?: string[];
 }

@@ -317,6 +317,10 @@ export class ProcessTransport implements Transport {
       args.push('--allowed-tools', this.options.allowedTools.join(','));
     }
 
+    if (this.options.extensions && this.options.extensions.length > 0) {
+      args.push('--extensions', this.options.extensions.join(','));
+    }
+
     if (this.options.authType) {
       args.push('--auth-type', this.options.authType);
     }
