@@ -126,3 +126,8 @@ export function extractRememberErrorDetails(err: unknown): string | undefined {
   if (!raw) return undefined;
   return sanitizeRememberErrorDetails(raw);
 }
+
+export function extractRememberErrorStack(err: unknown): string | undefined {
+  if (!(err instanceof Error) || !err.stack) return undefined;
+  return sanitizeRememberErrorDetails(err.stack);
+}

@@ -3685,6 +3685,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       message: 'Workspace memory forget failed',
       data: { errorKind: 'forget_failed', details: 'boom' },
     });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory forget failed:',
+      {
+        code: 'forget_failed',
+        details: 'boom',
+      },
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3826,6 +3833,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       message: 'Workspace memory dream failed',
       data: { errorKind: 'dream_failed', details: 'boom' },
     });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory dream failed:',
+      {
+        code: 'dream_failed',
+        details: 'boom',
+      },
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3867,6 +3881,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         message: 'Workspace memory dream timed out',
         data: { errorKind: 'dream_timeout' },
       });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory dream timed out:',
+        {
+          code: 'dream_timeout',
+          details: 'late abort',
+        },
+      );
     } finally {
       timeoutSpy.mockRestore();
       mockConnectionState.resolve();

@@ -18,6 +18,7 @@ import type {
 import {
   extractRememberErrorCode,
   extractRememberErrorDetails,
+  extractRememberErrorStack,
 } from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 import {
@@ -211,6 +212,14 @@ function workspaceMemoryDebugDetails(err: unknown): string {
   }
 }
 
+function workspaceMemoryDebugStack(err: unknown): string | undefined {
+  try {
+    return extractRememberErrorStack(err);
+  } catch {
+    return undefined;
+  }
+}
+
 export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
   private static readonly TERMINAL_TASK_TTL_MS = 5 * 60_000;
@@ -364,10 +373,12 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err);
+        const stack = workspaceMemoryDebugStack(err);
         debugLogger.error('Workspace memory remember task failed:', {
           taskId: task.taskId,
           code,
           details: workspaceMemoryDebugDetails(err),
+          ...(stack ? { stack } : {}),
         });
         task.status = 'failed';
         task.error = createTaskError(code, task.kind, err);
@@ -426,10 +437,12 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'forget_failed');
+        const stack = workspaceMemoryDebugStack(err);
         debugLogger.error('Workspace memory forget task failed:', {
           taskId: task.taskId,
           code,
           details: workspaceMemoryDebugDetails(err),
+          ...(stack ? { stack } : {}),
         });
         task.status = 'failed';
         task.error = createTaskError(code, task.kind, err);
@@ -485,10 +498,12 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'dream_failed');
+        const stack = workspaceMemoryDebugStack(err);
         debugLogger.error('Workspace memory dream task failed:', {
           taskId: task.taskId,
           code,
           details: workspaceMemoryDebugDetails(err),
+          ...(stack ? { stack } : {}),
         });
         task.status = 'failed';
         task.error = createTaskError(code, task.kind, err);

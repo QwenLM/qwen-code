@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractRememberErrorCode,
   extractRememberErrorDetails,
+  extractRememberErrorStack,
 } from './workspace-remember-errors.js';
 
 describe('extractRememberErrorCode', () => {
@@ -202,5 +203,18 @@ describe('extractRememberErrorDetails', () => {
 
     expect(details).toBe(`${'x'.repeat(984)}... [truncated]`);
     expect(details).toHaveLength(999);
+  });
+});
+
+describe('extractRememberErrorStack', () => {
+  it('redacts and caps error stacks before logging', () => {
+    const err = new Error('Authorization: Bearer secret-token-value');
+    err.stack = `${err.stack}\n${'x'.repeat(1100)}`;
+
+    const stack = extractRememberErrorStack(err);
+
+    expect(stack).toContain('Authorization: <redacted>');
+    expect(stack).not.toContain('secret-token-value');
+    expect(stack).toHaveLength(1000);
   });
 });

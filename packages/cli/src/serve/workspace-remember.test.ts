@@ -966,11 +966,12 @@ describe('workspace memory remember routes', () => {
 
     expect(mockDebugLogger.error).toHaveBeenCalledWith(
       'Workspace memory remember task failed:',
-      {
+      expect.objectContaining({
         taskId: post.body.taskId,
         code: 'remember_failed',
         details: 'Authorization: <redacted>',
-      },
+        stack: expect.stringContaining('Authorization: <redacted>'),
+      }),
     );
     expect(JSON.stringify(mockDebugLogger.error.mock.calls)).not.toContain(
       'secret-token-value',
@@ -978,6 +979,7 @@ describe('workspace memory remember routes', () => {
   });
 
   it('records forget and dream failures with kind-specific error codes', async () => {
+    mockDebugLogger.error.mockClear();
     const bridge = buildBridgeStub({
       forgetImpl: vi.fn().mockRejectedValue(new Error('forget failed')),
       dreamImpl: vi.fn().mockRejectedValue(new Error('dream failed')),
@@ -1000,6 +1002,15 @@ describe('workspace memory remember routes', () => {
           details: 'forget failed',
         });
       });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory forget task failed:',
+      expect.objectContaining({
+        taskId: forgetPost.body.taskId,
+        code: 'forget_failed',
+        details: 'forget failed',
+        stack: expect.stringContaining('forget failed'),
+      }),
+    );
 
     const dreamPost = await request(app)
       .post('/workspace/memory/dream')
@@ -1017,5 +1028,14 @@ describe('workspace memory remember routes', () => {
           details: 'dream failed',
         });
       });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory dream task failed:',
+      expect.objectContaining({
+        taskId: dreamPost.body.taskId,
+        code: 'dream_failed',
+        details: 'dream failed',
+        stack: expect.stringContaining('dream failed'),
+      }),
+    );
   });
 });
