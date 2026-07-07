@@ -1356,7 +1356,7 @@ function parseOutboundMediaMarkers(text: string): {
   media: OutboundMediaMarker[];
 } {
   const codeRanges = findCodeRanges(text);
-  const markerRe = /\[(IMAGE|FILE|VIDEO|VOICE):\s*([^\]]+)\]/gi;
+  const markerRe = /\[(IMAGE):\s*([^\]]+)\]/gi;
   const media: OutboundMediaMarker[] = [];
   const rangesToRemove: Array<[number, number]> = [];
 

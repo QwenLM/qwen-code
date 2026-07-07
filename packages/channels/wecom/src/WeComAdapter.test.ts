@@ -4114,7 +4114,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('does not upload arbitrary files from non-image media markers', async () => {
+  it('leaves unsupported media markers in markdown text', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -4128,14 +4128,17 @@ describe('WeComChannel', () => {
     );
     await channel.connect();
     const client = lastClient();
+    stderr.mockClear();
 
     await channel.sendMessage('chat-1', `[FILE: ${filePath}]`);
 
     expect(client.uploadMedia).not.toHaveBeenCalled();
     expect(client.sendMediaMessage).not.toHaveBeenCalled();
-    expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('skipping unsupported outbound media marker'),
-    );
+    expect(client.sendMessage).toHaveBeenCalledWith('chat-1', {
+      msgtype: 'markdown',
+      markdown: { content: `[FILE: ${filePath}]` },
+    });
+    expect(stderr).not.toHaveBeenCalled();
     stderr.mockRestore();
   });
 
