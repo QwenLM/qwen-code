@@ -46,6 +46,21 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  forkSession?: boolean;
+  maxToolCalls?: number;
+  maxSubagentDepth?: number;
+  agents?: SubagentConfig[];
+  includeDirectories?: string[];
+  extraArgs?: string[];
+  extensions?: string[];
+  allowedMcpServerNames?: string[];
+  fallbackModel?: string[];
+  proxy?: string;
+  sandbox?: boolean;
+  safeMode?: boolean;
+  insecure?: boolean;
+  worktree?: boolean;
+  disabledSlashCommands?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -464,6 +479,100 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Fork from an existing session instead of starting fresh.
+   * Equivalent to CLI's `--fork-session` flag.
+   * @default false
+   */
+  forkSession?: boolean;
+
+  /**
+   * Maximum cumulative tool calls. -1 means no limit.
+   * Equivalent to CLI's `--max-tool-calls` flag.
+   */
+  maxToolCalls?: number;
+
+  /**
+   * Maximum nesting depth for sub-agents (1-100).
+   * Equivalent to CLI's `--max-subagent-depth` flag.
+   */
+  maxSubagentDepth?: number;
+
+  /**
+   * Sub-agent definitions that can be invoked during the session.
+   */
+  agents?: SubagentConfig[];
+
+  /**
+   * Additional directories to include in the workspace.
+   * Equivalent to CLI's `--include-directories` flag.
+   */
+  includeDirectories?: string[];
+
+  /**
+   * Additional CLI arguments to pass through directly.
+   * Cannot contain `--input-format`, `--output-format`, or `--channel`.
+   */
+  extraArgs?: string[];
+
+  /**
+   * Extensions to enable for this session.
+   * Equivalent to CLI's `--extensions` flag.
+   */
+  extensions?: string[];
+
+  /**
+   * Whitelist of MCP server names to allow.
+   * Equivalent to CLI's `--allowed-mcp-server-names` flag.
+   */
+  allowedMcpServerNames?: string[];
+
+  /**
+   * Fallback model(s) for capacity errors (429/503/529).
+   * Up to 3 models, tried in order when the primary model is unavailable.
+   */
+  fallbackModel?: string[];
+
+  /**
+   * Proxy URL for the Qwen CLI process.
+   * @deprecated Use the "proxy" setting in settings.json instead.
+   */
+  proxy?: string;
+
+  /**
+   * Run in sandbox mode.
+   * Equivalent to CLI's `--sandbox` flag.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Disable all customizations for troubleshooting.
+   * Equivalent to CLI's `--safe-mode` flag.
+   * @default false
+   */
+  safeMode?: boolean;
+
+  /**
+   * Skip TLS certificate verification for API connections.
+   * Equivalent to CLI's `--insecure` flag.
+   * @default false
+   */
+  insecure?: boolean;
+
+  /**
+   * Enable Git worktree mode.
+   * Equivalent to CLI's `--worktree` flag.
+   * @default false
+   */
+  worktree?: boolean;
+
+  /**
+   * Slash command names to hide/disable.
+   * Equivalent to CLI's `--disabled-slash-commands` flag.
+   */
+  disabledSlashCommands?: string[];
 
   /**
    * Timeout configuration for various SDK operations.

@@ -167,8 +167,33 @@ def test_timeout_rejects_boolean_value() -> None:
         TimeoutOptions.from_mapping({"stream_close": True})
 
 
-def test_rejects_mcp_servers() -> None:
-    with pytest.raises(ValidationError, match="mcp_servers is not supported"):
+def test_rejects_invalid_max_tool_calls() -> None:
+    with pytest.raises(ValidationError, match="max_tool_calls"):
+        validate_query_options(QueryOptions(max_tool_calls=-2))
+
+
+def test_rejects_invalid_max_subagent_depth() -> None:
+    with pytest.raises(ValidationError, match="max_subagent_depth"):
+        validate_query_options(QueryOptions(max_subagent_depth=0))
+
+
+def test_rejects_agents_missing_required_fields() -> None:
+    with pytest.raises(ValidationError, match="missing required field"):
         validate_query_options(
-            QueryOptions(mcp_servers={"my-server": {"command": "node", "args": []}})
+            QueryOptions(agents=[{"name": "test"}])
         )
+
+
+def test_rejects_extra_args_with_reserved_flags() -> None:
+    with pytest.raises(ValidationError, match="reserved flag"):
+        validate_query_options(QueryOptions(extra_args=["--input-format"]))
+
+
+def test_rejects_fallback_model_exceeding_max() -> None:
+    with pytest.raises(ValidationError, match="fallback_model supports a maximum of 3"):
+        validate_query_options(QueryOptions(fallback_model=["a", "b", "c", "d"]))
+
+
+def test_rejects_empty_proxy() -> None:
+    with pytest.raises(ValidationError, match="proxy cannot be empty"):
+        validate_query_options(QueryOptions(proxy="   "))

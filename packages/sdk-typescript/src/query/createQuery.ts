@@ -70,6 +70,20 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    forkSession: options.forkSession,
+    maxToolCalls: options.maxToolCalls,
+    maxSubagentDepth: options.maxSubagentDepth,
+    includeDirectories: options.includeDirectories,
+    extraArgs: options.extraArgs,
+    extensions: options.extensions,
+    allowedMcpServerNames: options.allowedMcpServerNames,
+    fallbackModel: options.fallbackModel,
+    proxy: options.proxy,
+    sandbox: options.sandbox,
+    safeMode: options.safeMode,
+    insecure: options.insecure,
+    worktree: options.worktree,
+    disabledSlashCommands: options.disabledSlashCommands,
   });
 
   const queryOptions: QueryOptions = {

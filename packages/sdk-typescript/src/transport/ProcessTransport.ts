@@ -335,6 +335,80 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    if (this.options.forkSession) {
+      args.push('--fork-session');
+    }
+
+    if (this.options.maxToolCalls !== undefined) {
+      args.push('--max-tool-calls', String(this.options.maxToolCalls));
+    }
+
+    if (this.options.maxSubagentDepth !== undefined) {
+      args.push('--max-subagent-depth', String(this.options.maxSubagentDepth));
+    }
+
+    if (
+      this.options.includeDirectories &&
+      this.options.includeDirectories.length > 0
+    ) {
+      args.push(
+        '--include-directories',
+        this.options.includeDirectories.join(','),
+      );
+    }
+
+    if (this.options.extensions && this.options.extensions.length > 0) {
+      args.push('--extensions', this.options.extensions.join(','));
+    }
+
+    if (
+      this.options.allowedMcpServerNames &&
+      this.options.allowedMcpServerNames.length > 0
+    ) {
+      args.push(
+        '--allowed-mcp-server-names',
+        this.options.allowedMcpServerNames.join(','),
+      );
+    }
+
+    if (this.options.fallbackModel && this.options.fallbackModel.length > 0) {
+      args.push('--fallback-model', this.options.fallbackModel.join(','));
+    }
+
+    if (this.options.proxy) {
+      args.push('--proxy', this.options.proxy);
+    }
+
+    if (this.options.sandbox) {
+      args.push('--sandbox');
+    }
+
+    if (this.options.safeMode) {
+      args.push('--safe-mode');
+    }
+
+    if (this.options.insecure) {
+      args.push('--insecure');
+    }
+
+    if (this.options.worktree) {
+      args.push('--worktree');
+    }
+
+    if (
+      this.options.disabledSlashCommands &&
+      this.options.disabledSlashCommands.length > 0
+    ) {
+      args.push(
+        '--disabled-slash-commands',
+        this.options.disabledSlashCommands.join(','),
+      );
+    }
+
+    if (this.options.extraArgs && this.options.extraArgs.length > 0) {
+      args.push(...this.options.extraArgs);
+    }
+
     return args;
   }
 

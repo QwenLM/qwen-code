@@ -240,4 +240,58 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     elif options.session_id:
         args.extend(["--session-id", options.session_id])
 
+    if options.fork_session:
+        args.append("--fork-session")
+
+    if options.max_tool_calls is not None:
+        args.extend(["--max-tool-calls", str(options.max_tool_calls)])
+
+    if options.max_subagent_depth is not None:
+        args.extend(["--max-subagent-depth", str(options.max_subagent_depth)])
+
+    if options.include_directories:
+        args.extend(
+            ["--include-directories", ",".join(options.include_directories)]
+        )
+
+    if options.extensions:
+        args.extend(["--extensions", ",".join(options.extensions)])
+
+    if options.allowed_mcp_server_names:
+        args.extend(
+            [
+                "--allowed-mcp-server-names",
+                ",".join(options.allowed_mcp_server_names),
+            ]
+        )
+
+    if options.fallback_model:
+        args.extend(["--fallback-model", ",".join(options.fallback_model)])
+
+    if options.proxy:
+        args.extend(["--proxy", options.proxy])
+
+    if options.sandbox:
+        args.append("--sandbox")
+
+    if options.safe_mode:
+        args.append("--safe-mode")
+
+    if options.insecure:
+        args.append("--insecure")
+
+    if options.worktree:
+        args.append("--worktree")
+
+    if options.disabled_slash_commands:
+        args.extend(
+            [
+                "--disabled-slash-commands",
+                ",".join(options.disabled_slash_commands),
+            ]
+        )
+
+    if options.extra_args:
+        args.extend(options.extra_args)
+
     return args

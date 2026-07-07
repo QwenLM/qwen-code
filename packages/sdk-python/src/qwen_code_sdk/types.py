@@ -114,6 +114,21 @@ class QueryOptionsDict(TypedDict, total=False):
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
     stderr: Callable[[str], None]
+    fork_session: bool
+    max_tool_calls: int
+    max_subagent_depth: int
+    agents: list[dict[str, Any]]
+    include_directories: list[str]
+    extra_args: list[str]
+    extensions: list[str]
+    allowed_mcp_server_names: list[str]
+    fallback_model: list[str]
+    proxy: str
+    sandbox: bool
+    safe_mode: bool
+    insecure: bool
+    worktree: bool
+    disabled_slash_commands: list[str]
 
 
 @dataclass
@@ -139,6 +154,21 @@ class QueryOptions:
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
     stderr: Callable[[str], None] | None = None
+    fork_session: bool = False
+    max_tool_calls: int | None = None
+    max_subagent_depth: int | None = None
+    agents: list[dict[str, Any]] | None = None
+    include_directories: list[str] | None = None
+    extra_args: list[str] | None = None
+    extensions: list[str] | None = None
+    allowed_mcp_server_names: list[str] | None = None
+    fallback_model: list[str] | None = None
+    proxy: str | None = None
+    sandbox: bool = False
+    safe_mode: bool = False
+    insecure: bool = False
+    worktree: bool = False
+    disabled_slash_commands: list[str] | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> QueryOptions:
@@ -182,6 +212,25 @@ class QueryOptions:
             stderr=cast(
                 Callable[[str], None] | None,
                 _as_optional_callable(data, "stderr"),
+            ),
+            fork_session=_as_optional_bool(data, "fork_session") or False,
+            max_tool_calls=_as_optional_int(data, "max_tool_calls"),
+            max_subagent_depth=_as_optional_int(data, "max_subagent_depth"),
+            agents=_as_optional_list_of_dicts(data, "agents"),
+            include_directories=_as_optional_str_list(data, "include_directories"),
+            extra_args=_as_optional_str_list(data, "extra_args"),
+            extensions=_as_optional_str_list(data, "extensions"),
+            allowed_mcp_server_names=_as_optional_str_list(
+                data, "allowed_mcp_server_names"
+            ),
+            fallback_model=_as_optional_str_list(data, "fallback_model"),
+            proxy=_as_optional_str(data, "proxy"),
+            sandbox=_as_optional_bool(data, "sandbox") or False,
+            safe_mode=_as_optional_bool(data, "safe_mode") or False,
+            insecure=_as_optional_bool(data, "insecure") or False,
+            worktree=_as_optional_bool(data, "worktree") or False,
+            disabled_slash_commands=_as_optional_str_list(
+                data, "disabled_slash_commands"
             ),
         )
 
@@ -321,3 +370,16 @@ def _as_optional_nested_dict(
             raise TypeError(f"{key} must be a mapping of string to mapping")
         parsed[k] = dict(v)
     return parsed
+
+
+def _as_optional_list_of_dicts(
+    data: Mapping[str, Any], key: str
+) -> list[dict[str, Any]] | None:
+    raw = data.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise TypeError(f"{key} must be a list of mappings")
+    if any(not isinstance(item, Mapping) for item in raw):
+        raise TypeError(f"{key} must be a list of mappings")
+    return [dict(item) for item in raw]

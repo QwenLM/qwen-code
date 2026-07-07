@@ -181,6 +181,37 @@ export const QueryOptionsSchema = z
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    forkSession: z.boolean().optional(),
+    maxToolCalls: z.number().optional(),
+    maxSubagentDepth: z.number().int().min(1).max(100).optional(),
+    agents: z
+      .array(
+        z.custom<SubagentConfig>(
+          (val) =>
+            val &&
+            typeof val === 'object' &&
+            'name' in val &&
+            'description' in val &&
+            'systemPrompt' in val && {
+              message: 'agents must be an array of SubagentConfig objects',
+            },
+        ),
+      )
+      .optional(),
+    includeDirectories: z.array(z.string()).optional(),
+    extraArgs: z.array(z.string()).optional(),
+    extensions: z.array(z.string()).optional(),
+    allowedMcpServerNames: z.array(z.string()).optional(),
+    fallbackModel: z
+      .array(z.string())
+      .max(3, 'fallbackModel supports a maximum of 3 models')
+      .optional(),
+    proxy: z.string().trim().min(1, 'proxy cannot be empty').optional(),
+    sandbox: z.boolean().optional(),
+    safeMode: z.boolean().optional(),
+    insecure: z.boolean().optional(),
+    worktree: z.boolean().optional(),
+    disabledSlashCommands: z.array(z.string()).optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

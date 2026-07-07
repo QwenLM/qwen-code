@@ -110,6 +110,10 @@ class Query:
     async def _initialize(self) -> None:
         try:
             payload: dict[str, Any] = {"hooks": None}
+            if self._options.mcp_servers:
+                payload["mcp_servers"] = self._options.mcp_servers
+            if self._options.agents:
+                payload["agents"] = self._options.agents
             await self._send_control_request("initialize", payload)
         except Exception as exc:
             await self._finish_with_error(exc)

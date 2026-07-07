@@ -64,11 +64,41 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
 
-    if options.mcp_servers:
+    if options.max_tool_calls is not None and options.max_tool_calls < -1:
+        raise ValidationError("max_tool_calls must be -1 or a non-negative integer")
+
+    if (
+        options.max_subagent_depth is not None
+        and not (1 <= options.max_subagent_depth <= 100)
+    ):
         raise ValidationError(
-            "mcp_servers is not supported in Python SDK v1. "
-            "Remove the mcp_servers option or use the TypeScript SDK."
+            "max_subagent_depth must be between 1 and 100"
         )
+
+    if options.agents:
+        for i, agent in enumerate(options.agents):
+            for field in ("name", "description", "systemPrompt"):
+                if not agent.get(field):
+                    raise ValidationError(
+                        f"agents[{i}] is missing required field: {field}"
+                    )
+
+    if options.extra_args:
+        reserved = {"--input-format", "--output-format", "--channel"}
+        for arg in options.extra_args:
+            if arg in reserved:
+                raise ValidationError(
+                    f"extra_args cannot contain reserved flag: {arg}"
+                )
+
+    if options.fallback_model and len(options.fallback_model) > 3:
+        raise ValidationError(
+            "fallback_model supports a maximum of 3 models. "
+            f"Got {len(options.fallback_model)}."
+        )
+
+    if options.proxy is not None and not options.proxy.strip():
+        raise ValidationError("proxy cannot be empty")
 
 
 def _validate_optional_callable(
