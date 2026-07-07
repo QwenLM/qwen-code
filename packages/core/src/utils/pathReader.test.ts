@@ -428,8 +428,7 @@ describe('readPathFromWorkspace', () => {
     },
   );
 
-  it('should return an error string for files exceeding the size limit', async () => {
-    // Mock a file slightly larger than the 10MB limit defined in fileUtils.ts
+  it('should truncate text files exceeding 10MB instead of failing', async () => {
     const largeContent = 'a'.repeat(11 * 1024 * 1024); // 11MB
     mock({
       [CWD]: {
@@ -442,7 +441,7 @@ describe('readPathFromWorkspace', () => {
     const config = createMockConfig(CWD, [], mockFileService);
     const result = await readPathFromWorkspace('large.txt', config);
     const textResult = result[0] as string;
-    // The error message comes directly from processSingleFileContent
-    expect(textResult).toBe('File size exceeds the 10MB limit.');
+    expect(textResult).toContain('a'.repeat(100));
+    expect(textResult).toContain('... [truncated]');
   });
 });

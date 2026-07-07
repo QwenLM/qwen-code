@@ -56,6 +56,7 @@ vi.mock('./StreamingStatus', () => ({
     <div
       data-testid="pane-streaming"
       data-started-at={props.startedAt === undefined ? 'none' : String(props.startedAt)}
+      data-show-phrase={String(props.showPhrase)}
     />
   ),
 }));
@@ -161,6 +162,13 @@ describe('ChatPane', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
     expect(container!.textContent).toContain('Refactor core');
+  });
+
+  it('suppresses the rotating loading phrase in its compact status', () => {
+    render();
+    expect(testid('pane-streaming')?.getAttribute('data-show-phrase')).toBe(
+      'false',
+    );
   });
 
   it('sends a prompt to its own session on submit', () => {
