@@ -108,20 +108,39 @@ function replaceControlChars(details: string): string {
     .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
 
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
+function truncateBeforeDanglingSurrogate(
+  details: string,
+  cutPoint: number,
+): number {
+  const beforeCut = details.charCodeAt(cutPoint - 1);
+  const atCut = details.charCodeAt(cutPoint);
+  if (isHighSurrogate(beforeCut) && isLowSurrogate(atCut)) {
+    return cutPoint - 1;
+  }
+  return cutPoint;
+}
+
 function sanitizeRememberErrorDetails(details: string): string | undefined {
-  const redacted = redactLogCredentials(details);
-  const normalized = redactLogCredentials(replaceControlChars(redacted)).trim();
-  if (!normalized) return undefined;
-  if (normalized.length <= MAX_REMEMBER_ERROR_DETAILS_CHARS) {
-    return normalized;
+  const normalized = replaceControlChars(details);
+  const redacted = redactLogCredentials(normalized).trim();
+  if (!redacted) return undefined;
+  if (redacted.length <= MAX_REMEMBER_ERROR_DETAILS_CHARS) {
+    return redacted;
   }
   const truncationSuffix = '... [truncated]';
-  let cutPoint = MAX_REMEMBER_ERROR_DETAILS_CHARS - truncationSuffix.length;
-  const codeUnit = normalized.charCodeAt(cutPoint - 1);
-  if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-    cutPoint -= 1;
-  }
-  return `${normalized.slice(0, cutPoint)}${truncationSuffix}`;
+  const cutPoint = truncateBeforeDanglingSurrogate(
+    redacted,
+    MAX_REMEMBER_ERROR_DETAILS_CHARS - truncationSuffix.length,
+  );
+  return `${redacted.slice(0, cutPoint)}${truncationSuffix}`;
 }
 
 export function extractRememberErrorDetails(err: unknown): string | undefined {

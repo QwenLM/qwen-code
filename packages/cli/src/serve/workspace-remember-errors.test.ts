@@ -226,6 +226,15 @@ describe('extractRememberErrorDetails', () => {
     expect(details).toBe(`${'x'.repeat(984)}... [truncated]`);
     expect(details).toHaveLength(999);
   });
+
+  it('keeps the full prefix when the cut point falls before a surrogate pair', () => {
+    const details = extractRememberErrorDetails(
+      new Error(`${'x'.repeat(985)}${'😀'.repeat(100)}`),
+    );
+
+    expect(details).toBe(`${'x'.repeat(985)}... [truncated]`);
+    expect(details).toHaveLength(1000);
+  });
 });
 
 describe('extractRememberErrorStack', () => {

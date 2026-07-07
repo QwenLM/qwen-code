@@ -186,38 +186,41 @@ export function publicErrorStatus(code: string): number {
 function createTaskError(
   code: string,
   kind: WorkspaceMemoryTaskKind,
-  err: unknown,
+  details?: string,
 ): WorkspaceMemoryTaskBaseSnapshot['error'] {
   const error: WorkspaceMemoryTaskBaseSnapshot['error'] = {
     code,
     message: publicErrorMessage(code, kind),
   };
   if (code === 'managed_memory_unavailable') return error;
-  try {
-    const details = extractRememberErrorDetails(err);
-    return {
-      ...error,
-      ...(details ? { details } : {}),
-    };
-  } catch {
-    return error;
-  }
+  return {
+    ...error,
+    ...(details ? { details } : {}),
+  };
 }
 
-function workspaceMemoryDebugDetails(err: unknown): string {
+function workspaceMemoryFailureDiagnostics(err: unknown): {
+  details?: string;
+  debugDetails: string;
+  stack?: string;
+} {
+  let details: string | undefined;
+  let stack: string | undefined;
   try {
-    return extractRememberErrorDetails(err) ?? '<details unavailable>';
+    details = extractRememberErrorDetails(err);
   } catch {
-    return '<details unavailable>';
+    details = undefined;
   }
-}
-
-function workspaceMemoryDebugStack(err: unknown): string | undefined {
   try {
-    return extractRememberErrorStack(err);
+    stack = extractRememberErrorStack(err);
   } catch {
-    return undefined;
+    stack = undefined;
   }
+  return {
+    ...(details ? { details } : {}),
+    debugDetails: details ?? '<details unavailable>',
+    ...(stack ? { stack } : {}),
+  };
 }
 
 export class WorkspaceRememberTaskLane {
@@ -373,15 +376,15 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err);
-        const stack = workspaceMemoryDebugStack(err);
+        const diagnostics = workspaceMemoryFailureDiagnostics(err);
         debugLogger.error('Workspace memory remember task failed:', {
           taskId: task.taskId,
           code,
-          details: workspaceMemoryDebugDetails(err),
-          ...(stack ? { stack } : {}),
+          details: diagnostics.debugDetails,
+          ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
         });
         task.status = 'failed';
-        task.error = createTaskError(code, task.kind, err);
+        task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
       try {
@@ -437,15 +440,15 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'forget_failed');
-        const stack = workspaceMemoryDebugStack(err);
+        const diagnostics = workspaceMemoryFailureDiagnostics(err);
         debugLogger.error('Workspace memory forget task failed:', {
           taskId: task.taskId,
           code,
-          details: workspaceMemoryDebugDetails(err),
-          ...(stack ? { stack } : {}),
+          details: diagnostics.debugDetails,
+          ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
         });
         task.status = 'failed';
-        task.error = createTaskError(code, task.kind, err);
+        task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
       try {
@@ -498,15 +501,15 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'dream_failed');
-        const stack = workspaceMemoryDebugStack(err);
+        const diagnostics = workspaceMemoryFailureDiagnostics(err);
         debugLogger.error('Workspace memory dream task failed:', {
           taskId: task.taskId,
           code,
-          details: workspaceMemoryDebugDetails(err),
-          ...(stack ? { stack } : {}),
+          details: diagnostics.debugDetails,
+          ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
         });
         task.status = 'failed';
-        task.error = createTaskError(code, task.kind, err);
+        task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
       try {
