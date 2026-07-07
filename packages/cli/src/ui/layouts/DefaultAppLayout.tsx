@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box } from 'ink';
 import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
@@ -17,13 +17,80 @@ import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
+import { FleetView } from '../components/fleet-view/FleetView.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
+import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
 import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { useFleetViewSessions } from '../hooks/use-fleet-view-sessions.js';
+
+const FleetViewContainer: React.FC = () => {
+  const uiState = useUIState();
+  const uiActions = useUIActions();
+  const config = useConfig();
+  const settings = useSettings();
+  const { sessions, loading, error, refresh } = useFleetViewSessions({
+    isOpen: uiState.isFleetViewOpen,
+    currentSessionId: config.getSessionId() ?? null,
+  });
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const initialGroupMode =
+    (settings.merged.ui?.fleetViewGroupMode as 'state' | 'directory') ||
+    'state';
+  const [groupMode, setGroupMode] = useState<'state' | 'directory'>(
+    initialGroupMode,
+  );
+
+  const sessionService = useMemo(() => config.getSessionService(), [config]);
+
+  const handleAttach = useCallback(
+    (sessionId: string) => {
+      uiActions.setFleetDoubleTapPending(false);
+      uiActions.closeFleetView();
+      void uiActions.handleResume(sessionId);
+    },
+    [uiActions],
+  );
+
+  const handleClose = useCallback(() => {
+    uiActions.setFleetDoubleTapPending(false);
+    uiActions.closeFleetView();
+  }, [uiActions]);
+
+  const handleCreateNew = useCallback(() => {
+    uiActions.setFleetDoubleTapPending(false);
+    uiActions.closeFleetView();
+  }, [uiActions]);
+
+  const handleCycleGroupMode = useCallback(
+    () => setGroupMode((prev) => (prev === 'state' ? 'directory' : 'state')),
+    [],
+  );
+
+  return (
+    <FleetView
+      sessions={sessions}
+      selectedIndex={selectedIndex}
+      loading={loading}
+      error={error}
+      groupMode={groupMode}
+      onSelect={setSelectedIndex}
+      onAttach={handleAttach}
+      onClose={handleClose}
+      onDelete={() => {}}
+      onCreateNew={handleCreateNew}
+      onCycleGroupMode={handleCycleGroupMode}
+      workspaceCwd={config.getWorkingDir()}
+      sessionService={sessionService}
+      onRefresh={refresh}
+    />
+  );
+};
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -61,7 +128,9 @@ export const DefaultAppLayout: React.FC = () => {
 
   return (
     <Box flexDirection="column" width={terminalWidth}>
-      {isAgentTab ? (
+      {uiState.isFleetViewOpen ? (
+        <FleetViewContainer />
+      ) : isAgentTab ? (
         <>
           {/* Agent view: chat history + agent-specific composer */}
           <AgentChatView agentId={activeView} />

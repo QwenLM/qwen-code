@@ -84,6 +84,7 @@ import { openQwenAsrRealtimeStream } from '../voice/qwen-asr-realtime-session.js
 import { openVoiceStream } from '../voice/voice-stream-session.js';
 import { openVoiceStreamWithRetry } from '../voice/voice-stream-retry.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
+import { useDoubleTap } from '../hooks/use-double-tap.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -179,6 +180,10 @@ export interface InputPromptProps {
   promptSuggestion?: string | null;
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
+  /** Called when double-left-arrow triggers Fleet View */
+  onOpenFleetView?: () => void;
+  /** Called when fleet double-tap pending state changes */
+  onFleetDoubleTapPendingChange?: (pending: boolean) => void;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -212,11 +217,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   isEmbeddedShellFocused,
   promptSuggestion,
   onPromptSuggestionDismiss,
+  onOpenFleetView,
+  onFleetDoubleTapPendingChange,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
   const settings = useSettings();
+  const fleetViewEnabled =
+    settings.merged.ui?.leftArrowOpensFleetView !== false;
+  const { handleTap: fleetHandleTap } = useDoubleTap({
+    timeoutMs: 800,
+    onDoubleTap: () => {
+      onOpenFleetView?.();
+    },
+    onFirstTap: () => {
+      onFleetDoubleTapPendingChange?.(true);
+    },
+    onTimeout: () => {
+      onFleetDoubleTapPendingChange?.(false);
+    },
+  });
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
   const mouseInteractionsEnabled = !!settings.merged.ui?.useTerminalBuffer;
@@ -836,6 +857,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (voiceInput.status !== 'idle') {
         return voiceInput.handleKeypress(key);
+      }
+
+      // Fleet View: detect double-left-arrow on empty input
+      if (
+        fleetViewEnabled &&
+        key.name === 'left' &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.shift &&
+        buffer.text === ''
+      ) {
+        fleetHandleTap();
+        return true;
       }
 
       // When the Arena tab bar or background pill has focus, block
@@ -1754,6 +1788,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       isHistoryRestoredText,
       showCompletionSuggestions,
       voiceInput,
+      fleetViewEnabled,
+      fleetHandleTap,
     ],
   );
 

@@ -72,6 +72,9 @@ export interface UIActions {
   handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
+  openFleetView: () => void;
+  closeFleetView: () => void;
+  setFleetDoubleTapPending: (pending: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;

@@ -117,6 +117,8 @@ export interface UIState {
   ctrlCPressedOnce: boolean;
   ctrlDPressedOnce: boolean;
   showEscapePrompt: boolean;
+  fleetDoubleTapPending: boolean;
+  isFleetViewOpen: boolean;
   elapsedTime: number;
   currentLoadingPhrase: string;
   historyRemountKey: number;

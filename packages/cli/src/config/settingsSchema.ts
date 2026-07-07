@@ -825,6 +825,36 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
+      leftArrowOpensFleetView: {
+        type: 'boolean',
+        label: 'Left Arrow Opens Fleet View',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions. Requires a running daemon (qwen-code serve).',
+        showInDialog: true,
+      },
+      defaultToFleetView: {
+        type: 'boolean',
+        label: 'Default to Fleet View',
+        category: 'UI',
+        requiresRestart: true,
+        default: false,
+        description:
+          'When true, start in Fleet View instead of a new session. Only works when a daemon is running. (Reserved for future use — not yet implemented.)',
+        showInDialog: true,
+      },
+      fleetViewGroupMode: {
+        type: 'string',
+        label: 'Fleet View Group Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: 'state' as string,
+        description:
+          'How to group sessions in Fleet View. "state" groups by running/idle/persisted status. "directory" groups by workspace path.',
+        showInDialog: true,
+      },
       history: {
         type: 'object',
         label: 'History',

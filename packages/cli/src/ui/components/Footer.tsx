@@ -87,6 +87,10 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>
       {t('Press Esc again to rewind conversation.')}
     </Text>
+  ) : uiState.fleetDoubleTapPending ? (
+    <Text color={theme.text.secondary}>
+      {t('Press ← again for fleet view.')}
+    </Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : vimEnabled && vimMode === 'NORMAL' ? (

@@ -65,6 +65,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { fleetCommand } from '../commands/fleet.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -1080,7 +1081,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
-    .command(sessionsCommand);
+    .command(sessionsCommand)
+    // Register Fleet View
+    .command(fleetCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
