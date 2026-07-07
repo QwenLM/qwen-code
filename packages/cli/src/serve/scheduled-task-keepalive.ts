@@ -28,9 +28,12 @@
  * gap is caught up when the session loads.
  */
 
+import * as fsSync from 'node:fs';
+import * as path from 'node:path';
 import {
   readCronTasks,
   updateCronTasks,
+  getCronFilePath,
   createDebugLogger,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -264,12 +267,47 @@ export function startScheduledTaskKeepalive(
   // The heartbeat alone must never hold the daemon process open.
   timer.unref?.();
 
+  // Watch the tasks file so a newly created cron_create task is bound to a
+  // dedicated session immediately, not after the next interval. Same
+  // directory-watch + debounce pattern the scheduler uses.
+  let bindDebounce: ReturnType<typeof setTimeout> | undefined;
+  const cronFilePath = getCronFilePath(boundWorkspace);
+  const cronDir = path.dirname(cronFilePath);
+  const cronFileName = path.basename(cronFilePath);
+  let fileWatcher: ReturnType<typeof fsSync.watch> | undefined;
+  try {
+    fsSync.mkdirSync(cronDir, { recursive: true });
+    fileWatcher = fsSync.watch(
+      cronDir,
+      { persistent: false },
+      (_event, filename) => {
+        if (filename && filename !== cronFileName) return;
+        if (bindDebounce) clearTimeout(bindDebounce);
+        bindDebounce = setTimeout(() => {
+          if (running) return;
+          running = true;
+          void tick().finally(() => {
+            running = false;
+          });
+        }, 500);
+        bindDebounce.unref?.();
+      },
+    );
+    fileWatcher.on('error', () => {
+      // Watch errors are non-fatal — the interval timer still ticks.
+    });
+  } catch {
+    // Directory doesn't exist or can't be watched — interval timer still runs.
+  }
+
   let stopped = false;
   return {
     stop: () => {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      if (bindDebounce) clearTimeout(bindDebounce);
+      fileWatcher?.close();
     },
     tick,
   };
