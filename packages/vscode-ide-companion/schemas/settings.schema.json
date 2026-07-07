@@ -1269,6 +1269,11 @@
       "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
       "type": "object",
       "properties": {
+        "maxParallelAgents": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet."
+        },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
           "enum": [
