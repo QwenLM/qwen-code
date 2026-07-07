@@ -123,6 +123,14 @@ import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
+import {
+  DeviceFlowRegistry,
+  TooManyActiveDeviceFlowsError,
+  UpstreamDeviceFlowError,
+  brandSecret,
+  type DeviceFlowProvider,
+  type DeviceFlowRegistry as DeviceFlowRegistryType,
+} from './auth/device-flow.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
@@ -14584,7 +14592,7 @@ describe('auth device-flow routes', () => {
   // whose `poll` is scripted per-test. Lives at the top of the suite so
   // every `it()` can compose it with the registry.
   function makeFakeProvider(): {
-    provider: import('./auth/device-flow.js').DeviceFlowProvider;
+    provider: DeviceFlowProvider;
     startCount: () => number;
   } {
     let starts = 0;
@@ -14597,12 +14605,8 @@ describe('auth device-flow routes', () => {
             deviceCode:
               // Use the brandSecret helper so the secret follows the same
               // redaction shape the production provider produces.
-              (await import('./auth/device-flow.js')).brandSecret(
-                `device-${starts}`,
-              ),
-            pkceVerifier: (await import('./auth/device-flow.js')).brandSecret(
-              `pkce-${starts}`,
-            ),
+              brandSecret(`device-${starts}`),
+            pkceVerifier: brandSecret(`pkce-${starts}`),
             userCode: `USER-${starts}`,
             verificationUri: 'https://idp.example/verify',
             verificationUriComplete: 'https://idp.example/verify?u=AB12',
@@ -15083,17 +15087,15 @@ describe('auth device-flow routes', () => {
     // must surface as 502 with code:'upstream_error' instead of falling
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
-    const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
-    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider =
-      {
-        providerId: 'qwen-oauth',
-        async start() {
-          throw new UpstreamDeviceFlowError('mocked upstream outage');
-        },
-        async poll() {
-          return { kind: 'pending' as const };
-        },
-      };
+    const failingProvider: DeviceFlowProvider = {
+      providerId: 'qwen-oauth',
+      async start() {
+        throw new UpstreamDeviceFlowError('mocked upstream outage');
+      },
+      async poll() {
+        return { kind: 'pending' as const };
+      },
+    };
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
       bridge,
@@ -15112,10 +15114,7 @@ describe('auth device-flow routes', () => {
   it('sweeper-driven auto-expiry transitions a stale entry to status:error and surfaces over GET', async () => {
     // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
     // injected registry with a controlled clock + manual sweeper trigger.
-    const { DeviceFlowRegistry, brandSecret } = await import(
-      './auth/device-flow.js'
-    );
-    const fakeProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
+    const fakeProvider: DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
         return {
@@ -15215,9 +15214,6 @@ describe('auth device-flow routes', () => {
 
   it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
     // Inject a fake registry whose `start` always throws the cap error.
-    const { TooManyActiveDeviceFlowsError } = await import(
-      './auth/device-flow.js'
-    );
     const fakeRegistry = {
       start: async () => {
         throw new TooManyActiveDeviceFlowsError();
@@ -15226,7 +15222,7 @@ describe('auth device-flow routes', () => {
       cancel: () => undefined,
       listPending: () => [],
       dispose: () => {},
-    } as unknown as import('./auth/device-flow.js').DeviceFlowRegistry;
+    } as unknown as DeviceFlowRegistryType;
 
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
