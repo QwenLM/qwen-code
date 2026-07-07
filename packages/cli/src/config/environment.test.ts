@@ -126,6 +126,7 @@ describe('buildRuntimeEnvironment', () => {
     ]);
     expect(snapshot.envFilePaths).toContain(path.join(workspace, '.env'));
     expect(snapshot.envFileReadFailed).toBe(false);
+    expect(snapshot.envFileReadFailures).toEqual([]);
 
     expect(baseEnv).toEqual({
       RUNTIME_PARENT: 'from-parent',
@@ -157,6 +158,12 @@ describe('buildRuntimeEnvironment', () => {
 
     expect(snapshot.envFilePaths).toContain(envPath);
     expect(snapshot.envFileReadFailed).toBe(true);
+    expect(snapshot.envFileReadFailures).toEqual([
+      expect.objectContaining({
+        path: envPath,
+        error: expect.any(String),
+      }),
+    ]);
     expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBeUndefined();
   });
 });

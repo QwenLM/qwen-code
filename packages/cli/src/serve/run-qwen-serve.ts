@@ -1355,7 +1355,7 @@ export async function runQwenServe(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
-  let daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
   });
 
@@ -2046,24 +2046,28 @@ export async function runQwenServe(
           overlayKeys: Object.freeze([] as string[]),
           envFilePaths: Object.freeze([] as string[]),
           envFileReadFailed: false,
+          envFileReadFailures: Object.freeze([]),
         };
-    if (runtimeEnvSnapshot.envFileReadFailed) {
+    const logRuntimeEnvFileReadFailures = (
+      workspace: string,
+      snapshot: {
+        readonly envFileReadFailed: boolean;
+        readonly envFileReadFailures?: readonly {
+          readonly path: string;
+          readonly error: string;
+        }[];
+      },
+    ): void => {
+      if (!snapshot.envFileReadFailed) return;
+      const failedFiles = snapshot.envFileReadFailures ?? [];
       daemonLog.warn('one or more runtime env files could not be read', {
-        workspace: boundWorkspace,
+        workspace,
+        ...(failedFiles.length > 0 ? { failedFiles } : {}),
       });
-    }
+    };
+    logRuntimeEnvFileReadFailures(boundWorkspace, runtimeEnvSnapshot);
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
-    };
-    const pruneDaemonRuntimeBaseEnv = (keys: readonly string[]): void => {
-      if (keys.length === 0) return;
-      // Reload-owned keys must be absent from the base so the fresh
-      // workspace env/settings parse can add current values and drop removals.
-      const nextBaseEnv: NodeJS.ProcessEnv = { ...daemonRuntimeBaseEnv };
-      for (const key of keys) {
-        delete nextBaseEnv[key];
-      }
-      daemonRuntimeBaseEnv = Object.freeze(nextBaseEnv);
     };
     const replaceRuntimeEffectiveEnv = (
       nextEnv: Readonly<NodeJS.ProcessEnv>,
@@ -2079,6 +2083,7 @@ export async function runQwenServe(
       envFilePaths: string[];
       effectiveEnv: NodeJS.ProcessEnv;
       envFileReadFailed: boolean;
+      envFileReadFailures: { path: string; error: string }[];
       fallbackReason?: string;
     } = {
       mode: 'runtime-overlay' as const,
@@ -2086,6 +2091,7 @@ export async function runQwenServe(
       effectiveEnv: runtimeEffectiveEnv,
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
+      envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
     };
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
     let daemonTelemetrySettings: TelemetrySettings;
@@ -2452,10 +2458,6 @@ export async function runQwenServe(
             fresh.merged,
             workspace,
           );
-          pruneDaemonRuntimeBaseEnv([
-            ...result.updatedKeys,
-            ...result.removedKeys,
-          ]);
           let refreshedRuntimeEnv: ReturnType<
             EnvironmentRuntime['buildRuntimeEnvironment']
           >;
@@ -2480,13 +2482,12 @@ export async function runQwenServe(
               overlayKeys: [...primaryRuntimeEnv.overlayKeys],
               envFilePaths: [...primaryRuntimeEnv.envFilePaths],
               envFileReadFailed: primaryRuntimeEnv.envFileReadFailed ?? false,
+              envFileReadFailures: [
+                ...(primaryRuntimeEnv.envFileReadFailures ?? []),
+              ],
             };
           }
-          if (refreshedRuntimeEnv.envFileReadFailed) {
-            daemonLog.warn('one or more runtime env files could not be read', {
-              workspace,
-            });
-          }
+          logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
           replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
           if (fallbackReason) {
             primaryRuntimeEnv.fallbackReason = fallbackReason;
@@ -2495,6 +2496,11 @@ export async function runQwenServe(
           }
           primaryRuntimeEnv.envFileReadFailed =
             refreshedRuntimeEnv.envFileReadFailed;
+          primaryRuntimeEnv.envFileReadFailures.splice(
+            0,
+            primaryRuntimeEnv.envFileReadFailures.length,
+            ...refreshedRuntimeEnv.envFileReadFailures,
+          );
           primaryRuntimeEnv.overlayKeys.splice(
             0,
             primaryRuntimeEnv.overlayKeys.length,

@@ -329,6 +329,12 @@ interface ParsedEnvFile {
 interface ParsedEnvFilesResult {
   readonly files: readonly ParsedEnvFile[];
   readonly readFailed: boolean;
+  readonly readFailures: readonly EnvFileReadFailure[];
+}
+
+export interface EnvFileReadFailure {
+  readonly path: string;
+  readonly error: string;
 }
 
 function parseEnvFiles(
@@ -336,7 +342,7 @@ function parseEnvFiles(
   userLevelPaths: ReadonlySet<string>,
 ): ParsedEnvFilesResult {
   const files: ParsedEnvFile[] = [];
-  let readFailed = false;
+  const readFailures: EnvFileReadFailure[] = [];
 
   for (const envFilePath of envFilePaths) {
     try {
@@ -353,12 +359,15 @@ function parseEnvFiles(
         isHomeScopedEnvFile,
         isQwenScopedEnvFile,
       });
-    } catch {
-      readFailed = true;
+    } catch (err) {
+      readFailures.push({
+        path: envFilePath,
+        error: getErrorMessage(err),
+      });
     }
   }
 
-  return { files, readFailed };
+  return { files, readFailed: readFailures.length > 0, readFailures };
 }
 
 function canApplyParsedEnvKey(
@@ -383,6 +392,7 @@ export interface RuntimeEnvironmentSnapshot {
   readonly overlayKeys: readonly string[];
   readonly envFilePaths: readonly string[];
   readonly envFileReadFailed: boolean;
+  readonly envFileReadFailures: readonly EnvFileReadFailure[];
 }
 
 function isEffectivelyUnset(env: NodeJS.ProcessEnv, key: string): boolean {
@@ -445,6 +455,7 @@ export function buildRuntimeEnvironment(
     overlayKeys: Object.freeze(overlayKeys),
     envFilePaths: Object.freeze([...envFilePaths]),
     envFileReadFailed: parsedEnvFiles.readFailed,
+    envFileReadFailures: Object.freeze([...parsedEnvFiles.readFailures]),
   };
 }
 

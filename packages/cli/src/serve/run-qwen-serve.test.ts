@@ -1305,7 +1305,7 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('prunes reload-owned daemon base keys before rebuilding runtime env after workspace reload', async () => {
+  it('rebuilds runtime env from the immutable daemon base after workspace reload', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),
     );
@@ -1401,14 +1401,12 @@ describe('runQwenServe runtime startup failures', () => {
 
       const reloadBaseEnv = buildRuntimeEnvironment.mock.calls.at(-1)?.[2];
       expect(reloadBaseEnv?.['QWEN_TEST_BOOT_BASE']).toBe('base');
+      expect(reloadBaseEnv?.['QWEN_TEST_REMOVED_FROM_DOTENV']).toBe('stale');
       expect(reloadBaseEnv?.['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
-      expect(reloadBaseEnv?.['QWEN_TEST_REMOVED_FROM_DOTENV']).toBeUndefined();
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
+      expect(capturedRuntimeEnv['QWEN_TEST_REMOVED_FROM_DOTENV']).toBe('stale');
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
-      expect(
-        capturedRuntimeEnv['QWEN_TEST_REMOVED_FROM_DOTENV'],
-      ).toBeUndefined();
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
