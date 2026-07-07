@@ -3,7 +3,7 @@ import type {
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
-import { isValidChatId } from './QQChannel.js';
+import { isValidChatId, DeliveryError } from './QQChannel.js';
 
 const {
   mockSendQQMessage,
@@ -634,7 +634,9 @@ describe('sendMessage', () => {
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 500))
       .mockResolvedValueOnce(mockResponse(false, 500));
-    await ch.sendMessage('test-chat-id', 'hello');
+    await expect(
+      ch.sendMessage('test-chat-id', 'hello'),
+    ).rejects.toBeInstanceOf(DeliveryError);
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
     expect(writes.some((w) => w.includes('MESSAGE DROPPED'))).toBe(true);
     expect(saveSpy).not.toHaveBeenCalled();
@@ -656,7 +658,9 @@ describe('sendMessage', () => {
       .mockResolvedValueOnce(mockResponse(false, 500))
       .mockResolvedValueOnce(mockResponse(false, 429));
 
-    await ch.sendMessage('test-chat-id', 'hello');
+    await expect(
+      ch.sendMessage('test-chat-id', 'hello'),
+    ).rejects.toBeInstanceOf(DeliveryError);
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
     expect(
@@ -914,7 +918,9 @@ describe('sendMessage', () => {
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
       .mockResolvedValueOnce(mockResponse(false, 500, 'server error'));
 
-    await ch.sendMessage('test-chat-id', '**bold**');
+    await expect(
+      ch.sendMessage('test-chat-id', '**bold**'),
+    ).rejects.toBeInstanceOf(DeliveryError);
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
@@ -925,7 +931,9 @@ describe('sendMessage', () => {
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
       .mockResolvedValueOnce(mockResponse(false, 429, 'rate limited'));
 
-    await ch.sendMessage('test-chat-id', '**bold**');
+    await expect(
+      ch.sendMessage('test-chat-id', '**bold**'),
+    ).rejects.toBeInstanceOf(DeliveryError);
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
     const secondBody = mockSendQQMessage.mock.calls[1][3] as Record<
@@ -1038,7 +1046,9 @@ describe('sendMessage', () => {
 
     mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
 
-    await ch.sendMessage('test-chat-id', '**bold**');
+    await expect(
+      ch.sendMessage('test-chat-id', '**bold**'),
+    ).rejects.toBeInstanceOf(DeliveryError);
 
     // No second call — 429 bails immediately
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
@@ -1060,7 +1070,9 @@ describe('sendMessage', () => {
 
     mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
 
-    await ch.sendMessage('test-chat-id', 'hello');
+    await expect(
+      ch.sendMessage('test-chat-id', 'hello'),
+    ).rejects.toBeInstanceOf(DeliveryError);
 
     // No second call — 429 bails immediately without fallback or rollback
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);

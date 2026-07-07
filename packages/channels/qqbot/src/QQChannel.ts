@@ -58,6 +58,21 @@ import {
   sendQQMessage,
 } from './api.js';
 
+export type DeliveryErrorCode =
+  | 'RATE_LIMITED'
+  | 'RETRY_EXHAUSTED'
+  | 'FALLBACK_FAILED';
+
+export class DeliveryError extends Error {
+  constructor(
+    readonly code: DeliveryErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DeliveryError';
+  }
+}
+
 /** Validate chatId to prevent SSRF when constructing URLs. */
 export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
@@ -269,9 +284,10 @@ export class QQChannel extends ChannelBase {
                     if (!entry!.buffer) this.cronBuffer.delete(sessionId);
                   })
                   .catch((err) => {
+                    const code =
+                      err instanceof DeliveryError ? ` (${err.code})` : '';
                     process.stderr.write(
-                      `[QQ:${this.name}] Cron flush send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}
-`,
+                      `[QQ:${this.name}] Cron flush send error${code}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
                     );
                     this.cronBuffer.delete(sessionId);
                   });
@@ -496,7 +512,10 @@ export class QQChannel extends ChannelBase {
             this.msgSeqMap.set(msgId, nextSeq - 1);
             this.saveQQState();
           }
-          return;
+          throw new DeliveryError(
+            'RATE_LIMITED',
+            `Message blocked by rate limit for ${sanitizeLogText(chatId, 64)}`,
+          );
         }
 
         // Active retry when we have a reply context (msgId)
@@ -538,7 +557,10 @@ export class QQChannel extends ChannelBase {
               `[QQ:${this.name}] MESSAGE DROPPED: active retry rate-limited (HTTP 429) for ${sanitizeLogText(chatId, 64)}\n`,
             );
             this.saveQQState();
-            return;
+            throw new DeliveryError(
+              'RATE_LIMITED',
+              `Message blocked by rate limit for ${sanitizeLogText(chatId, 64)}`,
+            );
           }
 
           // Active retry failed with non-429 — don't fall through to plain-text
@@ -546,7 +568,10 @@ export class QQChannel extends ChannelBase {
             `[QQ:${this.name}] MESSAGE DROPPED: both passive and active send failed for ${sanitizeLogText(chatId, 64)}\n`,
           );
           this.saveQQState();
-          return;
+          throw new DeliveryError(
+            'RETRY_EXHAUSTED',
+            `All delivery attempts exhausted for ${sanitizeLogText(chatId, 64)}`,
+          );
         }
 
         // Plain-text fallback for active messages (no reply context)
@@ -567,12 +592,18 @@ export class QQChannel extends ChannelBase {
             process.stderr.write(
               `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on plain-text fallback for ${sanitizeLogText(chatId, 64)}\n`,
             );
-            return;
+            throw new DeliveryError(
+              'RATE_LIMITED',
+              `Message blocked by rate limit for ${sanitizeLogText(chatId, 64)}`,
+            );
           }
           process.stderr.write(
             `[QQ:${this.name}] MESSAGE DROPPED: plain-text fallback failed (HTTP ${fallbackRes.status}: ${sanitizeLogText(fbErrBody, 200)}) for ${sanitizeLogText(chatId, 64)}\n`,
           );
-          return;
+          throw new DeliveryError(
+            'FALLBACK_FAILED',
+            `Plain-text fallback delivery failed for ${sanitizeLogText(chatId, 64)}`,
+          );
         }
 
         process.stderr.write(
@@ -592,9 +623,11 @@ export class QQChannel extends ChannelBase {
       if (msgId) this.saveQQState();
       // Note: sendQQMessage only throws on network/timeout errors, never HTTP status.
       // Rate-limit (429) handling is in the resp.status checks above.
-      process.stderr.write(
-        `[QQ:${this.name}] Send error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
-      );
+      if (!(e instanceof DeliveryError)) {
+        process.stderr.write(
+          `[QQ:${this.name}] Send error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+      }
       throw e; // Re-throw for .catch() callers
     }
   }
@@ -826,10 +859,9 @@ export class QQChannel extends ChannelBase {
     logLabel: string,
   ): void {
     this.flushingSessions.add(sessionId);
-    // NOTE: sendMessage resolves for HTTP errors (e.g., 429, 500) without
-    // rejecting, so .then() may fire even when the send didn't actually
-    // succeed. Fixing this requires sendMessage to propagate HTTP errors
-    // (upstream issue). The .catch() path below handles network-level errors.
+    // sendMessage now throws DeliveryError for definitive delivery failures
+    // (rate-limited, retries exhausted, fallback failed). The .catch() path
+    // handles both DeliveryError (no retry) and network-level errors (retry).
     this.sendMessage(state.chatId, buffer)
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
@@ -857,6 +889,26 @@ export class QQChannel extends ChannelBase {
         }
       })
       .catch((e: unknown) => {
+        if (e instanceof DeliveryError) {
+          process.stderr.write(
+            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}\n`,
+          );
+          // DeliveryError = definitive drop (rate-limited, retries exhausted,
+          // or fallback failed). Don't retry — just clean up state.
+          const current = this.streamState.get(sessionId);
+          if (current === state) {
+            current.retryCount = 0;
+            if (!current.buffer) {
+              this.streamState.delete(sessionId);
+            }
+          }
+          if (this.pendingStreamDelete.has(sessionId)) {
+            this.pendingStreamDelete.delete(sessionId);
+            this.flushedSessions.delete(sessionId);
+          }
+          return;
+        }
+
         process.stderr.write(
           `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
