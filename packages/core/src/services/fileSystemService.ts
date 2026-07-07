@@ -5,6 +5,7 @@
  */
 
 import os from 'node:os';
+import type { Stats } from 'node:fs';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -46,6 +47,7 @@ export type CoreReadTextFileRequest = Omit<
   line?: number | null;
   maxOutputBytes?: number;
   signal?: AbortSignal;
+  stats?: Stats;
 };
 
 /**
@@ -276,13 +278,14 @@ export class StandardFileSystemService implements FileSystemService {
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    const { path, limit, line, maxOutputBytes, signal } = params;
+    const { path, limit, line, maxOutputBytes, signal, stats } = params;
     const readResult = await readFileWithLineAndLimit({
       path,
       limit: limit ?? Number.POSITIVE_INFINITY,
       ...(line !== undefined && line !== null ? { line } : {}),
       ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
       ...(signal !== undefined ? { signal } : {}),
+      ...(stats !== undefined ? { stats } : {}),
     });
     const detectedLineEnding =
       readResult.lineEnding ?? detectLineEnding(readResult.content);

@@ -299,6 +299,7 @@ export async function readFileWithLineAndLimit(params: {
   line?: number;
   maxOutputBytes?: number;
   signal?: AbortSignal;
+  stats?: import('node:fs').Stats;
 }): Promise<{
   content: string;
   bom?: boolean;
@@ -309,7 +310,7 @@ export async function readFileWithLineAndLimit(params: {
   truncatedByBytes?: boolean;
 }> {
   const { path: filePath, limit, line, maxOutputBytes, signal } = params;
-  const stats = await fs.promises.stat(filePath);
+  const stats = params.stats ?? (await fs.promises.stat(filePath));
   if (
     (line !== undefined && line > 0) ||
     Number.isFinite(limit) ||
@@ -1133,6 +1134,7 @@ export async function processSingleFileContent(
             limit: limit ?? config.getTruncateToolOutputLines(),
             line: offset,
             maxOutputBytes: getRangeReadByteLimit(config),
+            stats,
             ...(signal !== undefined ? { signal } : {}),
           });
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
@@ -1193,12 +1195,15 @@ export async function processSingleFileContent(
         if (_meta?.truncatedByBytes === true) {
           const marker = '... [truncated]';
           if (!llmContent.endsWith(marker)) {
-            if (Number.isFinite(configCharLimit)) {
-              const sliceLength = Math.max(configCharLimit - marker.length, 0);
-              llmContent = llmContent.slice(0, sliceLength) + marker;
-            } else {
-              llmContent += marker;
-            }
+            const prefix = Number.isFinite(configCharLimit)
+              ? llmContent.slice(
+                  0,
+                  Math.max(configCharLimit - marker.length - 1, 0),
+                )
+              : llmContent;
+            const separator =
+              prefix.length === 0 || prefix.endsWith('\n') ? '' : '\n';
+            llmContent = prefix + separator + marker;
           }
           contentLengthTruncated = true;
         }

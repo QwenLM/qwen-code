@@ -110,8 +110,9 @@ function toAcpReadTextFileRequest(
   params: CoreReadTextFileRequest,
   sessionId: string,
 ): ReadTextFileRequest {
-  // `maxOutputBytes` and `signal` are core-local concerns that the current ACP
-  // schema cannot represent. Keep this boundary explicit if the schema grows.
+  // `maxOutputBytes`, `signal`, and `stats` are core-local concerns that the
+  // current ACP schema cannot represent. Keep this boundary explicit if the
+  // schema grows.
   const request: ReadTextFileRequest = {
     path: params.path,
     sessionId,

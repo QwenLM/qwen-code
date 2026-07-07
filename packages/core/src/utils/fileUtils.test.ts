@@ -1576,6 +1576,28 @@ describe('fileUtils', () => {
       ).rejects.toThrow(/abort/i);
     });
 
+    it('should use provided stats when reading with line and byte limits', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
+      const stats = actualNodeFs.statSync(testTextFilePath);
+      const statSpy = vi
+        .spyOn(fs.promises, 'stat')
+        .mockRejectedValueOnce(new Error('unexpected stat'));
+
+      try {
+        const result = await readFileWithLineAndLimit({
+          path: testTextFilePath,
+          limit: 1,
+          maxOutputBytes: 100,
+          stats,
+        });
+
+        expect(result.content).toBe('hello');
+        expect(statSpy).not.toHaveBeenCalled();
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
     it('should not byte-truncate multibyte text before the character limit', async () => {
       const content = '你'.repeat(1000);
       actualNodeFs.writeFileSync(testTextFilePath, content, 'utf-8');
@@ -1743,7 +1765,7 @@ describe('fileUtils', () => {
 
       expect(typeof result.llmContent).toBe('string');
       const llmContent = result.llmContent as string;
-      expect(llmContent).toBe('visible... [truncated]');
+      expect(llmContent).toBe('visible\n... [truncated]');
       expect(llmContent.match(/\.\.\. \[truncated\]/g)).toHaveLength(1);
       expect(result.returnDisplay).toBe(
         'Read lines 1-1 of at least 1 from test.txt (truncated)',
