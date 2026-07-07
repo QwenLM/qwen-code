@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
@@ -210,9 +211,79 @@ export interface AgentParams {
    *   are returned in the agent's result.
    */
   isolation?: 'worktree';
+  /**
+   * Pins the sub-agent's working directory to an EXISTING, caller-owned
+   * git worktree of the current repo (absolute, or relative to the
+   * parent's cwd). Unlike `isolation:'worktree'`, the harness does NOT
+   * create or clean up the directory — the caller owns its lifecycle
+   * (e.g. `/review`'s `fetch-pr` provisions the PR worktree and `cleanup`
+   * removes it). Every "where am I?" surface on the sub-agent's Config is
+   * rebound to this path so its file/shell tools cannot leak into the
+   * parent project tree. Must resolve to a worktree registered against
+   * this repository. Mutually exclusive with `isolation`.
+   */
+  working_dir?: string;
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+/**
+ * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
+ * caller-owned git worktree that a sub-agent should be pinned to (e.g. the
+ * PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
+ * `isolation:'worktree'`, the harness neither creates nor tears down this
+ * directory — it only rebinds the child Config's cwd surfaces to it.
+ *
+ * The directory MUST be a worktree registered against the current
+ * repository. `getRegisteredWorktreeBranch` enforces this by comparing
+ * `--git-common-dir` and `--show-toplevel`, which rejects arbitrary
+ * directories, sibling `git init`s, and plain sub-directories — the
+ * containment guarantee that stops a bad path from aiming the sub-agent at
+ * `~/`, `/etc`, or an unrelated repo.
+ *
+ * @returns the resolved absolute path + branch, or `{ error }` with a
+ *   user-facing reason.
+ */
+async function resolveExternalWorktreeDir(
+  config: Config,
+  workingDir: string,
+): Promise<
+  | { path: string; branch: string; slug: string; repoRoot: string }
+  | { error: string }
+> {
+  const parentCwd = config.getTargetDir();
+  const resolvedPath = path.resolve(parentCwd, workingDir);
+
+  const probe = new GitWorktreeService(parentCwd);
+  const gitCheck = await probe.checkGitAvailable();
+  if (!gitCheck.available) {
+    return {
+      error: `Cannot use working_dir: ${gitCheck.error ?? 'git is not available'}.`,
+    };
+  }
+  // Anchor at the repo top-level so the common-dir comparison inside
+  // getRegisteredWorktreeBranch is against the repository, not a monorepo
+  // subdirectory the parent happened to launch from.
+  const repoRoot = (await probe.getRepoTopLevel()) ?? parentCwd;
+  const wtService =
+    repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
+
+  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
+  if (!info) {
+    return {
+      error:
+        `working_dir "${resolvedPath}" is not a registered git worktree of ` +
+        `this repository. Create it first (e.g. \`git worktree add <path> ` +
+        `<ref>\`), then pass its path.`,
+    };
+  }
+  return {
+    path: resolvedPath,
+    branch: info.branch,
+    slug: path.basename(resolvedPath),
+    repoRoot,
+  };
+}
 
 const TEAM_AGENT_NAME_PROPERTY = {
   type: 'string',
@@ -643,6 +714,11 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
         },
+        working_dir: {
+          type: 'string',
+          description:
+            "Pin the sub-agent to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. All of the sub-agent's file and shell tools operate inside this directory, so it cannot touch the parent project tree. Must be a worktree already registered against the current repository. Mutually exclusive with 'isolation'.",
+        },
       },
       required: ['description', 'prompt'],
       additionalProperties: false,
@@ -900,6 +976,31 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
       ) {
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
+      }
+    }
+
+    if (params.working_dir !== undefined) {
+      if (
+        typeof params.working_dir !== 'string' ||
+        params.working_dir.length === 0
+      ) {
+        return 'Parameter "working_dir" must be a non-empty string when set.';
+      }
+      // A worktree pin and a fresh-worktree isolation are contradictory —
+      // one reuses a caller-owned directory, the other provisions and
+      // reaps its own. Reject the ambiguous combination up front.
+      if (params.isolation !== undefined) {
+        return 'Parameters "working_dir" and "isolation" are mutually exclusive.';
+      }
+      // Same rationale as isolation: a fork shares the parent's
+      // conversation context and working tree, so it cannot be rebound to
+      // a different directory; and the pin is only meaningful for an
+      // explicit subagent_type.
+      if (
+        !params.subagent_type ||
+        params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
+      ) {
+        return 'Parameter "working_dir" requires an explicit subagent_type (and cannot be "fork").';
       }
     }
 
@@ -1912,6 +2013,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       path: string;
       branch: string;
       repoRoot: string;
+      /**
+       * True when `path` is a caller-owned worktree supplied via
+       * `working_dir` (not provisioned by this tool). Teardown is the
+       * caller's responsibility, so `cleanupWorktreeIsolation` must NOT
+       * remove or "preserve"-report it.
+       */
+      externallyManaged?: boolean;
     } | null = null;
 
     const cleanupWorktreeIsolation = async (): Promise<{
@@ -1928,6 +2036,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // removed and `hasWorktreeChanges()` would fail-closed and
       // produce a bogus `[worktree preserved: <missing path>]` suffix.
       worktreeIsolation = null;
+      // A caller-owned worktree (supplied via `working_dir`) is never
+      // removed or preserved by this tool — its provider owns the
+      // lifecycle. Rebind-only: skip all teardown. Every teardown call
+      // site funnels through this helper, so this one guard covers them
+      // all.
+      if (isolation.externallyManaged) return {};
       const wtService = new GitWorktreeService(isolation.repoRoot);
       // The two checks have no data dependency on each other and each
       // spawns its own `git` invocation. Run them concurrently so
@@ -2195,7 +2309,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
       };
 
-      if (this.params.isolation === 'worktree') {
+      if (this.params.working_dir !== undefined) {
+        // Pin the sub-agent to a caller-owned, pre-existing worktree
+        // instead of provisioning a fresh one. The rebind block below
+        // (guarded by `worktreeIsolation`) points every cwd surface at
+        // this path; `externallyManaged` tells the cleanup helper to
+        // leave the directory alone.
+        const resolved = await resolveExternalWorktreeDir(
+          this.config,
+          this.params.working_dir,
+        );
+        if ('error' in resolved) {
+          return failWorktreeProvisioning(resolved.error);
+        }
+        worktreeIsolation = {
+          slug: resolved.slug,
+          path: resolved.path,
+          branch: resolved.branch,
+          repoRoot: resolved.repoRoot,
+          externallyManaged: true,
+        };
+      } else if (this.params.isolation === 'worktree') {
         const cwd = this.config.getTargetDir();
         // Refuse nested isolation. If the parent itself is already
         // running inside a worktree (cwd contains `.qwen/worktrees/`),

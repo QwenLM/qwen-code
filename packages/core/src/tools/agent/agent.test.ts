@@ -567,6 +567,55 @@ describe('AgentTool', () => {
       ).toMatch(/fork/i);
     });
 
+    it('accepts working_dir when subagent_type is set', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects an empty working_dir', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '',
+        }),
+      ).toMatch(/working_dir/i);
+    });
+
+    it('rejects working_dir combined with isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+          isolation: 'worktree',
+        }),
+      ).toMatch(/mutually exclusive/i);
+    });
+
+    it('rejects working_dir without an explicit subagent_type', () => {
+      const { subagent_type: _ignored, ...noTypeParams } = validParams;
+      void _ignored;
+      expect(
+        agentTool.validateToolParams({
+          ...noTypeParams,
+          working_dir: '.qwen/tmp/review-pr-1',
+        }),
+      ).toMatch(/subagent_type/i);
+    });
+
+    it('rejects working_dir combined with subagent_type "fork"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          working_dir: '.qwen/tmp/review-pr-1',
+        }),
+      ).toMatch(/fork/i);
+    });
+
     it('rejects plan_mode_required without a named teammate', () => {
       expect(
         agentTool.validateToolParams({
@@ -1231,6 +1280,113 @@ describe('AgentTool', () => {
             .getFileService()
             .getQwenIgnoreFileDisplayForPath('secret.txt'),
         ).toBe('.cursorignore');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('pins the sub-agent to a caller-owned worktree via working_dir and leaves it in place', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // A real, registered worktree the caller owns — mirrors the PR
+        // worktree `/review`'s fetch-pr provisions at `.qwen/tmp/review-pr-<n>`.
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          {
+            cwd: repo,
+          },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        // Every cwd surface is rebound to the caller's worktree...
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+        expect(agentConfig.getProjectRoot()).not.toBe(repo);
+        // ...and the caller-owned worktree is NOT torn down by cleanup.
+        expect(fs.existsSync(wt)).toBe(true);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('rejects working_dir that is not a registered worktree of this repo', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-bad-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // A plain sub-directory that was never `git worktree add`-ed.
+        const plain = path.join(repo, 'not-a-worktree');
+        fs.mkdirSync(plain);
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: plain,
+        });
+        const result = await invocation.execute();
+
+        expect(partToString(result.llmContent)).toMatch(
+          /not a registered git worktree/i,
+        );
+        expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
