@@ -859,9 +859,9 @@ export class QQChannel extends ChannelBase {
     logLabel: string,
   ): void {
     this.flushingSessions.add(sessionId);
-    // sendMessage now throws DeliveryError for definitive delivery failures
-    // (rate-limited, retries exhausted, fallback failed). The .catch() path
-    // handles both DeliveryError (no retry) and network-level errors (retry).
+    // sendMessage throws DeliveryError for delivery failures. Only
+    // RETRY_EXHAUSTED is definitive — RATE_LIMITED and FALLBACK_FAILED
+    // are transient and fall through to re-buffer/retry.
     this.sendMessage(state.chatId, buffer)
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
@@ -889,12 +889,12 @@ export class QQChannel extends ChannelBase {
         }
       })
       .catch((e: unknown) => {
-        if (e instanceof DeliveryError) {
+        if (e instanceof DeliveryError && e.code === 'RETRY_EXHAUSTED') {
           process.stderr.write(
             `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}\n`,
           );
-          // DeliveryError = definitive drop (rate-limited, retries exhausted,
-          // or fallback failed). Don't retry — just clean up state.
+          // RETRY_EXHAUSTED = permanent failure (retries exhausted at QQ
+          // or upstream layers). Don't retry — just clean up state.
           const current = this.streamState.get(sessionId);
           if (current === state) {
             current.retryCount = 0;
