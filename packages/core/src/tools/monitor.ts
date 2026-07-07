@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import stripAnsi from 'strip-ansi';
@@ -54,6 +55,7 @@ import {
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -366,7 +368,10 @@ class MonitorToolInvocation extends BaseToolInvocation<
           ...process.env,
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
-          PAGER: 'cat',
+          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });

@@ -2189,9 +2189,9 @@ const SETTINGS_SCHEMA = {
             label: 'Pager',
             category: 'Tools',
             requiresRestart: false,
-            default: 'cat' as string | undefined,
+            default: undefined as string | undefined,
             description:
-              'The pager command to use for shell output. Defaults to `cat`.',
+              'The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.',
             showInDialog: false,
           },
           showColor: {
@@ -2243,6 +2243,17 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      visible: {
+        type: 'array',
+        label: 'Visible Deferred Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

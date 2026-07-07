@@ -34,26 +34,26 @@ scope because each channel already has a clear native surface for these states.
 
 ## Current State
 
-| Channel | Existing status surface | Current behavior |
-| --- | --- | --- |
-| Telegram | Typing indicator | Starts typing on prompt start and stops on prompt end. |
-| Weixin | Typing indicator | Starts typing on prompt start and stops on prompt end. |
-| DingTalk | Message reaction | Adds the eye reaction on prompt start and recalls it on prompt end. |
-| Feishu | Streaming card | Shows and updates a streaming card, with completion and error paths. |
+| Channel  | Existing status surface | Current behavior                                                     |
+| -------- | ----------------------- | -------------------------------------------------------------------- |
+| Telegram | Typing indicator        | Starts typing on prompt start and stops on prompt end.               |
+| Weixin   | Typing indicator        | Starts typing on prompt start and stops on prompt end.               |
+| DingTalk | Message reaction        | Adds the eye reaction on prompt start and recalls it on prompt end.  |
+| Feishu   | Streaming card          | Shows and updates a streaming card, with completion and error paths. |
 
 ## Proposed Design
 
 Keep the implementation adapter-local. Each adapter consumes the lifecycle event
 hook and maps the event into the platform's existing native status surface.
 
-| Lifecycle event | Telegram | Weixin | DingTalk | Feishu |
-| --- | --- | --- | --- | --- |
-| `started` | Start typing. | Start typing. | Add eye reaction. | Show/update card as running. |
-| `text_chunk` | Ignore. | Ignore. | Ignore. | Ignore in the lifecycle hook. Content streaming stays on the existing response/card stream path. |
-| `tool_call` | Ignore. | Ignore. | Ignore. | Ignore for UI. |
-| `completed` | Stop typing. | Stop typing. | Recall eye reaction. | Mark card completed. |
-| `cancelled` | Stop typing. | Stop typing. | Recall eye reaction. | Mark card cancelled. |
-| `failed` | Stop typing. | Stop typing. | Recall eye reaction. | Mark card failed. |
+| Lifecycle event | Telegram      | Weixin        | DingTalk             | Feishu                                                                                           |
+| --------------- | ------------- | ------------- | -------------------- | ------------------------------------------------------------------------------------------------ |
+| `started`       | Start typing. | Start typing. | Add eye reaction.    | Show/update card as running.                                                                     |
+| `text_chunk`    | Ignore.       | Ignore.       | Ignore.              | Ignore in the lifecycle hook. Content streaming stays on the existing response/card stream path. |
+| `tool_call`     | Ignore.       | Ignore.       | Ignore.              | Ignore for UI.                                                                                   |
+| `completed`     | Stop typing.  | Stop typing.  | Recall eye reaction. | Mark card completed.                                                                             |
+| `cancelled`     | Stop typing.  | Stop typing.  | Recall eye reaction. | Mark card cancelled.                                                                             |
+| `failed`        | Stop typing.  | Stop typing.  | Recall eye reaction. | Mark card failed.                                                                                |
 
 ### Telegram
 
@@ -85,12 +85,12 @@ send extra status messages unless an existing error path already does so.
 Feishu keeps the streaming card as the status surface and makes the terminal
 state explicit in card content:
 
-| State | Card label |
-| --- | --- |
-| Running | `运行中...` |
-| Completed | `已完成` |
-| Cancelled | `已取消` |
-| Failed | `已失败，请重试` |
+| State     | Card label       |
+| --------- | ---------------- |
+| Running   | `运行中...`      |
+| Completed | `已完成`         |
+| Cancelled | `已取消`         |
+| Failed    | `已失败，请重试` |
 
 The card still streams answer content as it does today through the existing
 response/card stream hook. Lifecycle `text_chunk` is not consumed directly by

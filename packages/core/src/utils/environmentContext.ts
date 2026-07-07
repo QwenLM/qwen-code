@@ -543,13 +543,16 @@ export async function getInitialChatHistory(
     ? await buildAvailableSkillsReminder(config)
     : null;
 
+  // Stable parts first (MCP, skills, startup) so prefix-caching servers
+  // retain the KV-cache for the shared prefix. Deferred-tools is last
+  // because tool_search revelations change it — only the tail recomputes.
   const reminderParts = [
-    includeDeferredToolsReminder
-      ? buildDeferredToolsReminder(toolRegistry)
-      : null,
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,
     startupReminder,
+    includeDeferredToolsReminder
+      ? buildDeferredToolsReminder(toolRegistry)
+      : null,
   ]
     .filter((text): text is string => text !== null)
     .map((text) => ({ text }));

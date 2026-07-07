@@ -5,7 +5,7 @@ Internal design document for replacing the hand-rolled 192-line YAML parser at
 `mcpServers` and `hooks` fields from Claude Code's declarative-agent schema can
 round-trip safely through subagent / skill / converter code paths.
 
-Companion to [`docs/declarative-agents-port.md`](./declarative-agents-port.md).
+Companion to [`docs/design/declarative-agents-port.md`](./declarative-agents-port.md).
 Issue: [#4821](https://github.com/QwenLM/qwen-code/issues/4821). Prereq for
 the follow-up to [PR #4842](https://github.com/QwenLM/qwen-code/pull/4842).
 
@@ -46,7 +46,7 @@ export function parseYaml(input: string): unknown {
   (we don't target Bun runtime).
 - **Schema mode**: NOT explicitly set anywhere in CC. Relies on `yaml`
   package's default behavior, plus zod validation at the consumer layer
-  (`DL7`, `gS8`, `TKO`/`_u` per `docs/declarative-agents-port.md`). **C**
+  (`DL7`, `gS8`, `TKO`/`_u` per `docs/design/declarative-agents-port.md`). **C**
 
 ### Why `yaml` rather than `js-yaml`
 
@@ -87,13 +87,13 @@ Track that decision separately if it comes up.
 `~/code/claude-code/src/utils/frontmatterParser.ts` is 370 lines. Key
 findings:
 
-| Step                | Logic                                                                                                                     | Source                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Delimiter match     | Regex `/^---\s*\n([\s\S]*?)\n---\s*\n?/` — opens at column 0, body is non-greedy, closing `---` must be on its own line   | `frontmatterParser.ts:~123` (line numbers from old snapshot; treat as approximate) **C**               |
-| Pass 1 parse        | Call `parseYaml(body)`. If success → return parsed object + content remainder.                                            | same file, top of try block **C**                                                                      |
-| Pass 2 recovery     | On `YAMLException`, walk lines, auto-quote values that look like dates/colons/specials, retry `parseYaml` once.           | lines ~85–121 in old snapshot **C** (`tab → 2 spaces` normalisation, ISO-date heuristic, colon-trap)   |
-| Failure fallthrough | Both passes failed → log via `logForDebugging`, return `{ data: {}, content: text }`. Agent loads with empty frontmatter. | end of function **C**                                                                                  |
-| Telemetry           | Wrapped further upstream — `tengu_frontmatter_shadow_unknown_key` / `_mismatch` events fire from `ug5.agent` (Ig5 schema) | `claude.strings:308120`, `309074`, `309076` (cross-cited in `docs/declarative-agents-port.md` Phase 1) |
+| Step                | Logic                                                                                                                     | Source                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Delimiter match     | Regex `/^---\s*\n([\s\S]*?)\n---\s*\n?/` — opens at column 0, body is non-greedy, closing `---` must be on its own line   | `frontmatterParser.ts:~123` (line numbers from old snapshot; treat as approximate) **C**                      |
+| Pass 1 parse        | Call `parseYaml(body)`. If success → return parsed object + content remainder.                                            | same file, top of try block **C**                                                                             |
+| Pass 2 recovery     | On `YAMLException`, walk lines, auto-quote values that look like dates/colons/specials, retry `parseYaml` once.           | lines ~85–121 in old snapshot **C** (`tab → 2 spaces` normalisation, ISO-date heuristic, colon-trap)          |
+| Failure fallthrough | Both passes failed → log via `logForDebugging`, return `{ data: {}, content: text }`. Agent loads with empty frontmatter. | end of function **C**                                                                                         |
+| Telemetry           | Wrapped further upstream — `tengu_frontmatter_shadow_unknown_key` / `_mismatch` events fire from `ug5.agent` (Ig5 schema) | `claude.strings:308120`, `309074`, `309076` (cross-cited in `docs/design/declarative-agents-port.md` Phase 1) |
 
 **Implication for qwen-code**: we do NOT need to clone the 2-pass recovery.
 qwen-code's `subagent-manager.ts` already enforces stricter "throw on malformed
@@ -105,7 +105,7 @@ warn-and-drop posture.
 
 ## Phase 3 — Nested validation via zod (CC)
 
-The relevant CC validators per `docs/declarative-agents-port.md` Phase 1 +
+The relevant CC validators per `docs/design/declarative-agents-port.md` Phase 1 +
 binary strings cross-check:
 
 ### `mcpServers` (CC symbol `gS8` / JSON-shadow `jL7`)
@@ -134,7 +134,7 @@ DL7-style), and let the downstream merge into `Config.getMcpServers()` do the
 shape coercion. `qwen-code` already has `MCPServerConfig` class with
 `type` discrimination — we reuse that converter instead of duplicating the
 zod schema. See Phase 4 of the runtime-wiring plan in
-`docs/declarative-agents-port.md`.
+`docs/design/declarative-agents-port.md`.
 
 ### `hooks` (CC symbol `TKO` / `_u`)
 
@@ -477,7 +477,7 @@ from the existing test suites in `packages/core/src/subagents/`,
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Q1  | Does `yaml.parse` need an explicit logger to redirect `YAMLWarning` (e.g., `Unresolved tag`) to qwen-code's logger instead of `process.emitWarning`?  | No — defer                                                              | If logs get noisy in CI, plumb `{ logLevel: 'silent' }` or a custom `onWarning` callback. Not load-bearing for v1.                                                      |
 | Q2  | Should `parse()` continue to return `{}` for empty-string / null-document YAML, or throw?                                                             | No — preserve current behavior                                          | Current hand-rolled returns `{}`; we keep that. Add a regression test pinning the choice.                                                                               |
-| Q3  | When `mcpServers` is malformed at the top level (e.g., `mcpServers: "string"`), should the whole agent fail to load, or load with that field dropped? | Yes — drives the warn-and-drop posture in Phase 3 of the implementation | **Resolution**: drop the field, emit a console warning (parity with CC `DL7` per Phase 3 of `docs/declarative-agents-port.md`).                                         |
+| Q3  | When `mcpServers` is malformed at the top level (e.g., `mcpServers: "string"`), should the whole agent fail to load, or load with that field dropped? | Yes — drives the warn-and-drop posture in Phase 3 of the implementation | **Resolution**: drop the field, emit a console warning (parity with CC `DL7` per Phase 3 of `docs/design/declarative-agents-port.md`).                                  |
 | Q4  | Same as Q3 but for `hooks`: drop the field, the event, or just the individual matcher?                                                                | Yes — drives the warn-and-drop posture                                  | **Resolution**: drop the whole `hooks` field on top-level shape failure. Per-event / per-matcher granularity is deferred to a future PR if a real user surfaces a need. |
 | Q5  | Does the `Bun.YAML.parse` shortcut from CC's helper apply to qwen-code?                                                                               | No                                                                      | qwen-code does not target Bun runtime. Skip.                                                                                                                            |
 
@@ -485,4 +485,4 @@ from the existing test suites in `packages/core/src/subagents/`,
 
 **Status**: research complete, ready to implement Phase 2 (replace
 `yaml-parser.ts`) and Phase 3 (re-surface `mcpServers` + `hooks` on
-`SubagentConfig`) per `docs/declarative-agents-port.md`.
+`SubagentConfig`) per `docs/design/declarative-agents-port.md`.

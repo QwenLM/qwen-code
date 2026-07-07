@@ -160,7 +160,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
 
 ### General workflow
 
-1. **Design doc for non-trivial work** — write one in `.qwen/design/` if the
+1. **Design doc for non-trivial work** — write one in `docs/design/` if the
    change touches multiple files or involves design decisions. Skip for small
    bugfixes.
 2. **Test plan for behavioral changes** — write an E2E test plan in
@@ -220,11 +220,18 @@ applicable.
 
 ## Project Directories
 
-Project artifacts live under `.qwen/`:
+Design docs and implementation plans are committed under `docs/` so they are
+tracked in version control:
+
+| Directory      | Purpose                          |
+| -------------- | -------------------------------- |
+| `docs/design/` | Design docs for planned features |
+| `docs/plans/`  | Implementation plans             |
+
+Other working artifacts live under `.qwen/` (git-ignored):
 
 | Directory               | Purpose                              |
 | ----------------------- | ------------------------------------ |
-| `.qwen/design/`         | Design docs for planned features     |
 | `.qwen/e2e-tests/`      | E2E test plans and results           |
 | `.qwen/issues/`         | Issue drafts before filing on GitHub |
 | `.qwen/pr-drafts/`      | PR drafts before submitting          |
