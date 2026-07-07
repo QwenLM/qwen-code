@@ -155,6 +155,36 @@ describe('MemoryDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it.each(['darwin', 'win32'] as const)(
+    'opens managed memory folders on %s without display variables',
+    async (platform) => {
+      stubPlatform(platform);
+      vi.stubEnv('DISPLAY', '');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+      vi.stubEnv('MIR_SOCKET', '');
+      const onClose = vi.fn();
+      const launchEditor = vi.fn();
+      mockedUseLaunchEditor.mockReturnValue(launchEditor);
+
+      render(<MemoryDialog onClose={onClose} />);
+
+      const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+      await act(async () => {
+        keypressHandler({ name: 'return' } as never);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(mockedSpawnSync).toHaveBeenCalledWith(
+        expect.any(String),
+        [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
+        expect.objectContaining({ stdio: 'inherit' }),
+      );
+      expect(launchEditor).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+    },
+  );
+
   it('opens the project managed memory folder after moving selection down', async () => {
     const onClose = vi.fn();
     const launchEditor = vi.fn();
