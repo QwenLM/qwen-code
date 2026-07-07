@@ -63,6 +63,7 @@ export function query({
     stderr: options.stderr,
     logLevel: options.logLevel,
     maxSessionTurns: options.maxSessionTurns,
+    maxToolCalls: options.maxToolCalls,
     coreTools: options.coreTools,
     excludeTools: options.excludeTools,
     allowedTools: options.allowedTools,

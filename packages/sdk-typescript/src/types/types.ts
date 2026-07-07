@@ -23,6 +23,12 @@ export type TransportOptions = {
   stderr?: (message: string) => void;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   maxSessionTurns?: number;
+  /**
+   * Maximum cumulative tool calls executed during the run.
+   * -1 means no limit, 0 means no tool calls allowed.
+   * Equivalent to CLI's `--max-tool-calls` flag.
+   */
+  maxToolCalls?: number;
   coreTools?: string[];
   excludeTools?: string[];
   allowedTools?: string[];
@@ -365,6 +371,14 @@ export interface QueryOptions {
    * @default -1 (unlimited)
    */
   maxSessionTurns?: number;
+
+  /**
+   * Maximum cumulative tool calls executed during the run (success or failure).
+   * Aborts with exit code 55 when exceeded.
+   * -1 / unset means no limit; 0 means no tool calls allowed.
+   * Equivalent to CLI's `--max-tool-calls` flag.
+   */
+  maxToolCalls?: number;
 
   /**
    * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.

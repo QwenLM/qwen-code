@@ -218,6 +218,9 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
     if options.max_session_turns is not None:
         args.extend(["--max-session-turns", str(options.max_session_turns)])
 
+    if options.max_tool_calls is not None:
+        args.extend(["--max-tool-calls", str(options.max_tool_calls)])
+
     if options.core_tools:
         args.extend(["--core-tools", ",".join(options.core_tools)])
 

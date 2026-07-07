@@ -144,6 +144,24 @@ def test_rejects_invalid_max_session_turns() -> None:
         validate_query_options(QueryOptions(max_session_turns=-2))
 
 
+def test_rejects_negative_max_tool_calls() -> None:
+    with pytest.raises(ValidationError, match="max_tool_calls"):
+        validate_query_options(QueryOptions(max_tool_calls=-2))
+
+
+def test_allows_unlimited_max_tool_calls() -> None:
+    validate_query_options(QueryOptions(max_tool_calls=-1))
+
+
+def test_allows_zero_max_tool_calls() -> None:
+    validate_query_options(QueryOptions(max_tool_calls=0))
+
+
+def test_rejects_max_tool_calls_over_limit() -> None:
+    with pytest.raises(ValidationError, match="1,000,000"):
+        validate_query_options(QueryOptions(max_tool_calls=1_000_001))
+
+
 def test_rejects_empty_qwen_executable_path() -> None:
     with pytest.raises(
         ValidationError, match="path_to_qwen_executable cannot be empty"

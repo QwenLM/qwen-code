@@ -158,6 +158,7 @@ export const QueryOptionsSchema = z
       .optional(),
     logLevel: z.enum(['debug', 'info', 'warn', 'error']).optional(),
     maxSessionTurns: z.number().optional(),
+    maxToolCalls: z.number().optional(),
     coreTools: z.array(z.string()).optional(),
     excludeTools: z.array(z.string()).optional(),
     allowedTools: z.array(z.string()).optional(),

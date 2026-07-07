@@ -103,6 +103,7 @@ class QueryOptionsDict(TypedDict, total=False):
     append_system_prompt: str
     debug: bool
     max_session_turns: int
+    max_tool_calls: int
     core_tools: list[str]
     exclude_tools: list[str]
     allowed_tools: list[str]
@@ -128,6 +129,7 @@ class QueryOptions:
     append_system_prompt: str | None = None
     debug: bool = False
     max_session_turns: int | None = None
+    max_tool_calls: int | None = None
     core_tools: list[str] | None = None
     exclude_tools: list[str] | None = None
     allowed_tools: list[str] | None = None
@@ -165,6 +167,7 @@ class QueryOptions:
             append_system_prompt=_as_optional_str(data, "append_system_prompt"),
             debug=_as_optional_bool(data, "debug") or False,
             max_session_turns=_as_optional_int(data, "max_session_turns"),
+            max_tool_calls=_as_optional_int(data, "max_tool_calls"),
             core_tools=_as_optional_str_list(data, "core_tools"),
             exclude_tools=_as_optional_str_list(data, "exclude_tools"),
             allowed_tools=_as_optional_str_list(data, "allowed_tools"),

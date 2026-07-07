@@ -58,6 +58,12 @@ def validate_query_options(options: QueryOptions) -> None:
     if options.max_session_turns is not None and options.max_session_turns < -1:
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")
 
+    if options.max_tool_calls is not None and options.max_tool_calls < -1:
+        raise ValidationError("max_tool_calls must be -1 or a non-negative integer")
+
+    if options.max_tool_calls is not None and options.max_tool_calls > 1_000_000:
+        raise ValidationError("max_tool_calls must not exceed 1,000,000")
+
     if (
         options.path_to_qwen_executable is not None
         and not options.path_to_qwen_executable.strip()

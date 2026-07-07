@@ -305,6 +305,10 @@ export class ProcessTransport implements Transport {
       args.push('--max-session-turns', String(this.options.maxSessionTurns));
     }
 
+    if (this.options.maxToolCalls !== undefined) {
+      args.push('--max-tool-calls', String(this.options.maxToolCalls));
+    }
+
     if (this.options.coreTools && this.options.coreTools.length > 0) {
       args.push('--core-tools', this.options.coreTools.join(','));
     }
