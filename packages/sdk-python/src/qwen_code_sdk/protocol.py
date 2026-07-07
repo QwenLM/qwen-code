@@ -238,6 +238,11 @@ class CLIControlSupportedCommandsRequest(TypedDict):
     subtype: Literal["supported_commands"]
 
 
+class CLIControlGetContextUsageRequest(TypedDict):
+    subtype: Literal["get_context_usage"]
+    show_details: NotRequired[bool]
+
+
 ControlRequestPayload: TypeAlias = (
     CLIControlInterruptRequest
     | CLIControlPermissionRequest
@@ -246,6 +251,7 @@ ControlRequestPayload: TypeAlias = (
     | CLIControlSetModelRequest
     | CLIControlMcpStatusRequest
     | CLIControlSupportedCommandsRequest
+    | CLIControlGetContextUsageRequest
     | dict[str, Any]
 )
 

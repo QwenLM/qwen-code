@@ -482,6 +482,14 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
+    async def get_context_usage(
+        self, show_details: bool = False
+    ) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request(
+            "get_context_usage", {"show_details": show_details}
+        )
+
     @property
     def control_request_timeout(self) -> float:
         return self._options.timeout.control_request
