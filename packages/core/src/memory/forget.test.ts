@@ -20,7 +20,9 @@ import {
 } from './forget.js';
 import {
   clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from './paths.js';
@@ -418,6 +420,159 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       await expect(
         fs.stat(getAutoMemoryMetadataPath(projectRoot)),
       ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes duplicate project and user paths without scope collisions', async () => {
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'forget-mixed-scopes-'),
+    );
+    try {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+      clearAutoMemoryRootCache();
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const projectRootMemory = getAutoMemoryRoot(projectRoot);
+      const userRoot = getUserAutoMemoryRoot();
+      const relativePath = path.join('shared', 'note.md');
+      const projectFile = path.join(projectRootMemory, relativePath);
+      const userFile = path.join(userRoot, relativePath);
+      await fs.mkdir(path.dirname(projectFile), { recursive: true });
+      await fs.mkdir(path.dirname(userFile), { recursive: true });
+      await fs.writeFile(
+        projectFile,
+        [
+          '---',
+          'type: project',
+          'title: Shared memory',
+          '---',
+          '',
+          'Forget this project memory',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+      await fs.writeFile(
+        userFile,
+        [
+          '---',
+          'type: user',
+          'title: Shared memory',
+          '---',
+          '',
+          'Forget this user memory',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+      vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+
+      const result = await forgetManagedAutoMemoryMatches(
+        projectRoot,
+        [
+          {
+            topic: 'project',
+            summary: 'Forget this project memory',
+            filePath: projectFile,
+            entryIndex: 0,
+          },
+          {
+            topic: 'user',
+            summary: 'Forget this user memory',
+            filePath: userFile,
+            entryIndex: 0,
+          },
+        ],
+        new Date('2026-07-03T00:00:00.000Z'),
+      );
+
+      expect(result.removedEntries).toHaveLength(2);
+      expect(result.touchedScopes).toEqual(['user', 'project']);
+      await expect(fs.stat(projectFile)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(fs.stat(userFile)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8'),
+      ).resolves.toBe('');
+      await expect(
+        fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8'),
+      ).resolves.toBe('');
+      const metadata = JSON.parse(
+        await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8'),
+      ) as { updatedAt?: string };
+      expect(metadata.updatedAt).toBe('2026-07-03T00:00:00.000Z');
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps successful user deletions when index rebuild fails', async () => {
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'forget-rebuild-failure-'),
+    );
+    try {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+      clearAutoMemoryRootCache();
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const userRoot = getUserAutoMemoryRoot();
+      await fs.mkdir(userRoot, { recursive: true });
+      const userFile = path.join(userRoot, 'user.md');
+      await fs.writeFile(
+        userFile,
+        [
+          '---',
+          'type: user',
+          'title: User memory',
+          '---',
+          '',
+          'Forget this user-level preference',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+      await fs.mkdir(getUserAutoMemoryIndexPath(), { recursive: true });
+      vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([]);
+      vi.mocked(scanUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+
+      const result = await forgetManagedAutoMemoryMatches(
+        projectRoot,
+        [
+          {
+            topic: 'user',
+            summary: 'Forget this user-level preference',
+            filePath: userFile,
+            entryIndex: 0,
+          },
+        ],
+        new Date('2026-07-03T00:00:00.000Z'),
+      );
+
+      expect(result.removedEntries).toHaveLength(1);
+      expect(result.touchedScopes).toEqual(['user']);
+      await expect(fs.stat(userFile)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     } finally {
       if (originalMemoryBase === undefined) {
         delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];

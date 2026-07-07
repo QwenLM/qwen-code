@@ -437,14 +437,30 @@ export async function forgetManagedAutoMemoryMatches(
   }
 
   if (touchedScopes.has('project')) {
-    options.abortSignal?.throwIfAborted();
-    await bumpMetadata(projectRoot, now);
-    options.abortSignal?.throwIfAborted();
-    await rebuildManagedAutoMemoryIndex(projectRoot);
+    try {
+      options.abortSignal?.throwIfAborted();
+      await bumpMetadata(projectRoot, now);
+      options.abortSignal?.throwIfAborted();
+      await rebuildManagedAutoMemoryIndex(projectRoot);
+    } catch (err) {
+      if (options.abortSignal?.aborted) throw err;
+      debugLogger.warn(
+        'Managed auto-memory forget failed to rebuild project index:',
+        err,
+      );
+    }
   }
   if (touchedScopes.has('user')) {
-    options.abortSignal?.throwIfAborted();
-    await rebuildUserAutoMemoryIndex();
+    try {
+      options.abortSignal?.throwIfAborted();
+      await rebuildUserAutoMemoryIndex();
+    } catch (err) {
+      if (options.abortSignal?.aborted) throw err;
+      debugLogger.warn(
+        'Managed auto-memory forget failed to rebuild user index:',
+        err,
+      );
+    }
   }
 
   return {
