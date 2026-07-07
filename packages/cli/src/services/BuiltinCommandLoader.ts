@@ -69,6 +69,7 @@ import { vimCommand } from '../ui/commands/vimCommand.js';
 import { voiceCommand } from '../ui/commands/voice-command.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
+import { learnCommand } from '../ui/commands/learn-command.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { lspCommand } from '../ui/commands/lspCommand.js';
 
@@ -142,6 +143,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       importConfigCommand,
       initCommand,
       languageCommand,
+      learnCommand,
       mcpCommand,
       ...(this.config?.isManagedMemoryAvailable()
         ? [dreamCommand, forgetCommand]

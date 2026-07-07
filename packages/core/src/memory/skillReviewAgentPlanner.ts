@@ -258,7 +258,7 @@ export const SKILL_REVIEW_SYSTEM_PROMPT = [
   "If nothing is worth saving, just say 'Nothing to save.' and stop.",
 ].join('\n');
 
-function buildAgentHistory(history: Content[]): Content[] {
+export function buildAgentHistory(history: Content[]): Content[] {
   if (history.length === 0) return [];
   const last = history[history.length - 1];
   // If the final message is a user turn (not a model turn), drop it. A trailing
