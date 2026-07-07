@@ -215,9 +215,10 @@ export function fitPendingSlice(
       // early on a wide terminal, while modelling only the width trigger
       // under-charges a wide terminal whose long-text cells wrap tall (the
       // renderer goes vertical, the live frame overflows and locks to the top).
-      const colCount = splitMarkdownTableRow(
+      const headerCells = splitMarkdownTableRow(
         TABLE_ROW_RE.exec(allLines[i]!)![1]!,
-      ).length;
+      ).map((cell) => cell.trim());
+      const colCount = headerCells.length;
       // TableRenderer: borderOverhead = 1 + 3*colCount;
       // minHorizontalTableWidth = max(24, colCount*3 + borderOverhead + 4).
       const minHorizontalWidth = Math.max(24, 6 * colCount + 5);
@@ -235,9 +236,9 @@ export function fitPendingSlice(
       //    cell (columns share `perColWidth`);
       //  - the tallest single cell `maxRowLines` (the vertical trigger);
       //  - vertical `verticalRows`: each DATA cell becomes its own `label: value`
-      //    line that wraps at ~`contentWidth` (the header is folded into labels,
-      //    so it adds no line of its own). Charging one flat line per cell here
-      //    would under-count a long value that wraps.
+      //    line (TableRenderer's renderVerticalFormat prefixes the header label)
+      //    that wraps at ~`contentWidth`. Charging just the value, or one flat
+      //    line per cell, would under-count a long `label: value` that wraps.
       let contentRows = 0;
       let maxRowLines = 1;
       let verticalRows = 0;
@@ -247,11 +248,15 @@ export function fitPendingSlice(
           TABLE_ROW_RE.exec(allLines[r]!)![1]!,
         );
         let rowMax = 1;
-        for (const cell of cells) {
-          const trimmed = cell.trim();
+        for (let colIdx = 0; colIdx < cells.length; colIdx++) {
+          const trimmed = cells[colIdx]!.trim();
           rowMax = Math.max(rowMax, estimateWrappedRows(trimmed, perColWidth));
           if (r >= i + 2) {
-            verticalRows += estimateWrappedRows(trimmed, contentWidth);
+            const label = headerCells[colIdx] ?? '';
+            verticalRows += estimateWrappedRows(
+              label ? `${label}: ${trimmed}` : trimmed,
+              contentWidth,
+            );
           }
         }
         contentRows += rowMax;
@@ -265,8 +270,15 @@ export function fitPendingSlice(
       // `maxRowLines` (header + first row) is an upper bound on the renderer's
       // real first-row wrap count — the equal column share never widens a cell —
       // so it agrees with TableRenderer on which format is chosen.
+      // With no data rows yet (a header+separator still streaming), TableRenderer
+      // keeps the horizontal header box — renderVerticalFormat iterates the data
+      // rows and would draw nothing — so only model vertical once a row exists.
+      // Otherwise a narrow terminal would charge the 2-row vertical stub instead
+      // of the taller horizontal header, under-charging the transient state.
       const usesVertical =
-        contentWidth < minHorizontalWidth || maxRowLines > TABLE_MAX_ROW_LINES;
+        dataRows > 0 &&
+        (contentWidth < minHorizontalWidth ||
+          maxRowLines > TABLE_MAX_ROW_LINES);
       const rows = usesVertical
         ? verticalRows + Math.max(0, dataRows - 1) + 2
         : contentRows + Math.max(0, dataRows - 1) + TABLE_CHROME_ROWS;

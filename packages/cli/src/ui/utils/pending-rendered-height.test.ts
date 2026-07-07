@@ -265,6 +265,39 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(1); // cut before the vertical-bound table
   });
 
+  it('charges wrapped vertical rows when the `label: value` line itself wraps', () => {
+    // Narrow terminal (20 < minHorizontalWidth 24 for 2 cols) → vertical. Each
+    // data cell renders as `label: value`; here that is `Key: vvv…` = 45 chars,
+    // wrapping to ceil(45/20)=3 lines PER cell — not 1. So vertical = 3+3 data
+    // lines + 2 margin = 8. intro(1)+8 = 9 > budget 7 → cut before the table.
+    // The old value-only (or flat one-line-per-cell) charge would be 2+2+2 = 6,
+    // giving 1+6 = 7 ≤ 7 and wrongly keeping the table — under-charging a table
+    // whose vertical lines wrap, the exact miss that overflows the live frame.
+    const val = 'v'.repeat(40);
+    const lines = [
+      'intro',
+      '| Key | Val |',
+      '| --- | --- |',
+      `| ${val} | ${val} |`,
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 20, 7, CLAMP);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1);
+  });
+
+  it('keeps a zero-data-row table horizontal on a narrow terminal (no vertical stub)', () => {
+    // Header + separator only (first data row still streaming). TableRenderer
+    // keeps the horizontal header box; renderVerticalFormat iterates data rows
+    // and would draw nothing. Even though the terminal is narrow (20 < 29), the
+    // estimator must charge horizontal chrome (5), not the 2-row vertical stub.
+    // intro(1)+5 = 6 > budget 4 → cut before it. Without the dataRows>0 guard it
+    // would charge 2, keep the table, and under-count the transient header box.
+    const lines = ['intro', '| A | B | C | D |', '| - | - | - | - |'];
+    const { keptLines, clipped } = fitPendingSlice(lines, 20, 4, CLAMP);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1);
+  });
+
   it('still uses the shorter horizontal height when wide cells stay within MAX_ROW_LINES', () => {
     // Same wide terminal and shape, but short cells (1 line each) → maxRowLines 1,
     // no vertical fallback → horizontal 4*1 + header + chrome = 13. intro(1)+13 =
