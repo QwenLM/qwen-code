@@ -12,7 +12,13 @@ import {
   QWEN_SERVER_TOKEN_ENV,
 } from './channel-worker-env.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
+import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
+import {
+  createChannelWebhookTaskMessage,
+  isChannelWebhookTaskResultMessage,
+  type ChannelWebhookAccepted,
+} from './channel-webhook-ipc.js';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
@@ -70,6 +76,9 @@ export interface ChannelWorkerSupervisor {
   stop(): Promise<void>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
+  enqueueWebhookTask?(
+    task: ChannelWebhookTask,
+  ): Promise<ChannelWebhookAccepted>;
 }
 
 export interface ChannelWorkerChild {
@@ -77,6 +86,7 @@ export interface ChannelWorkerChild {
   killed?: boolean;
   stdout?: WorkerLogStream;
   stderr?: WorkerLogStream;
+  send?(message: unknown): boolean;
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
@@ -448,6 +458,14 @@ export function createChannelWorkerSupervisor(
   let restartTimer: NodeJS.Timeout | undefined;
   let staleHeartbeatTimer: NodeJS.Timeout | undefined;
   let restartAttemptTimes: number[] = [];
+  const pendingWebhookTasks = new Map<
+    string,
+    {
+      resolve: (accepted: ChannelWebhookAccepted) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
 
   const snapshotCopy = (): ChannelWorkerSnapshot => ({
     ...snapshot,
@@ -473,6 +491,30 @@ export function createChannelWorkerSupervisor(
     if (!staleHeartbeatTimer) return;
     clearTimeout(staleHeartbeatTimer);
     staleHeartbeatTimer = undefined;
+  };
+
+  const rejectPendingWebhookTasks = (message: string) => {
+    for (const pending of pendingWebhookTasks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    pendingWebhookTasks.clear();
+  };
+
+  const settleWebhookTask = (message: unknown): boolean => {
+    if (!isChannelWebhookTaskResultMessage(message)) return false;
+    const pending = pendingWebhookTasks.get(message.id);
+    if (!pending) return true;
+    pendingWebhookTasks.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.ok) {
+      pending.resolve({ accepted: true });
+    } else {
+      pending.reject(
+        new Error(message.error || 'Channel webhook task failed.'),
+      );
+    }
+    return true;
   };
 
   const pruneRestartAttempts = (nowMs: number) => {
@@ -746,6 +788,9 @@ export function createChannelWorkerSupervisor(
       };
       function handleMessage(message: unknown) {
         if (child !== startedChild) return;
+        if (settleWebhookTask(message)) {
+          return;
+        }
         if (!ready && isReadyMessage(message)) {
           completeReady(message);
         } else if (isHeartbeatMessage(message)) {
@@ -765,6 +810,7 @@ export function createChannelWorkerSupervisor(
           snapshot.error ??
             (ready ? undefined : sanitizeWorkerError(message, redaction)),
         );
+        rejectPendingWebhookTasks('Channel worker exited.');
         child = undefined;
         if ((ready || kind === 'restart') && !stopping) {
           scheduleRestart();
@@ -826,6 +872,7 @@ export function createChannelWorkerSupervisor(
     async stop() {
       clearRestartTimer();
       clearStaleHeartbeatTimer();
+      rejectPendingWebhookTasks('Channel worker stopped.');
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -859,6 +906,7 @@ export function createChannelWorkerSupervisor(
       snapshot = { ...snapshot, state: 'stopped' };
     },
     killAllSync() {
+      rejectPendingWebhookTasks('Channel worker stopped.');
       if (
         !child ||
         snapshot.state === 'exited' ||
@@ -886,6 +934,25 @@ export function createChannelWorkerSupervisor(
     },
     snapshot() {
       return snapshotCopy();
+    },
+    async enqueueWebhookTask(task) {
+      if (!child || snapshot.state !== 'running') {
+        throw new Error('Channel worker is not running.');
+      }
+      const message = createChannelWebhookTaskMessage(task);
+      return await new Promise<ChannelWebhookAccepted>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingWebhookTasks.delete(message.id);
+          reject(new Error('Channel webhook task IPC timed out.'));
+        }, 30_000);
+        timer.unref();
+        pendingWebhookTasks.set(message.id, { resolve, reject, timer });
+        if (!child?.send?.(message)) {
+          pendingWebhookTasks.delete(message.id);
+          clearTimeout(timer);
+          reject(new Error('Channel worker IPC send failed.'));
+        }
+      });
     },
   };
 }

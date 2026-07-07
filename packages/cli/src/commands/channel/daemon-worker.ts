@@ -9,6 +9,7 @@ import {
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelWebhookTask,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
@@ -23,6 +24,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import { isChannelWebhookTaskMessage } from '../../serve/channel-webhook-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -86,6 +88,7 @@ interface ChannelDaemonWorkerReady {
 
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
+  runWebhookTask(task: ChannelWebhookTask): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -384,6 +387,13 @@ export async function runChannelDaemonWorker(
 
     return {
       channels: connected,
+      async runWebhookTask(task: ChannelWebhookTask): Promise<void> {
+        const channel = channels.get(task.channelName);
+        if (!channel || !connected.includes(task.channelName)) {
+          throw new Error(`Channel "${task.channelName}" is not running.`);
+        }
+        await channel.runWebhookTask(task);
+      },
       async close() {
         disconnectAll();
         try {
@@ -508,6 +518,37 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       removeEarlyShutdownHandlers();
 
       let heartbeatTimer: NodeJS.Timeout | undefined;
+      const sendWebhookTaskResult = (
+        id: string,
+        result: { ok: true } | { ok: false; error: string },
+      ) => {
+        process.send?.({
+          type: 'webhook_task_result',
+          id,
+          ...result,
+        });
+      };
+      const onMessage = (message: unknown) => {
+        if (!isChannelWebhookTaskMessage(message)) return;
+        if (!handle.channels.includes(message.task.channelName)) {
+          sendWebhookTaskResult(message.id, {
+            ok: false,
+            error: sanitizeLogText(
+              `Channel "${message.task.channelName}" is not running.`,
+              512,
+            ),
+          });
+          return;
+        }
+        sendWebhookTaskResult(message.id, { ok: true });
+        void handle.runWebhookTask(message.task).catch((err: unknown) => {
+          const safeMessage = sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            512,
+          );
+          writeStderrLine(`[Channel] webhook task failed: ${safeMessage}`);
+        });
+      };
       const clearHeartbeat = () => {
         if (!heartbeatTimer) return;
         clearInterval(heartbeatTimer);
@@ -525,6 +566,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         }
       }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref();
+      process.on('message', onMessage);
 
       let shuttingDown = false;
       let exitCode = 0;
@@ -538,6 +580,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         } else {
           shuttingDown = true;
           clearHeartbeat();
+          process.removeListener('message', onMessage);
           try {
             await handle.close();
           } catch (err) {
@@ -567,6 +610,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       }
       await finished;
       clearHeartbeat();
+      process.removeListener('message', onMessage);
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);

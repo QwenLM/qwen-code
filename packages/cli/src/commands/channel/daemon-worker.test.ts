@@ -171,6 +171,15 @@ const parsedFeishu = {
   },
 };
 
+const webhookTask = {
+  channelName: 'telegram',
+  source: 'github-ci',
+  eventType: 'check_failed',
+  targetRef: 'default',
+  title: 'CI failed',
+  payload: { runId: 123 },
+};
+
 function createSdk() {
   const client = {
     capabilities: vi.fn().mockResolvedValue({
@@ -850,6 +859,43 @@ describe('runChannelDaemonWorker', () => {
     await expect(handle.close()).rejects.toThrow('stop boom');
     expect(mockRouterClearAll).toHaveBeenCalled();
   });
+
+  it('runs webhook tasks on the matching channel handle', async () => {
+    const sdk = createSdk();
+    const runWebhookTask = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      runWebhookTask,
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    await handle.runWebhookTask(webhookTask);
+
+    expect(runWebhookTask).toHaveBeenCalledWith(webhookTask);
+  });
+
+  it('rejects webhook tasks for channels that are not running', async () => {
+    const sdk = createSdk();
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    await expect(
+      handle.runWebhookTask({ ...webhookTask, channelName: 'missing' }),
+    ).rejects.toThrow('Channel "missing" is not running.');
+  });
 });
 
 describe('daemonWorkerCommand', () => {
@@ -1323,6 +1369,53 @@ describe('daemonWorkerCommand', () => {
       await handler;
 
       expect(exit).toHaveBeenNthCalledWith(1, 1);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('rejects webhook IPC messages for channels that are not running', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const webhookListener = process
+        .listeners('message')
+        .find((listener) => !existingMessageListeners.includes(listener));
+      expect(webhookListener).toBeDefined();
+      (webhookListener as ((message: unknown) => void) | undefined)?.({
+        type: 'webhook_task',
+        id: 'webhook-1',
+        task: { ...webhookTask, channelName: 'missing' },
+      });
+
+      expect(send).toHaveBeenCalledWith({
+        type: 'webhook_task_result',
+        id: 'webhook-1',
+        ok: false,
+        error: 'Channel "missing" is not running.',
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
     } finally {
       restoreSend();
     }
