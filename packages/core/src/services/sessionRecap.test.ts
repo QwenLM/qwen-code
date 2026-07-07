@@ -19,8 +19,13 @@ const reminder = (body: string) =>
 describe('generateSessionRecap', () => {
   it('strips startup and mid-session system reminders from recap input', async () => {
     const history: Content[] = [
-      { role: 'user', parts: [{ text: reminder('STARTUP_SKILL_LIST') }] },
-      { role: 'user', parts: [{ text: 'fix session title pollution' }] },
+      {
+        role: 'user',
+        parts: [
+          { text: reminder('STARTUP_SKILL_LIST') },
+          { text: 'fix session title pollution' },
+        ],
+      },
       { role: 'model', parts: [{ text: 'I found the title service.' }] },
       { role: 'user', parts: [{ text: reminder('ADDED_MCP_TOOLS') }] },
       {
@@ -57,9 +62,7 @@ describe('generateSessionRecap', () => {
       new AbortController().signal,
     );
 
-    expect(result).toBe(
-      'Fixing session title pollution. Next: verify tests.',
-    );
+    expect(result).toBe('Fixing session title pollution. Next: verify tests.');
     expect(captured).not.toBeNull();
     const serialized = JSON.stringify(captured);
     expect(serialized).not.toContain('STARTUP_SKILL_LIST');

@@ -593,15 +593,7 @@ export function getStartupContextLength(
 ): number {
   const firstEntry = history[0];
   if (firstEntry?.role !== 'user') return 0;
-  const firstText = firstEntry.parts?.[0]?.text;
-  // Open prefix, and close tag AT THE END (not merely present). Excludes a
-  // prompt quoting the literal tag, and — since IDE mode merges the reminder
-  // into the prompt's text part — a real first turn trailing after the close.
-  if (
-    typeof firstText === 'string' &&
-    firstText.startsWith(SYSTEM_REMINDER_OPEN) &&
-    firstText.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
-  ) {
+  if (isSystemReminderContent(firstEntry)) {
     if (options.includeCompressed) {
       const compressedLength = detectCompressedPrefixLength(history, 1);
       if (compressedLength > 0) return 1 + compressedLength;
@@ -724,7 +716,7 @@ export function stripSystemReminderBlocks(text: string): string {
       SYSTEM_REMINDER_CLOSE,
       open + SYSTEM_REMINDER_OPEN.length,
     );
-    if (close === -1) return out + text.slice(offset);
+    if (close === -1) return out + text.slice(offset, open);
 
     out += text.slice(offset, open);
     offset = close + SYSTEM_REMINDER_CLOSE.length;
