@@ -23,10 +23,10 @@ export const learnCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
   argumentHint: '<path|URL|text>',
-  action: (
+  action: async (
     context: CommandContext,
     args: string,
-  ): SlashCommandActionReturn | void => {
+  ): Promise<SlashCommandActionReturn | void> => {
     const rawInput = args.trim();
     if (!rawInput) {
       return {
@@ -51,7 +51,7 @@ export const learnCommand: SlashCommand = {
 
     return {
       type: 'submit_prompt',
-      content: buildLearnSkillPrompt(rawInput, projectRoot),
+      content: await buildLearnSkillPrompt(rawInput, projectRoot),
     };
   },
 };

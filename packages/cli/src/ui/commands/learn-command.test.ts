@@ -19,18 +19,18 @@ describe('learnCommand', () => {
     expect(learnCommand.argumentHint).toMatch(/path|URL|text/i);
   });
 
-  it('returns an error when no args are provided', () => {
+  it('returns an error when no args are provided', async () => {
     const ctx = createMockCommandContext();
-    const result = learnCommand.action!(ctx, '');
+    const result = await learnCommand.action!(ctx, '');
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'error',
     });
   });
 
-  it('returns an error when config is not loaded', () => {
+  it('returns an error when config is not loaded', async () => {
     const ctx = createMockCommandContext({ services: { config: null } });
-    const result = learnCommand.action!(ctx, 'https://example.com/docs');
+    const result = await learnCommand.action!(ctx, 'https://example.com/docs');
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'error',
@@ -38,7 +38,7 @@ describe('learnCommand', () => {
     });
   });
 
-  it('returns submit_prompt when config is available', () => {
+  it('returns submit_prompt when config is available', async () => {
     const ctx = createMockCommandContext({
       services: {
         config: {
@@ -47,7 +47,7 @@ describe('learnCommand', () => {
         } as any,
       },
     });
-    const result = learnCommand.action!(ctx, 'https://example.com/docs');
+    const result = await learnCommand.action!(ctx, 'https://example.com/docs');
     expect(result).toMatchObject({
       type: 'submit_prompt',
     });
