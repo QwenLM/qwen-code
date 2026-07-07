@@ -249,9 +249,16 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const resolveTargetPath = useCallback(
     async (item: DialogItem): Promise<string> => {
       if (item.action === 'folder') {
-        return item.value === 'global'
-          ? managedUserMemoryPath
-          : managedMemoryPath;
+        switch (item.value) {
+          case 'global':
+            return managedUserMemoryPath;
+          case 'project':
+            return managedMemoryPath;
+          default: {
+            const _exhaustive: never = item.value;
+            return _exhaustive;
+          }
+        }
       }
 
       switch (item.value) {

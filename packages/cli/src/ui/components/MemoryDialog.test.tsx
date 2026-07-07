@@ -132,7 +132,11 @@ describe('MemoryDialog', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSpawnSync).toHaveBeenCalled();
+    expect(mockedSpawnSync).toHaveBeenCalledWith(
+      expect.any(String),
+      [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
+      expect.objectContaining({ stdio: 'inherit' }),
+    );
     expect(launchEditor).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });
