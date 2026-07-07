@@ -667,6 +667,8 @@ const EN: Messages = {
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
   'scheduledTasks.error.runFailed': 'Failed to record the run',
+  'scheduledTasks.error.oneShotConsumedButFailed':
+    'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
   'scheduledTasks.dueNow': 'Due now',
   'scheduledTasks.nextRunTooltip': (v) => `Next run: ${v?.when ?? ''}`,
   'scheduledTasks.dur.d': 'd',
@@ -1582,7 +1584,8 @@ const EN: Messages = {
   'splitView.closePane': 'Close pane',
   'splitView.paneError': 'This session pane hit an error',
   'splitView.paneConnectionError': 'Connection lost',
-  'splitView.outerApprovalPending': 'Your main session is waiting for approval.',
+  'splitView.outerApprovalPending':
+    'Your main session is waiting for approval.',
   'splitView.goToApproval': 'Go to it',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
@@ -2283,6 +2286,8 @@ const ZH: Messages = {
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
   'scheduledTasks.error.runFailed': '记录运行失败',
+  'scheduledTasks.error.oneShotConsumedButFailed':
+    '任务已删除,但提示词未能送达——它没有运行。请重新创建后重试。',
   'scheduledTasks.dueNow': '即将运行',
   'scheduledTasks.nextRunTooltip': (v) => `下次运行：${v?.when ?? ''}`,
   'scheduledTasks.dur.d': '天',
@@ -3126,7 +3131,8 @@ const ZH: Messages = {
   'sessionsOverview.openInSplitHint': '在本窗口内并排显示选中的会话',
   'sessionsOverview.openInTab': '在新标签页打开',
   'sessionsOverview.openInTabHint': '在新标签页中以分屏并排打开选中的会话',
-  'sessionsOverview.popupBlocked': '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
+  'sessionsOverview.popupBlocked':
+    '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
   'sessionsOverview.selectAll': '全选',
   'sessionsOverview.splitCap': (v) =>

@@ -999,8 +999,15 @@ export function createServeApp(
       // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
       // catches readCronTasks failures and per-session load errors internally
       // (returning { loaded, failed }), so this only guards an unexpected throw
-      // from the function entry itself — intentional, not a swallowed error.
-    }).catch(() => {});
+      // from the function entry itself. Log rather than swallow it — a silent
+      // failure here leaves every bound task dormant with no diagnostic.
+    }).catch((err) => {
+      process.stderr.write(
+        `qwen serve: unexpected scheduled-task rehydration failure: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    });
   }
 
   registerPermissionRoutes(app, {

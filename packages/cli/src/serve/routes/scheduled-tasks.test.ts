@@ -980,5 +980,11 @@ describe('scheduledTaskSessionName', () => {
       .map((c) => String.fromCodePoint(c))
       .join('');
     expect(scheduledTaskSessionName(`x${embeds}y`)).toBe('⏰ xy');
+    // And the standalone directional marks (U+061C ALM, U+200E LRM, U+200F RLM),
+    // which are also Bidi_Control but invisible rather than reordering.
+    const marks = [0x061c, 0x200e, 0x200f]
+      .map((c) => String.fromCodePoint(c))
+      .join('');
+    expect(scheduledTaskSessionName(`m${marks}n`)).toBe('⏰ mn');
   });
 });

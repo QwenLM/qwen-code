@@ -320,12 +320,19 @@ export function ScheduledTasksDialog({
           }
         } else {
           // One-shot: /run IS its single fire — it deletes the task. Consume it
-          // BEFORE enqueuing, so a failed enqueue leaves a visible "recorded but
-          // never ran" (recoverable by recreating) instead of a SILENT double
-          // execution — the task would otherwise still fire at its own slot.
+          // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
+          // silent double execution). The trade-off is that a failed delivery
+          // leaves the task gone AND un-run — and reload() has already dropped it
+          // from the list — so surface THAT explicitly rather than the generic
+          // "run failed", which would hide the deletion.
           await actions.runScheduledTask(fresh.id);
           await reload();
-          await onRunPrompt(fresh.prompt, fresh.sessionId);
+          try {
+            await onRunPrompt(fresh.prompt, fresh.sessionId);
+          } catch (err) {
+            onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
+            return;
+          }
         }
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));

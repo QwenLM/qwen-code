@@ -305,6 +305,33 @@ describe('ScheduledTasksDialog run now', () => {
     expect(order).toEqual(['record', 'enqueue']);
   });
 
+  it('surfaces a consumed-but-failed error when a ONE-SHOT delivery fails', async () => {
+    // The one-shot was deleted before the run; if delivery then rejects it is
+    // gone AND un-run, so the error must say so — not the generic "run failed",
+    // which would hide that the task no longer exists.
+    const onRunPrompt = vi.fn().mockRejectedValue(new Error('switch timeout'));
+    const onError = vi.fn();
+    await mount(
+      [
+        baseTask({
+          recurring: false,
+          enabled: true,
+          sessionId: 'sess-9',
+          prompt: 'do it',
+        }),
+      ],
+      { onRunPrompt, onError },
+    );
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1'); // consumed
+    expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.stringContaining('never ran'),
+    );
+  });
+
   it('records a RECURRING task after enqueuing (enqueue → record)', async () => {
     const order: string[] = [];
     const onRunPrompt = vi.fn(() => {

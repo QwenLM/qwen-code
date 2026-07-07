@@ -290,7 +290,15 @@ export async function rehydrateScheduledTaskSessions(deps: {
       // it as failed and free the worker to pull the next queued session; the
       // background load, if it ever settles, just warms that session late.
       failed.push(sessionId);
-      deps.onError?.(sessionId, err);
+      // The onError callback must never abort the sweep: if it throws (e.g. a
+      // stderr EPIPE during log rotation) the rejection would escape loadOne,
+      // fail its worker, and short-circuit the `Promise.all` below — stranding
+      // every other queued session. Swallow the callback's own failure.
+      try {
+        deps.onError?.(sessionId, err);
+      } catch {
+        /* a broken error sink must not strand the rest of the sweep */
+      }
     }
   };
   // Bounded worker pool: REHYDRATE_MAX_CONCURRENCY workers pull from a shared

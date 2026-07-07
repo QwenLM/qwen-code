@@ -730,7 +730,7 @@ export class CronScheduler {
         // cron_delete, or a just-delivered fire) is gone, not missed.
         if (this.pendingRemoval.has(t.id)) continue;
         const responsibleForMissed =
-          t.sessionId !== undefined
+          typeof t.sessionId === 'string' && t.sessionId.length > 0
             ? t.sessionId === this.sessionId
             : handleMissed;
         if (!responsibleForMissed) continue;

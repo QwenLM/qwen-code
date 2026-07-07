@@ -75,15 +75,17 @@ const MAX_SESSION_NAME_LENGTH = 60;
  * with a clock so scheduled-task sessions are recognizable in the list. Strips
  * terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
  * them, so an unsanitized control char would silently drop the whole rename and
- * leave a bare-id session — plus Unicode bidi override/isolate chars (a
- * Trojan-Source-style reordering defense for the session list), and truncates on
- * a code-point boundary so slicing can't leave a lone surrogate rendered as
- * `�`. */
+ * leave a bare-id session — plus Unicode Bidi_Control marks (ALM/LRM/RLM,
+ * embedding/override, isolates) as a Trojan-Source-style reordering defense for
+ * the session list — and truncates on a code-point boundary so slicing can't
+ * leave a lone surrogate rendered as `�`. */
 export function scheduledTaskSessionName(label: string): string {
   const cleaned = stripTerminalControlSequences(label)
-    // Bidi override/isolate (U+202A–202E, U+2066–2069): stripTerminalControlSequences
-    // doesn't cover these, and they can visually reorder the session name.
-    .replace(/[\u202a-\u202e\u2066-\u2069]/g, '')
+    // Unicode Bidi_Control marks: ALM (U+061C), LRM/RLM (U+200E/200F), the
+    // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069).
+    // stripTerminalControlSequences does not cover these; they can visually
+    // reorder or invisibly mislead the session name.
+    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     .trim()
     .replace(/\s+/g, ' ');
   let short = cleaned;
