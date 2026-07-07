@@ -8,39 +8,12 @@ import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  ToolDisplayNames,
-  ToolDisplayNamesMigration,
-  ToolNames,
-} from '../tools/tool-names.js';
+import { getAliasSetForTool } from '../utils/tool-utils.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
-const toolNameKeys = Object.keys(ToolNames) as Array<keyof typeof ToolNames>;
-
 export function getToolMatcherTargets(toolName: string): string[] {
-  const targets = new Set([toolName]);
-
-  for (const key of toolNameKeys) {
-    if (ToolNames[key] !== toolName) {
-      continue;
-    }
-
-    const displayName = ToolDisplayNames[key];
-    targets.add(displayName);
-
-    for (const [legacyDisplayName, migratedDisplayName] of Object.entries(
-      ToolDisplayNamesMigration,
-    )) {
-      if (migratedDisplayName === displayName) {
-        targets.add(legacyDisplayName);
-      }
-    }
-
-    break;
-  }
-
-  return [...targets];
+  return [...getAliasSetForTool(toolName)];
 }
 
 type HookMatcherTargetKind =
@@ -274,16 +247,21 @@ export class HookPlanner {
   private matchesToolName(matcher: string, toolName: string): boolean {
     const targets = getToolMatcherTargets(toolName);
 
+    if (targets.includes(matcher)) {
+      return true;
+    }
+
     try {
-      // Attempt to treat the matcher as a regular expression.
+      // Regex matchers apply to the runtime id only. Alias expansion is exact
+      // so display names do not create new substring matches.
       const regex = new RegExp(matcher);
-      return targets.some((target) => regex.test(target));
+      return regex.test(toolName);
     } catch (error) {
       // If it's not a valid regex, treat it as a literal string for an exact match.
       debugLogger.warn(
         `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
       );
-      return targets.includes(matcher);
+      return false;
     }
   }
 

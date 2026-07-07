@@ -307,6 +307,66 @@ describe('SessionHooksManager', () => {
       expect(matching.length).toBe(1);
     });
 
+    it('matches pipe-separated display names against runtime tool ids', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'WriteFile|Edit',
+        callback,
+        'Test error',
+      );
+
+      const matching = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'write_file',
+      );
+
+      expect(matching.length).toBe(1);
+    });
+
+    it('does not match regex against tool aliases', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Edit',
+        callback,
+        'Test error',
+      );
+
+      const matching = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'notebook_edit',
+      );
+
+      expect(matching.length).toBe(0);
+    });
+
+    it('does not let alias expansion bypass runtime id regex exclusions', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        '^(?!write_file).*$',
+        callback,
+        'Test error',
+      );
+
+      const matching = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'write_file',
+      );
+
+      expect(matching.length).toBe(0);
+    });
+
     it('should not match different tool name', () => {
       const callback = vi.fn().mockResolvedValue({ continue: true });
 
