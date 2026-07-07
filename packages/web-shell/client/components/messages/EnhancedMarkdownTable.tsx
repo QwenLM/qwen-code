@@ -11,6 +11,7 @@ import {
   type CSSProperties,
   type ClipboardEvent,
   type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
@@ -115,7 +116,13 @@ export const MAX_ENHANCED_TABLE_COLUMNS = 50;
 const DEFAULT_COLUMN_WIDTH = 160;
 const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
+const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
+
+function clampColumnWidth(width: number): number {
+  return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
+}
+
 const FOCUSABLE_FILTER_MENU_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -1255,7 +1262,12 @@ export function EnhancedTable({
     resetCopiedSelection();
     draggingRef.current = false;
     setIsDragging(false);
-  }, [resetCopiedSelection, resetCopiedVisible, tableStructureKey]);
+  }, [
+    resetCopiedSelection,
+    resetCopiedVisible,
+    table.columnCount,
+    tableStructureKey,
+  ]);
 
   useEffect(() => {
     resetCopiedSelection();
@@ -1382,12 +1394,8 @@ export function EnhancedTable({
   useEffect(() => {
     if (!resizingColumn) return;
     const resizeColumn = (event: MouseEvent) => {
-      const nextWidth = Math.min(
-        MAX_COLUMN_WIDTH,
-        Math.max(
-          MIN_COLUMN_WIDTH,
-          resizingColumn.startWidth + event.clientX - resizingColumn.startX,
-        ),
+      const nextWidth = clampColumnWidth(
+        resizingColumn.startWidth + event.clientX - resizingColumn.startX,
       );
       setColumnWidths((current) => ({
         ...current,
@@ -1397,9 +1405,13 @@ export function EnhancedTable({
     const stopResize = () => setResizingColumn(null);
     window.addEventListener('mousemove', resizeColumn);
     window.addEventListener('mouseup', stopResize);
+    window.addEventListener('blur', stopResize);
+    document.addEventListener('visibilitychange', stopResize);
     return () => {
       window.removeEventListener('mousemove', resizeColumn);
       window.removeEventListener('mouseup', stopResize);
+      window.removeEventListener('blur', stopResize);
+      document.removeEventListener('visibilitychange', stopResize);
     };
   }, [resizingColumn]);
 
@@ -1513,18 +1525,19 @@ export function EnhancedTable({
     () => (selection ? getSelectionBounds(selection) : null),
     [selection],
   );
+  const selectedColumnIndexSet = useMemo(
+    () =>
+      new Set(getSelectedColumnIndexes(selection, orderedVisibleColumnIndexes)),
+    [selection, orderedVisibleColumnIndexes],
+  );
 
   const isCellSelected = (rowIndex: number, columnIndex: number): boolean => {
     if (!selectionBounds) return false;
     const { minRow, maxRow } = selectionBounds;
-    const selectedColumnIndexes = getSelectedColumnIndexes(
-      selection,
-      orderedVisibleColumnIndexes,
-    );
     return (
       rowIndex >= minRow &&
       rowIndex <= maxRow &&
-      selectedColumnIndexes.includes(columnIndex)
+      selectedColumnIndexSet.has(columnIndex)
     );
   };
 
@@ -1551,6 +1564,30 @@ export function EnhancedTable({
       columnIndex,
       startX: event.clientX,
       startWidth: columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH,
+    });
+  };
+
+  const resizeColumnWithKeyboard = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => {
+    let delta = 0;
+    if (event.key === 'ArrowRight') {
+      delta = KEYBOARD_COLUMN_RESIZE_STEP;
+    } else if (event.key === 'ArrowLeft') {
+      delta = -KEYBOARD_COLUMN_RESIZE_STEP;
+    }
+
+    if (delta === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    setColumnWidths((current) => {
+      const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+      return {
+        ...current,
+        [columnIndex]: clampColumnWidth(width + delta),
+      };
     });
   };
 
@@ -1949,9 +1986,19 @@ export function EnhancedTable({
                       onMouseDown={(event) =>
                         startColumnResize(event, columnIndex)
                       }
+                      onKeyDown={(event) =>
+                        resizeColumnWithKeyboard(event, columnIndex)
+                      }
+                      role="separator"
                       aria-label={t('markdownTable.resizeColumn', {
                         column: columnName,
                       })}
+                      aria-orientation="vertical"
+                      aria-valuemin={MIN_COLUMN_WIDTH}
+                      aria-valuemax={MAX_COLUMN_WIDTH}
+                      aria-valuenow={
+                        columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH
+                      }
                     />
                   </th>
                 );

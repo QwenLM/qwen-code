@@ -415,6 +415,42 @@ tr:hover .selectedCell {
   z-index: 4;
 }
 
+.stickyActionHeaderCell,
+.frozenHeaderCell,
+.stickyActionCell,
+.frozenCell {
+  background: var(--card);
+}
+
+.evenRow .stickyActionCell,
+.evenRow .frozenCell {
+  background:
+    linear-gradient(var(--subtle-bg), var(--subtle-bg)),
+    var(--card);
+}
+
+tr:hover .stickyActionCell,
+tr:hover .frozenCell {
+  background:
+    linear-gradient(var(--subtle-bg-strong), var(--subtle-bg-strong)),
+    var(--card);
+}
+
+.stickyActionCell.selectedCell,
+.frozenCell.selectedCell,
+.evenRow .stickyActionCell.selectedCell,
+.evenRow .frozenCell.selectedCell,
+tr:hover .stickyActionCell.selectedCell,
+tr:hover .frozenCell.selectedCell {
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--agent-blue-500) 20%, transparent),
+      color-mix(in srgb, var(--agent-blue-500) 20%, transparent)
+    ),
+    var(--card);
+  box-shadow: inset 0 0 0 1px var(--agent-blue-500);
+}
+
 .rowDetailButton {
   padding: 3px 7px;
   border: 1px solid var(--border);

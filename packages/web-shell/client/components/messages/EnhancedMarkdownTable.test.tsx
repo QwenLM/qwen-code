@@ -757,6 +757,91 @@ describe('EnhancedMarkdownTable', () => {
     expect(dataCell(container, 0, 0).style.width).toBe('220px');
   });
 
+  it('stops resizing a column when the window blurs', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 220 }),
+      );
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '160px',
+    );
+  });
+
+  it('stops resizing a column when page visibility changes', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 220 }),
+      );
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '160px',
+    );
+  });
+
+  it('resizes a column with keyboard arrows', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'ArrowRight',
+        }),
+      );
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '176px',
+    );
+
+    act(() => {
+      resize.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'ArrowLeft',
+        }),
+      );
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '160px',
+    );
+  });
+
   it('reorders columns and quick copies in the visible order', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
