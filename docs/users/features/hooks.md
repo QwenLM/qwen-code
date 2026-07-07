@@ -397,6 +397,12 @@ Hook output supports three categories of fields:
 - `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
 - `hookSpecificOutput.additionalContext`: additional context information
 
+The `permissionDecision` value controls whether the tool runs:
+
+- `"allow"` — run the tool without the usual approval prompt.
+- `"deny"` — block the tool; it does not execute and an error is returned to the model.
+- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
+
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
 **Example Output**:

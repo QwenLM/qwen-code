@@ -1354,10 +1354,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ].join(path.delimiter);
 
     try {
-      await expectAcpLocalReadRoots(
-        'session-with-fs-env',
-        [...expectedDefaultAcpLocalReadRoots(), envRootA, envRootB],
-      );
+      await expectAcpLocalReadRoots('session-with-fs-env', [
+        ...expectedDefaultAcpLocalReadRoots(),
+        envRootA,
+        envRootB,
+      ]);
     } finally {
       restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
     }

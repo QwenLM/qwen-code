@@ -22,6 +22,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -397,6 +398,19 @@ function resolveGenerationConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
+    }
+  }
+
+  // contextWindowSize fallback: auto-detect from model when neither
+  // modelProvider nor settings supplied it. Only known models are stamped —
+  // unknown models keep `undefined` so downstream `?? DEFAULT_TOKEN_LIMIT`
+  // consumers apply the generic default without a misleading
+  // 'auto-detected' source label.
+  if (result.contextWindowSize === undefined && modelId) {
+    const knownLimit = knownTokenLimit(modelId, 'input');
+    if (knownLimit !== undefined) {
+      result.contextWindowSize = knownLimit;
+      sources['contextWindowSize'] = computedSource('auto-detected from model');
     }
   }
 

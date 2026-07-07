@@ -25,16 +25,18 @@ import type {
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SESSION_ORGANIZATION_FEATURE,
+} from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_SESSION_PAGE_SIZE = 1000;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
-const SESSION_ORGANIZATION_FEATURE = 'session_organization';
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
@@ -87,6 +89,16 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenSessions: () => void;
+  /**
+   * Whether to offer the Session Overview entry point. Gated to large screens
+   * by the app: below that there is no room to make managing several sessions
+   * side by side worthwhile.
+   */
+  canOpenSessionsOverview?: boolean;
+  onOpenSplitView: () => void;
+  /** Whether to offer the in-window split view (large screens only). */
+  canOpenSplitView?: boolean;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -239,6 +251,26 @@ function IconSchedule() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function IconGrid() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+function IconColumns() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="8" height="16" rx="1" />
+      <rect x="13" y="4" width="8" height="16" rx="1" />
     </svg>
   );
 }
@@ -433,6 +465,10 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenSessions,
+  canOpenSessionsOverview,
+  onOpenSplitView,
+  canOpenSplitView,
   onNewSession,
   onLoadSession,
   onError,
@@ -456,7 +492,7 @@ export function WebShellSidebar({
     archiveSession,
   } = useSessions({
     autoLoad: true,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -473,7 +509,7 @@ export function WebShellSidebar({
   } = useSessions({
     autoLoad: true,
     enabled: archivedExpanded,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -2471,6 +2507,28 @@ export function WebShellSidebar({
         >
           <IconSchedule />
         </button>
+        {canOpenSessionsOverview && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.sessionsOverview')}
+            aria-label={t('sidebar.sessionsOverview')}
+            onClick={onOpenSessions}
+          >
+            <IconGrid />
+          </button>
+        )}
+        {canOpenSplitView && (
+          <button
+            className={styles.collapseButton}
+            type="button"
+            title={t('sidebar.splitView')}
+            aria-label={t('sidebar.splitView')}
+            onClick={onOpenSplitView}
+          >
+            <IconColumns />
+          </button>
+        )}
         <button
           className={styles.collapseButton}
           type="button"

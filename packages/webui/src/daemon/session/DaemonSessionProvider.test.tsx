@@ -2064,6 +2064,61 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('logs settings reloads without inserting daemon debug blocks', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const session = createMockSession({
+      events: async function* settingsReloadEvents() {
+        yield {
+          id: 31,
+          v: 1,
+          type: 'settings_reloaded',
+          data: {
+            env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+            changedKeys: ['env', 'hooks'],
+            childReloaded: true,
+            sessionsRefreshed: ['session-1'],
+            sessionsSkipped: [],
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let signals: DaemonWorkspaceEventSignals | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(signals?.settingsVersion).toBe(1);
+    expect(blocks).not.toContainEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        text: expect.stringContaining(
+          'settings_reloaded (unrecognized daemon event)',
+        ) as string,
+      }),
+    );
+    expect(debug).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] settings reloaded:',
+      expect.objectContaining({
+        childReloaded: true,
+        changedKeys: ['env', 'hooks'],
+        env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      }),
+    );
+    debug.mockRestore();
+  });
+
   it('treats prompt abort during cancel as cancellation and keeps busy until cancel completes', async () => {
     const cancel = createDeferred<void>();
     const assistantChunk = createDeferred<void>();
@@ -2624,6 +2679,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'missing session',
     });
+    expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
     const abortedPrompt = promptResult;
     if (!abortedPrompt) throw new Error('prompt was not started');
@@ -4050,6 +4106,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'missing session',
     });
+    expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
   });
 
@@ -4965,7 +5022,7 @@ describe('DaemonSessionProvider', () => {
     });
 
     await act(async () => {
-      await wait(10);
+      await wait(50);
       await flushPromises();
     });
 
@@ -4975,6 +5032,264 @@ describe('DaemonSessionProvider', () => {
       error: 'heartbeat lost',
     });
   });
+
+  it('clears stale sessions on terminal HTTP heartbeat errors', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi.fn(async () => {
+      throw Object.assign(new Error('session gone'), { status: 410 });
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 20,
+      heartbeatFailureThreshold: 1,
+    });
+
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(heartbeat).toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      missingSession: true,
+      capabilities: {
+        workspaceCwd: '/mock-workspace',
+        features: ['client_heartbeat'],
+      },
+    });
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
+  it('uses recent HTTP status when heartbeat threshold ends with transport failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('session gone'), { status: 410 }),
+      )
+      .mockRejectedValue(new Error('heartbeat lost'));
+    sdkMocks.sessions.push(
+      createMockSession({
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 2,
+    });
+
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      missingSession: true,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
+  it('preserves missing-session heartbeat status across later HTTP failures', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('session gone'), { status: 410 }),
+      )
+      .mockRejectedValue(
+        Object.assign(new Error('server error'), { status: 500 }),
+      );
+    sdkMocks.sessions.push(
+      createMockSession({
+        heartbeat,
+        events: createIdleEvents(),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 2,
+    });
+
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      missingSession: true,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+  });
+
+  it('clears prompt state on terminal HTTP heartbeat errors', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi.fn(async () => {
+      throw Object.assign(new Error('session gone'), { status: 410 });
+    });
+    const session = createMockSession({
+      heartbeat,
+      submitPrompt: vi.fn(
+        (_req: unknown, signal?: AbortSignal) =>
+          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () => reject(createAbortError()),
+              { once: true },
+            );
+          }),
+      ),
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
+    });
+    const providerActions = requireActions(actions);
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('still running');
+      await flushPromises();
+    });
+
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(streamingState).toBe('idle');
+    const runningPrompt = promptResult;
+    if (!runningPrompt) throw new Error('prompt was not started');
+    await expect(runningPrompt).resolves.toEqual({
+      stopReason: 'cancelled',
+    });
+  });
+
+  it.each([401, 403])(
+    'enters auth-error state on %d heartbeat auth failures',
+    async (status) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['client_heartbeat'],
+        modelServices: [],
+        workspaceCwd: '/mock-workspace',
+      });
+      const heartbeat = vi.fn(async () => {
+        throw Object.assign(new Error('Unauthorized'), { status });
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          heartbeat,
+          events: createIdleEvents(),
+        }),
+      );
+      let connection: DaemonConnectionState | undefined;
+
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        heartbeatIntervalMs: 1,
+        heartbeatFailureThreshold: 1,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+
+      await act(async () => {
+        await wait(20);
+        await flushPromises();
+      });
+
+      expect(heartbeat).toHaveBeenCalled();
+      expect(connection).toMatchObject({
+        status: 'error',
+        error: 'Unauthorized',
+        errorStatus: status,
+      });
+      expect(connection?.sessionId).toBeUndefined();
+    },
+  );
 
   it('ignores stale connect attempts after provider props change', async () => {
     const staleLoad = createDeferred<MockSession>();
@@ -5653,6 +5968,7 @@ describe('DaemonSessionProvider', () => {
       status: 'disconnected',
       error: 'session gone',
     });
+    expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
@@ -5739,10 +6055,61 @@ describe('DaemonSessionProvider', () => {
       expect(connection).toMatchObject({
         status: 'disconnected',
         error: 'session gone',
+        errorStatus: status,
+        missingSession: true,
+        capabilities: {
+          workspaceCwd: '/mock-workspace',
+          features: [],
+        },
       });
       expect(connection?.sessionId).toBeUndefined();
     },
   );
+
+  it('clears missing-session state when starting a new session', async () => {
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      Object.assign(new Error('session gone'), { status: 410 }),
+    );
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'new-session' }));
+
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+      sessionId: 'missing-session',
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'session gone',
+      errorStatus: 410,
+      missingSession: true,
+    });
+
+    await act(async () => {
+      await actions?.newSession();
+      await wait(5);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'new-session',
+    });
+    expect(connection?.error).toBeUndefined();
+    expect(connection?.errorStatus).toBeUndefined();
+    expect(connection?.missingSession).not.toBe(true);
+  });
 
   it.each([401, 403])(
     'preserves transcript and clears prompt state on %d auth failures from the SSE stream',
@@ -5806,7 +6173,14 @@ describe('DaemonSessionProvider', () => {
       expect(connection).toMatchObject({
         status: 'error',
         error: 'Unauthorized',
+        errorStatus: status,
+        missingSession: false,
+        capabilities: {
+          workspaceCwd: '/mock-workspace',
+          features: [],
+        },
       });
+      expect(connection?.sessionId).toBeUndefined();
       expect(blocks[0]).toMatchObject({
         kind: 'user',
         text: 'keep transcript',

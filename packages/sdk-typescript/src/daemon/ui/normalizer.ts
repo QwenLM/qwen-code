@@ -267,6 +267,9 @@ export function normalizeDaemonEvent(
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
 
+    case 'settings_reloaded':
+      return normalizeSettingsReloaded(event, base);
+
     case 'trust_change_requested':
       return normalizeTrustChangeRequested(event, base);
 
@@ -1220,6 +1223,24 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+    },
+  ];
+}
+
+function normalizeSettingsReloaded(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'malformed settings_reloaded payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.settings.changed',
+      key: 'settings_reloaded',
+      scope: 'workspace',
+      value: event.data,
     },
   ];
 }
