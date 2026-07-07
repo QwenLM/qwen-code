@@ -24,6 +24,7 @@ import { useVimModeState } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
@@ -96,6 +97,16 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+    </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+    <Text color={theme.status.warning}>
+      {t('IDE connection unavailable: {{message}}', {
+        message: uiState.startupIdeConnectionStatus.message,
+      })}
+    </Text>
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
@@ -107,7 +118,13 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
+    });
+  }
+  if (config.isSafeMode()) {
+    rightItems.push({
+      key: 'safe-mode',
+      node: <Text color={theme.status.warning}>⚠ Safe Mode</Text>,
     });
   }
   if (debugMode) {
@@ -117,7 +134,7 @@ export const Footer: React.FC = () => {
     });
   }
   // Dream tasks now surface via the BackgroundTasksPill (e.g. "1 dream")
-  // alongside the other background-task kinds. The previous `✦ dreaming`
+  // alongside the other background-task kinds. The previous `◆ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
   if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
@@ -140,6 +157,10 @@ export const Footer: React.FC = () => {
   const goalActive = useFooterGoalState() !== undefined;
   if (goalActive) {
     rightItems.push({ key: 'goal', node: <GoalPill /> });
+  }
+  const cronTaskCount = useFooterCronTaskCount();
+  if (cronTaskCount > 0) {
+    rightItems.push({ key: 'cron', node: <CronPill count={cronTaskCount} /> });
   }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
@@ -202,10 +223,28 @@ export const Footer: React.FC = () => {
               {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
             </Text>
           )}
+        {/* P7-trigger: the current turn was steered toward the Workflow tool
+            by the `workflow` keyword. Hidden during ctrl-quit warnings so they
+            take precedence (matches the worktree indicator above). */}
+        {uiState.workflowKeywordActive &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text color={theme.text.accent} wrap="truncate">
+              {`▷ ${t('workflow active')}`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {!uiState.isSkillReviewDialogOpen &&
+            (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
+              <Text color={theme.status.warning}>
+                {` ⚠ ${t('{{count}} skill(s) pending review', {
+                  count: String(uiState.skillReviewPending!.skills.length),
+                })}`}
+              </Text>
+            )}
         </Box>
       </Box>
 

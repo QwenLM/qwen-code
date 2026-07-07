@@ -10,7 +10,8 @@
 | ------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `QWEN_SERVE_DEBUG` stderr logs              | `bridge.ts` and call sites                     | Env values `1` / `true` / `on` / `yes` (case-insensitive) print `qwen serve debug: ...` lines to stderr.                                                                                                                                                                                  |
 | OpenTelemetry span instrumentation          | `server.ts` `daemonTelemetryMiddleware`        | Each HTTP request is wrapped in `withDaemonRequestSpan`; attributes include route, sessionId, clientId, and status code. Permission routes have dedicated spans. Prompt lifecycle is traced end-to-end. Configuration lives in `settings.json` `telemetry`.                               |
-| `DaemonLogger` structured file logs         | `serve/daemonLogger.ts`                        | Structured JSON-like log lines are written to a file. Boot prints `daemon log -> <path>`. Supports `info` / `warn` / `error` levels, with structured fields such as `route`, `sessionId`, `clientId`, `childPid`, and `channelId`.                                                        |
+| OpenTelemetry daemon perf metrics           | `telemetry/*event-loop-lag*`, `daemon-metrics` | Event loop lag gauges for daemon and ACP child processes, plus daemon-child pipe message byte histograms.                                                                                                                                                                                 |
+| `DaemonLogger` structured file logs         | `serve/daemon-logger.ts`                       | Structured JSON-like log lines are written to a file. Boot prints `daemon log -> <path>`. Supports `info` / `warn` / `error` levels, with structured fields such as `route`, `sessionId`, `clientId`, `childPid`, and `channelId`.                                                        |
 | Per-request access-log middleware           | `server.ts`, registered before `bearerAuth`    | Logs `method`, `path`, `status`, `durationMs`, `sessionId`, and `clientId` after each request. Skips `GET /health` and heartbeat. 4xx+ uses `warn`; success uses `info`.                                                                                                                  |
 | `/health`                                   | `server.ts` route                              | Liveness probe; `?deep=1` returns extended details.                                                                                                                                                                                                                                       |
 | `/capabilities`                             | `server.ts` route                              | Preflight feature discovery. See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                                                                                                                                                                      |
@@ -20,12 +21,12 @@
 | `/workspace/skills`, `/workspace/providers` | Routes                                         | ACP-side live snapshots; return empty idle data when no session exists.                                                                                                                                                                                                                   |
 | Per-session SSE                             | `GET /session/:id/events`                      | Real-time event stream.                                                                                                                                                                                                                                                                   |
 | `/demo` debug console                       | `GET /demo` (`packages/cli/src/serve/demo.ts`) | Browser-accessible single-page console: chat, event log, workspace inspector, and permission UX. On loopback, `http://127.0.0.1:4170/demo` is the quickest end-to-end validation path without writing SDK code. Registration rules are in [`02-serve-runtime.md`](./02-serve-runtime.md). |
-| `PermissionAuditRing`                       | `permissionAudit.ts`                           | In-memory FIFO of 512 permission decisions.                                                                                                                                                                                                                                               |
+| `PermissionAuditRing`                       | `permission-audit.ts`                          | In-memory FIFO of 512 permission decisions.                                                                                                                                                                                                                                               |
 | Mediator `decisionReason` audit             | `permissionMediator.ts`                        | Internal structured record explaining why a permission request resolved the way it did.                                                                                                                                                                                                   |
 
 ## What does not exist today
 
-- **No Prometheus / metrics endpoint.** There is no `process_cpu_seconds_total`, `http_requests_total`, or `event_bus_queue_depth`.
+- **No Prometheus / metrics endpoint.** OTel metrics can be exported, but the daemon does not expose a Prometheus scrape endpoint.
 - **No external audit sink for `PermissionAuditRing`.** The ring exists, but fan-out hooks to SIEM or external storage are not wired.
 
 ## Debugging recipes
@@ -91,6 +92,39 @@ The first signal triggers graceful shutdown (see [`02-serve-runtime.md`](./02-se
 
 A **second** SIGTERM/SIGINT intentionally triggers `bridge.killAllSync()` + `process.exit(1)`.
 
+### 9. Is the daemon event loop, prompt queue, or ACP pipe overloaded?
+
+`GET /daemon/status` may include `runtime.perf` when the production daemon runtime injects the perf snapshot provider:
+
+```json
+{
+  "runtime": {
+    "perf": {
+      "eventLoop": { "meanMs": 1.2, "p50Ms": 1.0, "p99Ms": 9.5, "maxMs": 25 },
+      "promptQueueWait": {
+        "count": 3,
+        "meanMs": 12.5,
+        "maxMs": 35,
+        "lastMs": 4
+      },
+      "pipe": {
+        "inbound": { "count": 42, "totalBytes": 100000, "maxBytes": 12000 },
+        "outbound": { "count": 41, "totalBytes": 90000, "maxBytes": 11000 }
+      }
+    }
+  }
+}
+```
+
+The status payload is daemon-only. `promptQueueWait` summarizes prompt FIFO queue wait samples observed in the daemon process. ACP child event loop lag is intentionally not aggregated into `/daemon/status`; it is visible through OTel gauge `qwen-code.acp.event_loop.lag` and through stderr stall lines forwarded into daemon logs.
+
+New OTel metric names:
+
+- `qwen-code.daemon.event_loop.lag`, gauge in milliseconds with `stat=mean|p50|p99|max`.
+- `qwen-code.acp.event_loop.lag`, gauge in milliseconds with `stat=mean|p50|p99|max`.
+- `qwen-code.daemon.prompt.queue_wait`, histogram in milliseconds.
+- `qwen-code.daemon.pipe.message_bytes`, histogram in bytes with `direction=inbound|outbound`.
+
 ## Flow
 
 ### Typical triage flow
@@ -110,7 +144,7 @@ flowchart TD
 
 ## State and lifecycle
 
-- `QWEN_SERVE_DEBUG` is read on every check through `isServeDebugMode()` from `debugMode.ts`; toggling it does not require restart. Boot logs are not available unless the env was set at boot.
+- `QWEN_SERVE_DEBUG` is read on every check through `isServeDebugMode()` from `debug-mode.ts`; toggling it does not require restart. Boot logs are not available unless the env was set at boot.
 - `PermissionAuditRing` is bounded at 512 FIFO entries; older records are silently dropped.
 - `DaemonStatusProvider` rebuilds cells per request and does not cache; avoid unnecessary high-frequency polling.
 
@@ -119,6 +153,7 @@ flowchart TD
 - `process.stderr.write` for debug stderr.
 - `DaemonLogger` for structured file logs.
 - OpenTelemetry SDK through `initializeTelemetry` and `createDaemonBridgeTelemetry`.
+- `node:perf_hooks.monitorEventLoopDelay` for daemon and ACP event loop lag gauges.
 - `node:process` for env and signal inspection.
 
 ## Configuration
@@ -135,6 +170,7 @@ flowchart TD
 
 - **DaemonLogger file logs are structured** and can be filtered by `route`, `sessionId`, and `clientId`. `QWEN_SERVE_DEBUG` stderr logs remain unstructured text.
 - **OpenTelemetry spans include per-request correlation.** Each HTTP request span carries route, sessionId, and clientId attributes that can be joined in a tracing backend.
+- **`runtime.perf` is daemon-only.** Child event loop lag is not reported there by design; use OTel or forwarded stderr stall warnings for ACP child stalls.
 - **ACP-level `/workspace/preflight` cells require a live session.** On an idle daemon, auth / MCP / skills / providers may show `status: 'not_started'`; this is expected.
 - **`/workspace/env` only reports secret presence, not values.** Do not expose the response where the mere presence of a secret is sensitive.
 - **The audit ring is process-local** and history is lost on daemon restart.
@@ -142,9 +178,9 @@ flowchart TD
 
 ## References
 
-- `packages/cli/src/serve/daemonStatusProvider.ts`
-- `packages/cli/src/serve/daemonLogger.ts` (`DaemonLogger`, `buildDaemonLogLine`)
-- `packages/cli/src/serve/debugMode.ts` (`isServeDebugMode`)
+- `packages/cli/src/serve/daemon-status-provider.ts`
+- `packages/cli/src/serve/daemon-logger.ts` (`DaemonLogger`, `buildDaemonLogLine`)
+- `packages/cli/src/serve/debug-mode.ts` (`isServeDebugMode`)
 - `packages/acp-bridge/src/permissionMediator.ts` (`PermissionDecisionReason`)
 - `packages/cli/src/serve/server.ts` (`daemonTelemetryMiddleware`, access-log middleware)
 - Configuration: [`17-configuration.md`](./17-configuration.md)

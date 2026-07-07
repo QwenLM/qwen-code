@@ -97,6 +97,7 @@ export class MissingCliEntryError extends Error {
 export const SERVE_STATUS_EXT_METHODS = {
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceMcpTools: 'qwen/status/workspace/mcp/tools',
+  workspaceMcpResources: 'qwen/status/workspace/mcp/resources',
   workspaceSkills: 'qwen/status/workspace/skills',
   workspaceTools: 'qwen/status/workspace/tools',
   workspaceProviders: 'qwen/status/workspace/providers',
@@ -108,10 +109,14 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
+  sessionLspStatus: 'qwen/status/session/lsp',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
   workspaceExtensions: 'qwen/status/workspace/extensions',
+  // Process-wide rss/cpu of this ACP child, self-reported to the daemon for
+  // the Daemon Status resource charts (workspace-scoped; no sessionId).
+  workspaceResource: 'qwen/status/workspace/resource',
 } as const;
 
 /**
@@ -125,20 +130,41 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionBranch: 'qwen/control/session/branch',
+  sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
+  sessionContinue: 'qwen/control/session/continue',
+  sessionTitle: 'qwen/control/session/title',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceMemoryRememberAvailability:
+    'qwen/control/workspace/memory/remember/availability',
+  workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
+  workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
+  workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
+   * here — which the PARENT serve process calls DOWN into the `qwen --acp`
+   * child — this one is called by the CHILD UP into the parent: a
+   * client-hosted (extension) MCP server's `sendSdkMcpMessage` round-trips a
+   * JSON-RPC `mcp_message` from the child's `McpClientManager` back to the
+   * parent's `ClientMcpRegistrar`, which pushes it down the daemon WS to the
+   * client and returns the correlated response. Params: `{ server, payload }`;
+   * result: `{ payload }`.
+   */
+  clientMcpMessage: 'qwen/control/client_mcp/message',
+  sessionCd: 'qwen/control/session/cd',
 } as const;
 
 export type ServeStatus =
@@ -192,6 +218,24 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   };
   description?: string;
   extensionName?: string;
+  /**
+   * Count of MCP resources (`resources/list`) this server advertises,
+   * from the workspace `ResourceRegistry`. Rides the existing status
+   * payload so dashboards can show a "Resources: N" line and gate a
+   * resource-browser affordance without a separate fetch. Absent on
+   * older daemons; present (including `0`) on newer daemons for
+   * non-disabled servers. The full list is fetched lazily via
+   * `qwen/status/workspace/mcp/resources`.
+   */
+  resourceCount?: number;
+  /**
+   * Count of MCP prompts (`prompts/list`) this server advertises, from
+   * the workspace `PromptRegistry`. Inline-only (there is no prompt
+   * drill-down endpoint — prompts surface as slash commands), so this
+   * count is the sole signal a dashboard has. Absent on older daemons;
+   * present (including `0`) on newer daemons for non-disabled servers.
+   */
+  promptCount?: number;
   /**
    * Why this server is not live, when known. Distinguishes
    * operator-disabled (`disabled: true` from `disabledMcpServers`
@@ -320,6 +364,38 @@ export interface ServeWorkspaceMcpToolsStatus {
   errors?: ServeStatusCell[];
 }
 
+/**
+ * One resource advertised by an MCP server (`resources/list`). Mirrors
+ * the `MCPResourceDisplayInfo` the TUI `/mcp` dialog renders: metadata
+ * only (no content). The content is read on demand in-chat via the
+ * `@<serverName>:<uri>` reference, which the frontend reconstructs from
+ * `serverName` (the parent `ServeWorkspaceMcpResourcesStatus`) + `uri`.
+ */
+export interface ServeWorkspaceMcpResourceStatus {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Drill-down payload for `GET /workspace/mcp/:server/resources`. Mirrors
+ * `ServeWorkspaceMcpToolsStatus` — resources are a per-server drill-down
+ * exactly like tools, kept off the base `/workspace/mcp` status so that
+ * frequently-polled payload stays lean.
+ */
+export interface ServeWorkspaceMcpResourcesStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  resources: ServeWorkspaceMcpResourceStatus[];
+  errors?: ServeStatusCell[];
+}
+
 export type ServeSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
 
 export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
@@ -346,6 +422,7 @@ export interface ServeWorkspaceProviderCurrent {
   modelId?: string;
   baseUrl?: string;
   fastModelId?: string;
+  visionModelId?: string;
 }
 
 export interface ServeWorkspaceProviderModel {
@@ -377,7 +454,9 @@ export interface ServeWorkspaceProvidersStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
+  approvalMode?: string;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
 }
@@ -450,6 +529,30 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
 }
 
+export interface ServeLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface ServeSessionLspStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: ServeLspServerStatus[];
+}
+
 export type ServeSessionTaskLifecycleStatus =
   | 'running'
   | 'paused'
@@ -480,6 +583,20 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one; absent for agents
+   * launched by the top-level session. Mirrors `AgentTask.parentAgentId`
+   * (a `null` there serializes as absent here). Lets clients render the
+   * roster as a tree.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface ServeSessionShellTaskStatus {
@@ -558,6 +675,12 @@ export interface ServeSessionStatsToolByName {
   };
 }
 
+export interface ServeSessionStatsSkillByName {
+  count: number;
+  success: number;
+  fail: number;
+}
+
 export interface ServeSessionStatsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
@@ -576,6 +699,12 @@ export interface ServeSessionStatsStatus {
   files: {
     totalLinesAdded: number;
     totalLinesRemoved: number;
+  };
+  skills: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, ServeSessionStatsSkillByName>;
   };
 }
 
@@ -857,7 +986,8 @@ export type ServeExtensionInstallType =
   | 'local'
   | 'link'
   | 'github-release'
-  | 'npm';
+  | 'npm'
+  | 'archive-url';
 
 export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
@@ -872,10 +1002,32 @@ export interface ServeExtensionCapabilities {
   hasSettings: boolean;
 }
 
+export type ServeExtensionUpdateState =
+  | 'checking for updates'
+  | 'updated, needs restart'
+  | 'updating'
+  | 'updated'
+  | 'update available'
+  | 'up to date'
+  | 'error'
+  | 'not updatable'
+  | 'unknown';
+
+export interface ServeExtensionDetails {
+  mcpServers: string[];
+  commands: string[];
+  skills: string[];
+  agents: string[];
+  contextFiles: string[];
+  settings: string[];
+}
+
 export interface ServeExtensionEntry {
   kind: 'extension';
   id: string;
   name: string;
+  displayName?: string;
+  description?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -884,7 +1036,9 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
+  details?: ServeExtensionDetails;
 }
 
 export interface ServeWorkspaceExtensionsStatus {
@@ -993,7 +1147,7 @@ export function createIdleWorkspaceProvidersStatus(
  * tests, embedded callers that don't need daemon-host cells). Single
  * construction site so future optional-field additions to
  * `ServeWorkspaceEnvStatus` only need updating in one place — the
- * production builder in `cli/src/serve/envSnapshot.ts buildEnvStatusFromProcess`
+ * production builder in `cli/src/serve/env-snapshot.ts buildEnvStatusFromProcess`
  * and this helper would otherwise diverge silently (TS won't flag a
  * missing optional field).
  *

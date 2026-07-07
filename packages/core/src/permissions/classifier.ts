@@ -180,6 +180,7 @@ export async function classifyAction(
       systemInstruction: stage1SystemPrompt,
       abortSignal: stage1Signal,
       purpose: 'permission_classifier_stage1',
+      skipOutputLanguagePreference: true,
       maxAttempts: 2,
       config: {
         temperature: 0,
@@ -228,6 +229,7 @@ export async function classifyAction(
       systemInstruction: baseSystemPrompt + STAGE2_SUFFIX,
       abortSignal: stage2Signal,
       purpose: 'permission_classifier_stage2',
+      skipOutputLanguagePreference: true,
       maxAttempts: 2,
       config: {
         temperature: 0,

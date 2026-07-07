@@ -1,14 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
+import {
+  computeAgentTreeInfo,
+  computeUserBlockingIds,
+  reorderChildrenUnderParents,
+  TREE_INDENT_MAX_LEVELS,
+  type AgentTreeInfo,
+} from './agentForest';
 import { useActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
-import { formatToolDisplayName } from './toolFormatting';
+import { localizeToolDisplayName } from './toolFormatting';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -62,6 +69,19 @@ function sortTasks(
   });
 }
 
+/**
+ * Display order for the panel: active-first sort, then each nested agent
+ * grouped under its parent as a tree. The reorder is a post-pass so a tree
+ * spanning the active/terminal buckets stays contiguous at whichever
+ * position its root earned. Every `setTasks` site must use this (not bare
+ * `sortTasks`) — selection is index-based, so list order IS the contract.
+ */
+function arrangeTasks(
+  tasks: DaemonSessionTaskStatus[],
+): DaemonSessionTaskStatus[] {
+  return reorderChildrenUnderParents(sortTasks(tasks));
+}
+
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
@@ -85,6 +105,26 @@ function statusClassName(status: TaskStatus): string {
   }
 }
 
+function statusLabel(
+  status: TaskStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  switch (status) {
+    case 'running':
+      return t('tasks.running');
+    case 'completed':
+      return t('tasks.completed');
+    case 'failed':
+      return t('tasks.failed');
+    case 'cancelled':
+      return t('tasks.cancelled');
+    case 'paused':
+      return t('tasks.paused');
+    default:
+      return status;
+  }
+}
+
 function terminalStatusIcon(status: TaskStatus): string | null {
   switch (status) {
     case 'paused':
@@ -101,10 +141,33 @@ function terminalStatusIcon(status: TaskStatus): string | null {
   }
 }
 
-function rowLabel(task: DaemonSessionTaskStatus): string {
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      className={`${styles.chevron} ${expanded ? styles.chevronExpanded : ''}`}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+    >
+      <path
+        d="M6 4.5 9.5 8 6 11.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function rowLabel(task: DaemonSessionTaskStatus, blocking: boolean): string {
   switch (task.kind) {
     case 'agent':
-      return task.isBackgrounded ? task.label : `[blocking] ${task.label}`;
+      // `blocking` comes from computeUserBlockingIds — an agent is tagged
+      // only when its entire ancestor chain is foreground up to the
+      // top-level session (cancelling it would end the user's turn), not
+      // merely for being a foreground entry (a foreground child awaited by
+      // a background parent blocks that parent, not the user).
+      return blocking ? `[blocking] ${task.label}` : task.label;
     case 'shell':
       return `[shell] ${task.command}`;
     case 'monitor':
@@ -147,8 +210,12 @@ function windowTasks(
   };
 }
 
-function formatActivityLabel(name: string, description: string | undefined) {
-  const display = formatToolDisplayName(name);
+function formatActivityLabel(
+  name: string,
+  description: string | undefined,
+  t: ReturnType<typeof useI18n>['t'],
+) {
+  const display = localizeToolDisplayName(name, t);
   const singleLineDescription = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
@@ -159,16 +226,20 @@ function formatActivityLabel(name: string, description: string | undefined) {
 
 export function TasksStatusMessage({
   message,
+  embedded = false,
   manageActiveEvent = true,
   onClose,
 }: {
   message: SerializedTasksMessage;
+  embedded?: boolean;
   manageActiveEvent?: boolean;
   onClose?: () => void;
 }) {
   const { t } = useI18n();
   const actions = useActions();
-  const [tasks, setTasks] = useState(() => sortTasks(message.snapshot.tasks));
+  const [tasks, setTasks] = useState(() =>
+    arrangeTasks(message.snapshot.tasks),
+  );
   const [isOpen, setIsOpen] = useState(true);
   const [step, setStep] = useState<TasksPanelStep>('list');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -187,6 +258,12 @@ export function TasksStatusMessage({
     tasks.length === 0 ? 0 : Math.min(selectedIndex, tasks.length - 1);
   const selectedTask = tasks[clampedSelectedIndex] ?? null;
 
+  // Tree metadata is computed on the full task list (not the windowed
+  // slice) so a row's indent doesn't shift when the window scrolls past
+  // its parent.
+  const treeInfo = useMemo(() => computeAgentTreeInfo(tasks), [tasks]);
+  const blockingIds = useMemo(() => computeUserBlockingIds(tasks), [tasks]);
+
   useEffect(() => {
     if (!isOpen) return;
     const refresh = () => {
@@ -195,7 +272,7 @@ export function TasksStatusMessage({
       actions
         .getTasks()
         .then((snapshot) => {
-          setTasks(sortTasks(snapshot.tasks));
+          setTasks(arrangeTasks(snapshot.tasks));
           setRefreshError(false);
         })
         .catch((error: unknown) => {
@@ -276,8 +353,14 @@ export function TasksStatusMessage({
       const isRunning = task.status === 'running';
       const isAbandonable = task.kind === 'agent' && task.status === 'paused';
       if (!isRunning && !isAbandonable) return;
-      const isForegroundAgent = task.kind === 'agent' && !task.isBackgrounded;
-      if (isForegroundAgent && pendingCancelId !== task.id) {
+      // Two-step confirm only when cancelling would end the USER's turn —
+      // the same chain-aware verdict as the `[blocking]` row prefix. A
+      // foreground child awaited by a *background* parent unblocks that
+      // parent, not the user, so it cancels on the first press like any
+      // background entry. Mirrors BackgroundTasksDialog's cancel gate.
+      const isUserBlockingAgent =
+        task.kind === 'agent' && blockingIds.has(task.id);
+      if (isUserBlockingAgent && pendingCancelId !== task.id) {
         setPendingCancelId(task.id);
         return;
       }
@@ -290,7 +373,7 @@ export function TasksStatusMessage({
           return;
         }
         const snapshot = await actions.getTasks();
-        setTasks(sortTasks(snapshot.tasks));
+        setTasks(arrangeTasks(snapshot.tasks));
         setActionError(null);
       } catch (error: unknown) {
         console.warn('[web-shell] failed to cancel task:', error);
@@ -299,7 +382,7 @@ export function TasksStatusMessage({
         setBusy(false);
       }
     },
-    [actions, busy, pendingCancelId, t],
+    [actions, busy, blockingIds, pendingCancelId, t],
   );
 
   useDelayedGlobalKeyDown(
@@ -422,21 +505,29 @@ export function TasksStatusMessage({
 
   if (tasks.length === 0) {
     return (
-      <div className={styles.panel} data-keyboard-scope>
-        <div className={styles.header}>
-          <div className={styles.title}>{t('tasks.title')}</div>
-          {refreshError && (
-            <div className={styles.warning}>{t('tasks.refreshStale')}</div>
-          )}
-          {actionError && <div className={styles.error}>{actionError}</div>}
-        </div>
-        <div>
-          <div className={styles.sectionTitle}>
-            {t('tasks.title')} <span className={styles.secondary}>(0)</span>
+      <div
+        className={
+          embedded ? `${styles.panel} ${styles.embeddedPanel}` : styles.panel
+        }
+        data-keyboard-scope
+      >
+        {(refreshError || actionError || !embedded) && (
+          <div className={styles.header}>
+            {!embedded && (
+              <div className={styles.title}>{t('tasks.title')}</div>
+            )}
+            {refreshError && (
+              <div className={styles.warning}>{t('tasks.refreshStale')}</div>
+            )}
+            {actionError && <div className={styles.error}>{actionError}</div>}
           </div>
+        )}
+        <div>
           <div className={styles.secondary}>{t('tasks.empty')}</div>
         </div>
-        <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
+        {!embedded && (
+          <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
+        )}
       </div>
     );
   }
@@ -445,60 +536,138 @@ export function TasksStatusMessage({
     tasks,
     clampedSelectedIndex,
   );
+  const listTasks = embedded ? tasks : visible;
+  const listOffset = embedded ? 0 : windowStart;
 
   return (
-    <div className={styles.panel} data-keyboard-scope>
-      {step === 'list' && (
-        <div className={styles.header}>
-          <div className={styles.title}>{t('tasks.title')}</div>
-          {refreshError && (
-            <div className={styles.warning}>{t('tasks.refreshStale')}</div>
-          )}
-          {actionError && <div className={styles.error}>{actionError}</div>}
-        </div>
-      )}
-
-      {step === 'list' && (
-        <div className={styles.list}>
-          <div className={styles.sectionTitle}>
-            {t('tasks.title')}{' '}
-            <span className={styles.secondary}>({tasks.length})</span>
+    <div
+      className={
+        embedded ? `${styles.panel} ${styles.embeddedPanel}` : styles.panel
+      }
+      data-keyboard-scope
+    >
+      {(embedded || step === 'list') &&
+        (refreshError || actionError || !embedded) && (
+          <div className={styles.header}>
+            {!embedded && (
+              <div className={styles.title}>{t('tasks.title')}</div>
+            )}
+            {refreshError && (
+              <div className={styles.warning}>{t('tasks.refreshStale')}</div>
+            )}
+            {actionError && <div className={styles.error}>{actionError}</div>}
           </div>
-          {hiddenAbove > 0 && (
+        )}
+
+      {(embedded || step === 'list') && (
+        <div className={styles.list}>
+          {!embedded && (
+            <div className={styles.sectionTitle}>
+              {t('tasks.title')}{' '}
+              <span className={styles.secondary}>({tasks.length})</span>
+            </div>
+          )}
+          {!embedded && hiddenAbove > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreAbove', { count: hiddenAbove })}
             </div>
           )}
-          {visible.map((task, visibleIndex) => {
-            const index = windowStart + visibleIndex;
+          {listTasks.map((task, visibleIndex) => {
+            const index = listOffset + visibleIndex;
             const selected = index === clampedSelectedIndex;
             const stClass = statusClassName(task.status);
+            const taskStatusLabel = statusLabel(task.status, t);
+            const expanded = embedded && selected && step === 'detail';
+            const showSelected = embedded ? expanded : selected;
+            const tree: AgentTreeInfo | undefined =
+              task.kind === 'agent' ? treeInfo.get(task.id) : undefined;
+            // Indent clamps so deep trees don't starve the label column;
+            // the detail view's nesting line carries the exact depth.
+            const indentLevels = Math.min(
+              tree?.visibleDepth ?? 0,
+              TREE_INDENT_MAX_LEVELS,
+            );
+            // The ↳ marker is kept even for orphans (parent already gone,
+            // depth back at 0) so "this was a nested agent" stays legible.
+            const nestedMarker =
+              task.kind === 'agent' && task.parentAgentId != null;
+            const orphanNote = tree?.orphaned
+              ? task.kind === 'agent' && task.parentName
+                ? t('tasks.row.from', { parent: task.parentName })
+                : t('tasks.row.nested')
+              : null;
             return (
               <div
                 key={task.id}
-                className={
-                  selected ? `${styles.row} ${styles.selected}` : styles.row
-                }
-                onClick={() => {
-                  setSelectedIndex(index);
-                  setStep('detail');
-                }}
-                onMouseEnter={() => setSelectedIndex(index)}
+                className={`${styles.task} ${
+                  expanded ? styles.taskExpanded : ''
+                }`}
               >
-                <span className={styles.pointer}>{selected ? '❯' : ''}</span>
-                <span
+                <div
                   className={
-                    task.status === 'running'
-                      ? styles.nameCell
-                      : `${styles.nameCell} ${stClass}`
+                    showSelected
+                      ? `${styles.row} ${styles.selected}`
+                      : styles.row
                   }
+                  onClick={() => {
+                    setSelectedIndex(index);
+                    setStep(embedded && expanded ? 'list' : 'detail');
+                  }}
+                  onMouseEnter={() => {
+                    if (!embedded) setSelectedIndex(index);
+                  }}
                 >
-                  {rowLabel(task)}
-                </span>
+                  <span className={styles.pointer}>
+                    {showSelected ? '❯' : ''}
+                  </span>
+                  {embedded && (
+                    <span className={styles.taskIcon} aria-hidden="true" />
+                  )}
+                  <span
+                    className={styles.nameCell}
+                    style={
+                      indentLevels > 0
+                        ? { paddingLeft: `${indentLevels * 16}px` }
+                        : undefined
+                    }
+                  >
+                    {nestedMarker && (
+                      <span className={styles.treeMarker} aria-hidden="true">
+                        {'↳ '}
+                      </span>
+                    )}
+                    {rowLabel(task, blockingIds.has(task.id))}
+                    {orphanNote && (
+                      <span className={styles.orphanNote}>
+                        {' · '}
+                        {orphanNote}
+                      </span>
+                    )}
+                  </span>
+                  <span className={`${styles.status} ${stClass}`}>
+                    {taskStatusLabel}
+                  </span>
+                  <span className={styles.chevronCell}>
+                    <ChevronIcon expanded={expanded} />
+                  </span>
+                </div>
+                {expanded && (
+                  <div className={styles.inlineDetail}>
+                    <TaskDetail
+                      task={task}
+                      t={t}
+                      hideHeader
+                      busy={busy}
+                      showCancelConfirm={pendingCancelId === task.id}
+                      onCancel={() => void handleCancel(task)}
+                      onCancelConfirmDismiss={() => setPendingCancelId(null)}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
-          {hiddenBelow > 0 && (
+          {!embedded && hiddenBelow > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreBelow', { count: hiddenBelow })}
             </div>
@@ -506,22 +675,31 @@ export function TasksStatusMessage({
         </div>
       )}
 
-      {step === 'detail' && selectedTask && (
+      {!embedded && step === 'detail' && selectedTask && (
         <>
           {actionError && <div className={styles.error}>{actionError}</div>}
-          <TaskDetail task={selectedTask} t={t} />
+          <TaskDetail
+            task={selectedTask}
+            t={t}
+            busy={busy}
+            showCancelConfirm={pendingCancelId === selectedTask.id}
+            onCancel={() => void handleCancel(selectedTask)}
+            onCancelConfirmDismiss={() => setPendingCancelId(null)}
+          />
         </>
       )}
 
-      <div
-        className={
-          showCancelConfirm
-            ? `${styles.shortcuts} ${styles.confirmHint}`
-            : styles.shortcuts
-        }
-      >
-        {(step === 'list' ? listHints : detailHints).join(' · ')}
-      </div>
+      {!embedded && (
+        <div
+          className={
+            showCancelConfirm
+              ? `${styles.shortcuts} ${styles.confirmHint}`
+              : styles.shortcuts
+          }
+        >
+          {(step === 'list' ? listHints : detailHints).join(' · ')}
+        </div>
+      )}
     </div>
   );
 }
@@ -543,20 +721,54 @@ function detailTitle(
 function TaskDetail({
   task,
   t,
+  hideHeader = false,
+  busy = false,
+  showCancelConfirm = false,
+  onCancel,
+  onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
   t: ReturnType<typeof useI18n>['t'];
+  hideHeader?: boolean;
+  busy?: boolean;
+  showCancelConfirm?: boolean;
+  onCancel?: () => void;
+  onCancelConfirmDismiss?: () => void;
 }) {
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
+  const isAbandonable = task.kind === 'agent' && task.status === 'paused';
+  const canCancel = task.status === 'running' || isAbandonable;
+  const cancelLabel = isAbandonable
+    ? t('tasks.action.abandon')
+    : t('tasks.action.stop');
+  const confirmLabel = isAbandonable
+    ? t('tasks.action.confirmAbandon')
+    : t('tasks.action.confirmStop');
   const subtitleParts = [formatRuntime(task.runtimeMs)];
+  const compactFields = [
+    {
+      label: t('tasks.detail.runtime'),
+      value: formatRuntime(task.runtimeMs),
+    },
+  ];
 
-  if (task.kind === 'agent' && task.stats?.totalTokens) {
+  const agentOutputTokens =
+    task.kind === 'agent'
+      ? (((task.stats as Record<string, unknown> | undefined)?.[
+          'outputTokens'
+        ] as number | undefined) ?? task.stats?.totalTokens)
+      : undefined;
+  if (agentOutputTokens) {
     subtitleParts.push(
       t('tasks.detail.tokens', {
-        count: formatTokenCount(task.stats.totalTokens),
+        count: formatTokenCount(agentOutputTokens),
       }),
     );
+    compactFields.push({
+      label: t('tasks.detail.tokenCount'),
+      value: formatTokenCount(agentOutputTokens),
+    });
   }
 
   if (task.kind === 'agent' && task.stats?.toolUses !== undefined) {
@@ -565,6 +777,10 @@ function TaskDetail({
         count: task.stats.toolUses,
       }),
     );
+    compactFields.push({
+      label: t('tasks.detail.toolCallCount'),
+      value: String(task.stats.toolUses),
+    });
   }
 
   if (task.kind !== 'agent' && task.pid !== undefined) {
@@ -589,9 +805,44 @@ function TaskDetail({
 
   const promptLines =
     task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
-
-  return (
-    <div className={styles.detail}>
+  const actionControls =
+    canCancel && onCancel ? (
+      <div className={styles.actionBar}>
+        {showCancelConfirm ? (
+          <>
+            <span className={styles.actionHint}>
+              {t('tasks.action.confirmHint')}
+            </span>
+            <button
+              type="button"
+              className={`${styles.actionButton} ${styles.dangerButton}`}
+              disabled={busy}
+              onClick={onCancel}
+            >
+              {confirmLabel}
+            </button>
+            <button
+              type="button"
+              className={styles.actionButton}
+              onClick={onCancelConfirmDismiss}
+            >
+              {t('common.cancel')}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className={`${styles.actionButton} ${styles.dangerButton}`}
+            disabled={busy}
+            onClick={onCancel}
+          >
+            {cancelLabel}
+          </button>
+        )}
+      </div>
+    ) : null;
+  const headerContent = !hideHeader ? (
+    <>
       <div className={styles.title}>{detailTitle(task, t)}</div>
       <div className={styles.statusBadge}>
         {terminalIcon && (
@@ -604,6 +855,25 @@ function TaskDetail({
         )}
         <span className={styles.secondary}>{subtitleParts.join(' · ')}</span>
       </div>
+    </>
+  ) : compactFields.length > 0 ? (
+    <div className={styles.compactSummary}>
+      {compactFields
+        .map((field) => `${field.label} ${field.value}`)
+        .join(' · ')}
+    </div>
+  ) : null;
+
+  return (
+    <div className={styles.detail}>
+      {(headerContent || actionControls) && (
+        <div className={styles.detailTop}>
+          {headerContent && (
+            <div className={styles.detailTopMain}>{headerContent}</div>
+          )}
+          {actionControls}
+        </div>
+      )}
 
       {task.kind === 'shell' && (
         <>
@@ -625,39 +895,60 @@ function TaskDetail({
         <DetailField label={t('tasks.detail.type')} value={task.subagentType} />
       )}
 
+      {task.kind === 'agent' && (task.depth ?? 0) > 0 && (
+        <DetailField
+          label={t('tasks.detail.nesting')}
+          value={
+            // User-facing level = launch depth + 1 (depth 0 = spawned by
+            // the top-level session). Unlike the row indent, this is the
+            // absolute launch level, unaffected by departed ancestors.
+            task.parentName
+              ? t('tasks.detail.nestingValue', {
+                  level: (task.depth ?? 0) + 1,
+                  parent: task.parentName,
+                })
+              : t('tasks.detail.nestingLevel', {
+                  level: (task.depth ?? 0) + 1,
+                })
+          }
+        />
+      )}
+
       {task.kind === 'agent' &&
         task.recentActivities &&
         task.recentActivities.length > 0 && (
-          <div>
+          <div className={styles.detailField}>
             <div className={styles.detailFieldLabel}>
               {t('tasks.detail.progress')}
             </div>
-            {task.recentActivities.slice(-5).map((a, i, arr) => {
-              const isLast = i === arr.length - 1;
-              const desc = formatActivityLabel(a.name, a.description);
-              return (
-                <div
-                  key={`${a.at}-${i}`}
-                  className={
-                    isLast ? styles.activityCurrent : styles.activityPast
-                  }
-                >
-                  {isLast ? '> ' : '  '}
-                  {desc}
-                </div>
-              );
-            })}
+            <div className={styles.detailContent}>
+              {task.recentActivities.slice(-5).map((a, i, arr) => {
+                const isLast = i === arr.length - 1;
+                const desc = formatActivityLabel(a.name, a.description, t);
+                return (
+                  <div
+                    key={`${a.at}-${i}`}
+                    className={
+                      isLast ? styles.activityCurrent : styles.activityPast
+                    }
+                  >
+                    {isLast ? '> ' : '  '}
+                    {desc}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
       {task.kind === 'agent' && task.prompt && (
-        <div>
+        <div className={styles.detailField}>
           <div className={styles.detailFieldLabel}>
             {t('tasks.detail.prompt')}
           </div>
           <div className={styles.promptContent}>
             {promptLines.slice(0, 5).map((line, i, arr) => (
-              <div key={i} className={styles.truncate}>
+              <div key={i}>
                 {i === arr.length - 1 && promptLines.length > 5
                   ? `${line}…`
                   : line || ' '}
@@ -677,7 +968,7 @@ function TaskDetail({
       {task.kind === 'agent' &&
         task.status === 'paused' &&
         task.resumeBlockedReason && (
-          <div>
+          <div className={styles.detailField}>
             <div className={`${styles.detailFieldLabel} ${styles.error}`}>
               {t('tasks.detail.resumeBlocked')}
             </div>
@@ -686,7 +977,7 @@ function TaskDetail({
         )}
 
       {task.error && (
-        <div>
+        <div className={styles.detailField}>
           <div
             className={`${styles.detailFieldLabel} ${
               task.kind === 'monitor' && task.status !== 'failed'
@@ -716,8 +1007,8 @@ function TaskDetail({
 function DetailField({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailField}>
-      <span className={styles.detailFieldLabel}>{label}</span>
-      <span className={styles.truncate}>{value}</span>
+      <div className={styles.detailFieldLabel}>{label}</div>
+      <div className={styles.detailContent}>{value}</div>
     </div>
   );
 }

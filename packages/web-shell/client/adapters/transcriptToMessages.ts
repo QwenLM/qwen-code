@@ -33,17 +33,108 @@ type DaemonPermissionTranscriptBlock = Extract<
   { kind: 'permission' }
 >;
 
-type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
-  source?: string;
-  data?: unknown;
+type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
+  meta?: {
+    source?: unknown;
+    qwenDiscreteMessage?: boolean;
+    backgroundTask?: unknown;
+  };
 };
 
 interface TranscriptMessageLabels {
   promptCancelled?: string;
+  branchSuccess?: (name: string) => string;
+  midTurnInserted?: (message: string) => string;
+  modelStreamInterrupted?: string;
 }
 
 interface TranscriptMessageOptions {
   labels?: TranscriptMessageLabels;
+}
+
+function isIgnoredWebShellStatus(text: string): boolean {
+  return (
+    text.startsWith('language_changed (unrecognized daemon event):') ||
+    text.startsWith('Model switched: ')
+  );
+}
+
+function getErrorDisplayText(
+  block: DaemonStatusTranscriptBlock,
+  labels?: TranscriptMessageLabels,
+): string {
+  if (
+    block.errorKind === 'model_stream_interrupted' ||
+    // Older daemons emit this turn_error before they know about errorKind.
+    (block.source === 'turn_error' &&
+      block.text.trim().toLowerCase() === 'terminated')
+  ) {
+    return labels?.modelStreamInterrupted ?? block.text;
+  }
+  return block.text;
+}
+
+function getErrorMessageData(
+  data: unknown,
+  errorKind: DaemonStatusTranscriptBlock['errorKind'],
+): { data?: unknown } {
+  if (data === undefined) return {};
+  if (!errorKind) return { data };
+  return {
+    data: {
+      ...(getRecord(data) ?? { value: data }),
+      errorKind,
+    },
+  };
+}
+
+function getSessionBranchDisplayName(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const branchData = data as {
+    displayName?: unknown;
+    newSessionId?: unknown;
+  };
+  if (typeof branchData.displayName === 'string' && branchData.displayName) {
+    return branchData.displayName;
+  }
+  return typeof branchData.newSessionId === 'string'
+    ? branchData.newSessionId.slice(0, 8)
+    : null;
+}
+
+function getMidTurnInjectedText(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const messages = (data as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return null;
+  const text = messages
+    .filter((message): message is string => typeof message === 'string')
+    .join('\n')
+    .trim();
+  return text || null;
+}
+
+function isBackgroundNotificationAssistantBlock(
+  block: DaemonTextTranscriptBlock,
+): boolean {
+  const extended = block as ExtendedDaemonTextTranscriptBlock;
+  const meta = extended.meta;
+  return (
+    meta?.['source'] === 'background_notification' &&
+    meta['qwenDiscreteMessage'] === true &&
+    meta['backgroundTask'] !== undefined
+  );
+}
+
+function normalizeAssistantTextBlock(
+  block: DaemonTextTranscriptBlock,
+): DaemonTextTranscriptBlock | null {
+  if (isBackgroundNotificationAssistantBlock(block)) return null;
+  if (!block.text && !block.usage) return null;
+  return block;
+}
+
+function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
+  return block.text.length === 0;
 }
 
 function parseDaemonTodoItemsFromEntries(
@@ -110,6 +201,7 @@ export function transcriptBlocksToDaemonMessages(
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
   let currentAssistantIdx: number | null = null;
+  let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
   // the next top-level assistant/thought block must start a fresh assistant
   // message instead of being appended to text that appeared before the tool.
@@ -125,13 +217,19 @@ export function transcriptBlocksToDaemonMessages(
     switch (block.kind) {
       case 'user': {
         currentAssistantIdx = null;
+        currentThinkingIdx = null;
         needsNewContentMessage = false;
         const textBlock = block as DaemonTextTranscriptBlock;
+        const meta = getRecord(
+          (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
+        );
+        const source = getString(meta, 'source');
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
           content: textBlock.text,
           timestamp: blockTime,
+          ...(source ? { source } : {}),
         };
         // Attach images if present
         if (textBlock.images && textBlock.images.length > 0) {
@@ -145,7 +243,10 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'assistant': {
-        const textBlock = block as DaemonTextTranscriptBlock;
+        const textBlock = normalizeAssistantTextBlock(
+          block as DaemonTextTranscriptBlock,
+        );
+        if (!textBlock) break;
 
         const parentSubAgent = textBlock.parentToolCallId
           ? toolsByCallId.get(textBlock.parentToolCallId)
@@ -190,6 +291,7 @@ export function transcriptBlocksToDaemonMessages(
                 timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
+              currentThinkingIdx = null;
             }
           }
           if (lastProgress && !hasTerminal) {
@@ -210,7 +312,12 @@ export function transcriptBlocksToDaemonMessages(
           currentAssistantIdx !== null
             ? messages[currentAssistantIdx]
             : undefined;
-        if (target && target.role === 'assistant' && !needsNewContentMessage) {
+        if (
+          target &&
+          target.role === 'assistant' &&
+          !needsNewContentMessage &&
+          !isTextBlockEmpty(textBlock)
+        ) {
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
@@ -219,7 +326,8 @@ export function transcriptBlocksToDaemonMessages(
             ...(usage ? { usage } : {}),
           };
           needsNewContentMessage = false;
-        } else {
+          currentThinkingIdx = null;
+        } else if (!isTextBlockEmpty(textBlock)) {
           messages.push({
             id: block.id,
             role: 'assistant',
@@ -229,7 +337,14 @@ export function transcriptBlocksToDaemonMessages(
             ...(textBlock.usage ? { usage: textBlock.usage } : {}),
           });
           currentAssistantIdx = messages.length - 1;
+          currentThinkingIdx = null;
           needsNewContentMessage = false;
+        } else if (textBlock.usage && target && target.role === 'assistant') {
+          const usage = mergeAssistantUsage(target.usage, textBlock.usage);
+          messages[currentAssistantIdx!] = {
+            ...target,
+            ...(usage ? { usage } : {}),
+          };
         }
         break;
       }
@@ -244,33 +359,28 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
         const target =
-          currentAssistantIdx !== null
-            ? messages[currentAssistantIdx]
+          currentThinkingIdx !== null
+            ? messages[currentThinkingIdx]
             : undefined;
-        if (
-          target &&
-          target.role === 'assistant' &&
-          !needsNewContentMessage &&
-          !target.content
-        ) {
-          messages[currentAssistantIdx!] = {
+        if (target && target.role === 'thinking' && !needsNewContentMessage) {
+          messages[currentThinkingIdx!] = {
             ...target,
-            thinking: (target.thinking || '') + textBlock.text,
+            content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
           };
           needsNewContentMessage = false;
         } else {
           messages.push({
             id: block.id,
-            role: 'assistant',
-            content: '',
-            thinking: textBlock.text,
+            role: 'thinking',
+            content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
           });
-          currentAssistantIdx = messages.length - 1;
+          currentThinkingIdx = messages.length - 1;
           needsNewContentMessage = false;
         }
+        currentAssistantIdx = null;
         break;
       }
 
@@ -302,6 +412,8 @@ export function transcriptBlocksToDaemonMessages(
 
         appendToolCallMessage(messages, block.id, toolCall, blockTime);
         toolsByCallId.set(toolCall.callId, toolCall);
+        currentAssistantIdx = null;
+        currentThinkingIdx = null;
         needsNewContentMessage = true;
         break;
       }
@@ -443,8 +555,22 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'status':
       case 'debug': {
-        const statusBlock = block as ExtendedDaemonStatusTranscriptBlock;
-        const text = statusBlock.text;
+        const statusBlock = block;
+        const branchDisplayName =
+          statusBlock.source === 'session_branched'
+            ? getSessionBranchDisplayName(statusBlock.data)
+            : null;
+        const midTurnInsertedText =
+          statusBlock.source === 'mid_turn_message_injected'
+            ? getMidTurnInjectedText(statusBlock.data)
+            : null;
+        const text =
+          branchDisplayName && options.labels?.branchSuccess
+            ? options.labels.branchSuccess(branchDisplayName)
+            : midTurnInsertedText && options.labels?.midTurnInserted
+              ? options.labels.midTurnInserted(midTurnInsertedText)
+              : statusBlock.text;
+        if (isIgnoredWebShellStatus(text)) break;
         const todos = parsePlanTodos(text);
         if (todos) {
           messages.push({
@@ -474,16 +600,17 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'error': {
-        const errorBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const errorBlock = block;
+        const errorKind = errorBlock.errorKind;
         messages.push({
           id: block.id,
           role: 'system',
-          content: errorBlock.text,
+          content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
           retryable: errorBlock.source === 'turn_error',
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
-          ...(errorBlock.data !== undefined ? { data: errorBlock.data } : {}),
+          ...getErrorMessageData(errorBlock.data, errorKind),
         });
         needsNewContentMessage = true;
         break;
@@ -495,6 +622,7 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: promptCancelledText,
           variant: 'info',
+          source: 'prompt_cancelled',
           timestamp: blockTime,
         });
         needsNewContentMessage = true;

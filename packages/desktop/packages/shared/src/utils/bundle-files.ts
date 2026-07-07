@@ -8,7 +8,8 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'fs'
-import { join, relative, dirname, sep } from 'path'
+import { join, relative, dirname, sep, resolve } from 'path'
+import { isPathWithinDirectoryForCreation } from '@craft-agent/session-tools-core'
 import { debug } from './debug.ts'
 
 /**
@@ -47,6 +48,10 @@ export function fromPortableRelPath(portablePath: string): string {
   return portablePath.split('/').join(sep)
 }
 
+function hasParentTraversalSegment(portablePath: string): boolean {
+  return portablePath.split('/').includes('..')
+}
+
 // ============================================================
 // Validation
 // ============================================================
@@ -61,7 +66,7 @@ export function validateBundleFile(file: BundleFile): string | null {
   }
 
   // Path traversal checks
-  if (file.relativePath.includes('..')) {
+  if (hasParentTraversalSegment(file.relativePath)) {
     return `Path traversal detected: ${file.relativePath}`
   }
   if (file.relativePath.startsWith('/') || file.relativePath.startsWith('\\')) {
@@ -175,6 +180,8 @@ export function collectDirectoryFiles(dir: string, options?: CollectOptions): Bu
  * @throws Error if any file fails path validation (path traversal, absolute path, etc.)
  */
 export function restoreFiles(targetDir: string, files: BundleFile[]): void {
+  const resolvedTargetDir = resolve(targetDir)
+
   for (const file of files) {
     const error = validateBundleFile(file)
     if (error) {
@@ -182,10 +189,10 @@ export function restoreFiles(targetDir: string, files: BundleFile[]): void {
     }
 
     const nativePath = fromPortableRelPath(file.relativePath)
-    const fullPath = join(targetDir, nativePath)
+    const fullPath = resolve(resolvedTargetDir, nativePath)
 
     // Safety: ensure resolved path is inside target dir
-    if (!fullPath.startsWith(targetDir + sep) && fullPath !== targetDir) {
+    if (!isPathWithinDirectoryForCreation(fullPath, resolvedTargetDir)) {
       throw new Error(`Path escapes target directory: ${file.relativePath}`)
     }
 

@@ -85,9 +85,8 @@ function parseOscSequence(input: string, start: number): OscParseResult | null {
   const oscCode = Number(codeStr);
   if (!ALLOWED_OSC_CODES.has(oscCode)) return null;
 
-  // After the code, expect ';' or a terminator
-  // (OSC 0/1/2 can have just a title with ';')
-  if (position >= input.length) return null;
+  // After the code, require ';' before the payload.
+  if (position >= input.length || input[position] !== ';') return null;
 
   // Read until terminator: BEL or ST (ESC \)
   // The ';' after code is part of payload

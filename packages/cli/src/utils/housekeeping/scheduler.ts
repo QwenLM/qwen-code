@@ -5,14 +5,20 @@
  */
 
 import { stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   Storage,
   type Config,
   createDebugLogger,
+  getSubagentsRootDir,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { cleanupOldFileHistoryBackups, getCutoffDate } from './cleanup.js';
+import {
+  cleanupOldFileHistoryBackups,
+  cleanupOldSubagentTranscripts,
+  getCutoffDate,
+} from './cleanup.js';
 import { runThrottledOnce } from './throttledOnce.js';
 import { msSinceLastInteraction } from './lastInteractionAt.js';
 
@@ -33,6 +39,7 @@ const CATCHUP_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const STARTUP_DELAY_CATCHUP_MS = 60 * 1000;
 
 const FILE_HISTORY_MARKER = '.file-history-cleanup';
+const SUBAGENT_MARKER = '.subagent-cleanup';
 
 let started = false;
 
@@ -75,6 +82,14 @@ async function needsCatchUp(markerPath: string): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+function getSubagentMarkerPath(qwenDir: string, projectDir: string): string {
+  const projectKey = createHash('sha256')
+    .update(projectDir)
+    .digest('hex')
+    .slice(0, 16);
+  return join(qwenDir, `${SUBAGENT_MARKER}-${projectKey}`);
 }
 
 async function runPass(
@@ -156,6 +171,30 @@ async function runHousekeeping(
       );
     },
   );
+
+  // Subagent transcripts live per-project under <projectDir>/subagents/.
+  // Throttle per-project without writing marker dotfiles into the user's
+  // checkout. Guard the access: real Config always exposes storage; the
+  // optional chain keeps housekeeping best-effort if a caller doesn't.
+  const projectDir = config.storage?.getProjectDir?.();
+  if (projectDir) {
+    const markerPath = getSubagentMarkerPath(qwenDir, projectDir);
+    await runThrottledOnce(
+      {
+        name: 'subagent-cleanup',
+        markerPath,
+        lockPath: markerPath + '.lock',
+      },
+      async () => {
+        const r = await cleanupOldSubagentTranscripts({
+          cutoffDate: cutoff,
+          excludeSessionIds: new Set([currentSessionId]),
+          subagentsRoot: getSubagentsRootDir(projectDir),
+        });
+        debugLogger.debug(`subagents: removed=${r.removed} errors=${r.errors}`);
+      },
+    );
+  }
 }
 
 // Test-only exports — individual underscore-prefixed names matching the
@@ -169,3 +208,4 @@ export const _needsCatchUpForTesting = needsCatchUp;
 export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
+export const _getSubagentMarkerPathForTesting = getSubagentMarkerPath;

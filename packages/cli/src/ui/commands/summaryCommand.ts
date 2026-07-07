@@ -106,6 +106,7 @@ export const summaryCommand: SlashCommand = {
 
       const result = await runSideQuery(config, {
         purpose: 'project-summary',
+        skipOutputLanguagePreference: true,
         model: config.getModel(),
         systemInstruction: chatSystemInstruction,
         contents: [
@@ -213,7 +214,7 @@ export const summaryCommand: SlashCommand = {
       ui.addItem(
         {
           type: 'error' as const,
-          text: `❌ ${formatErrorMessage(error)}`,
+          text: `✗ ${formatErrorMessage(error)}`,
         },
         Date.now(),
       );

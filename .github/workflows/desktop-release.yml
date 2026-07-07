@@ -76,7 +76,7 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           fetch-depth: 0
 
@@ -234,7 +234,7 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ needs.release_metadata.outputs.release_ref }}'
 
@@ -667,6 +667,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --base main \
               --head "$RELEASE_BRANCH" \
+              --label 'skip-changelog' \
               --title "chore(release): desktop ${RELEASE_TAG}" \
               --body "Automated desktop release PR for ${RELEASE_TAG}. Syncs desktop package versions on main.")"
           fi
@@ -681,10 +682,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          # No --delete-branch: main has a merge queue and gh rejects the flag
+          # when one is enabled (the queue owns the merge; head-branch deletion
+          # follows the repo's "Automatically delete head branches" setting).
           gh pr merge "$PR_URL" \
             --squash \
             --auto \
-            --delete-branch \
             --subject "chore(release): desktop ${RELEASE_TAG} [skip ci]"
 
   dry-run-summary:

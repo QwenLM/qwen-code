@@ -12,23 +12,22 @@ import {
   useMemo,
   useLayoutEffect,
 } from 'react';
-import type {
-  Config,
-  EditorType,
-  GeminiClient,
-  Logger,
-  RetryInfo,
-  ServerGeminiChatCompressedEvent,
-  ServerGeminiContentEvent as ContentEvent,
-  ServerGeminiFinishedEvent,
-  ServerGeminiStreamEvent as GeminiEvent,
-  ThoughtSummary,
-  ToolCallRequestInfo,
-  GeminiErrorEventValue,
-  StopFailureErrorType,
-  ActiveGoal,
-} from '@qwen-code/qwen-code-core';
 import {
+  type Config,
+  type EditorType,
+  type GeminiClient,
+  type Logger,
+  type RetryInfo,
+  type ServerGeminiChatCompressedEvent,
+  type ServerGeminiContentEvent as ContentEvent,
+  type ServerGeminiFinishedEvent,
+  type ServerGeminiStreamEvent as GeminiEvent,
+  type ThoughtSummary,
+  type ToolCallRequestInfo,
+  type GeminiErrorEventValue,
+  type StopFailureErrorType,
+  type ActiveGoal,
+  type VisionBridgeResult,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -49,13 +48,22 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  detectAutonomousSentinel,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  hasImageParts,
+  splitImageParts,
   generateToolUseSummary,
   getActiveGoal,
   activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
+  createDuplicateProviderToolCallResponse,
+  markDuplicateProviderToolCallResponseSent,
+  findRepeatedDuplicateProviderToolCall,
+  AutonomousLoopTickResolver,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -63,6 +71,7 @@ import type {
   HistoryItemGoalStatus,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
+  HistoryItemGemini,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -72,9 +81,15 @@ import {
   isSlashCommand,
 } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  handleAtCommand,
+  resolveAtCommandQuery,
+} from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
+import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
   useReactToolScheduler,
@@ -92,9 +107,87 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
+import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+// The per-turn model override is held in two coupled refs: the model id and a
+// flag marking whether it came from an explicit inline `/model <id> <prompt>`
+// (which must win over skill-tool overrides for the rest of the turn). The two
+// always move together; these helpers are the single place that writes both so
+// the invariant (inline flag true => model id set) can't be broken by editing
+// one ref in isolation, and every set/clear is traceable via debug logs.
+function applyModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+  value: string | undefined,
+  isInline: boolean,
+): void {
+  modelOverrideRef.current = value;
+  inlineActiveRef.current = isInline;
+  debugLogger.debug(
+    `model override ${
+      value === undefined ? 'cleared' : `set to ${value}`
+    } (inline=${isInline})`,
+  );
+}
+
+function clearModelOverride(
+  modelOverrideRef: { current: string | undefined },
+  inlineActiveRef: { current: boolean },
+): void {
+  applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
+}
+
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
+const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
+  'Mid-turn @ command resolution timed out';
+
+interface PendingDuplicateToolResponses {
+  executableCallIds: Set<string>;
+  promptId: string | undefined;
+  responseParts: Part[];
+}
+
+/**
+ * Build the user-facing notice shown when the vision bridge runs. On success it
+ * states which model was used, how many images were converted (and omitted),
+ * and discloses the data egress (and endpoint, since auto-select can route to a
+ * different host than the primary model). On failure it surfaces the reason.
+ *
+ * The transcription itself is not shown: it is fed to the primary model and
+ * surfaced in its answer, so repeating it here only duplicated the description.
+ *
+ * @param result The structured result returned by the vision bridge.
+ * @returns A notice string for the message history.
+ */
+function formatVisionBridgeNotice(result: VisionBridgeResult): string {
+  const modelName = result.modelId ?? 'vision model';
+  const target = result.modelEndpoint
+    ? `${modelName} (${result.modelEndpoint})`
+    : modelName;
+  const egressNote = result.egressOccurred
+    ? ` Your image and prompt/context were sent to ${target}.`
+    : '';
+  // No leading glyph here: the renderer supplies the gutter prefix (◎ for the
+  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
+  // marker (e.g. `● ◎ …`).
+  if (result.status === 'failed') {
+    const reason = result.egressOccurred
+      ? 'the vision model request failed'
+      : 'the vision bridge could not run';
+    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+  }
+  if (result.status === 'skipped') {
+    return `Vision bridge cancelled.${egressNote}`;
+  }
+  // On success the image was always sent, so disclose egress unconditionally.
+  const omitted =
+    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
+  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
+  return header;
+}
 
 /**
  * Pull the assistant's most recent visible text from the UI history. Used as
@@ -117,6 +210,35 @@ function extractLastAssistantText(history: HistoryItem[]): string | undefined {
 
 function stripLeadingBlankLines(text: string): string {
   return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+async function resolveWithAbort<T>(
+  signal: AbortSignal,
+  run: () => Promise<T>,
+): Promise<T> {
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error('Mid-turn @ command resolution aborted'),
+      );
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([run(), abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 /**
@@ -246,6 +368,17 @@ const EDIT_TOOL_NAMES = new Set([
   ToolNames.NOTEBOOK_EDIT,
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
+const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+// Rows kept in reserve below the commit budget so the incremental commit fires
+// BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
+// pending item's rendered height under the safety budget stops that clip from
+// engaging and hiding a table (or slicing the tail) in step with the commit
+// cycle.
+const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
+// Conservative estimate of the rows the composer/footer occupy, used to derive
+// a content-area height from terminalHeight before the live value is known.
+const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
+const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
@@ -257,6 +390,32 @@ function showCitations(settings: LoadedSettings): boolean {
     return enabled;
   }
   return true;
+}
+
+function clampLoadingThoughtDescription(description: string): string {
+  if (description.length <= LOADING_THOUGHT_DESCRIPTION_MAX_CHARS) {
+    return description;
+  }
+
+  return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Character index just after the `keptLines`-th source line of `text`, or -1 if
+ * there are not that many lines. Converts a fitPendingSlice line count into a
+ * commit boundary; callers pass it through `findLastSafeSplitPoint` so the cut
+ * never lands inside a fenced code block.
+ */
+function charIndexAfterLine(text: string, keptLines: number): number {
+  if (keptLines <= 0) return -1;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      count++;
+      if (count === keptLines) return i + 1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -296,6 +455,7 @@ export const useGeminiStream = (
   history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   config: Config,
+  isConfigInitialized: boolean,
   settings: LoadedSettings,
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
@@ -314,6 +474,14 @@ export const useGeminiStream = (
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
   logger?: Logger | null,
+  // Live content-area height (terminal minus composer/header). Used to bound the
+  // pending item's rendered height so it commits to <Static> before it can grow
+  // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
+  // it is computed after this hook is called in AppContainer.
+  availableTerminalHeightRef?: React.RefObject<number>,
+  // Live terminal width, paired with the height ref so the commit loop reads
+  // both dimensions consistently across a mid-stream resize.
+  terminalWidthRef?: React.RefObject<number>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -345,6 +513,20 @@ export const useGeminiStream = (
   // alongside lastTurnUserItemRef.
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
+
+  // Wrapper around addItem that attaches timestamp to gemini items for display.
+  // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
+  // (same turn, performance-split continuation) does not.
+  const commitItem = useCallback(
+    (item: HistoryItemWithoutId, userMessageTimestamp: number): number => {
+      if (item.type === 'gemini' && !(item as HistoryItemGemini).timestamp) {
+        (item as HistoryItemGemini).timestamp = Date.now();
+      }
+      return addItem(item, userMessageTimestamp);
+    },
+    [addItem],
+  );
+
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
@@ -359,13 +541,11 @@ export const useGeminiStream = (
   useLayoutEffect(() => {
     historyRef.current = history;
   }, [history]);
-  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
-  // because the captured turn controller is replaced when submitQuery starts
-  // the next turn, and the summary call outlives the current turn (that's the
-  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
-  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
-  // this turn's stale summary work.
-  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
+  // In-flight auxiliary work. Some work is batch-scoped rather than turn-scoped:
+  // summaries intentionally outlive the turn, and mid-turn @ resolution may run
+  // before submitQuery installs the next turn controller.
+  // cancelOngoingRequest aborts these controllers so Ctrl+C still cancels them.
+  const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   // Streamed model reasoning for the current turn. Rendered (height-limited)
@@ -390,6 +570,23 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // True when the current turn's model override came from an explicit inline
+  // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
+  // explicit choice mid-turn, so this takes precedence until the next user turn.
+  const inlineModelOverrideActiveRef = useRef<boolean>(false);
+  const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
+  // Scoped to a top-level submit and cleared below before a new user prompt.
+  // Repeated duplicate provider ids within that submit are terminal/drop-only.
+  const duplicateProviderToolCallResponseIdsRef = useRef<Set<string>>(
+    new Set(),
+  );
+  const pendingDuplicateToolResponsesRef = useRef<
+    PendingDuplicateToolResponses[]
+  >([]);
+  const immediateDuplicateToolResponsesRef = useRef<{
+    promptId: string | undefined;
+    responseParts: Part[];
+  } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
   // Uses a ref to avoid re-renders on every text_delta.
@@ -631,7 +828,7 @@ export const useGeminiStream = (
     // events that arrived inside the throttle window
     // (STREAM_UPDATE_THROTTLE_MS), making AppContainer's auto-restore
     // wrongly conclude the model produced nothing — and the subsequent
-    // addItem(pendingHistoryItemRef.current) below would commit content
+    // commitItem(pendingHistoryItemRef.current) below would commit content
     // that auto-restore then truncates away.
     for (const flushBufferedStreamEvents of flushBufferedStreamEventsRef.current) {
       flushBufferedStreamEvents();
@@ -645,12 +842,18 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
-    // Cancel any in-flight tool-use-summary generations so their Promise.then
-    // doesn't addItem a stale label after the user cancelled.
-    for (const ac of summaryAbortRefsRef.current) {
+    // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
+    // wakeups so the loop doesn't resume after the cancelled tick. Only clears
+    // session wakeups (never cron jobs); lazily-creating an empty scheduler
+    // here is inert.
+    const loopWakeupsCancelled =
+      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
+    // Cancel any in-flight auxiliary work so its Promise.then doesn't add
+    // stale content after the user cancelled.
+    for (const ac of auxiliaryAbortRefsRef.current) {
       ac.abort();
     }
-    summaryAbortRefsRef.current.clear();
+    auxiliaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -661,14 +864,15 @@ export const useGeminiStream = (
     // Log API cancellation
     const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
-      config.getModel(),
+      modelOverrideRef.current ?? config.getModel(),
       prompt_id,
       config.getContentGeneratorConfig()?.authType,
+      loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
     );
     logApiCancel(config, cancellationEvent);
 
     if (pendingHistoryItemRef.current) {
-      addItem(pendingHistoryItemRef.current, Date.now());
+      commitItem(pendingHistoryItemRef.current, Date.now());
     }
     addItem(
       {
@@ -677,6 +881,17 @@ export const useGeminiStream = (
       },
       Date.now(),
     );
+    if (loopWakeupsCancelled > 0) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `Stopped the self-paced loop: cancelled ${loopWakeupsCancelled} pending wakeup${
+            loopWakeupsCancelled === 1 ? '' : 's'
+          }.`,
+        },
+        Date.now(),
+      );
+    }
     setPendingHistoryItem(null);
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel
@@ -706,6 +921,7 @@ export const useGeminiStream = (
   }, [
     streamingState,
     addItem,
+    commitItem,
     setPendingHistoryItem,
     onCancelSubmit,
     pendingHistoryItemRef,
@@ -714,6 +930,56 @@ export const useGeminiStream = (
     config,
     getPromptCount,
   ]);
+
+  const applyVisionBridgeIfNeeded = useCallback(
+    async (
+      parts: PartListUnion | null,
+      timestamp: number,
+      signal: AbortSignal,
+    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+      if (
+        parts === null ||
+        !hasImageParts(parts) ||
+        !shouldRunVisionBridge(config)
+      ) {
+        return { parts, shouldProceed: true };
+      }
+
+      debugLogger.debug('vision bridge: gate matched, running conversion');
+      const bridgeResult = await runVisionBridge({ config, parts, signal });
+      debugLogger.debug(
+        `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
+      );
+      // Surface one notice: egress + transcript on success, reason on failure,
+      // and egress disclosure after cancellation if data was already sent.
+      if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+        addItem(
+          {
+            type:
+              bridgeResult.status === 'failed'
+                ? MessageType.ERROR
+                : MessageType.VISION_NOTICE,
+            text: formatVisionBridgeNotice(bridgeResult),
+          },
+          timestamp,
+        );
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
+      }
+      if (bridgeResult.applied && bridgeResult.parts != null) {
+        return { parts: bridgeResult.parts, shouldProceed: true };
+      }
+      // The bridge produced no usable replacement. Never forward images to a
+      // text-only model (it can't read them): drop them and proceed on the
+      // remaining text, or stop if nothing is left.
+      const textOnly = splitImageParts(parts).nonImageParts;
+      return textOnly.length > 0
+        ? { parts: textOnly, shouldProceed: true }
+        : { parts: null, shouldProceed: false };
+    },
+    [addItem, config],
+  );
 
   const prepareQueryForGemini = useCallback(
     async (
@@ -796,6 +1062,33 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              // Per-turn model override (e.g. inline `/model <id> <prompt>`).
+              // Runs after the new-user-turn reset above and before the stream
+              // is sent, so it applies to this turn and — because the reset is
+              // skipped for ToolResult/Retry — persists across the tool loop,
+              // then clears on the next user turn. Re-validate provider identity
+              // here rather than trust the producer: any slash command can set
+              // `modelOverride`, so the consumer enforces that it names a model
+              // on the active provider before redirecting API calls to it.
+              if (slashCommandResult.modelOverride) {
+                if (
+                  isInlineModelOverrideAllowed(
+                    config,
+                    slashCommandResult.modelOverride,
+                  )
+                ) {
+                  applyModelOverride(
+                    modelOverrideRef,
+                    inlineModelOverrideActiveRef,
+                    slashCommandResult.modelOverride,
+                    true,
+                  );
+                } else {
+                  debugLogger.warn(
+                    `ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
+                  );
+                }
+              }
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -843,6 +1136,18 @@ export const useGeminiStream = (
             id: insertedId,
             text: trimmedQuery,
           };
+
+          // Yield via macrotask to let Ink/React flush the user message
+          // render before continuing with @-command processing and API
+          // call. React 19.2.4 (Ink 7.0.3) schedules renders via
+          // MessageChannel.postMessage (a macrotask), so a microtask yield
+          // (await Promise.resolve()) does NOT give React a chance to
+          // render — the continuation runs first. setImmediate fires in
+          // the check phase after I/O events (where MessageChannel
+          // delivers its postMessage), guaranteeing React renders first
+          // without the ~1ms timer overhead of setTimeout(0).
+          // Only needed for non-Cron submissions since Cron skips addItem().
+          await new Promise((r) => setImmediate(r));
         }
 
         // Handle @-commands (which might involve tool calls)
@@ -861,6 +1166,16 @@ export const useGeminiStream = (
           }
           localQueryToSendToGemini = atCommandResult.processedQuery;
         }
+
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          localQueryToSendToGemini,
+          userMessageTimestamp,
+          abortSignal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          return { queryToSend: null, shouldProceed: false };
+        }
+        localQueryToSendToGemini = bridgeResult.parts;
       } else {
         // It's a function response (PartListUnion that isn't a string)
         localQueryToSendToGemini = query;
@@ -883,6 +1198,7 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
+      applyVisionBridgeIfNeeded,
     ],
   );
 
@@ -915,21 +1231,30 @@ export const useGeminiStream = (
           return newGeminiMessageBuffer;
         }
         if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
-        setPendingHistoryItem({ type: 'gemini', text: '' });
+        setPendingHistoryItem({
+          type: 'gemini',
+          text: '',
+          timestamp: Date.now(),
+        });
         newGeminiMessageBuffer = stripLeadingBlankLines(newGeminiMessageBuffer);
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
-      const splitPoint = findLastSafeSplitPoint(newGeminiMessageBuffer);
-      if (splitPoint === newGeminiMessageBuffer.length) {
-        // Update the existing message with accumulated content
-        setPendingHistoryItem((item) => ({
-          type: item?.type as 'gemini' | 'gemini_content',
-          text: newGeminiMessageBuffer,
-        }));
-      } else {
+      let nextPendingType = pendingHistoryItemRef.current?.type as
+        | 'gemini'
+        | 'gemini_content';
+      while (newGeminiMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+        const safeSplitPoint =
+          splitPoint > 0 && splitPoint < newGeminiMessageBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
+
         // This indicates that we need to split up this Gemini Message.
         // Splitting a message is primarily a performance consideration. There is a
         // <Static> component at the root of App.tsx which takes care of rendering
@@ -938,45 +1263,148 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
-        const afterText = newGeminiMessageBuffer.substring(splitPoint);
-        addItem(
+        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
+        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
+        commitItem(
           {
-            type: pendingHistoryItemRef.current?.type as
-              | 'gemini'
-              | 'gemini_content',
+            type: nextPendingType,
             text: beforeText,
           },
           userMessageTimestamp,
         );
-        setPendingHistoryItem({ type: 'gemini_content', text: afterText });
+        nextPendingType = 'gemini_content';
         newGeminiMessageBuffer = afterText;
       }
+      // Rendered-height-aware incremental commit. Commit whole chunks to
+      // <Static> so the pending (live) item's ESTIMATED rendered height stays
+      // within the viewport budget. Uses the SAME accounting as
+      // MarkdownDisplay's safety-net slice (fitPendingSlice — tables counted as
+      // blocks, wide/CJK lines wrapped) so the two agree and the clip never
+      // engages / flickers in step with the commit cycle.
+      //
+      //  - `while`, not `if`: a single throttled update can append many lines, so
+      //    keep committing until the remainder fits.
+      //  - Commit ONLY at a blank-line block boundary so a table / list / code
+      //    block is never cut into a headerless continuation (which would render
+      //    as raw "| ... |" text). A table that is still streaming (no trailing
+      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
+      //    clamp — until it is complete, then commits whole.
+      //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
+      //  - Conservative fallback when the content-area height is not yet known
+      //    (ref is 0 before the first render populates it): derive from
+      //    terminalHeight so a short terminal does not use an over-large budget.
+      const viewportRows =
+        (availableTerminalHeightRef?.current ?? 0) > 0
+          ? availableTerminalHeightRef!.current
+          : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
+      // Read width from the same live ref as the height so a mid-stream resize
+      // is handled consistently; fall back to the render-time width.
+      const commitWidth =
+        (terminalWidthRef?.current ?? 0) > 0
+          ? terminalWidthRef!.current
+          : terminalWidth;
+      const commitRowBudget = Math.max(
+        4,
+        viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
+      );
+      const tableClampRows = Math.max(2, viewportRows - 3);
+      while (true) {
+        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const { keptLines, clipped } = fitPendingSlice(
+          bufferLines,
+          commitWidth,
+          commitRowBudget,
+          tableClampRows,
+        );
+        if (!clipped) break;
+        // Back up to the last blank line within the kept prefix — the only place
+        // it is safe to end a committed chunk without orphaning a block.
+        let boundaryLine = -1;
+        for (let k = Math.min(keptLines, bufferLines.length) - 1; k >= 0; k--) {
+          if (bufferLines[k]!.trim() === '') {
+            boundaryLine = k;
+            break;
+          }
+        }
+        if (boundaryLine < 0) break; // no block boundary yet → keep pending
+        const target = charIndexAfterLine(
+          newGeminiMessageBuffer,
+          boundaryLine + 1,
+        );
+        if (target <= 0) break;
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          target,
+        );
+        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+          break;
+        }
+        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
+        const afterText = newGeminiMessageBuffer.substring(splitPoint);
+        commitItem(
+          {
+            type: nextPendingType,
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        nextPendingType = 'gemini_content';
+        newGeminiMessageBuffer = afterText;
+      }
+      // Update the existing message with accumulated content.
+      setPendingHistoryItem((item) => {
+        const base: HistoryItemWithoutId = {
+          type: nextPendingType,
+          text: newGeminiMessageBuffer,
+        };
+        if (item && 'timestamp' in item) {
+          (base as HistoryItemGemini).timestamp = (
+            item as HistoryItemGemini
+          ).timestamp;
+        }
+        return base;
+      });
       return newGeminiMessageBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+      availableTerminalHeightRef,
+      terminalWidthRef,
+    ],
   );
 
   const mergeThought = useCallback(
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
+        const incomingDescription = incoming.description
+          ? clampLoadingThoughtDescription(incoming.description)
+          : incoming.description;
         if (!prev) {
           if (debugLogger.isEnabled()) {
             debugLogger.debug(
               `[THOUGHT_MERGE] New thought: ` +
                 `subjectLength=${incoming.subject?.length ?? 0}, ` +
-                `description length=${incoming.description?.length ?? 0}`,
+                `description length=${incomingDescription?.length ?? 0}`,
             );
           }
-          return incoming;
+          return {
+            ...incoming,
+            description: incomingDescription,
+          };
         }
         const subject = incoming.subject || prev.subject;
-        const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        const description = clampLoadingThoughtDescription(
+          `${prev.description ?? ''}${incomingDescription ?? ''}`,
+        );
         if (debugLogger.isEnabled()) {
           debugLogger.debug(
             `[THOUGHT_MERGE] Accumulating thought: ` +
               `prev length=${prev.description?.length ?? 0}, ` +
-              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `incoming length=${incomingDescription?.length ?? 0}, ` +
               `total length=${description.length}`,
           );
         }
@@ -987,7 +1415,11 @@ export const useGeminiStream = (
   );
 
   const handleThoughtEvent = useCallback(
-    (eventValue: ThoughtSummary, currentThoughtBuffer: string): string => {
+    (
+      eventValue: ThoughtSummary,
+      currentThoughtBuffer: string,
+      userMessageTimestamp: number,
+    ): string => {
       if (turnCancelledRef.current) {
         return '';
       }
@@ -997,11 +1429,12 @@ export const useGeminiStream = (
         return currentThoughtBuffer;
       }
 
-      const newThoughtBuffer = currentThoughtBuffer + thoughtText;
+      let newThoughtBuffer = currentThoughtBuffer + thoughtText;
       if (newThoughtBuffer.trim().length === 0) {
         return newThoughtBuffer;
       }
 
+      streamingResponseLengthRef.current += thoughtText.length;
       const startingNewThought = currentThoughtBuffer.trim().length === 0;
       const description = startingNewThought
         ? stripLeadingBlankLines(newThoughtBuffer)
@@ -1009,6 +1442,7 @@ export const useGeminiStream = (
 
       if (startingNewThought) {
         thoughtStartTimeRef.current = Date.now();
+        newThoughtBuffer = description;
       }
 
       // Keep the transient `thought` (subject) in sync for the window title.
@@ -1020,17 +1454,61 @@ export const useGeminiStream = (
       // Stream the accumulated reasoning into a pending history item so it
       // renders height-limited above the answer and can later be committed as
       // a collapsible block.
-      setPendingThoughtItem({
-        type: 'gemini_thought',
-        text: stripLeadingBlankLines(newThoughtBuffer),
-        durationMs: thoughtStartTimeRef.current
+      let pendingThoughtType: 'gemini_thought' | 'gemini_thought_content' =
+        startingNewThought
+          ? 'gemini_thought'
+          : pendingThoughtItemRef.current?.type === 'gemini_thought_content'
+            ? 'gemini_thought_content'
+            : 'gemini_thought';
+      const getThoughtDurationMs = () =>
+        thoughtStartTimeRef.current
           ? Date.now() - thoughtStartTimeRef.current
-          : 0,
-      });
+          : 0;
+      const buildThoughtItem = (
+        type: 'gemini_thought' | 'gemini_thought_content',
+        text: string,
+      ): HistoryItemWithoutId =>
+        type === 'gemini_thought'
+          ? {
+              type,
+              text,
+              durationMs: getThoughtDurationMs(),
+            }
+          : {
+              type,
+              text,
+            };
 
-      return startingNewThought ? description : newThoughtBuffer;
+      let splitPoint = findLastSafeSplitPoint(
+        newThoughtBuffer,
+        STREAM_PENDING_ITEM_MAX_CHARS,
+      );
+      while (newThoughtBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const safeSplitPoint =
+          splitPoint > 0 && splitPoint < newThoughtBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
+        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
+        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        addItem(
+          buildThoughtItem(pendingThoughtType, beforeText),
+          userMessageTimestamp,
+        );
+        pendingThoughtType = 'gemini_thought_content';
+        newThoughtBuffer = afterText;
+        splitPoint = findLastSafeSplitPoint(
+          newThoughtBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+      }
+
+      setPendingThoughtItem(
+        buildThoughtItem(pendingThoughtType, newThoughtBuffer),
+      );
+
+      return newThoughtBuffer;
     },
-    [mergeThought, setPendingThoughtItem],
+    [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   // Commit the streamed reasoning to history as a collapsible block (or drop
@@ -1075,7 +1553,7 @@ export const useGeminiStream = (
           };
           addItem(pendingItem, userMessageTimestamp);
         } else {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem(null);
       }
@@ -1090,6 +1568,7 @@ export const useGeminiStream = (
     [
       addItem,
       commitPendingThought,
+      commitItem,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setThought,
@@ -1103,7 +1582,7 @@ export const useGeminiStream = (
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       // Only show Ctrl+Y hint if not already showing an auto-retry countdown
@@ -1143,8 +1622,8 @@ export const useGeminiStream = (
         });
     },
     [
-      addItem,
       commitPendingThought,
+      commitItem,
       pendingHistoryItemRef,
       setPendingHistoryItem,
       setPendingRetryErrorItem,
@@ -1161,12 +1640,18 @@ export const useGeminiStream = (
       }
 
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       addItem({ type: MessageType.INFO, text }, userMessageTimestamp);
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, settings],
+    [
+      addItem,
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      settings,
+    ],
   );
 
   const handleFinishedEvent = useCallback(
@@ -1210,7 +1695,7 @@ export const useGeminiStream = (
         addItem(
           {
             type: 'info',
-            text: `⚠️  ${message}`,
+            text: `⚠  ${message}`,
           },
           userMessageTimestamp,
         );
@@ -1223,19 +1708,24 @@ export const useGeminiStream = (
     [addItem, clearRetryCountdown],
   );
 
+  const autonomousLoopTickResolverRef =
+    useRef<AutonomousLoopTickResolver | null>(null);
+
   const handleChatCompressionEvent = useCallback(
     (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
+      autonomousLoopTickResolverRef.current?.resetCache();
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const activeModel = modelOverrideRef.current ?? config.getModel();
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
-          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
-          : `approached the input token limit for ${config.getModel()}`;
+          ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
+          : `approached the input token limit for ${activeModel}`;
       return addItem(
         {
           type: 'info',
@@ -1248,7 +1738,7 @@ export const useGeminiStream = (
         Date.now(),
       );
     },
-    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, commitItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleMaxSessionTurnsEvent = useCallback(
@@ -1271,8 +1761,8 @@ export const useGeminiStream = (
         {
           type: 'error',
           text:
-            `🚫 Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
-            `💡 Solutions:\n` +
+            `✗ Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
+            `★ Solutions:\n` +
             `   • Start a new session: Use /clear command\n` +
             `   • Increase limit: Add "sessionTokenLimit": (e.g., 128000) to your settings.json\n` +
             `   • Compress history: Use /compress command to compress history`,
@@ -1321,7 +1811,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
     ) => {
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       addItem(
@@ -1333,7 +1823,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, commitItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleStopHookLoopEvent = useCallback(
@@ -1346,7 +1836,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
     ) => {
       if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       // When the active loop is driven by `/goal`, replace the generic
@@ -1377,7 +1867,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, commitItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleActiveGoalEvent = useCallback(
@@ -1433,40 +1923,49 @@ export const useGeminiStream = (
           const nextEvent = bufferedEvents.shift()!;
 
           if (nextEvent.kind === 'content') {
-            let mergedContent = nextEvent.value;
+            const contentParts = [nextEvent.value];
 
             while (bufferedEvents[0]?.kind === 'content') {
               const queuedContent = bufferedEvents.shift();
               if (queuedContent?.kind !== 'content') {
                 break;
               }
-              mergedContent += queuedContent.value;
+              contentParts.push(queuedContent.value);
             }
 
             geminiMessageBuffer = handleContentEvent(
-              mergedContent,
+              contentParts.join(''),
               geminiMessageBuffer,
               userMessageTimestamp,
             );
             continue;
           }
 
-          let mergedThought = nextEvent.value;
+          let subject = nextEvent.value.subject;
+          const thoughtDescriptions: string[] = [];
+          if (nextEvent.value.description) {
+            thoughtDescriptions.push(nextEvent.value.description);
+          }
 
           while (bufferedEvents[0]?.kind === 'thought') {
             const queuedThought = bufferedEvents.shift();
             if (queuedThought?.kind !== 'thought') {
               break;
             }
-            mergedThought = {
-              subject: queuedThought.value.subject || mergedThought.subject,
-              description: `${mergedThought.description ?? ''}${
-                queuedThought.value.description ?? ''
-              }`,
-            };
+            subject = queuedThought.value.subject || subject;
+            if (queuedThought.value.description) {
+              thoughtDescriptions.push(queuedThought.value.description);
+            }
           }
 
-          thoughtBuffer = handleThoughtEvent(mergedThought, thoughtBuffer);
+          thoughtBuffer = handleThoughtEvent(
+            {
+              subject,
+              description: thoughtDescriptions.join(''),
+            },
+            thoughtBuffer,
+            userMessageTimestamp,
+          );
         }
       };
 
@@ -1578,7 +2077,7 @@ export const useGeminiStream = (
               // as "t" → "te" → "tes" cumulative rendering even though each
               // turn is persisted as a clean, separate assistant message.
               if (pendingHistoryItemRef.current) {
-                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
                 setPendingHistoryItem(null);
               }
               geminiMessageBuffer = '';
@@ -1629,12 +2128,39 @@ export const useGeminiStream = (
                 clearRetryCountdown();
               }
               break;
+            case ServerGeminiEventType.ModelFallback: {
+              // The primary model (or a prior fallback) exhausted its retry
+              // budget on a capacity/availability error and the system is
+              // switching to the next fallback model. Discard partial content
+              // from the failed attempt and show a notification.
+              discardBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              geminiMessageBuffer = '';
+              toolCallRequests.length = 0;
+              clearRetryCountdown();
+              const fromModel =
+                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+              addItem(
+                {
+                  type: 'notification',
+                  text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+                },
+                userMessageTimestamp,
+              );
+              break;
+            }
             case ServerGeminiEventType.HookSystemMessage:
               flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
               // First commit any pending AI response to ensure correct ordering
               if (pendingHistoryItemRef.current) {
-                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
                 setPendingHistoryItem(null);
               }
               addItem(
@@ -1673,8 +2199,93 @@ export const useGeminiStream = (
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
       dualOutput?.finalizeAssistantMessage();
-      if (toolCallRequests.length > 0 && !signal.aborted) {
-        scheduleToolCalls(toolCallRequests, signal);
+      // When a loop was detected, halt without scheduling the calls collected
+      // before the guard fired. The core splice/clear only touches
+      // turn.pendingToolCalls, which the TUI does not execute from — without
+      // this gate the pre-detection (and, for the always-on consecutive guard,
+      // potentially repeated) calls would still run before the halt dialog
+      // appears. Mirrors the non-interactive runner, which returns on
+      // LoopDetected before scheduling.
+      if (
+        toolCallRequests.length > 0 &&
+        !signal.aborted &&
+        !loopDetectedRef.current
+      ) {
+        const executableToolCallRequests: ToolCallRequestInfo[] = [];
+        const duplicateResponseParts: Part[] = [];
+        let duplicatePromptId: string | undefined;
+        const historyCallIdsWithResponse: Set<string> = geminiClient
+          ? geminiClient.getHistoryFunctionResponseIds()
+          : new Set<string>();
+        const handledProviderIds = new Set([
+          ...handledProviderToolCallIdsRef.current,
+          ...historyCallIdsWithResponse,
+        ]);
+        const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
+          toolCallRequests,
+          (request) => request.providerCallId,
+          handledProviderIds,
+          duplicateProviderToolCallResponseIdsRef.current,
+        );
+        if (repeatedDuplicateRequest?.providerCallId) {
+          debugLogger.debug(
+            `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+          );
+          loopDetectedRef.current = true;
+          return StreamProcessingStatus.Completed;
+        }
+
+        for (const request of toolCallRequests) {
+          const providerCallId = request.providerCallId;
+          if (!providerCallId) {
+            executableToolCallRequests.push(request);
+            continue;
+          }
+
+          if (
+            handledProviderToolCallIdsRef.current.has(providerCallId) ||
+            historyCallIdsWithResponse.has(providerCallId)
+          ) {
+            markDuplicateProviderToolCallResponseSent(
+              providerCallId,
+              duplicateProviderToolCallResponseIdsRef.current,
+            );
+
+            const response = createDuplicateProviderToolCallResponse(request);
+            debugLogger.debug(
+              `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
+            );
+            dualOutput?.emitToolResult(request, response);
+            duplicateResponseParts.push(...response.responseParts);
+            duplicatePromptId ??= request.prompt_id;
+            continue;
+          }
+
+          handledProviderToolCallIdsRef.current.add(providerCallId);
+          executableToolCallRequests.push(request);
+        }
+
+        if (duplicateResponseParts.length > 0) {
+          if (executableToolCallRequests.length > 0) {
+            pendingDuplicateToolResponsesRef.current.push({
+              executableCallIds: new Set(
+                executableToolCallRequests.map((request) => request.callId),
+              ),
+              promptId:
+                duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
+              responseParts: duplicateResponseParts,
+            });
+          } else {
+            immediateDuplicateToolResponsesRef.current = {
+              promptId: duplicatePromptId,
+              responseParts: duplicateResponseParts,
+            };
+          }
+        }
+
+        if (executableToolCallRequests.length > 0) {
+          scheduleToolCalls(executableToolCallRequests, signal);
+        }
       }
       return StreamProcessingStatus.Completed;
     },
@@ -1684,6 +2295,7 @@ export const useGeminiStream = (
       handleUserCancelledEvent,
       handleErrorEvent,
       scheduleToolCalls,
+      geminiClient,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -1700,6 +2312,7 @@ export const useGeminiStream = (
       handleStopHookLoopEvent,
       handleActiveGoalEvent,
       addItem,
+      commitItem,
       dualOutput,
     ],
   );
@@ -1709,7 +2322,11 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
-      metadata?: { notificationDisplayText?: string },
+      metadata?: {
+        notificationDisplayText?: string;
+        onDelivered?: () => void;
+        onDeliveryFailed?: () => void;
+      },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -1724,6 +2341,7 @@ export const useGeminiStream = (
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
       ) {
+        metadata?.onDeliveryFailed?.();
         return;
       }
 
@@ -1732,11 +2350,22 @@ export const useGeminiStream = (
           streamingState === StreamingState.WaitingForConfirmation) &&
         submitType !== SendMessageType.ToolResult &&
         !allowConcurrentBtwDuringResponse
-      )
+      ) {
+        metadata?.onDeliveryFailed?.();
         return;
+      }
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
+
+      // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
+      // events), so it must reflect only this turn's state. Reset it
+      // unconditionally at entry: if the previous turn detected a loop but threw
+      // before its own post-stream reset, a stuck `true` would otherwise make
+      // every later turn silently drop its tool calls. A ToolResult/btw
+      // continuation never carries a pending loop (a detected loop schedules
+      // nothing), so clearing it here is a no-op for those paths.
+      loopDetectedRef.current = false;
 
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
@@ -1755,6 +2384,10 @@ export const useGeminiStream = (
       ) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
+        handledProviderToolCallIdsRef.current.clear();
+        duplicateProviderToolCallResponseIdsRef.current.clear();
+        pendingDuplicateToolResponsesRef.current = [];
+        immediateDuplicateToolResponsesRef.current = null;
       }
 
       const userMessageTimestamp = Date.now();
@@ -1765,10 +2398,31 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        // Clear model override for new user turns, but preserve it on retry
-        // so the same skill-selected model is used again.
-        if (submitType !== SendMessageType.Retry) {
-          modelOverrideRef.current = undefined;
+        // Clear model override for new user turns. On retry, preserve a
+        // skill-selected override so the same model is used again, but drop an
+        // explicit inline `/model <id> <prompt>` override: that is a one-off
+        // for the original prompt, so a retry reverts to the session model and
+        // lets skill-tool overrides apply again.
+        const droppingInlineOverrideOnRetry =
+          submitType === SendMessageType.Retry &&
+          inlineModelOverrideActiveRef.current;
+        if (
+          submitType !== SendMessageType.Retry ||
+          inlineModelOverrideActiveRef.current
+        ) {
+          // The retry re-sends the same prompt on the session model, which may
+          // differ from the one-shot override. Tell the user so the model
+          // switch isn't silent.
+          if (droppingInlineOverrideOnRetry) {
+            addItem(
+              {
+                type: 'info',
+                text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+              },
+              userMessageTimestamp,
+            );
+          }
+          clearModelOverride(modelOverrideRef, inlineModelOverrideActiveRef);
         }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -1815,6 +2469,7 @@ export const useGeminiStream = (
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
+          metadata?.onDeliveryFailed?.();
           return;
         }
 
@@ -1857,6 +2512,7 @@ export const useGeminiStream = (
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
                 queryToSend,
+                modelOverrideRef.current ?? config.getModel(),
               ),
             );
           }
@@ -1918,12 +2574,24 @@ export const useGeminiStream = (
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
+            metadata?.onDeliveryFailed?.();
             return;
           }
 
           if (pendingHistoryItemRef.current) {
-            addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+            commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
+          }
+
+          const immediateDuplicateToolResponses =
+            immediateDuplicateToolResponsesRef.current;
+          if (immediateDuplicateToolResponses) {
+            immediateDuplicateToolResponsesRef.current = null;
+            await submitQuery(
+              immediateDuplicateToolResponses.responseParts,
+              SendMessageType.ToolResult,
+              immediateDuplicateToolResponses.promptId,
+            );
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
@@ -1935,6 +2603,12 @@ export const useGeminiStream = (
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          if (lastPromptErroredRef.current) {
+            metadata?.onDeliveryFailed?.();
+          } else {
+            metadata?.onDelivered?.();
           }
 
           // If the turn was initiated by a submit_prompt with an onComplete
@@ -1968,6 +2642,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -2003,6 +2678,7 @@ export const useGeminiStream = (
       processGeminiStreamEvents,
       pendingHistoryItemRef,
       addItem,
+      commitItem,
       setPendingHistoryItem,
       setInitError,
       geminiClient,
@@ -2024,10 +2700,10 @@ export const useGeminiStream = (
    * Retries the last failed prompt when the user presses Ctrl+Y.
    *
    * Activation conditions for Ctrl+Y shortcut:
-   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
-   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
-   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
-   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   * 1. ✓ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✓ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✓ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✓ There must be a stored lastPrompt in lastPromptRef.current
    *
    * When conditions are not met:
    * - If streaming is active (Responding/WaitingForConfirmation): silently return without action
@@ -2082,8 +2758,17 @@ export const useGeminiStream = (
         newApprovalMode === ApprovalMode.AUTO_EDIT
       ) {
         let awaitingApprovalCalls = toolCalls.filter(
-          (call): call is TrackedWaitingToolCall =>
-            call.status === 'awaiting_approval',
+          (call): call is TrackedWaitingToolCall => {
+            if (call.status !== 'awaiting_approval') {
+              return false;
+            }
+            const { confirmationDetails } = call;
+            return !(
+              confirmationDetails &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true
+            );
+          },
         );
 
         // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
@@ -2245,6 +2930,26 @@ export const useGeminiStream = (
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const completedCallIds = new Set(
+        completedAndReadyToSubmitTools.map(
+          (toolCall) => toolCall.request.callId,
+        ),
+      );
+      const readyDuplicateBatches: PendingDuplicateToolResponses[] = [];
+      pendingDuplicateToolResponsesRef.current =
+        pendingDuplicateToolResponsesRef.current.filter((batch) => {
+          const isReady = [...batch.executableCallIds].some((callId) =>
+            completedCallIds.has(callId),
+          );
+          if (isReady) {
+            readyDuplicateBatches.push(batch);
+          }
+          return !isReady;
+        });
+      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
+        (batch) => batch.responseParts,
+      );
+      const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
       for (const toolCall of geminiTools) {
         geminiClient?.recordCompletedToolCall(
@@ -2253,7 +2958,10 @@ export const useGeminiStream = (
         );
       }
 
-      if (geminiTools.length === 0) {
+      if (
+        geminiTools.length === 0 &&
+        pendingDuplicateResponseParts.length === 0
+      ) {
         return;
       }
 
@@ -2272,7 +2980,7 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled) {
+      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -2298,6 +3006,7 @@ export const useGeminiStream = (
       const responsesToSend: Part[] = geminiTools.flatMap(
         (toolCall) => toolCall.response.responseParts,
       );
+      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -2305,13 +3014,30 @@ export const useGeminiStream = (
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
+      const promptId = prompt_ids[0] ?? pendingDuplicatePromptId;
 
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
       // prior override, while non-skill tools (field absent) leave it intact.
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn, so skip skill-tool writes (including the undefined-clears case)
+      // while it is active.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          modelOverrideRef.current = toolCall.response.modelOverride;
+          if (inlineModelOverrideActiveRef.current) {
+            debugLogger.debug(
+              `skill-tool model override (${String(
+                toolCall.response.modelOverride,
+              )}) blocked: inline override active`,
+            );
+          } else {
+            applyModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              toolCall.response.modelOverride,
+              false,
+            );
+          }
         }
       }
 
@@ -2357,7 +3083,7 @@ export const useGeminiStream = (
           // resolve time (which covers both Ctrl+C on the next turn and
           // mid-flight cancellation of this batch via turnCancelledRef).
           const summaryAbort = new AbortController();
-          summaryAbortRefsRef.current.add(summaryAbort);
+          auxiliaryAbortRefsRef.current.add(summaryAbort);
 
           // Capture the first callId so we can locate "our" tool_group at
           // resolve time. If a newer tool_group has been added since we
@@ -2372,7 +3098,7 @@ export const useGeminiStream = (
             lastAssistantText,
           })
             .then((summary) => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
               const cancelled =
                 turnCancelledRef.current ||
                 abortControllerRef.current?.signal.aborted ||
@@ -2409,7 +3135,7 @@ export const useGeminiStream = (
               }
             })
             .catch(() => {
-              summaryAbortRefsRef.current.delete(summaryAbort);
+              auxiliaryAbortRefsRef.current.delete(summaryAbort);
             });
         }
       }
@@ -2427,19 +3153,144 @@ export const useGeminiStream = (
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
-        for (const msg of drained) {
-          const midTurnUserMessage = {
-            text: `\n[User message received during tool execution]: ${msg}`,
-          };
-          responsesToSend.push(midTurnUserMessage);
-          config
-            .getChatRecordingService()
-            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+        const midTurnTimestamp = Date.now();
+        const midTurnAbort =
+          abortControllerRef.current ?? new AbortController();
+        const shouldTrackMidTurnAbort = !abortControllerRef.current;
+        if (shouldTrackMidTurnAbort) {
+          auxiliaryAbortRefsRef.current.add(midTurnAbort);
+        }
+        try {
+          for (let index = 0; index < drained.length; index += 1) {
+            if (midTurnAbort.signal.aborted) {
+              break;
+            }
+            const msg = drained[index];
+            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
+            if (isAtCommand(msg)) {
+              const atCommandTimeout = new AbortController();
+              const atCommandSignal = AbortSignal.any([
+                midTurnAbort.signal,
+                atCommandTimeout.signal,
+              ]);
+              const atCommandTimeoutId = setTimeout(() => {
+                atCommandTimeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+              try {
+                const atCommandResult = await resolveWithAbort(
+                  atCommandSignal,
+                  () =>
+                    resolveAtCommandQuery({
+                      query: msg,
+                      config,
+                      onDebugMessage,
+                      messageId: midTurnTimestamp + index,
+                      signal: atCommandSignal,
+                    }),
+                );
+                const shouldSkipMidTurnMessage =
+                  !atCommandResult.shouldProceed &&
+                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
+                if (
+                  atCommandResult.shouldProceed &&
+                  atCommandResult.processedQuery !== null
+                ) {
+                  resolvedMidTurnQuery = atCommandResult.processedQuery;
+                } else if (atCommandResult.toolDisplays?.length) {
+                  addItem(
+                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
+                    midTurnTimestamp + index,
+                  );
+                }
+                if (atCommandResult.recording) {
+                  config.getChatRecordingService?.()?.recordAtCommand?.({
+                    filesRead: atCommandResult.recording.filesRead,
+                    status: atCommandResult.recording.status,
+                    ...(atCommandResult.recording.message
+                      ? { message: atCommandResult.recording.message }
+                      : {}),
+                    userText: msg,
+                  });
+                }
+                if (shouldSkipMidTurnMessage) {
+                  continue;
+                }
+              } catch (error) {
+                const errorMessage = getErrorMessage(error);
+                onDebugMessage(
+                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
+                );
+                if (!midTurnAbort.signal.aborted) {
+                  addItem(
+                    {
+                      type: MessageType.WARNING,
+                      text: `Could not attach file: ${errorMessage}`,
+                    },
+                    Date.now(),
+                  );
+                }
+                continue;
+              } finally {
+                clearTimeout(atCommandTimeoutId);
+              }
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+            }
+
+            const bridgeResult = await applyVisionBridgeIfNeeded(
+              resolvedMidTurnQuery,
+              midTurnTimestamp + index,
+              midTurnAbort.signal,
+            );
+            if (!bridgeResult.shouldProceed) {
+              if (midTurnAbort.signal.aborted) {
+                break;
+              }
+              continue;
+            }
+            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
+
+            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
+              resolvedMidTurnQuery,
+              msg,
+            );
+            const formatCheck = checkImageFormatsSupport(
+              midTurnUserMessageParts,
+            );
+            if (formatCheck.hasUnsupportedFormats) {
+              addItem(
+                {
+                  type: MessageType.INFO,
+                  text: getUnsupportedImageFormatWarning(),
+                },
+                Date.now(),
+              );
+            }
+            responsesToSend.push(...midTurnUserMessageParts);
+            config
+              .getChatRecordingService?.()
+              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
+            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          }
+        } finally {
+          if (shouldTrackMidTurnAbort) {
+            auxiliaryAbortRefsRef.current.delete(midTurnAbort);
+            midTurnAbort.abort();
+          }
         }
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
+      if (
+        turnCancelledRef.current ||
+        abortControllerRef.current?.signal.aborted
+      ) {
+        return;
+      }
+
+      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
     },
     [
       submitQuery,
@@ -2451,6 +3302,8 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
+      onDebugMessage,
+      applyVisionBridgeIfNeeded,
     ],
   );
 
@@ -2564,9 +3417,16 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      onDelivered?: () => void;
+      onDeliveryFailed?: () => void;
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+
+  const getAutonomousLoopTickResolver = useCallback(() => {
+    autonomousLoopTickResolverRef.current ??= new AutonomousLoopTickResolver();
+    return autonomousLoopTickResolverRef.current;
+  }, []);
   const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
 
   useEffect(() => {
@@ -2575,6 +3435,7 @@ export const useGeminiStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    autonomousLoopTickResolverRef.current?.resetCache();
   }, [sessionStates.sessionId]);
 
   // Current sessionId for the cron effect, read through a ref so the
@@ -2586,41 +3447,85 @@ export const useGeminiStream = (
   const cronSessionIdRef = useRef(sessionStates.sessionId);
   cronSessionIdRef.current = sessionStates.sessionId;
 
-  // Start the cron scheduler on mount, stop on unmount.
+  // Start the cron scheduler once config is initialized, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
+  // Gated on isConfigInitialized: without this gate, enableDurable() runs
+  // before config.initialize() completes, and overdue-task fires delivered
+  // through the notification drain reach a chat client whose startChat() has
+  // not yet run — producing "Chat not initialized" on every fresh launch
+  // that has pending durable work (#5022). This matches the ordering the
+  // ACP (Session.ts) and headless (nonInteractiveCli.ts) paths already use.
   useEffect(() => {
+    if (!isConfigInitialized) return;
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
 
-    // Enable durable (file-backed) cron support (loads tasks from the
-    // user's per-project runtime dir, acquires the lock). The tasks file
-    // lives under ~/.qwen, not the working tree, so it's user-owned rather
-    // than project-controlled — no folder-trust gate needed; the user's
-    // own loops run regardless of how the folder is trusted.
-    // Missed one-shots arrive as late fires through the start() callback.
-    void scheduler.enableDurable(cronSessionIdRef.current).catch((err) => {
-      debugLogger.warn(
-        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+    let stopped = false;
+    // Await enableDurable before start so overdue fires buffer into
+    // pendingFires (onFire is still null) and flush through start()'s
+    // buffer-drain — matching the ACP and headless startup order.
+    void (async () => {
+      try {
+        // Enable durable (file-backed) cron support (loads tasks from the
+        // user's per-project runtime dir, acquires the lock). The tasks file
+        // lives under ~/.qwen, not the working tree, so it's user-owned
+        // rather than project-controlled — no folder-trust gate needed; the
+        // user's own loops run regardless of how the folder is trusted.
+        // Missed one-shots arrive as late fires through the start() callback.
+        await scheduler.enableDurable(cronSessionIdRef.current);
+      } catch (err) {
+        // Fall through (no `return`): a failed enableDurable must NOT skip
+        // start(), or session-only cron tasks (created via cron_create during
+        // this session) would silently never fire. Only durable/persistent
+        // tasks are lost when enableDurable fails. Pre-#5022 the unconditional
+        // start() preserved this; keep that behavior.
+        debugLogger.warn(
+          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+        );
+      }
+      // Unmount may have happened during the await above; the cleanup below
+      // already ran scheduler.stop(), so do not (re)install onFire.
+      if (stopped) return;
+      scheduler.start(
+        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+          const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          const autonomousMode = detectAutonomousSentinel(job.prompt);
+          let label = job.prompt.slice(0, 40);
+          let modelText = job.prompt;
+          if (autonomousMode) {
+            if (job.missed) return;
+            const resolver = getAutonomousLoopTickResolver();
+            const tick = resolver.resolveAutonomous(autonomousMode);
+            label = 'Autonomous loop tick';
+            modelText = tick.modelText;
+            notificationQueueRef.current.push({
+              displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+              modelText,
+              sendMessageType: SendMessageType.Cron,
+              onDelivered: () => resolver.markDelivered(),
+            });
+            setNotificationTrigger((n) => n + 1);
+            return;
+          }
+          notificationQueueRef.current.push({
+            displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+            modelText,
+            sendMessageType: SendMessageType.Cron,
+          });
+          setNotificationTrigger((n) => n + 1);
+        },
       );
-    });
+    })();
 
-    scheduler.start((job: { prompt: string; missed?: boolean }) => {
-      const label = job.prompt.slice(0, 40);
-      notificationQueueRef.current.push({
-        displayText: `${job.missed ? 'Missed' : 'Cron'}: ${label}`,
-        modelText: job.prompt,
-        sendMessageType: SendMessageType.Cron,
-      });
-      setNotificationTrigger((n) => n + 1);
-    });
     return () => {
+      stopped = true;
       const summary = scheduler.getExitSummary();
       scheduler.stop();
       if (summary) {
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config]);
+  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
@@ -2700,6 +3605,8 @@ export const useGeminiStream = (
         );
         submitQuery(item.modelText, item.sendMessageType, undefined, {
           notificationDisplayText: item.displayText,
+          onDelivered: item.onDelivered,
+          onDeliveryFailed: item.onDeliveryFailed,
         });
         return;
       }

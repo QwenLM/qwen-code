@@ -2,7 +2,7 @@
  * DingTalk markdown normalization.
  *
  * DingTalk's markdown renderer is a limited subset with quirks:
- * - Tables don't render — convert to pipe-separated plain text
+ * - Tables don't render consistently - convert to pipe-separated plain text
  * - Max message length ~3800 chars — split into chunks
  * - Code fences must be closed/reopened across chunk boundaries
  */
@@ -18,8 +18,8 @@ function isTableSeparator(line: string): boolean {
     .replace(/^\|/, '')
     .replace(/\|$/, '')
     .split('|')
-    .map((c) => c.trim());
-  return cells.length > 0 && cells.every((c) => /^:?-{3,}:?$/.test(c));
+    .map((cell) => cell.trim());
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
 function isTableRow(line: string): boolean {
@@ -33,7 +33,7 @@ function parseTableRow(line: string): string[] {
     .replace(/^\|/, '')
     .replace(/\|$/, '')
     .split('|')
-    .map((c) => c.trim());
+    .map((cell) => cell.trim());
 }
 
 function renderTable(lines: string[]): string {
@@ -63,7 +63,7 @@ export function convertTables(text: string): string {
       isTableSeparator(lines[i + 1] || '')
     ) {
       const tableLines = [line];
-      i += 2; // skip header + separator
+      i += 2;
       while (i < lines.length && isTableRow(lines[i] || '')) {
         tableLines.push(lines[i] || '');
         i++;
@@ -91,20 +91,91 @@ export function splitChunks(text: string): string[] {
   const lines = text.split('\n');
   let inCode = false;
 
-  for (const line of lines) {
-    const fenceCount = (line.match(/```/g) || []).length;
-
-    if (buf.length + line.length + 1 > CHUNK_LIMIT && buf.length > 0) {
-      if (inCode) {
-        buf += '\n```';
-      }
-      chunks.push(buf);
-      buf = inCode ? '```' : '';
+  const flush = (keepCodeOpen = inCode) => {
+    if (keepCodeOpen) {
+      buf += '\n```';
     }
+    chunks.push(buf);
+    buf = keepCodeOpen ? '```' : '';
+  };
 
-    buf += (buf ? '\n' : '') + line;
+  const appendLine = (
+    line: string,
+    needsLineBreak: boolean,
+    closesCodeFence: boolean,
+    leavesCodeFenceOpen: boolean,
+  ) => {
+    let remaining = line;
+    let prefixPending = needsLineBreak;
+    let lineOpenedFenceInBuffer = false;
 
-    if (fenceCount % 2 === 1) {
+    while (remaining.length > 0 || prefixPending) {
+      const prefix = prefixPending ? '\n' : '';
+      const fitsAsFinalPiece =
+        remaining.length <= CHUNK_LIMIT - buf.length - prefix.length;
+      const closeFenceOverhead =
+        (inCode && !(closesCodeFence && fitsAsFinalPiece)) ||
+        (!inCode && leavesCodeFenceOpen)
+          ? '\n```'.length
+          : 0;
+      const available =
+        CHUNK_LIMIT - closeFenceOverhead - buf.length - prefix.length;
+
+      if (available <= 0) {
+        flush(inCode || lineOpenedFenceInBuffer);
+        continue;
+      }
+
+      let pieceLength = Math.min(available, remaining.length);
+      if (pieceLength < remaining.length) {
+        for (
+          let fenceStart = Math.max(0, pieceLength - 2);
+          fenceStart < pieceLength;
+          fenceStart++
+        ) {
+          if (
+            remaining.slice(fenceStart, fenceStart + 3) === '```' &&
+            pieceLength < fenceStart + 3
+          ) {
+            pieceLength = fenceStart;
+            break;
+          }
+        }
+      }
+
+      if (pieceLength === 0 && remaining.length > 0) {
+        flush(inCode || lineOpenedFenceInBuffer);
+        continue;
+      }
+
+      const piece = remaining.slice(0, pieceLength);
+      const appendedText = prefix + piece;
+      buf += appendedText;
+      remaining = remaining.slice(piece.length);
+      prefixPending = false;
+      lineOpenedFenceInBuffer ||=
+        !inCode && leavesCodeFenceOpen && appendedText.includes('```');
+
+      if (remaining.length > 0) {
+        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
+        flush(keepCodeOpen);
+        prefixPending = keepCodeOpen;
+      }
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] || '';
+    const fenceCount = (line.match(/```/g) || []).length;
+    const togglesCodeFence = fenceCount % 2 === 1;
+    appendLine(
+      line,
+      i > 0,
+      inCode && togglesCodeFence,
+      inCode !== togglesCodeFence,
+    );
+
+    if (togglesCodeFence) {
       inCode = !inCode;
     }
   }
@@ -123,8 +194,7 @@ export function extractTitle(text: string): string {
   return cleaned || 'Reply';
 }
 
-/** Full normalization pipeline: tables → chunks. */
+/** Full normalization pipeline: tables, then chunks. */
 export function normalizeDingTalkMarkdown(text: string): string[] {
-  const converted = convertTables(text);
-  return splitChunks(converted);
+  return splitChunks(convertTables(text));
 }

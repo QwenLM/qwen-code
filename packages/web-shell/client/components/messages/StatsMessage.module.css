@@ -1,14 +1,13 @@
 .panel {
   display: flex;
-  width: min(100%, 720px);
+  width: min(100%, var(--chat-regular-content-width, 1000px));
   flex-direction: column;
   gap: 2px;
   padding: 12px 16px;
-  margin-left: 14px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: var(--text-primary);
-  background: var(--bg-surface);
+  color: var(--foreground);
+  background: var(--background);
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.45;
@@ -17,13 +16,13 @@
 
 .title {
   margin-bottom: 8px;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   font-weight: 700;
 }
 
 .sectionTitle {
   margin-top: 8px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 700;
 }
 
@@ -42,14 +41,14 @@
 .metricCell {
   flex: 0 0 24ch;
   min-width: 24ch;
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
   white-space: nowrap;
 }
 
 .metricCellSection {
   flex: 0 0 24ch;
   min-width: 24ch;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -58,21 +57,21 @@
   flex: 0 0 24ch;
   min-width: 24ch;
   padding-left: 2ch;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   white-space: nowrap;
 }
 
 .modelCell {
   flex: 1 1 20ch;
   min-width: 16ch;
-  color: var(--text-primary);
+  color: var(--foreground);
   white-space: nowrap;
 }
 
 .modelCellHeader {
   flex: 1 1 20ch;
   min-width: 16ch;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -80,7 +79,7 @@
 .divider {
   height: 1px;
   margin: 2px 0;
-  background: var(--border-color);
+  background: var(--border);
 }
 
 /* ---------- Summary rows (key-value) ---------- */
@@ -101,12 +100,12 @@
 }
 
 .kvLabel {
-  color: var(--accent-color);
+  color: var(--agent-blue-500);
 }
 
 .kvValue {
   justify-self: end;
-  color: var(--text-primary);
+  color: var(--foreground);
   text-align: right;
   white-space: nowrap;
 }
@@ -120,9 +119,7 @@
 }
 
 .tableNameCol {
-  flex: 0 0 35ch;
-  min-width: 20ch;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
@@ -140,7 +137,7 @@
 .tableNumCol {
   flex: 1 1 15ch;
   min-width: 10ch;
-  color: var(--text-primary);
+  color: var(--foreground);
   text-align: right;
   white-space: nowrap;
 }
@@ -156,7 +153,7 @@
 }
 
 .secondary {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
 }
 
 .warning {

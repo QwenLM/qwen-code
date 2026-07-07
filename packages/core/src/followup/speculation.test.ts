@@ -63,32 +63,30 @@ describe('startSpeculation', () => {
     forkedAgentMocks.runForkedAgent.mockResolvedValue({
       jsonResult: { suggestion: '' },
     });
-    forkedAgentMocks.sendMessageStream.mockImplementation(
-      async function* () {
-        if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
-          yield {
-            type: 'chunk',
-            value: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          id: 'call_123',
-                          name: 'read_file',
-                          args: { path: 'a.ts' },
-                        },
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_123',
+                        name: 'read_file',
+                        args: { path: 'a.ts' },
                       },
-                    ],
-                  },
+                    },
+                  ],
                 },
-              ],
-            },
-          };
-        }
-      },
-    );
+              },
+            ],
+          },
+        };
+      }
+    });
 
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() => {
@@ -97,13 +95,75 @@ describe('startSpeculation', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(state.messages[1].parts?.[0].functionCall?.id).toBe('call_123');
-    expect(state.messages[2].parts?.[0].functionResponse?.id).toBe(
-      'call_123',
-    );
+    expect(state.messages[2].parts?.[0].functionResponse?.id).toBe('call_123');
 
     await abortSpeculation(state);
   });
 });
+
+describe.each([
+  {
+    scenario: 'same model (undefined)',
+    fastModel: undefined,
+    expectedPreserveTools: true,
+  },
+  {
+    scenario: 'different model',
+    fastModel: 'different-fast-model',
+    expectedPreserveTools: false,
+  },
+])(
+  'generatePipelinedSuggestion preserveTools — $scenario',
+  ({ fastModel, expectedPreserveTools }) => {
+    it(`passes preserveTools: ${String(expectedPreserveTools)} to runForkedAgent`, async () => {
+      const config = {
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+        getCwd: vi.fn().mockReturnValue(process.cwd()),
+        getFastModel: vi.fn().mockReturnValue(fastModel),
+        getToolRegistry: vi.fn().mockReturnValue({
+          ensureTool: vi.fn().mockResolvedValue({
+            build: vi.fn().mockReturnValue({
+              execute: vi.fn().mockResolvedValue({
+                llmContent: '',
+                returnDisplay: '',
+              }),
+            }),
+          }),
+        }),
+      } as unknown as Config;
+
+      forkedAgentMocks.runForkedAgent.mockResolvedValue({
+        jsonResult: { suggestion: 'next step' },
+      });
+
+      forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'done' }],
+                },
+              },
+            ],
+          },
+        };
+      });
+
+      const state = await startSpeculation(config, 'do something');
+      await vi.waitFor(() => {
+        expect(state.status).toBe('completed');
+      });
+
+      expect(forkedAgentMocks.runForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ preserveTools: expectedPreserveTools }),
+      );
+
+      await abortSpeculation(state);
+    });
+  },
+);
 
 describe('ensureToolResultPairing', () => {
   it('returns empty array unchanged', () => {

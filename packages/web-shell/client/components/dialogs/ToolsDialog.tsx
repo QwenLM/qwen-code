@@ -4,32 +4,27 @@ import {
   useTools,
   type DaemonWorkspaceToolStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
-
-interface ToolsDialogProps {
-  onClose: () => void;
-}
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 
 function toolLabel(tool: DaemonWorkspaceToolStatus): string {
   return tool.displayName || tool.name;
 }
 
-export function ToolsDialog({ onClose }: ToolsDialogProps) {
+const LIST_ID = 'tools-list';
+const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
+
+export function ToolsDialog() {
   const { t } = useI18n();
-  const { status, tools, loading, error, reload, setEnabled } = useTools({
+  const { status, tools, loading, error } = useTools({
     autoLoad: true,
   });
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const [busyTool, setBusyTool] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const listRef = useRef<HTMLDivElement>(null);
-
-  const selected = tools[selectedIdx];
-  const selectedExpanded = selected ? expandedTools.has(selected.name) : false;
 
   useEffect(() => {
     if (error) setMessage(error.message);
@@ -37,29 +32,9 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
     else if (status) setMessage(null);
   }, [status, error]);
 
-  const handleToggle = useCallback(
-    (tool: DaemonWorkspaceToolStatus) => {
-      setMessage(null);
-      setBusyTool(tool.name);
-      setEnabled(tool.name, !tool.enabled)
-        .then(() => reload())
-        .catch((err: unknown) => {
-          setMessage(err instanceof Error ? err.message : String(err));
-        })
-        .finally(() => setBusyTool(null));
-    },
-    [reload, setEnabled],
-  );
-
   const toggleDetails = useCallback((tool: DaemonWorkspaceToolStatus) => {
     setExpandedTools((current) => {
-      const next = new Set(current);
-      if (next.has(tool.name)) {
-        next.delete(tool.name);
-      } else {
-        next.add(tool.name);
-      }
-      return next;
+      return current.has(tool.name) ? new Set() : new Set([tool.name]);
     });
   }, []);
 
@@ -76,40 +51,15 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  useDelayedGlobalKeyDown(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, Math.max(tools.length - 1, 0)));
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.max(i - 1, 0));
-        return;
-      }
-      if (e.key === 'r') {
-        e.preventDefault();
-        reload();
-        return;
-      }
-      if ((e.key === 'Enter' || e.key === ' ') && selected?.description) {
-        e.preventDefault();
-        toggleDetails(selected);
-        return;
-      }
-      if (e.key === 't' && selected) {
-        e.preventDefault();
-        handleToggle(selected);
-      }
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: tools.length,
+    activeIndex: selectedIdx,
+    onActiveIndexChange: setSelectedIdx,
+    onConfirm: (index) => {
+      const tool = tools[index];
+      if (tool?.description) toggleDetails(tool);
     },
-    [handleToggle, onClose, reload, selected, toggleDetails, tools.length],
-  );
+  });
 
   const summary = useMemo(() => {
     if (!status) return '';
@@ -117,80 +67,101 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
     return t('tools.summary', { enabled, total: tools.length });
   }, [status, tools, t]);
 
-  // resume-picker-keyboard-only: disable mouse hover highlight to prevent
-  // hover from fighting keyboard selection for focus
   return (
-    <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>{t('tools.title')}</span>
-        <span className={dp('resume-picker-count')}>{summary}</span>
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
+    <div className={dp('picker', 'picker-in-shell')}>
+      {summary && (
+        <div className={dp('picker-search')}>
+          <span className={dp('picker-search-hint')}>{summary}</span>
+        </div>
+      )}
       {(message || loading) && (
-        <div className={dp('resume-picker-search')}>
-          <span className={dp('resume-picker-search-hint')}>
+        <div className={dp('picker-search')}>
+          <span className={dp('picker-search-hint')}>
             {message || t('tools.loading')}
           </span>
         </div>
       )}
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
 
-      <div className={dp('resume-picker-list')} ref={listRef}>
+      <div
+        id={LIST_ID}
+        role="listbox"
+        aria-label={t('tools.title')}
+        tabIndex={0}
+        aria-activedescendant={
+          tools.length > 0 ? optionId(selectedIdx) : undefined
+        }
+        className={dp(
+          'picker-list',
+          keyboardMode ? 'picker-keyboard-only' : undefined,
+        )}
+        ref={listRef}
+      >
         {!loading && tools.length === 0 && (
-          <div className={dp('resume-picker-empty')}>{t('tools.empty')}</div>
+          <div className={dp('picker-empty')}>{t('tools.empty')}</div>
         )}
         {tools.map((tool, i) => {
           const expanded = expandedTools.has(tool.name);
           const desc = tool.description ?? '';
-          const internalName =
-            tool.displayName && tool.displayName !== tool.name ? tool.name : '';
-          const metaText = expanded
-            ? ''
-            : internalName ||
-              (desc.length > 80 ? `${desc.slice(0, 80)}...` : desc);
-
           return (
             <div
               key={tool.name}
+              id={optionId(i)}
+              role="option"
+              // Informational list — rows are expanded, never "chosen", so no
+              // row is ever aria-selected; the roving highlight is conveyed by
+              // aria-activedescendant on the listbox.
+              aria-selected={false}
+              aria-expanded={desc ? expanded : undefined}
               className={dp(
-                'resume-picker-item',
-                'resume-picker-session-item',
+                'picker-item',
+                'picker-session-item',
+                'tools-picker-item',
                 i === selectedIdx ? 'selected' : undefined,
+                expanded ? 'tools-picker-item-expanded' : undefined,
               )}
               onClick={() => {
                 setSelectedIdx(i);
                 if (tool.description) toggleDetails(tool);
               }}
+              onMouseMove={() => setSelectedIdx(i)}
             >
-              <div className={dp('resume-picker-item-row')}>
-                <span className={dp('resume-picker-item-prefix')}>
-                  {i === selectedIdx ? '›' : ' '}
-                </span>
-                <span className={dp('resume-picker-item-title')}>
+              <div className={dp('picker-item-row')}>
+                <span className={dp('tools-item-icon')} aria-hidden="true" />
+                <span className={dp('picker-item-title')}>
                   {toolLabel(tool)}
                 </span>
-              </div>
-              <div className={dp('resume-picker-item-meta')}>
-                <span>
-                  {busyTool === tool.name
-                    ? '...'
-                    : tool.enabled
-                      ? t('tools.status.enabled')
-                      : t('tools.status.disabled')}
+                <span
+                  className={dp(
+                    'tools-status-badge',
+                    tool.enabled
+                      ? 'tools-status-badge-enabled'
+                      : 'tools-status-badge-disabled',
+                  )}
+                >
+                  {tool.enabled
+                    ? t('tools.status.enabled')
+                    : t('tools.status.disabled')}
                 </span>
-                {!expanded && metaText && (
-                  <span className={dp('resume-picker-item-detail')}>
-                    {metaText}
-                  </span>
-                )}
+                {desc ? (
+                  <svg
+                    className={dp(
+                      'tools-item-chevron',
+                      expanded ? 'tools-item-chevron-expanded' : undefined,
+                    )}
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M6 4.5 9.5 8 6 11.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : null}
               </div>
               {expanded && desc && (
                 <div className={dp('tools-desc-expanded')}>
@@ -200,21 +171,6 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
             </div>
           );
         })}
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-footer')}>
-        {selected
-          ? t('tools.footer', {
-              name: toolLabel(selected),
-              details: selected?.description
-                ? selectedExpanded
-                  ? t('tools.details.hide')
-                  : t('tools.details.show')
-                : '',
-            })
-          : t('tools.footer')}
       </div>
     </div>
   );

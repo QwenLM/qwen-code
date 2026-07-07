@@ -40,6 +40,12 @@ import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
+import type { StartupIdeConnectionStatus } from '../../utils/events.js';
+
+export interface PendingSkillView {
+  name: string;
+  description: string;
+}
 
 export interface UIState {
   history: HistoryItem[];
@@ -57,12 +63,19 @@ export interface UIState {
   statusLineSettingsVersion?: number;
   statusLineConfigOverride?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
+  isSkillReviewDialogOpen: boolean;
+  /** Pending auto-skills awaiting confirmation, plus their owning task id. */
+  skillReviewPending: { taskId: string; skills: PendingSkillView[] } | null;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isVoiceModelMode: boolean;
+  isVisionModelMode: boolean;
+  modelDialogPersistScope: 'workspace' | 'user' | undefined;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
+  isEffortDialogOpen: boolean;
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
@@ -142,11 +155,18 @@ export interface UIState {
   } | null;
   /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
   showWorktreeExitDialog: boolean;
+  /**
+   * P7-trigger: true while the current turn was steered toward the Workflow
+   * tool by the `workflow` keyword. Drives the Footer `workflow active`
+   * indicator; cleared when the turn returns to idle.
+   */
+  workflowKeywordActive: boolean;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;
   mainControlsRef: React.MutableRefObject<DOMElement | null>;
   currentIDE: IdeInfo | null;
+  startupIdeConnectionStatus: StartupIdeConnectionStatus;
   updateInfo: UpdateObject | null;
   showIdeRestartPrompt: boolean;
   ideTrustRestartReason: RestartReason;
@@ -177,6 +197,8 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  taskStartStreamingChars: number;
+  responseCandidateTokens: number;
   // Real-time token display: ref to streaming output char length (polled, not state)
   streamingResponseLengthRef: React.RefObject<number>;
   // True = receiving content (↓), false = waiting for API response (↑)
@@ -186,8 +208,12 @@ export interface UIState {
   setSessionName: (name: string | null) => void;
   // Prompt suggestion
   promptSuggestion: string | null;
-  /** Dismiss prompt suggestion (clears state, aborts speculation) */
-  dismissPromptSuggestion: () => void;
+  /**
+   * Abort in-flight suggestion generation/speculation; intentionally preserves
+   * `promptSuggestion` so the placeholder can restore it when the buffer is
+   * emptied again.
+   */
+  abortPromptSuggestion: () => void;
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;

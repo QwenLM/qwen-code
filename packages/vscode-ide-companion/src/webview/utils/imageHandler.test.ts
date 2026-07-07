@@ -184,6 +184,19 @@ describe('normalizeImageAttachment', () => {
   it('rejects attachments with unsupported image mime types', () => {
     expect(
       normalizeImageAttachment({
+        id: 'img-unsupported',
+        name: 'vector.svg',
+        type: 'image/svg+xml',
+        size: 114,
+        data: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+        timestamp: Date.now(),
+      }),
+    ).toBeNull();
+  });
+
+  it('accepts GIF attachments when normalizing pasted images', () => {
+    expect(
+      normalizeImageAttachment({
         id: 'img-1',
         name: 'animated.gif',
         type: 'image/gif',
@@ -191,7 +204,11 @@ describe('normalizeImageAttachment', () => {
         data: 'data:image/gif;base64,R0lGODdhAQABAIAAAP///////ywAAAAAAQABAAACAkQBADs=',
         timestamp: Date.now(),
       }),
-    ).toBeNull();
+    ).toMatchObject({
+      name: 'animated.gif',
+      type: 'image/gif',
+      data: 'R0lGODdhAQABAIAAAP///////ywAAAAAAQABAAACAkQBADs=',
+    });
   });
 
   it('rejects attachments whose decoded payload exceeds the enforced byte limit', () => {

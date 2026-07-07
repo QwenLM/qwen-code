@@ -15,6 +15,32 @@ import {
 
 export type CronListParams = Record<string, never>;
 
+interface ListedJob {
+  id: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  durable: boolean;
+  fireAtMs?: number;
+  /** Optional display name (durable tasks created via the management UI). */
+  name?: string;
+  /** Absent (session-only jobs) or true = active; false = kept on disk but
+   * skipped by the scheduler. Surfaced so the agent can tell a disabled task
+   * apart from an active one. */
+  enabled?: boolean;
+}
+
+function truncatePrompt(prompt: string): string {
+  return prompt.length > 60 ? prompt.slice(0, 57) + '...' : prompt;
+}
+
+function displaySchedule(cron: string, fireAtMs?: number): string {
+  if (cron === '@wakeup' && fireAtMs !== undefined) {
+    return `wakeup at ${new Date(fireAtMs).toISOString()}`;
+  }
+  return humanReadableCron(cron);
+}
+
 class CronListInvocation extends BaseToolInvocation<
   CronListParams,
   ToolResult
@@ -50,13 +76,15 @@ class CronListInvocation extends BaseToolInvocation<
         error: { message },
       };
     }
-    const jobs = [
+    const jobs: ListedJob[] = [
       ...fileTasks.map((task) => ({
         id: task.id,
         cron: task.cron,
         prompt: task.prompt,
         recurring: task.recurring,
         durable: true,
+        ...(task.name ? { name: task.name } : {}),
+        enabled: task.enabled !== false,
       })),
       ...scheduler
         .list()
@@ -67,24 +95,35 @@ class CronListInvocation extends BaseToolInvocation<
           prompt: job.prompt,
           recurring: job.recurring,
           durable: false,
+          fireAtMs: job.fireAtMs,
         })),
     ];
 
     if (jobs.length === 0) {
-      const result = 'No active cron jobs.';
+      const result = 'No active cron jobs or loop wakeups.';
       return { llmContent: result, returnDisplay: result };
     }
 
     const llmLines = jobs.map((job) => {
       const type = job.recurring ? 'recurring' : 'one-shot';
       const durability = job.durable ? 'durable' : 'session-only';
-      return `${job.id} — ${job.cron} (${type}) [${durability}]: ${job.prompt}`;
+      // A disabled durable task stays on disk but never fires — mark it so the
+      // agent doesn't assume it is active.
+      const status = job.enabled === false ? ', disabled' : '';
+      const schedule =
+        job.cron === '@wakeup'
+          ? displaySchedule(job.cron, job.fireAtMs)
+          : job.cron;
+      const prompt =
+        job.cron === '@wakeup' ? truncatePrompt(job.prompt) : job.prompt;
+      const label = job.name ? `${job.name}: ` : '';
+      return `${job.id} — ${schedule} (${type}) [${durability}${status}]: ${label}${prompt}`;
     });
     const llmContent = llmLines.join('\n');
 
     const displayLines = jobs.map(
       (job) =>
-        `${job.id} ${humanReadableCron(job.cron)} [${job.durable ? 'durable' : 'session-only'}]`,
+        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}]${job.name ? `: ${job.name}` : ''}`,
     );
     const returnDisplay = displayLines.join('\n');
 
@@ -102,7 +141,9 @@ export class CronListTool extends BaseDeclarativeTool<
     super(
       CronListTool.Name,
       ToolDisplayNames.CRON_LIST,
-      `List all cron jobs scheduled via CronCreate, both session-only and durable (${CRON_TASKS_DISPLAY_PATH}).`,
+      'List all cron jobs scheduled via CronCreate (session-only, or ' +
+        `durable under ${CRON_TASKS_DISPLAY_PATH}) and pending loop wakeups ` +
+        'scheduled via LoopWakeup (always session-only).',
       Kind.Other,
       {
         type: 'object',
@@ -113,7 +154,7 @@ export class CronListTool extends BaseDeclarativeTool<
       false, // canUpdateOutput
       true, // shouldDefer — low-frequency inspection tool
       false, // alwaysLoad
-      'cron list scheduled jobs',
+      'cron list show active scheduled tasks loop jobs wakeups',
     );
   }
 

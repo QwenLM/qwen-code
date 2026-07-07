@@ -104,6 +104,12 @@ describe('languageUtils', () => {
       expect(normalizeOutputLanguage('en')).toBe('English');
     });
 
+    it('should normalize "english" to "English"', () => {
+      expect(normalizeOutputLanguage('english')).toBe('English');
+      expect(normalizeOutputLanguage('English')).toBe('English');
+      expect(normalizeOutputLanguage('en-US')).toBe('English');
+    });
+
     it('should convert "zh" to "Chinese"', () => {
       expect(normalizeOutputLanguage('zh')).toBe('Chinese');
     });
@@ -134,6 +140,7 @@ describe('languageUtils', () => {
     it('should preserve explicit language names as-is', () => {
       expect(normalizeOutputLanguage('Japanese')).toBe('Japanese');
       expect(normalizeOutputLanguage('French')).toBe('French');
+      expect(normalizeOutputLanguage('french')).toBe('French');
     });
 
     it('should preserve unknown language names as-is', () => {
@@ -164,6 +171,12 @@ describe('languageUtils', () => {
 
     it('should normalize explicit locale codes', () => {
       expect(resolveOutputLanguage('zh')).toBe('Chinese');
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
+    it('should normalize "english"', () => {
+      expect(resolveOutputLanguage('english')).toBe('English');
+      expect(resolveOutputLanguage('en-US')).toBe('English');
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 

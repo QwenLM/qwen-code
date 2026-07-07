@@ -1,8 +1,7 @@
 .group {
-  margin-bottom: 12px;
-  margin-left: 14px;
+  margin: 5px 0;
   padding: 8px 14px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   display: flex;
   flex-direction: column;
@@ -12,9 +11,191 @@
   overflow: hidden;
 }
 
+.chatSummaryGroup {
+  margin: 4px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  gap: 2px;
+}
+
 .line {
   padding: 2px 0;
   min-width: 0;
+}
+
+.chatSummary {
+  width: 100%;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummary:hover,
+.chatSummary:focus-visible {
+  color: var(--primary);
+  outline: none;
+}
+
+.chatSummary:hover .chatSummaryTextActive,
+.chatSummary:focus-visible .chatSummaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
+}
+
+.chatSummaryIcon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.chatSummaryIcon svg {
+  display: block;
+}
+
+.chatSummaryToolIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.chatSummaryText {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.chatSummaryInline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  color: inherit;
+  vertical-align: bottom;
+}
+
+.chatSummaryTextActive {
+  color: var(--muted-foreground);
+  background-image: linear-gradient(
+    105deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 46%,
+    rgba(255, 255, 255, 0.92) 50%,
+    var(--muted-foreground) 54%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 300% 100%;
+  background-position: 150% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-summary-shine 5s linear infinite;
+}
+
+@keyframes chat-summary-shine {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -150% 0;
+  }
+}
+
+.chatChevronRight,
+.chatChevronDown {
+  width: 14px;
+  height: 14px;
+  position: relative;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chatChevronRight::before,
+.chatChevronRight::after,
+.chatChevronDown::before,
+.chatChevronDown::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.chatSummary:hover .chatChevronRight,
+.chatSummary:hover .chatChevronDown,
+.chatSummary:focus-visible .chatChevronRight,
+.chatSummary:focus-visible .chatChevronDown {
+  opacity: 1;
+}
+
+.chatChevronRight {
+  transform: none;
+}
+
+.chatChevronRight::before {
+  top: calc(50% - 2px);
+  left: calc(50% - 3px);
+  transform: rotate(45deg);
+}
+
+.chatChevronRight::after {
+  top: calc(50% + 2px);
+  left: calc(50% - 3px);
+  transform: rotate(-45deg);
+}
+
+.chatChevronDown {
+  transform: none;
+  opacity: 1;
+}
+
+.chatChevronDown::before {
+  top: 50%;
+  left: calc(50% - 5px);
+  transform: rotate(45deg);
+}
+
+.chatChevronDown::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  transform: rotate(-45deg);
+}
+
+.chatSummaryContentClip {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease;
+}
+
+.chatSummaryContentCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.chatSummaryContentInner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .lineMain {
@@ -22,47 +203,25 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .icon {
-  font-size: 13px;
   flex-shrink: 0;
-}
-
-.iconDone {
-  color: var(--success-color);
+  white-space: nowrap;
 }
 
 .iconError {
   color: var(--error-color);
 }
 
-.iconPending {
-  color: var(--text-dimmed);
-}
-
-.iconSpin {
-  color: var(--warning-color);
-  display: inline-block;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .lineName {
-  font-weight: 700;
-  color: var(--text-primary);
-  font-size: 13px;
   flex-shrink: 0;
 }
 
 .lineArg {
-  color: var(--text-secondary);
-  font-size: 13px;
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -72,7 +231,6 @@
 
 .lineElapsed {
   margin-left: auto;
-  color: var(--text-dimmed);
   font-size: 12px;
   flex-shrink: 0;
 }
@@ -88,44 +246,129 @@
   cursor: pointer;
 }
 
-.lineExpandable:hover .lineName {
-  color: var(--accent-color);
+.lineExpandable .lineArg {
+  flex: 0 1 auto;
 }
 
-.agentSummary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  margin-left: 22px;
-  margin-top: 2px;
+.lineExpandable:hover,
+.lineExpandable:focus-visible {
+  color: var(--foreground);
+}
+
+.lineChevronRight,
+.lineChevronDown {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.lineChevronRight::before,
+.lineChevronDown::before {
+  content: '';
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-right: 1.25px solid currentColor;
+  border-bottom: 1.25px solid currentColor;
+  border-radius: 0.5px;
+  margin: 3px 0 0 2px;
+}
+
+.lineChevronRight::before {
+  transform: rotate(-45deg);
+}
+
+.lineChevronDown::before {
+  margin: 2px 0 0 3px;
+  transform: rotate(45deg);
+}
+
+.lineExpandable:hover .lineChevronRight,
+.lineExpandable:hover .lineChevronDown,
+.lineExpandable:focus-visible .lineChevronRight,
+.lineExpandable:focus-visible .lineChevronDown {
+  opacity: 1;
 }
 
 .lineOutput {
   margin-left: 16px;
   font-size: 12px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.4;
 }
 
-/* Full, wrapped tool argument shown below the header when the row is expanded
-   (the header drops its single-line ellipsised copy). Aligns with the expanded
-   output block below it. */
-.lineFullArg {
-  margin-left: 16px;
-  margin-top: 2px;
+.expandedCard {
+  margin: 5px 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--secondary);
+}
+
+.expandedCardHeader {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  align-items: stretch;
+  gap: 3px;
+  padding: 8px 12px 8px;
+}
+
+.expandedCardTitle {
+  flex-shrink: 0;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.expandedCardDetail {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.4;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  white-space: pre-wrap;
-  word-break: break-word;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.expandedCardBody {
+  padding: 6px 12px 8px;
+  min-width: 0;
+}
+
+.expandedAgentCard {
+  background: var(--secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 5px 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.expandedLineOutput {
+  margin-left: 0;
 }
 
 .lineDetail {
+  margin: 5px 0;
+  min-width: 0;
+  overflow: visible;
+}
+
+.markdownLineDetail {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  overflow: visible;
 }
 
 .expandedBash,
@@ -134,24 +377,25 @@
 }
 
 .expandedOutput {
-  padding: 0px 0px 0 16px;
+  margin: 0;
+  padding: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
-  margin-bottom: 0;
 }
 
 .expandedEdit {
-  margin-top: 2px;
+  margin: 0;
 }
 
 .expandedWrite {
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -160,41 +404,25 @@
   color: var(--success-color);
 }
 
-.expandBtn {
-  display: block;
-  width: 100%;
-  padding: 3px 10px;
-  margin-top: 10px;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  background: var(--subtle-bg);
-  border: none;
-  color: var(--text-dimmed);
-  cursor: pointer;
-  text-align: left;
-}
-
-.expandBtn:hover {
-  color: var(--accent-color);
-  background: var(--info-bg);
-}
-
 .todoProgress {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
 
 .todoBody {
-  padding: 4px 0 2px 24px;
+  padding: 4px 0 2px 14px;
+}
+
+.expandedCardBody .todoBody {
+  padding: 0;
 }
 
 .compactGroup {
   margin-bottom: 12px;
-  margin-left: 14px;
   padding: 8px 14px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
 }
 
@@ -203,16 +431,19 @@
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .compactCount {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 13px;
   flex-shrink: 0;
 }
 
 .compactHint {
   font-size: 12px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   margin-top: 4px;
 }

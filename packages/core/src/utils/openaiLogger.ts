@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
 import { createDebugLogger } from './debugLogger.js';
 import { isInternalPromptId } from './internalPromptIds.js';
+import { getRateLimitErrorDetails } from './rateLimit.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
 const MAIN_SESSION_PROMPT_ID_DELIMITER = '########';
@@ -111,6 +112,39 @@ function contextForPromptId(
   };
 }
 
+function getString(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+function getErrorRequestId(error: Error): string | undefined {
+  const source = error as {
+    requestID?: unknown;
+    request_id?: unknown;
+    requestId?: unknown;
+    response_id?: unknown;
+  };
+  return (
+    getString(source.requestID) ??
+    getString(source.request_id) ??
+    getString(source.requestId) ??
+    getString(source.response_id) ??
+    getRateLimitErrorDetails(error).requestId
+  );
+}
+
+function serializeError(error: Error): {
+  message: string;
+  stack?: string;
+  requestId?: string;
+} {
+  const requestId = getErrorRequestId(error);
+  return {
+    message: error.message,
+    stack: error.stack,
+    ...(requestId ? { requestId } : {}),
+  };
+}
+
 /**
  * Logger specifically for OpenAI API requests and responses
  */
@@ -175,12 +209,7 @@ export class OpenAILogger {
       timestamp: new Date().toISOString(),
       request,
       response: response || null,
-      error: error
-        ? {
-            message: error.message,
-            stack: error.stack,
-          }
-        : null,
+      error: error ? serializeError(error) : null,
       context: contextForPromptId(promptId),
       system: {
         hostname: os.hostname(),
@@ -217,7 +246,7 @@ export class OpenAILogger {
         .sort()
         .reverse();
 
-      return limit ? logFiles.slice(0, limit) : logFiles;
+      return limit === undefined ? logFiles : logFiles.slice(0, limit);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];

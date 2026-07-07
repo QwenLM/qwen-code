@@ -22,6 +22,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   CoreToolScheduler,
+  compactToolResultDisplayForHistory,
   createDebugLogger,
   isAnyAutoMemPath,
 } from '@qwen-code/qwen-code-core';
@@ -111,11 +112,12 @@ export function useReactToolScheduler(
 
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      const compactOutput = compactToolResultDisplayForHistory(outputChunk);
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {
           if (tc.request.callId === toolCallId && tc.status === 'executing') {
             const executingTc = tc as TrackedExecutingToolCall;
-            return { ...executingTc, liveOutput: outputChunk };
+            return { ...executingTc, liveOutput: compactOutput };
           }
           return tc;
         }),
@@ -325,21 +327,27 @@ export function mapToDisplay(
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'error':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'cancelled':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'awaiting_approval':
@@ -350,6 +358,7 @@ export function mapToDisplay(
             confirmationDetails: trackedCall.confirmationDetails,
           };
         case 'executing':
+          // React stores compacted live output when handling raw update chunks.
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),

@@ -9,21 +9,27 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
-import type { Config } from '../config/config.js';
+import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
+  FileDiff,
   ToolInvocation,
   ToolResult,
   ToolResultDisplay,
   ToolCallConfirmationDetails,
+  ToolEditConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-  ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { getErrorMessage } from '../utils/errors.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolConfirmationOutcome,
+} from './tools.js';
+import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import {
   CommitAttributionService,
@@ -42,13 +48,15 @@ import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpaths } from '../utils/paths.js';
+import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
   buildShellExecWarnings,
+  detectSelfKillCommand,
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
   hasShellSubstitution,
+  SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
   type ShellType,
   splitCommands,
@@ -56,10 +64,21 @@ import {
 } from '../utils/shell-utils.js';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyAST,
   extractCommandRules,
 } from '../utils/shellAstParser.js';
+import {
+  applySedSubstitution,
+  parseSedEditCommand,
+  type SedEditInfo,
+} from '../utils/sedEditParser.js';
+import {
+  detectLineEnding,
+  type ReadTextFileResponse,
+} from '../services/fileSystemService.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -990,6 +1009,50 @@ function longRunThresholdFor(effectiveTimeoutMs: number): number {
   );
 }
 
+const FOREGROUND_TIMEOUT_WARNING_LEAD_MS = 15_000;
+const FOREGROUND_TIMEOUT_WARNING =
+  'Warning: this command is about to time out. In the interactive TUI, press Ctrl+B to keep it running in the background.';
+
+function foregroundTimeoutWarningDelayFor(
+  effectiveTimeoutMs: number,
+  elapsedMs: number,
+): number | null {
+  if (effectiveTimeoutMs <= FOREGROUND_TIMEOUT_WARNING_LEAD_MS) {
+    return null;
+  }
+  const remainingMs = effectiveTimeoutMs - elapsedMs;
+  if (remainingMs <= 0) {
+    return null;
+  }
+  return Math.max(0, remainingMs - FOREGROUND_TIMEOUT_WARNING_LEAD_MS);
+}
+
+function appendForegroundTimeoutWarning(
+  output: string | AnsiOutput,
+): string | AnsiOutput {
+  if (typeof output === 'string') {
+    return output
+      ? `${output}\n\n${FOREGROUND_TIMEOUT_WARNING}`
+      : FOREGROUND_TIMEOUT_WARNING;
+  }
+
+  return [
+    ...output,
+    [
+      {
+        text: FOREGROUND_TIMEOUT_WARNING,
+        bold: true,
+        italic: false,
+        underline: false,
+        dim: false,
+        inverse: false,
+        fg: '#ff5555',
+        bg: '',
+      },
+    ],
+  ];
+}
+
 /**
  * Format the long-run advisory appended to long foreground commands.
  * Exported so tests and any future consumer (e.g. an alternative
@@ -1421,15 +1484,371 @@ export interface ShellToolParams {
   directory?: string;
 }
 
+interface PreparedSedEdit {
+  filePath: string;
+  fileName: string;
+  originalContent: string;
+  newContent: string;
+  meta: ReadTextFileResponse['_meta'];
+}
+
+class SedEditSimulationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SedEditSimulationError';
+  }
+}
+
+class SedEditCancelledError extends Error {
+  constructor() {
+    super('Command was cancelled by user before it could complete.');
+    this.name = 'SedEditCancelledError';
+  }
+}
+
+function getAbortReasonName(signal: AbortSignal): string | undefined {
+  const reason = signal.reason as unknown;
+  if (
+    typeof reason === 'object' &&
+    reason !== null &&
+    'name' in reason &&
+    typeof reason.name === 'string'
+  ) {
+    return reason.name;
+  }
+  return undefined;
+}
+
+const LEADING_ENV_ASSIGNMENT_RE = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
+
 export class ShellToolInvocation extends BaseToolInvocation<
   ShellToolParams,
   ToolResult
 > {
+  private preparedSedEdit: PreparedSedEdit | undefined;
+  private confirmedSedNewContent: string | undefined;
+  private sedEditPreviewFailed = false;
+
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
   ) {
     super(params);
+  }
+
+  private getSedEditInfo(): SedEditInfo | null {
+    if (
+      this.params.is_background ||
+      LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
+    ) {
+      return null;
+    }
+    const strippedCommand = stripShellWrapper(this.params.command);
+    if (LEADING_ENV_ASSIGNMENT_RE.test(strippedCommand)) {
+      return null;
+    }
+    return parseSedEditCommand(strippedCommand);
+  }
+
+  private resolveSedFilePath(filePath: string): string {
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    const cwd = this.params.directory || this.config.getTargetDir();
+    return path.resolve(cwd, filePath);
+  }
+
+  private async checkSedPriorRead(filePath: string): Promise<void> {
+    if (this.config.getFileReadCacheDisabled()) {
+      return;
+    }
+    const priorReadResult = await checkPriorRead(
+      this.config.getFileReadCache(),
+      filePath,
+      'editing',
+    );
+    if (!priorReadResult.ok) {
+      throw new StructuredToolError(
+        priorReadResult.rawMessage,
+        priorReadResult.type,
+      );
+    }
+  }
+
+  private async prepareSedEdit(sedInfo: SedEditInfo): Promise<PreparedSedEdit> {
+    const filePath = this.resolveSedFilePath(sedInfo.filePath);
+    if (fs.lstatSync(filePath).isSymbolicLink()) {
+      throw new Error(
+        `sed edit target '${filePath}' is a symlink; falling back to shell execution`,
+      );
+    }
+    await this.checkSedPriorRead(filePath);
+    const { content, _meta } = await this.config
+      .getFileSystemService()
+      .readTextFile({ path: filePath });
+    let newContent: string;
+    try {
+      newContent = applySedSubstitution(content, sedInfo);
+    } catch (err) {
+      throw new SedEditSimulationError(getErrorMessage(err));
+    }
+
+    return {
+      filePath,
+      fileName: path.basename(filePath),
+      originalContent: content,
+      newContent,
+      meta: {
+        ..._meta,
+        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+      },
+    };
+  }
+
+  private makeSedEditDisplay(edit: PreparedSedEdit): FileDiff {
+    const diffStat = getDiffStat(
+      edit.fileName,
+      edit.originalContent,
+      edit.newContent,
+      edit.newContent,
+    );
+    return {
+      fileDiff: createPatchSmart(
+        edit.fileName,
+        edit.originalContent,
+        edit.newContent,
+        'Current',
+        'Proposed',
+      ),
+      fileName: edit.fileName,
+      originalContent: edit.originalContent,
+      newContent: edit.newContent,
+      diffStat,
+    };
+  }
+
+  private sedEditError(
+    message: string,
+    type = ToolErrorType.FILE_WRITE_FAILURE,
+  ): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      error: {
+        message,
+        type,
+      },
+    };
+  }
+
+  private sedEditCancelledResult(
+    signal: AbortSignal,
+    effectiveTimeout: number,
+  ): ToolResult {
+    if (getAbortReasonName(signal) === 'TimeoutError') {
+      const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+    return {
+      llmContent: 'Command was cancelled by user before it could complete.',
+      returnDisplay: 'Command cancelled by user.',
+    };
+  }
+
+  private waitForSedOperation<T>(
+    operation: () => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) {
+      return Promise.reject(new SedEditCancelledError());
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        reject(new SedEditCancelledError());
+      };
+      const removeAbortListener = () => {
+        signal.removeEventListener('abort', onAbort);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      let operationPromise: Promise<T>;
+      try {
+        operationPromise = operation();
+      } catch (err) {
+        removeAbortListener();
+        reject(err);
+        return;
+      }
+      operationPromise.then(
+        (value) => {
+          removeAbortListener();
+          resolve(value);
+        },
+        (err: unknown) => {
+          removeAbortListener();
+          reject(err);
+        },
+      );
+    });
+  }
+
+  private async executeSedEdit(
+    sedInfo: SedEditInfo,
+    signal: AbortSignal,
+    effectiveTimeout: number,
+  ): Promise<ToolResult> {
+    let edit: PreparedSedEdit;
+    try {
+      edit = await this.waitForSedOperation(
+        () => this.prepareSedEdit(sedInfo),
+        signal,
+      );
+    } catch (err) {
+      const filePath = this.resolveSedFilePath(sedInfo.filePath);
+      if (err instanceof SedEditCancelledError) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      if (err instanceof SedEditSimulationError) {
+        const message = `Error simulating sed edit for file '${filePath}': ${err.message}`;
+        return this.sedEditError(
+          message,
+          ToolErrorType.EDIT_PREPARATION_FAILURE,
+        );
+      }
+      if (err instanceof StructuredToolError) {
+        return this.sedEditError(err.message, err.errorType);
+      }
+      const message = `Error reading file for sed edit '${filePath}': ${getErrorMessage(err)}`;
+      return this.sedEditError(
+        message,
+        isNodeError(err) && err.code === 'ENOENT'
+          ? ToolErrorType.FILE_NOT_FOUND
+          : ToolErrorType.READ_CONTENT_FAILURE,
+      );
+    }
+
+    if (
+      this.preparedSedEdit?.filePath === edit.filePath &&
+      this.preparedSedEdit.originalContent !== edit.originalContent
+    ) {
+      return this.sedEditError(
+        `File changed since sed edit confirmation: ${edit.filePath}. Please re-read the file and retry.`,
+        ToolErrorType.FILE_CHANGED_SINCE_READ,
+      );
+    }
+
+    if (
+      this.preparedSedEdit?.filePath === edit.filePath &&
+      this.confirmedSedNewContent !== undefined
+    ) {
+      edit = {
+        ...edit,
+        newContent: this.confirmedSedNewContent,
+      };
+    }
+
+    if (edit.originalContent === edit.newContent) {
+      const message = `sed edit made no changes to ${edit.filePath}.`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+      };
+    }
+
+    const display = this.makeSedEditDisplay(edit);
+    let fileHistoryBackupRecorded = false;
+    const userModifiedSedContent = this.confirmedSedNewContent !== undefined;
+
+    try {
+      if (signal.aborted) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      try {
+        await this.waitForSedOperation(
+          () => this.config.getFileHistoryService().trackEdit(edit.filePath),
+          signal,
+        );
+        fileHistoryBackupRecorded = true;
+      } catch (err) {
+        if (err instanceof SedEditCancelledError) {
+          return this.sedEditCancelledResult(signal, effectiveTimeout);
+        }
+        debugLogger.warn(
+          `file history trackEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+        // File history is best-effort; never block shell-compatible edits.
+      }
+
+      if (signal.aborted) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      // writeTextFile is not cancellation-aware; once the write starts, await
+      // it so the result reflects the on-disk state instead of a stale cancel.
+      await this.config.getFileSystemService().writeTextFile({
+        path: edit.filePath,
+        content: edit.newContent,
+        _meta: edit.meta,
+      });
+
+      if (!userModifiedSedContent) {
+        try {
+          CommitAttributionService.getInstance().recordEdit(
+            edit.filePath,
+            edit.originalContent,
+            edit.newContent,
+          );
+        } catch (err) {
+          debugLogger.warn(
+            `commit attribution recordEdit failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+          );
+          // Attribution is diagnostic metadata; the sed edit already succeeded.
+        }
+      }
+
+      try {
+        const postWriteStats = fs.statSync(edit.filePath);
+        this.config
+          .getFileReadCache()
+          .recordWrite(edit.filePath, postWriteStats);
+      } catch (err) {
+        debugLogger.warn(
+          `file read cache recordWrite failed for sed edit ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+        // Non-fatal: a future read can refresh the cache from disk.
+      }
+
+      return {
+        llmContent: `sed edit applied to ${edit.filePath}.`,
+        returnDisplay: display,
+      };
+    } catch (err) {
+      if (err instanceof SedEditCancelledError) {
+        return this.sedEditCancelledResult(signal, effectiveTimeout);
+      }
+      if (fileHistoryBackupRecorded) {
+        debugLogger.warn(
+          `sed edit write failed after file history backup was recorded for ${edit.filePath}: ${getErrorMessage(err)}`,
+        );
+      }
+      let type = ToolErrorType.FILE_WRITE_FAILURE;
+      let message = `Error writing sed edit to file '${edit.filePath}': ${getErrorMessage(err)}`;
+      if (isNodeError(err)) {
+        if (err.code === 'EACCES') {
+          type = ToolErrorType.PERMISSION_DENIED;
+          message = `Permission denied writing sed edit to file: ${edit.filePath} (${err.code})`;
+        } else if (err.code === 'ENOSPC') {
+          type = ToolErrorType.NO_SPACE_LEFT;
+          message = `No space left on device while writing sed edit to file: ${edit.filePath} (${err.code})`;
+        } else if (err.code === 'EISDIR') {
+          type = ToolErrorType.TARGET_IS_DIRECTORY;
+          message = `Sed edit target is a directory, not a file: ${edit.filePath} (${err.code})`;
+        }
+      }
+      return this.sedEditError(message, type);
+    }
   }
 
   getDescription(): string {
@@ -1499,6 +1918,50 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const command = stripShellWrapper(this.params.command);
     const pm = this.config.getPermissionManager?.();
     const cwd = this.params.directory || this.config.getTargetDir();
+    const sedInfo = this.getSedEditInfo();
+    let sedEditPreviewWarning: string | undefined;
+
+    if (sedInfo) {
+      try {
+        const edit = await this.prepareSedEdit(sedInfo);
+        this.preparedSedEdit = edit;
+        this.confirmedSedNewContent = undefined;
+        this.sedEditPreviewFailed = false;
+        const display = this.makeSedEditDisplay(edit);
+        const confirmationDetails: ToolEditConfirmationDetails = {
+          type: 'edit',
+          title: `Confirm Sed Edit: ${shortenPath(makeRelative(edit.filePath, this.config.getTargetDir()))}`,
+          fileName: edit.fileName,
+          filePath: edit.filePath,
+          fileDiff: display.fileDiff,
+          originalContent: edit.originalContent,
+          newContent: edit.newContent,
+          hideModify: true,
+          onConfirm: async (
+            outcome: ToolConfirmationOutcome,
+            payload?: ToolConfirmationPayload,
+          ) => {
+            if (payload?.newContent !== undefined) {
+              this.confirmedSedNewContent = payload.newContent;
+            }
+            if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+              this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+            }
+          },
+        };
+        return confirmationDetails;
+      } catch (err) {
+        if (err instanceof StructuredToolError) {
+          throw err;
+        }
+        this.sedEditPreviewFailed = true;
+        sedEditPreviewWarning =
+          'Sed edit preview unavailable; showing raw shell command confirmation.';
+        debugLogger.warn(
+          `sed edit preview failed, falling back to exec confirmation: ${getErrorMessage(err)}`,
+        );
+      }
+    }
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
@@ -1562,7 +2025,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (see issue #4093). Substitution is detected on both the stripped
     // and original command so wrappers like `bash -c "..."` are checked
     // along with their inner contents.
-    const warnings = buildShellExecWarnings(command, this.params.command);
+    const warnings = [
+      ...(buildShellExecWarnings(command, this.params.command) ?? []),
+      ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
+    ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
@@ -1577,7 +2043,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
-    if (warnings) {
+    if (warnings.length > 0) {
       confirmationDetails.warnings = warnings;
     }
     return confirmationDetails;
@@ -1589,6 +2055,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
     setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+    canPromoteForegroundShell?: () => boolean,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -1619,13 +2086,37 @@ export class ShellToolInvocation extends BaseToolInvocation<
       signal,
       promoteAbortController.signal,
     ]);
+    let timeoutSignalStartedAt: number | null = null;
     if (effectiveTimeout) {
+      timeoutSignalStartedAt = Date.now();
       const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
       combinedSignal = AbortSignal.any([
         signal,
         timeoutSignal,
         promoteAbortController.signal,
       ]);
+    }
+
+    const sedInfo = this.getSedEditInfo();
+    if (sedInfo && !this.sedEditPreviewFailed) {
+      if (this.preparedSedEdit) {
+        debugLogger.debug('executing simulated sed edit', {
+          command: this.params.command,
+        });
+        return this.executeSedEdit(sedInfo, combinedSignal, effectiveTimeout);
+      }
+      try {
+        await this.checkSedPriorRead(this.resolveSedFilePath(sedInfo.filePath));
+      } catch (err) {
+        if (err instanceof StructuredToolError) {
+          return this.sedEditError(err.message, err.errorType);
+        }
+        throw err;
+      }
+      debugLogger.debug(
+        'falling back to shell execution for sed edit without prepared preview',
+        { command: this.params.command },
+      );
     }
 
     // Add co-author to git commit commands and Qwen Code attribution to
@@ -1675,11 +2166,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let totalLines = 0;
     let totalBytes = 0;
     let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let timeoutWarningTimer: ReturnType<typeof setTimeout> | null = null;
+    let showTimeoutWarning = false;
 
     const cancelTrailingFlush = () => {
       if (trailingFlushTimer !== null) {
         clearTimeout(trailingFlushTimer);
         trailingFlushTimer = null;
+      }
+    };
+
+    const cancelTimeoutWarning = () => {
+      if (timeoutWarningTimer !== null) {
+        clearTimeout(timeoutWarningTimer);
+        timeoutWarningTimer = null;
       }
     };
 
@@ -1691,11 +2191,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cancelTrailingFlush();
       lastUpdateTime = Date.now();
       if (!updateOutput) return;
-      if (typeof cumulativeOutput === 'string') {
-        updateOutput(cumulativeOutput);
+      const displayOutput = showTimeoutWarning
+        ? appendForegroundTimeoutWarning(cumulativeOutput)
+        : cumulativeOutput;
+      if (typeof displayOutput === 'string') {
+        updateOutput(displayOutput);
       } else {
         updateOutput({
-          ansiOutput: cumulativeOutput,
+          ansiOutput: displayOutput,
           totalLines,
           totalBytes,
           ...(this.params.timeout != null && {
@@ -1710,8 +2213,37 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // between the abort signal firing and the result promise settling.
     const onAbort = () => {
       cancelTrailingFlush();
+      cancelTimeoutWarning();
     };
     combinedSignal.addEventListener('abort', onAbort, { once: true });
+
+    const armTimeoutWarning = () => {
+      if (
+        !updateOutput ||
+        combinedSignal.aborted ||
+        !this.config.isInteractive() ||
+        setPromoteAbortControllerCallback === undefined ||
+        canPromoteForegroundShell?.() !== true ||
+        timeoutSignalStartedAt === null
+      ) {
+        return;
+      }
+      const warningDelay = foregroundTimeoutWarningDelayFor(
+        effectiveTimeout,
+        Date.now() - timeoutSignalStartedAt,
+      );
+      if (warningDelay === null) {
+        return;
+      }
+      timeoutWarningTimer = setTimeout(() => {
+        timeoutWarningTimer = null;
+        if (combinedSignal.aborted || canPromoteForegroundShell?.() !== true) {
+          return;
+        }
+        showTimeoutWarning = true;
+        doUpdate();
+      }, warningDelay);
+    };
 
     const onShellOutputEvent = (event: ShellOutputEvent) => {
       let shouldUpdate = false;
@@ -1870,6 +2402,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (theoretically) scheduled trailing flush so nothing fires after we
       // re-throw to the caller.
       cancelTrailingFlush();
+      cancelTimeoutWarning();
       combinedSignal.removeEventListener('abort', onAbort);
       throw err;
     }
@@ -1884,6 +2417,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // implement promote yet, but exposing it now means PR-3 doesn't
     // need to revisit shell.ts.
     setPromoteAbortControllerCallback?.(promoteAbortController);
+    armTimeoutWarning();
 
     // Bracket the spawn → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Captured AFTER
@@ -1912,6 +2446,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // fire a stale frame after we've returned. `finally` covers both the
       // happy path and the (theoretical) reject path so no timer leaks.
       cancelTrailingFlush();
+      cancelTimeoutWarning();
       combinedSignal.removeEventListener('abort', onAbort);
     }
 
@@ -1976,10 +2511,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // `promoteAbortController.signal.aborted` exclusion, the
       // foreground path would falsely report "Command timed out" for
       // a process that finished naturally.
+      // When the scheduler's execution timeout fires, execSignal is aborted
+      // with a TimeoutError — distinguish this from a user cancellation.
+      const schedulerTimedOut =
+        signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
       const wasTimeout =
         effectiveTimeout &&
         combinedSignal.aborted &&
-        !signal.aborted &&
+        (!signal.aborted || schedulerTimedOut) &&
         !promoteAbortController.signal.aborted;
       const wasPromoteRefused =
         promoteAbortController.signal.aborted && !signal.aborted;
@@ -2133,10 +2672,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
           // cancellation. See the matching block above for why we also
           // exclude `promoteAbortController.signal.aborted` from the
           // timeout discriminator.
+          const schedulerTimedOut =
+            signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
           const wasTimeout =
             effectiveTimeout &&
             combinedSignal.aborted &&
-            !signal.aborted &&
+            (!signal.aborted || schedulerTimedOut) &&
             !promoteAbortController.signal.aborted;
           const wasPromoteRefused =
             promoteAbortController.signal.aborted && !signal.aborted;
@@ -3934,9 +4475,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Detect `gh pr create` commands and append AI attribution text to the
-   * PR body. Format: "🤖 Generated with Qwen Code (N-shotted by Qwen-Coder)"
+   * PR body. Format: "Generated with Qwen Code (N-shotted by Qwen-Coder)"
    * when at least one user prompt has been recorded since the last commit;
-   * otherwise just "🤖 Generated with Qwen Code".
+   * otherwise just "Generated with Qwen Code".
    *
    * Skipped on Windows: the appended text relies on bash quote-escape
    * conventions (`\$`, `'\''`) that cmd.exe and PowerShell don't honor,
@@ -3971,8 +4512,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const attribution =
       shots > 0
-        ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
-        : `\n\n🤖 Generated with Qwen Code`;
+        ? `\n\nGenerated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\n\nGenerated with Qwen Code`;
 
     // Match both the long form `--body` and the short alias `-b`
     // (documented in `gh pr create --help`), with either space or
@@ -4316,11 +4857,15 @@ export class ShellTool extends BaseDeclarativeTool<
   ): string | null {
     // NOTE: Permission checks (read-only detection, PM rules) are handled at
     // L3 (getDefaultPermission) and L4 (PM override) in coreToolScheduler.
-    // This method only performs pure parameter validation.
+    // This method handles parameter validation plus non-overridable shell
+    // safety gates that must run before auto/YOLO execution.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
     const strippedCommand = stripShellWrapper(params.command);
+    if (detectSelfKillCommand(params.command)) {
+      return SHELL_SELF_KILL_REJECTION;
+    }
     if (
       params.is_background &&
       hasTopLevelTrailingBackgroundOperator(strippedCommand)
@@ -4359,12 +4904,8 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
-      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
-      const isWithinWorkspace = workspaceDirs.some((wsDir) =>
-        params.directory!.startsWith(wsDir),
-      );
-
-      if (!isWithinWorkspace) {
+      const workspaceContext = this.config.getWorkspaceContext();
+      if (!workspaceContext.isPathWithinWorkspace(params.directory)) {
         return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
       }
     }

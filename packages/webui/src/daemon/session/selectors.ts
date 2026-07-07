@@ -72,6 +72,7 @@ export function extractDaemonTodosFromToolBlock(
   const toolKind = (block.toolKind ?? '').toLowerCase();
   if (
     toolName !== 'todowrite' &&
+    toolName !== 'todo_write' &&
     toolKind !== 'updated_plan' &&
     toolKind !== 'todo' &&
     toolKind !== 'other'
@@ -175,10 +176,19 @@ export function selectDaemonTranscriptStreamingState(
 
 export function selectDaemonStreamingState(
   blocks: readonly DaemonTranscriptBlock[],
-  promptStatus: DaemonPromptStatus = 'idle',
+  promptStatus?: DaemonPromptStatus,
 ): DaemonStreamingState {
   const transcriptState = selectDaemonTranscriptStreamingState(blocks);
-  if (promptStatus === 'idle' || transcriptState !== 'idle') {
+  // `promptStatus` is sourced from the daemon/session action state and is the
+  // authority for whether the current prompt is active after load/resume.
+  // Replayed transcript blocks may still contain stale running tool states.
+  if (promptStatus === 'idle') {
+    return 'idle';
+  }
+  if (transcriptState !== 'idle') {
+    return transcriptState;
+  }
+  if (promptStatus === undefined) {
     return transcriptState;
   }
   return promptStatus === 'waiting' ? 'waiting' : 'responding';

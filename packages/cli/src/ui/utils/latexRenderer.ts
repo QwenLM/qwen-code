@@ -7,7 +7,7 @@
 import {
   renderTerminalMathBlock,
   renderTerminalMathInline,
-} from './TerminalMathRenderer.js';
+} from './terminal-math-renderer.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('LATEX_RENDERER');
@@ -230,7 +230,9 @@ function summarizeLatexInput(input: string): string {
   const sanitized = Array.from(input)
     .map((char) => {
       const code = char.charCodeAt(0);
-      return code <= 0x1f || code === 0x7f || code === 0x9b ? ' ' : char;
+      return code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)
+        ? ' '
+        : char;
     })
     .join('');
   return sanitized.length > MAX_LOGGED_INPUT_CHARS

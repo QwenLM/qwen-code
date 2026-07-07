@@ -1,13 +1,17 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { dp } from './dialogStyles';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
-import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { dp } from './dialogStyles';
+import styles from './ModelDialog.module.css';
+
+export type ModelDialogMode = 'main' | 'fast' | 'voice' | 'vision';
 
 interface ModelDialogProps {
-  mode?: 'main' | 'fast';
+  mode?: ModelDialogMode;
   onSelect: (modelId: string) => void;
-  onClose: () => void;
+  models?: ModelDialogModel[];
+  currentModelId?: string;
 }
 
 interface ModelDialogModel {
@@ -16,6 +20,14 @@ interface ModelDialogModel {
   label?: string;
   authType?: string;
   contextWindow?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  baseUrl?: string;
+  envKey?: string;
   isRuntime?: boolean;
 }
 
@@ -25,6 +37,20 @@ function formatContextWindow(size: number | undefined, t: T): string {
   return size
     ? `${size.toLocaleString()} ${t('contextUsage.tokens')}`
     : t('model.contextWindow.unknown');
+}
+
+function formatModalities(
+  modalities: ModelDialogModel['modalities'],
+  t: T,
+): string {
+  if (!modalities) return t('model.modality.textOnly');
+  const parts: string[] = [];
+  if (modalities.image) parts.push(t('model.modality.image'));
+  if (modalities.pdf) parts.push(t('model.modality.pdf'));
+  if (modalities.audio) parts.push(t('model.modality.audio'));
+  if (modalities.video) parts.push(t('model.modality.video'));
+  if (parts.length === 0) return t('model.modality.textOnly');
+  return `${t('model.modality.text')} · ${parts.join(' · ')}`;
 }
 
 function getAuthType(model: ModelDialogModel): string | undefined {
@@ -39,17 +65,28 @@ function getModelName(model: ModelDialogModel): string {
   return model.id.replace(/\([^()]+\)$/, '');
 }
 
-function DetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}): React.JSX.Element {
+function getModelKey(model: ModelDialogModel): string {
+  return [
+    model.authType ?? '',
+    model.id,
+    model.baseUrl ?? '',
+    model.envKey ?? '',
+  ].join('\0');
+}
+
+function getModelSelectId(
+  model: ModelDialogModel,
+  isFastMode: boolean,
+): string {
+  if (!isFastMode) return model.id;
+  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className={dp('resume-picker-detail-row')}>
-      <span className={dp('resume-picker-detail-label')}>{label}:</span>
-      <span className={dp('resume-picker-detail-value')}>{value}</span>
+    <div className={styles.detailRow}>
+      <span className={styles.detailLabel}>{label}</span>
+      <span className={styles.detailValue}>{value}</span>
     </div>
   );
 }
@@ -57,248 +94,155 @@ function DetailRow({
 export function ModelDialog({
   mode = 'main',
   onSelect,
-  onClose,
+  models,
+  currentModelId,
 }: ModelDialogProps) {
   const connection = useConnection();
-  const currentModel = connection.currentModel ?? '';
-  const availableModels = (connection.models ?? []) as ModelDialogModel[];
+  const currentModel = currentModelId ?? connection.currentModel ?? '';
+  const availableModels = useMemo(
+    () => models ?? ((connection.models ?? []) as ModelDialogModel[]),
+    [models, connection.models],
+  );
   const { t } = useI18n();
-  const isFastMode = mode === 'fast';
-  const [selectedIdx, setSelectedIdx] = useState(() => {
-    const idx = availableModels.findIndex((m) => m.id === currentModel);
-    return idx >= 0 ? idx : 0;
-  });
-  const [searchMode, setSearchMode] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
-
-  const filtered = searchQuery
-    ? availableModels.filter((m) => {
-        const q = searchQuery.toLowerCase();
-        return (
-          m.id.toLowerCase().includes(q) ||
-          (m.label || '').toLowerCase().includes(q)
-        );
-      })
-    : availableModels;
-  const selectedModel = filtered[selectedIdx];
-
+  const isFastMode = mode === 'fast';
+  const isVoiceMode = mode === 'voice';
+  const isVisionMode = mode === 'vision';
+  const currentIdx = availableModels.findIndex((m) => m.id === currentModel);
+  const [activeIndex, setActiveIndex] = useState(
+    currentIdx >= 0 ? currentIdx : 0,
+  );
+  // Follow the current model until the user first navigates: models arrive
+  // asynchronously, and the current model itself can change while the dialog
+  // is open (e.g. another client sharing the session switches models) — the
+  // highlight, detail panel and Enter must track it. Once the user has moved
+  // the highlight themselves, it is theirs and must not be stolen.
+  const userNavigatedRef = useRef(false);
   useEffect(() => {
-    if (selectedIdx >= filtered.length && filtered.length > 0) {
-      setSelectedIdx(filtered.length - 1);
+    if (userNavigatedRef.current || availableModels.length === 0) return;
+    setActiveIndex(currentIdx >= 0 ? currentIdx : 0);
+  }, [availableModels.length, currentIdx]);
+
+  const moveHighlight = (index: number) => {
+    userNavigatedRef.current = true;
+    setActiveIndex(index);
+  };
+
+  // Keep the highlight in bounds if the model list refreshes/shrinks while open,
+  // so aria-activedescendant, the detail panel and Enter all stay in sync.
+  useEffect(() => {
+    if (activeIndex >= availableModels.length && availableModels.length > 0) {
+      setActiveIndex(availableModels.length - 1);
     }
-  }, [filtered.length, selectedIdx]);
+  }, [availableModels.length, activeIndex]);
+
+  const selectedModel = availableModels[activeIndex] ?? availableModels[0];
+
+  const confirm = (index: number) => {
+    const model = availableModels[index];
+    if (model) onSelect(getModelSelectId(model, isFastMode));
+  };
+
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: availableModels.length,
+    activeIndex,
+    onActiveIndexChange: moveHighlight,
+    onConfirm: confirm,
+  });
 
   useEffect(() => {
-    const el = listRef.current?.children[selectedIdx] as
+    const el = listRef.current?.children[activeIndex] as
       | HTMLElement
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [selectedIdx]);
-
-  const handleSelect = useCallback(() => {
-    const model = filtered[selectedIdx];
-    if (model) {
-      onSelect(model.id);
-      onClose();
-    }
-  }, [filtered, selectedIdx, onSelect, onClose]);
-
-  useDelayedGlobalKeyDown(
-    (e: KeyboardEvent) => {
-      if (searchMode) {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          if (searchQuery) {
-            setSearchQuery('');
-          } else {
-            setSearchMode(false);
-          }
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (filtered.length > 0) {
-            setSearchMode(false);
-          }
-          return;
-        }
-        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-          e.preventDefault();
-          setSearchMode(false);
-          if (e.key === 'ArrowDown') {
-            setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
-          }
-          return;
-        }
-        return;
-      }
-
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        if (searchQuery) {
-          setSearchQuery('');
-          setSelectedIdx(0);
-        } else {
-          onClose();
-        }
-        return;
-      }
-      if (e.key === 'ArrowDown' || e.key === 'j') {
-        e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
-        return;
-      }
-      if (e.key === 'ArrowUp' || e.key === 'k') {
-        e.preventDefault();
-        if (selectedIdx === 0) {
-          setSearchMode(true);
-        } else {
-          setSelectedIdx((i) => Math.max(i - 1, 0));
-        }
-        return;
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleSelect();
-        return;
-      }
-      if (e.key === '/') {
-        e.preventDefault();
-        setSearchMode(true);
-        return;
-      }
-    },
-    [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect],
-  );
+  }, [activeIndex]);
 
   return (
-    <div className={dp('resume-picker')}>
-      <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>
-          {isFastMode ? t('model.setFast') : t('model.switch')}
-        </span>
-        <span className={dp('resume-picker-count')}>
-          {isFastMode
-            ? t('model.fastHint')
-            : t('model.current', {
-                model: currentModel || t('model.unknown'),
-              })}
-        </span>
-        <button
-          className={dp('resume-picker-close')}
-          onClick={onClose}
-          title={t('common.close')}
-        >
-          ESC
-        </button>
-      </div>
-
-      <div className={dp('resume-picker-search')}>
-        {searchMode ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('common.search')}:{' '}
-            </span>
-            <input
-              className={dp('resume-picker-search-input')}
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSelectedIdx(0);
-              }}
-              autoFocus
-              placeholder=""
-            />
-          </>
-        ) : searchQuery ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('resume.filter')}:{' '}
-            </span>
-            <span className={dp('resume-picker-search-value')}>
-              {searchQuery}
-            </span>
-          </>
-        ) : (
-          <span className={dp('resume-picker-search-hint')}>
-            {t('model.searchHint')}
-          </span>
-        )}
-      </div>
-
-      <div className={dp('resume-picker-sep')} />
-
-      <div className={dp('resume-picker-list')} ref={listRef}>
-        {filtered.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
-            {searchQuery
-              ? t('model.noMatch', { query: searchQuery })
-              : t('model.none')}
-          </div>
-        )}
-        {filtered.map((m, i) => {
-          const authType = getAuthType(m);
+    <div className={styles.layout}>
+      <div
+        className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
+        ref={listRef}
+        role="listbox"
+        tabIndex={0}
+        aria-activedescendant={
+          availableModels.length > 0 ? `model-opt-${activeIndex}` : undefined
+        }
+        aria-label={
+          isFastMode
+            ? t('model.setFast')
+            : isVoiceMode
+              ? t('model.setVoice')
+              : isVisionMode
+                ? t('model.setVision')
+                : t('model.select')
+        }
+      >
+        {availableModels.length === 0 ? (
+          <div className={styles.empty}>{t('model.none')}</div>
+        ) : null}
+        {availableModels.map((model, index) => {
+          const selected = index === activeIndex;
+          // Only the first id match is the "current" one. `currentModel` is just
+          // an id string, so when two providers expose the same model id we
+          // cannot tell them apart here — mark one, consistent with the initial
+          // highlight (which also lands on `currentIdx`, the first match).
+          const isCurrent = index === currentIdx;
+          const authType = getAuthType(model);
           return (
             <div
-              key={m.id}
-              className={dp(
-                'resume-picker-item',
-                i === selectedIdx && !searchMode ? 'selected' : undefined,
-              )}
-              onClick={() => {
-                onSelect(m.id);
-                onClose();
-              }}
-              onMouseEnter={() => setSelectedIdx(i)}
+              key={getModelKey(model)}
+              id={`model-opt-${index}`}
+              role="option"
+              // aria-selected marks the actual current model; the roving
+              // keyboard highlight is conveyed by aria-activedescendant + the
+              // visual `.selected` class, not by aria-selected.
+              aria-selected={isCurrent}
+              className={`${styles.row} ${selected ? styles.selected : ''} ${
+                isCurrent ? dp('dialog-current') : ''
+              }`}
+              onClick={() => confirm(index)}
+              onMouseMove={() => moveHighlight(index)}
             >
-              <div className={dp('resume-picker-item-row')}>
-                <span className={dp('resume-picker-item-prefix')}>
-                  {i === selectedIdx && !searchMode ? '>' : ' '}
-                </span>
-                <span className={dp('resume-picker-item-number')}>
-                  {i + 1}.
-                </span>
-                {authType && (
-                  <span className={dp('resume-picker-item-provider')}>
-                    [{authType}]
-                  </span>
-                )}
-                <span className={dp('resume-picker-item-title')}>
-                  {getModelName(m)}
-                </span>
-                {m.isRuntime && (
-                  <span className={dp('resume-picker-item-badge')}>
-                    Runtime
-                  </span>
-                )}
-              </div>
+              <span className={styles.number}>{index + 1}.</span>
+              {authType ? (
+                <span className={styles.provider}>[{authType}]</span>
+              ) : null}
+              <span className={styles.label}>{getModelName(model)}</span>
+              {model.isRuntime ? (
+                <span className={styles.badge}>Runtime</span>
+              ) : null}
             </div>
           );
         })}
       </div>
 
-      <div className={dp('resume-picker-sep')} />
-
-      {selectedModel && (
+      {selectedModel ? (
         <>
-          <div className={dp('resume-picker-detail-panel')}>
+          <div className={styles.divider} />
+          <div className={styles.detail}>
+            <DetailRow
+              label={t('model.modality')}
+              value={formatModalities(selectedModel.modalities, t)}
+            />
             <DetailRow
               label={t('model.contextWindow')}
               value={formatContextWindow(selectedModel.contextWindow, t)}
             />
+            {getAuthType(selectedModel) !== 'qwen-oauth' ? (
+              <>
+                <DetailRow
+                  label={t('model.baseUrl')}
+                  value={selectedModel.baseUrl ?? t('model.default')}
+                />
+                <DetailRow
+                  label={t('model.apiKey')}
+                  value={selectedModel.envKey ?? t('model.notSet')}
+                />
+              </>
+            ) : null}
           </div>
-          <div className={dp('resume-picker-sep')} />
         </>
-      )}
-
-      <div className={dp('resume-picker-footer')}>
-        {searchMode
-          ? t('dialog.footer.search')
-          : isFastMode
-            ? t('dialog.footer.modelFast')
-            : t('dialog.footer.navSelectCancel')}
-      </div>
+      ) : null}
     </div>
   );
 }

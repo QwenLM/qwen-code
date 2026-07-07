@@ -13,7 +13,7 @@ import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
@@ -24,6 +24,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
@@ -31,6 +32,9 @@ const debugLogger = createDebugLogger('SHELL_EXECUTION');
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
 const SIGKILL_TIMEOUT_MS = 200;
+// Live PTY rendering only needs a short scrollback for interactive tailing.
+// The full transcript is preserved separately in raw output and final replay.
+const MAX_LIVE_TERMINAL_SCROLLBACK_LINES = 200;
 /**
  * Bound on how long the background-promote drain waits for in-flight
  * processingChain callbacks to finish writing into the headless terminal
@@ -97,15 +101,32 @@ export function getShellAbortReasonKind(
 }
 
 /**
- * On Windows with PowerShell, prefix the command with a statement that forces
- * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
- * as UTF-8 regardless of the system codepage.
+ * On Windows, prefix the command with a statement that forces UTF-8 output
+ * encoding so that non-ASCII characters are emitted as UTF-8 regardless of
+ * the system codepage.
+ *
+ * - PowerShell: uses `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;`
+ * - cmd.exe: uses `{SystemRoot}\System32\chcp.com 65001 >nul 2>nul &`
  */
-function applyPowerShellUtf8Prefix(command: string, shell: string): string {
-  if (os.platform() === 'win32' && shell === 'powershell') {
-    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
+
+function applyUtf8Prefix(command: string, shell: ShellType): string {
+  if (os.platform() !== 'win32') return command;
+  switch (shell) {
+    case 'powershell':
+      return (
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command
+      );
+    case 'cmd':
+      // Resolved at module-load time (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
+      return `${CHCP} 65001 >nul 2>nul & ${command}`;
+    case 'bash':
+      return command;
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
   }
-  return command;
 }
 
 /**
@@ -359,11 +380,14 @@ const replayTerminalOutput = async (
     convertEol: true,
   });
 
-  await new Promise<void>((resolve) => {
-    replayTerminal.write(output, () => resolve());
-  });
-
-  return serializeTerminalToText(replayTerminal);
+  try {
+    await new Promise<void>((resolve) => {
+      replayTerminal.write(output, () => resolve());
+    });
+    return serializeTerminalToText(replayTerminal);
+  } finally {
+    replayTerminal.dispose();
+  }
 };
 
 const getLastNonEmptyAnsiLineIndex = (output: AnsiOutput): number => {
@@ -454,9 +478,95 @@ interface ProcessCleanupStrategy {
   killChildProcesses(pids: Set<number>): void;
 }
 
+/**
+ * Kills a PTY shell process on Windows via taskkill. Under ConPTY,
+ * `ptyProcess.kill()` only tears down the pseudo-console host, not the
+ * pwsh/powershell/cmd process (microsoft/node-pty#333), so idle shells pile up
+ * until OOM (#5873).
+ *
+ * `tree` sets the blast radius:
+ *  - `true` (`/t`): also kill descendants. Use for cancellation and app-exit
+ *    cleanup, where the user has abandoned the whole command.
+ *  - `false`: kill only the shell pid. Use for the normal-completion reap: the
+ *    leak is the idle shell itself, and a command that finished may have
+ *    intentionally detached a child (e.g. `Start-Process`) that should outlive
+ *    the shell — `/t` would take that child down too.
+ *
+ * A failed *launch* of taskkill (System32 off PATH, EMFILE, EACCES) is reported
+ * via an async 'error' event, not a throw, so the try/catch below cannot see
+ * it. Without a listener that 'error' would bubble up as an unhandled
+ * EventEmitter error and crash the CLI from this cleanup path; the 'error' and
+ * 'exit' listeners below log the failure via debugLogger without re-throwing.
+ * Callers that need the kill to actually land must provide their own fallback —
+ * see performCancelKill. See #5873.
+ */
+// Resolve taskkill by absolute System32 path, never the bare name. On Windows
+// child_process spawn resolves a bare command through the executable search
+// path AND the current directory, so a taskkill.exe/.bat planted in the
+// workspace or on PATH could run from these cleanup paths with the CLI's
+// environment — arbitrary code execution out of a benign teardown. See #5873.
+const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+
+const windowsKillPid = (pid: number, tree: boolean): void => {
+  try {
+    // Flags-first, matching windowsStrategy.killPty / killChildProcesses so
+    // every taskkill invocation greps the same way (taskkill is order-agnostic).
+    const args = tree
+      ? ['/f', '/t', '/pid', pid.toString()]
+      : ['/f', '/pid', pid.toString()];
+    const killer = cpSpawn(WINDOWS_TASKKILL, args);
+    // Log (don't crash on) a failed launch: silently swallowing it would let
+    // the #5873 pwsh leak quietly return with no diagnostic trail under
+    // enterprise lockdown / EMFILE / antivirus interception.
+    killer.on('error', (e) => {
+      debugLogger.warn(
+        `windowsKillPid: taskkill failed to launch for pid ${pid}: ${e.message}`,
+      );
+    });
+    // Also observe a launch that succeeds but exits non-zero (e.g. access
+    // denied after launch) — otherwise a reap / post-promote taskkill could
+    // still fail silently. These callers run at runtime (not the process
+    // 'exit' handler), so the async debug write flushes. Logging only; the
+    // shell-only/tree-kill behavior is unchanged.
+    killer.on('exit', (code, signal) => {
+      if (code !== 0 || signal) {
+        debugLogger.warn(
+          `windowsKillPid: taskkill exited non-zero for pid ${pid}: ${signal ? `signal ${signal}` : `exit ${code}`}`,
+        );
+      }
+    });
+  } catch (e) {
+    debugLogger.warn(
+      `windowsKillPid: taskkill spawn threw for pid ${pid}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+};
+
 const windowsStrategy: ProcessCleanupStrategy = {
-  killPty: (_pid, pty) => {
-    pty.ptyProcess.kill();
+  killPty: (pid, pty) => {
+    // Sync because this runs from the process 'exit' cleanup() handler, where
+    // an async spawn would not get a chance to run before the process dies.
+    // Mirrors the sibling killChildProcesses taskkill below.
+    try {
+      // No diagnostic logging here: killPty runs only from the process 'exit'
+      // handler, where debugLogger's async fs.appendFile would never flush
+      // before the process dies (and a sync stderr write would be exit-time
+      // noise). The unconditional ptyProcess.kill() below is the mitigation;
+      // the runtime reap paths (windowsKillPid), which DO flush, keep logging.
+      spawnSync(WINDOWS_TASKKILL, ['/f', '/t', '/pid', pid.toString()]);
+    } catch {
+      // ignore
+    }
+    // Always also tear down the ConPTY host (the pre-#5873 behavior): taskkill
+    // owns the pwsh tree, this owns the pseudo-console host. Doing both
+    // unconditionally avoids depending on taskkill's launch/exit status — it
+    // may fail to launch, or exit non-zero on access-denied or an already-gone
+    // pid — and matches performCancelKill. Harmless once the process is dead.
+    try {
+      pty.ptyProcess.kill();
+    } catch {
+      // already gone
+    }
   },
   killChildProcesses: (pids) => {
     if (pids.size > 0) {
@@ -465,7 +575,9 @@ const windowsStrategy: ProcessCleanupStrategy = {
         for (const pid of pids) {
           args.push('/pid', pid.toString());
         }
-        spawnSync('taskkill', args);
+        // No logging — like killPty, this runs only from the 'exit' handler
+        // where an async debug write can't flush before the process dies.
+        spawnSync(WINDOWS_TASKKILL, args);
       } catch {
         // ignore
       }
@@ -507,6 +619,11 @@ export class ShellExecutionService {
     for (const [pid, pty] of this.activePtys) {
       try {
         strategy.killPty(pid, pty);
+      } catch {
+        // ignore
+      }
+      try {
+        pty.headlessTerminal.dispose();
       } catch {
         // ignore
       }
@@ -567,6 +684,7 @@ export class ShellExecutionService {
       abortSignal,
       options.streamStdout ?? false,
       getMaxBufferedOutputBytes(shellExecutionConfig),
+      shellExecutionConfig.pager,
       options.postPromote,
     );
   }
@@ -578,12 +696,13 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     streamStdout: boolean,
     maxBufferedOutputBytes: number,
+    pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -603,7 +722,10 @@ export class ShellExecutionService {
           ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          PAGER: 'cat',
+          ...getShellPagerEnv(pager, {
+            includeGitPager: false,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });
@@ -1132,7 +1254,41 @@ export class ShellExecutionService {
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
           if (isWindows) {
-            cpSpawn('taskkill', ['/pid', child.pid.toString(), '/f', '/t']);
+            const killer = cpSpawn(WINDOWS_TASKKILL, [
+              '/f',
+              '/t',
+              '/pid',
+              child.pid.toString(),
+            ]);
+            // taskkill can fail two ways, and either would otherwise hang the
+            // cancel (the abort waits for a child exit that never comes), so
+            // fall back to killing the child directly in both:
+            //  - a failed *launch* surfaces as an async 'error' event, not a
+            //    throw (swallowing it also avoids crashing the CLI on an
+            //    unhandled EventEmitter error);
+            //  - a successful launch that *exits non-zero* (e.g. access-denied
+            //    on an elevated child) means taskkill ran but did not kill the
+            //    tree, and no 'error' fires.
+            // Mirrors the POSIX branch's child.kill below and the PTY cancel's
+            // ptyProcess.kill fallback. See #5873.
+            const killChildFallback = (why: string) => {
+              debugLogger.warn(
+                `performCancelKill (child_process): taskkill ${why} for pid ${child.pid}; falling back to child.kill`,
+              );
+              if (!exited) {
+                try {
+                  child.kill('SIGKILL');
+                } catch {
+                  // already gone
+                }
+              }
+            };
+            killer.on('error', (e) =>
+              killChildFallback(`failed to launch (${e.message})`),
+            );
+            killer.on('exit', (code) => {
+              if (code !== 0) killChildFallback(`exited ${code}`);
+            });
           } else {
             try {
               process.kill(-child.pid, 'SIGTERM');
@@ -1243,7 +1399,7 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
 
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
@@ -1269,8 +1425,10 @@ export class ShellExecutionService {
           ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          PAGER: shellExecutionConfig.pager ?? 'cat',
-          GIT_PAGER: shellExecutionConfig.pager ?? 'cat',
+          ...getShellPagerEnv(shellExecutionConfig.pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
@@ -1281,6 +1439,7 @@ export class ShellExecutionService {
           allowProposedApi: true,
           cols,
           rows,
+          scrollback: MAX_LIVE_TERMINAL_SCROLLBACK_LINES,
         });
         headlessTerminal.scrollToTop();
 
@@ -1293,6 +1452,11 @@ export class ShellExecutionService {
         const sniffChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
+        // Set the moment performCancelKill actually proceeds (a cancel reached
+        // us before the shell exited). The finalizer reads THIS, not a late
+        // abortSignal.aborted check, to decide tree-kill vs shell-pid-only — an
+        // abort that arrives after a normal exit must not retro-flag the reap.
+        let cancelKillDispatched = false;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -1539,61 +1703,141 @@ export class ShellExecutionService {
         };
         ptyProcess.on('error', ptyErrorHandler);
 
+        const disposeForegroundPtyResources = () => {
+          listenersDetached = true;
+          if (renderTimeout) {
+            clearTimeout(renderTimeout);
+            renderTimeout = null;
+          }
+          try {
+            dataDisposable.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `dataDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            exitDisposable.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `exitDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            ptyProcess.removeListener('error', ptyErrorHandler);
+          } catch (e) {
+            debugLogger.warn(
+              `ptyProcess.removeListener('error') threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            headlessTerminal.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `headlessTerminal.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          // Windows: node-pty (ConPTY) fires onExit when it believes the shell
+          // exited, but the pwsh/powershell/cmd process can linger
+          // (microsoft/node-pty#333). We delete from activePtys just below, so
+          // the process-exit cleanup() can never reap it — do it here. The
+          // isPtyActive guard skips the taskkill when the shell exited cleanly
+          // (the healthy case).
+          //
+          // Blast radius depends on why we're exiting. On a *cancel* the user
+          // abandoned the whole command, so tree-kill: performCancelKill's own
+          // taskkill /t may still be in flight or have failed to launch, and a
+          // shell-only reap here could otherwise race it down to killing just
+          // the shell while its descendant tree survives. On cancel this can
+          // therefore fire taskkill a second time (performCancelKill fired the
+          // first) — deliberate, not a redundancy to "optimize away": the
+          // isPtyActive guard means it only runs while the shell is genuinely
+          // still alive, so it is a no-op once the tree is dead and a real
+          // retry when performCancelKill's taskkill never launched. On a
+          // *normal completion* kill only the shell pid, so a child the command
+          // intentionally detached (e.g. Start-Process) outlives it. We use
+          // cancelKillDispatched (set inside performCancelKill, before the shell
+          // exited), NOT a late abortSignal.aborted check — an abort that lands
+          // after a normal exit, during the async finalize window, must not
+          // retro-flag this reap into a tree-kill of detached children.
+          // Background-promote never reaches this finalizer (it disposes
+          // exitDisposable and reaps on its own settle path), so a backgrounded
+          // process is never reaped here. See #5873.
+          if (
+            os.platform() === 'win32' &&
+            ShellExecutionService.isPtyActive(ptyProcess.pid)
+          ) {
+            windowsKillPid(ptyProcess.pid, cancelKillDispatched);
+          }
+          this.activePtys.delete(ptyProcess.pid);
+        };
+
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
-            this.activePtys.delete(ptyProcess.pid);
 
             const finalize = async () => {
-              render(true);
               const finalBuffer = Buffer.concat(outputChunks);
               let fullOutput = '';
 
               try {
-                if (isStreamingRawContent) {
-                  // Re-decode the captured buffer with proper encoding detection.
-                  // The streaming decoder used the first-chunk heuristic which
-                  // can misdetect when early output is ASCII-only but later
-                  // output is in a different encoding (e.g. GBK).
-                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
-                  const decodedOutput = new TextDecoder(finalEncoding).decode(
-                    finalBuffer,
-                  );
-                  fullOutput = await replayTerminalOutput(
-                    decodedOutput,
-                    cols,
-                    rows,
-                  );
-                } else {
-                  fullOutput = serializeTerminalToText(headlessTerminal);
-                }
-              } catch {
                 try {
-                  fullOutput = decodeBufferedOutput(finalBuffer);
-                } catch {
-                  // Ignore fallback rendering errors and resolve with empty text.
+                  render(true);
+                } catch (e) {
+                  debugLogger.warn(
+                    `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
+                  );
                 }
-              }
-              fullOutput = appendOutputCaptureLimitNotice(
-                fullOutput,
-                outputCaptureLimitExceeded,
-                totalBytesReceived,
-                maxBufferedOutputBytes,
-              );
 
-              resolve({
-                rawOutput: finalBuffer,
-                output: fullOutput,
-                exitCode,
-                signal: signal ?? null,
-                error,
-                aborted: abortSignal.aborted,
-                pid: ptyProcess.pid,
-                executionMethod:
-                  (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
-                  'node-pty',
-              });
+                try {
+                  if (isStreamingRawContent) {
+                    // Re-decode the captured buffer with proper encoding detection.
+                    // The streaming decoder used the first-chunk heuristic which
+                    // can misdetect when early output is ASCII-only but later
+                    // output is in a different encoding (e.g. GBK).
+                    const finalEncoding =
+                      getCachedEncodingForBuffer(finalBuffer);
+                    const decodedOutput = new TextDecoder(finalEncoding).decode(
+                      finalBuffer,
+                    );
+                    fullOutput = await replayTerminalOutput(
+                      decodedOutput,
+                      cols,
+                      rows,
+                    );
+                  } else {
+                    fullOutput = serializeTerminalToText(headlessTerminal);
+                  }
+                } catch {
+                  try {
+                    fullOutput = decodeBufferedOutput(finalBuffer);
+                  } catch {
+                    // Ignore fallback rendering errors and resolve with empty text.
+                  }
+                }
+                fullOutput = appendOutputCaptureLimitNotice(
+                  fullOutput,
+                  outputCaptureLimitExceeded,
+                  totalBytesReceived,
+                  maxBufferedOutputBytes,
+                );
+
+                resolve({
+                  rawOutput: finalBuffer,
+                  output: fullOutput,
+                  exitCode,
+                  signal: signal ?? null,
+                  error,
+                  aborted: abortSignal.aborted,
+                  pid: ptyProcess.pid,
+                  executionMethod:
+                    (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
+                    'node-pty',
+                });
+              } finally {
+                disposeForegroundPtyResources();
+              }
             };
 
             // Give any last onData callbacks a chance to run before finalizing.
@@ -1772,6 +2016,20 @@ export class ShellExecutionService {
             // delay could recover them but would complicate the
             // single-fire latch.
             disposePostPromoteListeners();
+            // Windows: a promoted shell can leave its ConPTY pwsh/powershell/cmd
+            // process behind after it settles (microsoft/node-pty#333) — the
+            // same #5873 leak as the foreground path, but the background
+            // lifecycle never reaches disposeForegroundPtyResources. Reap it
+            // here, shell-pid-only: the command has finished (natural exit or
+            // error), so a child it intentionally detached should outlive it.
+            // (Runs before the onSettle early-return so it fires even without an
+            // onSettle handler.) See #5873.
+            if (
+              os.platform() === 'win32' &&
+              ShellExecutionService.isPtyActive(ptyProcess.pid)
+            ) {
+              windowsKillPid(ptyProcess.pid, false);
+            }
             if (!postPromote?.onSettle) return;
             try {
               postPromote.onSettle(info);
@@ -1925,27 +2183,72 @@ export class ShellExecutionService {
             totalBytesReceived,
             maxBufferedOutputBytes,
           );
-          resolve({
-            rawOutput: finalBuffer,
-            output: snapshot,
-            exitCode: null,
-            signal: null,
-            error,
-            // See childProcessFallback for the full rationale — promoted
-            // results are NOT user-cancellations, so callers' `if
-            // (result.aborted)` branches must NOT trigger.
-            aborted: false,
-            promoted: true,
-            pid: ptyProcess.pid,
-            executionMethod:
-              (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
-          });
+          try {
+            resolve({
+              rawOutput: finalBuffer,
+              output: snapshot,
+              exitCode: null,
+              signal: null,
+              error,
+              // See childProcessFallback for the full rationale — promoted
+              // results are NOT user-cancellations, so callers' `if
+              // (result.aborted)` branches must NOT trigger.
+              aborted: false,
+              promoted: true,
+              pid: ptyProcess.pid,
+              executionMethod:
+                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+            });
+          } finally {
+            try {
+              headlessTerminal.dispose();
+            } catch (e) {
+              debugLogger.warn(
+                `headlessTerminal.dispose() threw during background-promote cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
         };
 
         const performCancelKill = async (): Promise<void> => {
           if (!ptyProcess.pid || exited) return;
+          // Record that a cancel — not a natural exit — drove this teardown, so
+          // the finalizer reap tree-kills. Guarded by `exited` above, so a late
+          // abort after a normal exit returns early and never sets this.
+          cancelKillDispatched = true;
           if (os.platform() === 'win32') {
-            ptyProcess.kill();
+            // Tree-kill SYNCHRONOUSLY (spawnSync, like windowsStrategy.killPty):
+            // taskkill must enumerate and kill the process tree BEFORE
+            // ptyProcess.kill() below fires ClosePseudoConsole — an async
+            // taskkill could still be launching when the resulting CTRL_CLOSE
+            // exit orphans the descendants, leaking them (the #5873 leak on the
+            // cancel path). ptyProcess.kill() alone doesn't tree-kill under
+            // ConPTY (microsoft/node-pty#333).
+            try {
+              const r = spawnSync(WINDOWS_TASKKILL, [
+                '/f',
+                '/t',
+                '/pid',
+                ptyProcess.pid.toString(),
+              ]);
+              if (r.error || (typeof r.status === 'number' && r.status !== 0)) {
+                debugLogger.warn(
+                  `performCancelKill: taskkill failed for pid ${ptyProcess.pid}: ${r.error?.message ?? `exit ${r.status}`}`,
+                );
+              }
+            } catch (e) {
+              debugLogger.warn(
+                `performCancelKill: taskkill spawn threw for pid ${ptyProcess.pid}: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            // Then tear down the ConPTY host so onExit fires and the cancel
+            // resolves even if taskkill couldn't kill the tree. Harmless once
+            // the tree is already dead. Mirrors the POSIX branch's kill fallback.
+            try {
+              ptyProcess.kill();
+            } catch {
+              // already gone
+            }
           } else {
             try {
               // Send SIGTERM first to allow graceful shutdown

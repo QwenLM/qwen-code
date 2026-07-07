@@ -12,7 +12,11 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput, HookPhase } from './types.js';
+import type {
+  ContextUsageData,
+  DefaultHookOutput,
+  HookPhase,
+} from './types.js';
 import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
@@ -200,11 +204,13 @@ export class HookSystem {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
+      contextUsage,
       signal,
     );
   }
@@ -250,6 +256,7 @@ export class HookSystem {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePreToolUseEvent(
       toolName,
@@ -257,6 +264,7 @@ export class HookSystem {
       toolUseId,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PreToolUse', result.finalOutput)
@@ -273,6 +281,7 @@ export class HookSystem {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseEvent(
       toolName,
@@ -281,6 +290,7 @@ export class HookSystem {
       toolUseId,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUse', result.finalOutput)
@@ -298,6 +308,7 @@ export class HookSystem {
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseFailureEvent(
       toolUseId,
@@ -307,6 +318,7 @@ export class HookSystem {
       isInterrupt,
       permissionMode,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
@@ -482,6 +494,7 @@ export class HookSystem {
     toolUseId: string,
     reason: PermissionDeniedReason,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePermissionDeniedEvent(
       toolName,
@@ -489,6 +502,7 @@ export class HookSystem {
       toolUseId,
       reason,
       signal,
+      tool_call_id,
     );
     return result.finalOutput
       ? createHookOutput('PermissionDenied', result.finalOutput)

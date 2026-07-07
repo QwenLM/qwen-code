@@ -283,7 +283,7 @@ export default {
   'Open in editor': "Obrir a l'editor",
   'Edit tools': 'Editar eines',
   'Edit color': 'Editar color',
-  '❌ Error:': '❌ Error:',
+  '✗ Error:': '✗ Error:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Esteu segur que voleu eliminar l\'agent "{{name}}"?',
 
@@ -292,12 +292,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Nivell de projecte (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': "Nivell d'usuari (~/.qwen/agents/)",
-  '✅ Subagent Created Successfully!': '✅ Subagent creat correctament!',
+  '✓ Subagent Created Successfully!': '✓ Subagent creat correctament!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'El subagent "{{name}}" s\'ha desat al nivell {{level}}.',
   'Name: ': 'Nom: ',
   'Location: ': 'Ubicació: ',
-  '❌ Error saving subagent:': '❌ Error en desar el subagent:',
+  '✗ Error saving subagent:': '✗ Error en desar el subagent:',
   'Warnings:': 'Advertències:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'El nom "{{name}}" ja existeix al nivell {{level}} - sobreescriurà el subagent existent',
@@ -489,12 +489,57 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools]',
   'Show model-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques de les eines.",
+  'Show daily token usage statistics.':
+    "Mostrar les estadístiques diàries d'ús de tokens.",
+  'Show monthly token usage statistics.':
+    "Mostrar les estadístiques mensuals d'ús de tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exportar les estadístiques d'ús de tokens a CSV o JSON.",
+  'No usage data.': "No hi ha dades d'ús.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} sol·licituds)',
+  'Daily token usage for {{value}}': 'Ús diari de tokens per a {{value}}',
+  'Monthly token usage for {{value}}': 'Ús mensual de tokens per a {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Sol·licituds: {{requests}}',
+  'Breakdown:': 'Desglossament:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Sortida: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Memòria cau (inclosa a l’entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raonament: {{tokens}}',
+  'By model:': 'Per model:',
+  'By auth type:': "Per tipus d'autenticació:",
+  'By model/auth type:': "Per model/tipus d'autenticació:",
+  'By source:': 'Per origen:',
+  'Failed to load token usage stats: {{error}}':
+    "No s'han pogut carregar les estadístiques d'ús de tokens: {{error}}",
+  'Expected --format csv or --format json.':
+    "S'esperava --format csv o --format json.",
+  'Expected a file path after --output.':
+    "S'esperava una ruta de fitxer després de --output.",
+  'Unexpected argument: {{argument}}': 'Argument inesperat: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Ús: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "La ruta d'exportació de l'ús de tokens ha d'estar dins del directori de treball del projecte.",
+  'Export target does not exist: {{path}}':
+    "La destinació d'exportació no existeix: {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "No s'ha pogut resoldre la ruta d'exportació dins del directori de treball.",
+  'Could not create a temporary export file.':
+    "No s'ha pogut crear un fitxer temporal d'exportació.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Ús de tokens exportat a {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "No s'han pogut exportar les estadístiques d'ús de tokens: {{error}}",
+  'Unclosed quote in arguments.': 'Cometes sense tancar als arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Nota: el temps de generació (TTFT/TPS) pertany a les mètriques de generació.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
     "Gestionar els directoris de l'espai de treball",
@@ -1170,9 +1215,9 @@ export default {
     'Trieu com voleu continuar la vostra sessió:',
   'Start new chat session': 'Iniciar una nova sessió de xat',
   'Continue previous conversation': 'Continuar la conversa anterior',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Benvingut de nou! (Darrera actualització: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objectiu general:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Benvingut de nou! (Darrera actualització: {{timeAgo}})',
+  'Overall Goal:': 'Objectiu general:',
   'Connect a Provider': 'Connectar un proveïdor',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Cal connectar un proveïdor per continuar. Premeu Ctrl+C de nou per sortir.',
@@ -1339,8 +1384,8 @@ export default {
   // Estat MCP
   // ============================================================================
   'No MCP servers configured.': 'No hi ha MCP servers configurats.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    "⏳ MCP servers s'estan iniciant ({{count}} inicialitzant)...",
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    "◌ MCP servers s'estan iniciant ({{count}} inicialitzant)...",
   'Note: First startup may take longer. Tool availability will update automatically.':
     "Nota: El primer inici pot tardar més. La disponibilitat de les eines s'actualitzarà automàticament.",
   'Configured MCP servers:': 'MCP servers configurats:',
@@ -1362,8 +1407,9 @@ export default {
   'Tools:': 'Eines:',
   'Parameters:': 'Paràmetres:',
   'Prompts:': 'Missatges:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloquejat',
-  '💡 Tips:': '💡 Consells:',
+  '★ Tips:': '★ Consells:',
   Use: 'Useu',
   'to show server and tool descriptions':
     'per mostrar les descripcions del servidor i de les eines',
@@ -1498,6 +1544,8 @@ export default {
   'No tasks currently running': 'No hi ha cap tasca en execució',
   'No entry to show.': 'No hi ha cap entrada per mostrar.',
   'needs approval': 'necessita aprovació',
+  'rejected — edit config to re-approve':
+    'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
   Running: 'En execució',
@@ -1829,8 +1877,8 @@ export default {
     'Introduïu la vostra API Key de Coding Plan: ',
   'Select authentication method:': "Seleccioneu el mètode d'autenticació:",
   '\n=== Authentication Status ===\n': "\n=== Estat d'autenticació ===\n",
-  '⚠️  No authentication method configured.\n':
-    "⚠️  Cap mètode d'autenticació configurat.\n",
+  '⚠  No authentication method configured.\n':
+    "⚠  Cap mètode d'autenticació configurat.\n",
   'Run one of the following commands to get started:\n':
     'Executeu una de les ordres següents per començar:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1851,8 +1899,8 @@ export default {
   '  Current Model: {{model}}': '  Model actual: {{model}}',
   '  Config Version: {{version}}': '  Versió de configuració: {{version}}',
   '  Status: API key configured\n': '  Estat: API Key configurada\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    "⚠️  Mètode d'autenticació: Coding Plan d'Alibaba Cloud (Incomplet)",
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    "⚠  Mètode d'autenticació: Coding Plan d'Alibaba Cloud (Incomplet)",
   '  Issue: API key not found in environment or settings\n':
     "  Problema: API Key no trobada a l'entorn o la configuració\n",
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1872,6 +1920,8 @@ export default {
     'Premeu Ctrl+O per mostrar la sortida completa de les eines',
   'Switch to plan mode or exit plan mode':
     'Canviar al mode de planificació o sortir del mode de planificació',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Defineix la intensitat de raonament dels models compatibles ({{tiers}}); mapejada i limitada segons el proveïdor.',
   'Exited plan mode. Previous approval mode restored.':
     "S'ha sortit del mode de planificació. S'ha restaurat el mode d'aprovació anterior.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1990,4 +2040,24 @@ export default {
   in: 'ent.',
   out: 'sort.',
   'In/Out': 'Ent/Sort',
+
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Establir la història per reduir-se per defecte en reprendre una sessió',
+  'Set history to expand by default when resuming a session':
+    'Establir la història per expandir-se per defecte en reprendre una sessió',
+  'Expand the currently collapsed history transcript':
+    'Expandir la transcripció de la història actualment reduïda',
+  'Control history display preferences and visibility':
+    'Controlar les preferències de visualització de la història i la visibilitat',
+  'History will be collapsed by default for future resumed sessions.':
+    'La història es reduirà per defecte per a futures sessions represes.',
+  'History will be expanded by default for future resumed sessions.':
+    "La història s'expandirà per defecte per a futures sessions represes.",
+  'History is already expanded in this session.':
+    'La història ja està expandida en aquesta sessió.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Ús: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
 };

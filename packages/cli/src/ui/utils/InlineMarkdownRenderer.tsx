@@ -13,7 +13,7 @@ import { renderInlineLatex } from './latexRenderer.js';
 import {
   renderInlineMathInText,
   splitInlineMathSegments,
-} from './TerminalMathRenderer.js';
+} from './terminal-math-renderer.js';
 import {
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,

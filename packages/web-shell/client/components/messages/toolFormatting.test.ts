@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
   formatToolDisplayName,
+  getAgentCurrentToolHint,
   getToolDescription,
   getToolResultSummary,
+  getToolSummaryDescription,
+  localizeToolDisplayName,
+  TOOL_DISPLAY_NAMES,
 } from './toolFormatting';
+import { getTranslator } from '../../i18n';
 
 function tool(overrides: Partial<ACPToolCall>): ACPToolCall {
   return {
@@ -19,6 +24,12 @@ describe('toolFormatting', () => {
   it('matches CLI-style user shell command display names', () => {
     expect(formatToolDisplayName('shell')).toBe('Shell Command');
     expect(formatToolDisplayName('run_shell_command')).toBe('Shell');
+  });
+
+  it('normalizes web fetch display names', () => {
+    expect(formatToolDisplayName('web_fetch')).toBe('WebFetch');
+    expect(formatToolDisplayName('webFetch')).toBe('WebFetch');
+    expect(formatToolDisplayName('fetch')).toBe('WebFetch');
   });
 
   it('does not show the cwd for user shell commands', () => {
@@ -131,6 +142,99 @@ describe('toolFormatting', () => {
     ).toBe('Found 1 matching file(s)');
   });
 
+  it('matches CLI-style grep_search result summaries', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'src/a.ts:1:TODO\nsrc/b.ts:2:TODO\n',
+        }),
+      ),
+    ).toBe('2 result(s)');
+  });
+
+  it('keeps grep_search returnDisplay summaries unchanged', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 2 matches',
+        }),
+      ),
+    ).toBe('Found 2 matches');
+
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 1 match',
+        }),
+      ),
+    ).toBe('Found 1 match');
+  });
+
+  it('keeps truncated grep_search returnDisplay summaries unchanged', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 12 matches (truncated)',
+        }),
+      ),
+    ).toBe('Found 12 matches (truncated)');
+  });
+
+  it('keeps empty grep_search returnDisplay summaries unchanged', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'No matches found',
+        }),
+      ),
+    ).toBe('No matches found');
+  });
+
+  it('prefers grep_search returnDisplay when content is also present', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'Found 2 matches',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Found 2 matches for pattern "TODO" in path "./":\n---\nsrc/a.ts:1:TODO\nsrc/b.ts:2:TODO',
+              },
+            },
+          ],
+        }),
+      ),
+    ).toBe('Found 2 matches');
+  });
+
+  it('prefers empty grep_search returnDisplay when content is also present', () => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput: 'No matches found',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'No matches found for pattern "TODO" in path "./".',
+              },
+            },
+          ],
+        }),
+      ),
+    ).toBe('No matches found');
+  });
+
   it('matches CLI-style shell fallback descriptions', () => {
     expect(
       getToolDescription(
@@ -161,6 +265,52 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
+  it('uses semantic shell descriptions for summaries', () => {
+    const shellTool = tool({
+      toolName: 'run_shell_command',
+      title:
+        'Shell: dataworks-infra workspace list [timeout: 30000ms] (查询用户工作空间列表)',
+      args: {
+        command: 'dataworks-infra workspace list',
+        description: '查询用户工作空间列表',
+        timeout: 30000,
+      },
+    });
+
+    expect(getToolSummaryDescription(shellTool)).toBe('查询用户工作空间列表');
+    expect(getToolDescription(shellTool)).toBe(
+      'dataworks-infra workspace list [timeout: 30000ms] (查询用户工作空间列表)',
+    );
+  });
+
+  it('falls back to shell commands in summaries without timeout metadata', () => {
+    expect(
+      getToolSummaryDescription(
+        tool({
+          toolName: 'run_shell_command',
+          args: {
+            command: 'npm test',
+            timeout: 1000,
+          },
+        }),
+      ),
+    ).toBe('npm test');
+  });
+
+  it('describes skill calls from raw input', () => {
+    expect(
+      getToolDescription(
+        tool({
+          toolName: 'skill',
+          args: {
+            skill: 'qc-helper',
+            args: 'weather in Hangzhou next 5 days',
+          },
+        }),
+      ),
+    ).toBe('qc-helper');
+  });
+
   it('summarizes read_file rawOutput by line count', () => {
     expect(
       getToolResultSummary(
@@ -189,5 +339,68 @@ describe('toolFormatting', () => {
     );
     expect(result.length).toBeLessThan(5000);
     expect(result.endsWith('...')).toBe(true);
+  });
+
+  describe('localizeToolDisplayName', () => {
+    it('translates known tool names in Chinese', () => {
+      const t = getTranslator('zh-CN');
+      expect(localizeToolDisplayName('todo_write', t)).toBe('任务清单');
+      expect(localizeToolDisplayName('run_shell_command', t)).toBe('运行命令');
+      expect(localizeToolDisplayName('read_file', t)).toBe('读取文件');
+    });
+
+    it('keeps proper tool names / acronyms in English', () => {
+      const t = getTranslator('zh-CN');
+      expect(localizeToolDisplayName('agent', t)).toBe('Agent');
+      expect(localizeToolDisplayName('glob', t)).toBe('Glob');
+      expect(localizeToolDisplayName('lsp', t)).toBe('LSP');
+    });
+
+    it('localizes grep tool aliases in Chinese', () => {
+      const t = getTranslator('zh-CN');
+      expect(localizeToolDisplayName('grep', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('grep_search', t)).toBe('搜索内容');
+      expect(localizeToolDisplayName('search', t)).toBe('搜索内容');
+    });
+
+    it('falls back to the English display name when the locale has no entry', () => {
+      const t = getTranslator('en');
+      expect(localizeToolDisplayName('todo_write', t)).toBe('TodoList');
+      expect(localizeToolDisplayName('grep_search', t)).toBe('Grep');
+    });
+
+    it('falls back to the raw wire name for unknown tools', () => {
+      expect(
+        localizeToolDisplayName('mystery_tool', getTranslator('zh-CN')),
+      ).toBe('mystery_tool');
+    });
+
+    it('has a zh translation for every tool in the display-name map', () => {
+      const tZh = getTranslator('zh-CN');
+      // Tools intentionally shown in English (proper names / acronyms).
+      const keepEnglish = new Set(['agent', 'glob']);
+      const untranslated = Object.keys(TOOL_DISPLAY_NAMES).filter(
+        (wire) =>
+          !keepEnglish.has(wire) &&
+          localizeToolDisplayName(wire, tZh) === formatToolDisplayName(wire),
+      );
+      expect(untranslated).toEqual([]);
+    });
+
+    it('localizes the tool name in the agent activity hint', () => {
+      const agent = tool({
+        toolName: 'agent',
+        status: 'in_progress',
+        subTools: [
+          tool({ toolName: 'run_shell_command', status: 'in_progress' }),
+        ],
+      });
+      expect(getAgentCurrentToolHint(agent, getTranslator('zh-CN'))).toContain(
+        '运行命令',
+      );
+      expect(getAgentCurrentToolHint(agent, getTranslator('en'))).toContain(
+        'Shell',
+      );
+    });
   });
 });

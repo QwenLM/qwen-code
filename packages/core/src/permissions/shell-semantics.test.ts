@@ -466,6 +466,22 @@ describe('extractShellOperations', () => {
     });
   });
 
+  it('combined stdout fd redirect 1>file without space', () => {
+    const ops = extractShellOperations('echo hi 1>.qwen/settings.json', CWD);
+    expect(ops).toContainEqual({
+      virtualTool: 'write_file',
+      filePath: `${CWD}/.qwen/settings.json`,
+    });
+  });
+
+  it('combined stdout fd append redirect 1>>file without space', () => {
+    const ops = extractShellOperations('echo hi 1>>.qwen/settings.json', CWD);
+    expect(ops).toContainEqual({
+      virtualTool: 'write_file',
+      filePath: `${CWD}/.qwen/settings.json`,
+    });
+  });
+
   it('redirect 2>/dev/null: ignored (no op)', () => {
     const ops = extractShellOperations('cat /etc/passwd 2>/dev/null', CWD);
     expect(ops).not.toContainEqual(
@@ -960,6 +976,20 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(
       extractShellOperationsAcrossCommand(
         'cd "$QWEN_HOME" && echo hi > /tmp/out.txt',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/out.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ]);
+
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
         '/repo',
       ),
     ).toEqual([

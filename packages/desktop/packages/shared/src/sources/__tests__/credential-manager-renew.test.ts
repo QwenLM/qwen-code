@@ -9,13 +9,6 @@ import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { SourceCredentialManager } from '../credential-manager.ts';
 import type { FolderSourceConfig } from '../types.ts';
 
-// Mock storage module to prevent disk I/O
-mock.module('../storage.ts', () => ({
-  markSourceAuthenticated: mock(() => true),
-  loadSourceConfig: mock(() => null),
-  saveSourceConfig: mock(() => {}),
-}));
-
 // Mock credentials module — track set() calls to verify saves
 let setCalls: unknown[][] = [];
 const mockGet = mock(() => Promise.resolve(null as unknown));
@@ -174,6 +167,24 @@ describe('refreshApiRenew via refresh()', () => {
 
     await credManager.refresh(source);
     expect(fetchCalls[0]!.url).toBe('https://auth.example.com/oauth/token');
+  });
+
+  test('handles absolute renew URL with uppercase scheme', async () => {
+    mockGet.mockImplementationOnce(() => Promise.resolve({
+      value: 'old-token', expiresAt: Date.now() - 60_000,
+    }));
+    mockFetch({ access_token: 'new-token', expires_in: 3600 });
+
+    const source = createRenewSource({
+      api: {
+        baseUrl: 'https://api.example.com',
+        authType: 'bearer',
+        renewEndpoint: { path: 'HTTPS://auth.example.com/oauth/token' },
+      },
+    });
+
+    await credManager.refresh(source);
+    expect(fetchCalls[0]!.url).toBe('HTTPS://auth.example.com/oauth/token');
   });
 
   test('returns null on 401 response', async () => {

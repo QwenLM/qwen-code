@@ -38,6 +38,7 @@ import {
   EVENT_EXTENSION_DISABLE,
   EVENT_EXTENSION_INSTALL,
   EVENT_EXTENSION_UNINSTALL,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
   logApiRequest,
@@ -63,6 +64,7 @@ import {
 import * as metrics from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import * as sdk from './sdk.js';
+import * as tokenUsageService from '../services/tokenUsageService.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import {
   ApiRequestEvent,
@@ -93,6 +95,7 @@ import type {
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import * as uiTelemetry from './uiTelemetry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 describe('loggers', () => {
   const mockLogger = {
@@ -111,6 +114,10 @@ describe('loggers', () => {
     );
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('logChatCompression', () => {
@@ -248,6 +255,32 @@ describe('loggers', () => {
       });
     });
 
+    it('should include the model attribute when set (e.g. inline override)', () => {
+      const event = new UserPromptEvent(
+        11,
+        'prompt-id-model',
+        AuthType.USE_OPENAI,
+        'test-prompt',
+        'qwen-max',
+      );
+
+      logUserPrompt(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'User prompt. Length: 11.',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_USER_PROMPT,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          prompt_length: 11,
+          prompt: 'test-prompt',
+          prompt_id: 'prompt-id-model',
+          auth_type: 'openai',
+          model: 'qwen-max',
+        },
+      });
+    });
+
     it('should not log prompt if disabled', () => {
       const mockConfig = {
         getSessionId: () => 'test-session-id',
@@ -301,6 +334,10 @@ describe('loggers', () => {
       vi.spyOn(metrics, 'recordTokenUsageMetrics').mockImplementation(
         mockMetrics.recordTokenUsageMetrics,
       );
+      vi.spyOn(
+        tokenUsageService,
+        'recordTokenUsageFromApiResponseBestEffort',
+      ).mockImplementation(() => undefined);
     });
 
     it('should log an API response with all fields', () => {
@@ -364,11 +401,68 @@ describe('loggers', () => {
         },
         'test-session-id',
       );
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record token usage for internal prompt_id %s', (promptId) => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        promptId,
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not record token usage when usage statistics are disabled', () => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id-1',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(configWithUsageStatsDisabled, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
     });
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
-    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])(
       'should not record to chatRecordingService when prompt_id is %s',
       (promptId) => {
         const mockRecordUiTelemetryEvent = vi.fn();
@@ -412,6 +506,30 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('suppresses chatRecordingService writes inside hidden runs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiResponseEvent(
+        'resp-id',
+        'test-model',
+        50,
+        'user_query',
+      );
+      runWithChatRecordingSuppressed(() => {
+        logApiResponse(configWithRecording, event);
+      });
+
+      expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+      expect(mockUiEvent.addEvent).toHaveBeenCalled();
     });
   });
 
@@ -1324,7 +1442,7 @@ describe('loggers', () => {
         body: 'Tool output truncated for test-tool.',
         attributes: {
           'session.id': 'test-session-id',
-          'event.name': 'tool_output_truncated',
+          'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',

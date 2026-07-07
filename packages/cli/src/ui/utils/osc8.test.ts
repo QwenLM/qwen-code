@@ -574,6 +574,27 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(false);
     });
 
+    it('does not force hyperlinks for non-numeric FORCE_HYPERLINK values', () => {
+      setTTY(true);
+      process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+
+      for (const value of ['false', 'off', '1abc']) {
+        process.env['FORCE_HYPERLINK'] = value;
+        expect(supportsHyperlinks()).toBe(false);
+      }
+    });
+
+    it('forces hyperlinks for empty and non-zero numeric FORCE_HYPERLINK values', () => {
+      setTTY(true);
+      process.env['TERM'] = 'dumb';
+
+      for (const value of ['', '1', '+1', '-1']) {
+        process.env['FORCE_HYPERLINK'] = value;
+        expect(supportsHyperlinks()).toBe(true);
+      }
+    });
+
     it('hard opt-outs (NO_COLOR/QWEN_DISABLE_HYPERLINKS) win over FORCE_HYPERLINK', () => {
       setTTY(true);
       process.env['FORCE_HYPERLINK'] = '1';

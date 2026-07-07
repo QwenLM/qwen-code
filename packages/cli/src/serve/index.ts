@@ -9,7 +9,7 @@ export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
-} from './runQwenServe.js';
+} from './run-qwen-serve.js';
 export {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -92,13 +92,13 @@ export {
   type ServeExtensionInstallType,
   type ServeExtensionOriginSource,
   type ServeWorkspaceExtensionsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 export {
   ENV_NONSECRET_VARS,
   ENV_PROXY_VARS,
   ENV_SECRET_VARS,
   buildEnvStatusFromProcess,
-} from './envSnapshot.js';
+} from './env-snapshot.js';
 export {
   bearerAuth,
   createMutationGate,
@@ -116,7 +116,7 @@ export {
   // embeds that want to recognize these errors (parallel to how
   // they already match `WorkspaceInitConflictError` /
   // `SessionNotFoundError`) need them on the public barrel; without
-  // this they have to deep-import `./acpSessionBridge.js`.
+  // this they have to deep-import `./acp-session-bridge.js`.
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
@@ -133,11 +133,11 @@ export {
   type BridgeSpawnRequest,
   type ChannelFactory,
   type HttpAcpBridge,
-} from './acpSessionBridge.js';
+} from './acp-session-bridge.js';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type SubscribeOptions,
-} from './eventBus.js';
-export { createInMemoryChannel } from './inMemoryChannel.js';
+} from '@qwen-code/acp-bridge/eventBus';
+export { createInMemoryChannel } from '@qwen-code/acp-bridge/inMemoryChannel';

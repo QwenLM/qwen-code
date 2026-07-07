@@ -19,6 +19,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import { tryGenerateSessionTitle } from './sessionTitle.js';
 import type {
@@ -165,11 +166,20 @@ export function sanitizeToolCallResultForRecording<
   T extends Partial<ToolCallResponseInfo>,
 >(toolCallResult: T): T {
   const resultDisplay = toolCallResult.resultDisplay;
-  if (!isFileDiffDisplay(resultDisplay)) {
-    return toolCallResult;
+  if (isFileDiffDisplay(resultDisplay)) {
+    const sanitizedResultDisplay = sanitizeFileDiffForRecording(resultDisplay);
+    if (sanitizedResultDisplay === resultDisplay) {
+      return toolCallResult;
+    }
+
+    return {
+      ...toolCallResult,
+      resultDisplay: sanitizedResultDisplay,
+    } as T;
   }
 
-  const sanitizedResultDisplay = sanitizeFileDiffForRecording(resultDisplay);
+  const sanitizedResultDisplay =
+    compactToolResultDisplayForRecording(resultDisplay);
   if (sanitizedResultDisplay === resultDisplay) {
     return toolCallResult;
   }
@@ -554,6 +564,7 @@ export class ChatRecordingService {
    * returning undefined if the title is beyond both windows).
    */
   private bytesSinceTitleAnchor = 0;
+  private hasNonTitleContentSinceTitleAnchor = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -567,16 +578,19 @@ export class ChatRecordingService {
     // resumed. Legacy records (no `titleSource` field) stay `undefined` —
     // treated as manual for safety without rewriting the JSONL.
     //
-    // We then re-append a custom_title record to EOF so the title stays
-    // within the tail window that readers scan (guarding against a crash
-    // before the next finalize).
+    // Do not re-append during construction: loading/resuming a session is a
+    // read operation from the user's perspective, and touching the JSONL mtime
+    // would make session lists treat it as fresh activity.
     if (config.getResumedSessionData()) {
       try {
         const sessionService = config.getSessionService();
         const info = sessionService.getSessionTitleInfo(config.getSessionId());
         this.currentCustomTitle = info.title;
         this.currentTitleSource = info.source;
-        this.finalize();
+        if (info.title) {
+          // Prime the threshold so the first real content write re-anchors.
+          this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+        }
       } catch {
         // Best-effort — don't block construction
       }
@@ -783,9 +797,11 @@ export class ChatRecordingService {
   private updateTitleAnchorTracking(record: ChatRecord): void {
     if (record.type === 'system' && record.subtype === 'custom_title') {
       this.bytesSinceTitleAnchor = 0;
+      this.hasNonTitleContentSinceTitleAnchor = false;
       return;
     }
     if (!this.currentCustomTitle) return;
+    this.hasNonTitleContentSinceTitleAnchor = true;
     // +1 for the trailing newline jsonl.writeLine appends.
     this.bytesSinceTitleAnchor +=
       Buffer.byteLength(JSON.stringify(record), 'utf8') + 1;
@@ -1220,10 +1236,6 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
-    let prevUuid: string | null =
-      this.config.getResumedSessionData()?.lastCompletedUuid !== undefined
-        ? null
-        : this.lastRecordUuid;
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];
@@ -1233,9 +1245,10 @@ export class ChatRecordingService {
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message'
       ) {
-        this.turnParentUuids.push(prevUuid);
+        // Reconstructed histories can start mid-chain; the persisted edge is
+        // the source of truth, not the previous item in this sliced list.
+        this.turnParentUuids.push(record.parentUuid ?? null);
       }
-      prevUuid = record.uuid;
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {
@@ -1261,6 +1274,17 @@ export class ChatRecordingService {
       | undefined,
   ): void {
     this.titleRecordedCallback = callback;
+  }
+
+  /**
+   * Returns the currently registered title-recorded callback.
+   * Used to chain callbacks (e.g., when a UI component needs to observe
+   * title changes without replacing an existing ACP notification callback).
+   */
+  getTitleRecordedCallback():
+    | ((customTitle: string, titleSource: TitleSource) => void)
+    | undefined {
+    return this.titleRecordedCallback;
   }
 
   /**
@@ -1301,13 +1325,10 @@ export class ChatRecordingService {
   }
 
   /**
-   * Finalizes the current session by re-appending cached metadata to EOF.
-   *
-   * Call this whenever leaving the current session — whether switching to
-   * another session, shutting down the process, or any other transition.
-   * This single entry point replaces scattered re-append calls and ensures
-   * the custom_title record stays within the last 64KB tail window that
-   * readSessionTitleFromFile() scans.
+   * Finalizes the current session by re-appending cached metadata to EOF, but
+   * only after this recorder has appended non-title content since the last
+   * title anchor. Pure load/resume must remain read-only so session lists do
+   * not treat restored sessions as newly active.
    *
    * Best-effort: errors are logged but never thrown.
    */
@@ -1324,6 +1345,9 @@ export class ChatRecordingService {
       }
     }
     if (!this.currentCustomTitle) {
+      return;
+    }
+    if (!this.hasNonTitleContentSinceTitleAnchor) {
       return;
     }
     try {

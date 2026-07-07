@@ -1,9 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  existsSync,
+  symlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionToolContext } from '../context.ts';
 import { handleTransformData } from './transform-data.ts';
+import type { ToolResult } from '../types.ts';
 
 describe('transform_data path containment', () => {
   let rootDir: string;
@@ -26,7 +34,10 @@ describe('transform_data path containment', () => {
 
     writeFileSync(join(sessionDir, 'in.txt'), 'hello');
     writeFileSync(join(siblingDir, 'outside.txt'), 'evil');
-    writeFileSync(join(skillsDir, 'branding', 'assets', 'template.pptx'), 'fake-pptx');
+    writeFileSync(
+      join(skillsDir, 'branding', 'assets', 'template.pptx'),
+      'fake-pptx',
+    );
   });
 
   afterEach(() => {
@@ -59,6 +70,21 @@ describe('transform_data path containment', () => {
     };
   }
 
+  function assertIsolationUnavailable(result: ToolResult): boolean {
+    const text = result.content[0]?.text ?? '';
+    const isUnavailable =
+      result.isError === true &&
+      (text.includes('requires network isolation') ||
+        text.includes('requires filesystem isolation'));
+
+    if (isUnavailable) {
+      expect(text).toContain('transform_data requires');
+      expect(text).toContain('but no supported isolation backend is available');
+    }
+
+    return isUnavailable;
+  }
+
   it('rejects output path in sibling directory with shared prefix', async () => {
     const result = await handleTransformData(ctx(), {
       language: 'node',
@@ -68,7 +94,9 @@ describe('transform_data path containment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('outputFile must be within the session data directory');
+    expect(result.content[0]?.text).toContain(
+      'outputFile must be within the session data directory',
+    );
   });
 
   it('rejects input path in sibling directory with shared prefix', async () => {
@@ -80,7 +108,9 @@ describe('transform_data path containment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('inputFile must be within the session or skills directory');
+    expect(result.content[0]?.text).toContain(
+      'inputFile must be within the session or skills directory',
+    );
   });
 
   it('rejects output path that escapes via symlink', async () => {
@@ -100,32 +130,88 @@ describe('transform_data path containment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('outputFile must be within the session data directory');
+    expect(result.content[0]?.text).toContain(
+      'outputFile must be within the session data directory',
+    );
   });
 
   it('allows valid descendant paths and writes output', async () => {
     const result = await handleTransformData(ctx(), {
       language: 'node',
-      script: "const fs=require('node:fs');fs.writeFileSync(process.argv.at(-1), JSON.stringify({ok:true}));",
+      script:
+        "const fs=require('node:fs');console.log('made output');fs.writeFileSync(process.argv.at(-1), JSON.stringify({ok:true}));",
       inputFiles: ['in.txt'],
       outputFile: 'out.json',
     });
 
+    if (assertIsolationUnavailable(result)) {
+      return;
+    }
+
     expect(result.isError).toBe(false);
     expect(existsSync(join(dataDir, 'out.json'))).toBe(true);
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('out.json\nRuntime:');
+    expect(text).toMatch(/Network isolation: \w+ \([\w-]+\)/);
+    expect(text).toMatch(/Filesystem isolation: \w+ \([\w-]+\)/);
+    expect(text).toContain('\n\nUse this absolute path as the "src" value');
+    expect(text).toContain('\n\nStdout:\nmade output');
   });
 
   it('allows input files from skills directory (absolute path)', async () => {
     const skillAsset = join(skillsDir, 'branding', 'assets', 'template.pptx');
     const result = await handleTransformData(ctx(), {
       language: 'node',
-      script: "const fs=require('node:fs');const data=fs.readFileSync(process.argv.at(-2),'utf-8');fs.writeFileSync(process.argv.at(-1), JSON.stringify({content:data}));",
+      script:
+        "const fs=require('node:fs');const data=fs.readFileSync(process.argv.at(-2),'utf-8');fs.writeFileSync(process.argv.at(-1), JSON.stringify({content:data}));",
       inputFiles: [skillAsset],
       outputFile: 'out.json',
     });
 
+    if (assertIsolationUnavailable(result)) {
+      return;
+    }
+
     expect(result.isError).toBe(false);
     expect(existsSync(join(dataDir, 'out.json'))).toBe(true);
+  });
+
+  it('blocks scripts from writing outside the session directory', async () => {
+    const outsidePath = join(rootDir, 'outside-write.txt');
+
+    const result = await handleTransformData(ctx(), {
+      language: 'node',
+      script: `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(outsidePath)}, 'nope');fs.writeFileSync(process.argv.at(-1), '{}');`,
+      inputFiles: ['in.txt'],
+      outputFile: 'out.json',
+    });
+
+    if (assertIsolationUnavailable(result)) {
+      expect(existsSync(outsidePath)).toBe(false);
+      return;
+    }
+
+    expect(result.isError).toBe(true);
+    expect(existsSync(outsidePath)).toBe(false);
+  });
+
+  it('blocks scripts from writing outside the data directory', async () => {
+    const sessionStatePath = join(sessionDir, 'session.jsonl');
+
+    const result = await handleTransformData(ctx(), {
+      language: 'node',
+      script: `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(sessionStatePath)}, 'nope');fs.writeFileSync(process.argv.at(-1), '{}');`,
+      inputFiles: ['in.txt'],
+      outputFile: 'out.json',
+    });
+
+    if (assertIsolationUnavailable(result)) {
+      expect(existsSync(sessionStatePath)).toBe(false);
+      return;
+    }
+
+    expect(result.isError).toBe(true);
+    expect(existsSync(sessionStatePath)).toBe(false);
   });
 
   it('still rejects input files outside both session and skills directories', async () => {
@@ -137,7 +223,9 @@ describe('transform_data path containment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('inputFile must be within the session or skills directory');
+    expect(result.content[0]?.text).toContain(
+      'inputFile must be within the session or skills directory',
+    );
   });
 
   it('rejects input path in skills dir that escapes via symlink', async () => {
@@ -158,13 +246,18 @@ describe('transform_data path containment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('inputFile must be within the session or skills directory');
+    expect(result.content[0]?.text).toContain(
+      'inputFile must be within the session or skills directory',
+    );
   });
 
   it('rejects skills path when skillsPath is not available in context', async () => {
     // skillsPath is a required getter on SessionToolContext, but at runtime
     // it could theoretically be empty. Verify the handler falls back safely.
-    const ctxNoSkills = { ...ctx(), skillsPath: undefined } as unknown as SessionToolContext;
+    const ctxNoSkills = {
+      ...ctx(),
+      skillsPath: undefined,
+    } as unknown as SessionToolContext;
     const result = await handleTransformData(ctxNoSkills, {
       language: 'node',
       script: "require('node:fs').writeFileSync(process.argv.at(-1), 'ok')",
@@ -173,6 +266,8 @@ describe('transform_data path containment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('inputFile must be within the session or skills directory');
+    expect(result.content[0]?.text).toContain(
+      'inputFile must be within the session or skills directory',
+    );
   });
 });

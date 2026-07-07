@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
@@ -18,8 +17,9 @@ import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
+  isCacheableReadResult,
 } from '../utils/fileUtils.js';
-import { parsePDFPageRange } from '../utils/pdf.js';
+import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
@@ -54,8 +54,7 @@ export interface ReadFileToolParams {
 
   /**
    * For PDF files, the page range to extract as text (e.g. "1-5", "3", "10-20").
-   * Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like "3-"
-   * are not supported.
+   * Pages are 1-indexed. Open-ended ranges like "3-" are not supported.
    */
   pages?: string;
 }
@@ -99,20 +98,22 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
-   * so that external file reads require user confirmation.
+   * Returns 'ask' for paths outside the workspace/qwen-managed temp/userSkills
+   * directories, so that external file reads require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
 
+    // SYNC: Keep these base roots and the auto-memory check below aligned with
+    // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
+    // append fallback-only roots after that group.
     const allowedRoots = [
       this.config.storage.getProjectTempDir(),
       // Background subagent transcripts live under <projectDir>/subagents/ and
       // are advertised to the model as polling targets via read_file.
       path.join(this.config.storage.getProjectDir(), 'subagents'),
       Storage.getGlobalTempDir(),
-      os.tmpdir(),
       ...this.config.storage.getUserSkillsDirs(),
       Storage.getUserExtensionsDir(),
     ];
@@ -131,7 +132,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     const absPath = path.resolve(this.params.file_path);
     const projectRoot = this.config.getTargetDir();
     // Auto-memory files (AGENTS.md and friends under the auto-memory
@@ -201,9 +202,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const result = await processSingleFileContent(
       this.params.file_path,
       this.config,
-      this.params.offset,
-      this.params.limit,
-      this.params.pages,
+      {
+        offset: this.params.offset,
+        limit: this.params.limit,
+        pages: this.params.pages,
+        signal,
+      },
     );
 
     if (result.error) {
@@ -265,9 +269,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // hash on the read pipeline (deferred follow-up — see Risk
     // section in the PR description).
     if (cacheEnabled && (result.stats ?? stats)) {
-      const cacheable =
-        typeof result.llmContent === 'string' &&
-        result.originalLineCount !== undefined;
+      const cacheable = isCacheableReadResult(result);
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,
@@ -283,7 +285,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     ) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
-      llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
+      const totalLabel =
+        result.originalLineCountExact === false ? `at least ${total}` : total;
+      llmContent = `Showing lines ${start}-${end} of ${totalLabel} total lines.\n\n---\n\n${result.llmContent}`;
     } else {
       llmContent = result.llmContent || '';
     }
@@ -392,7 +396,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
@@ -404,16 +408,16 @@ export class ReadFileTool extends BaseDeclarativeTool<
           offset: {
             description:
               "Optional: For text files, the 0-based line number to start reading from. Requires 'limit' to be set. Use for paginating through large files.",
-            type: 'number',
+            type: 'integer',
           },
           limit: {
             description:
               "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit).",
-            type: 'number',
+            type: 'integer',
           },
           pages: {
             description:
-              "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like '3-' are not supported. When provided, PDF content is extracted as text regardless of model capabilities.",
+              `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
             type: 'string',
           },
         },
@@ -439,11 +443,17 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
-    if (params.offset !== undefined && params.offset < 0) {
-      return 'Offset must be a non-negative number';
+    if (
+      params.offset !== undefined &&
+      (!Number.isInteger(params.offset) || params.offset < 0)
+    ) {
+      return 'Offset must be a non-negative integer';
     }
-    if (params.limit !== undefined && params.limit <= 0) {
-      return 'Limit must be a positive number';
+    if (
+      params.limit !== undefined &&
+      (!Number.isInteger(params.limit) || params.limit <= 0)
+    ) {
+      return 'Limit must be a positive integer';
     }
 
     if (params.pages !== undefined) {
@@ -469,9 +479,9 @@ export class ReadFileTool extends BaseDeclarativeTool<
         return `Invalid pages parameter: '${params.pages}'. Use formats like '5' or '1-10'.`;
       }
       if (parsed.lastPage === Infinity) {
-        return `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the 20-page limit (e.g. '3-22').`;
+        return `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the ${PDF_MAX_PAGES_PER_READ}-page limit (e.g. '3-22').`;
       }
-      const maxPages = 20;
+      const maxPages = PDF_MAX_PAGES_PER_READ;
       if (parsed.lastPage - parsed.firstPage + 1 > maxPages) {
         return `Pages range exceeds maximum of ${maxPages} pages per request.`;
       }
@@ -479,7 +489,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
 
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.file_path)) {
-      return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
+      return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
     }
 
     return null;

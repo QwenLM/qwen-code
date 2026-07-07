@@ -523,7 +523,7 @@ function ModelIdsStep({
           key="model-ids-input"
           value={flow.state.modelIds}
           onChange={flow.changeModelIds}
-          onSubmit={flow.submitModelIds}
+          onSubmit={() => flow.submitModelIds()}
           placeholder={defaultIds || 'model-id-1, model-id-2'}
         />
       </Box>

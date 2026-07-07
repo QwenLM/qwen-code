@@ -75,6 +75,10 @@ function userMessage(id: string): Message {
   return { id, role: 'user', content: 'hello' };
 }
 
+function userShellMessage(id: string): Message {
+  return { id, role: 'user_shell', command: 'npm test', output: '' };
+}
+
 function assistantMessage(id: string): Message {
   return { id, role: 'assistant', content: 'working on it' };
 }
@@ -110,12 +114,21 @@ describe('getFloatingTodos', () => {
     expect(state.sourceCallId).toBeNull();
   });
 
-  it('keeps an active list visible across later user messages', () => {
+  it('clears an active list after the next user message', () => {
     const state = getFloatingTodos([
       todoWriteMessage('m1', [todo('1', 'in_progress')]),
       userMessage('u1'),
     ]);
-    expect(state.todos).toHaveLength(1);
+    expect(state.todos).toHaveLength(0);
+    expect(state.allCompleted).toBe(false);
+  });
+
+  it('clears an active list after the next user shell message', () => {
+    const state = getFloatingTodos([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      userShellMessage('shell-1'),
+    ]);
+    expect(state.todos).toHaveLength(0);
     expect(state.allCompleted).toBe(false);
   });
 
@@ -142,6 +155,17 @@ describe('getFloatingTodos', () => {
       todoWriteMessage('m2', [todo('2', 'pending')]),
     ]);
     expect(state.todos.map((t) => t.id)).toEqual(['2']);
+    expect(state.sourceMessageId).toBe('m2');
+  });
+
+  it('shows a new active list started after clearing a stale active one', () => {
+    const state = getFloatingTodos([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      userMessage('u1'),
+      todoWriteMessage('m2', [todo('2', 'pending')]),
+    ]);
+    expect(state.todos.map((t) => t.id)).toEqual(['2']);
+    expect(state.allCompleted).toBe(false);
     expect(state.sourceMessageId).toBe('m2');
   });
 

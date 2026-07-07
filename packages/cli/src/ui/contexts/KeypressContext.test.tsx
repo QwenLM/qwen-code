@@ -122,6 +122,96 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('rewrites macOS composed Option+t glyph "†" to Alt+t', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 't',
+            meta: true,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('leaves "†" untouched on non-macOS platforms', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '†',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: '',
+            meta: false,
+            sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('should recognize regular enter key (keycode 13) in kitty protocol', async () => {
       const keyHandler = vi.fn();
 
@@ -550,6 +640,117 @@ describe('KeypressContext - Kitty Protocol', () => {
             name: '',
           }),
         );
+      });
+
+      it('should not dispatch SGR mouse events embedded in pasted content', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // An SGR left-press (\x1b[<0;5;5M) hidden inside bracketed paste must
+        // be treated as paste content, never reconstructed into a real click —
+        // otherwise a pasted payload could select a dialog option or move the
+        // cursor without the user pressing anything.
+        const mouseSequence = '\x1b[<0;5;5M';
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          stdin.emit('data', Buffer.from(`\x1b[200~${mouseSequence}\x1b[201~`));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledTimes(1);
+        });
+
+        // No mouse event should ever be dispatched from pasted bytes.
+        expect(mouseHandler).not.toHaveBeenCalled();
+        // The bytes are delivered as a single paste event instead, carrying
+        // the SGR payload as literal content.
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ paste: true }),
+        );
+        expect(keyHandler.mock.calls[0][0].sequence).toContain('0;5;5');
+      });
+
+      it('should not dispatch SGR mouse events when a paste begins mid-reassembly', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // Race: a real mouse-move starts an SGR fragment (`\x1b[<…` with no
+        // terminating `M` yet), then a bracketed paste begins. paste-start must
+        // not be swallowed into the SGR buffer — otherwise `isPaste` stays false
+        // and an SGR left-press embedded in the pasted content gets
+        // reconstructed into a real click (e.g. auto-selecting a dialog option).
+        const partialMouseMove = '\x1b[<35;10;5';
+        const embeddedClick = '\x1b[<0;5;5M';
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          // Partial mouse-move fragment arrives first (no terminating M).
+          stdin.emit('data', Buffer.from(partialMouseMove));
+          // Then a paste carrying an embedded SGR left-press.
+          stdin.emit('data', Buffer.from(`\x1b[200~${embeddedClick}\x1b[201~`));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalled();
+        });
+
+        // No mouse event should ever be dispatched from the pasted bytes.
+        expect(mouseHandler).not.toHaveBeenCalled();
+        // The embedded SGR payload arrives as literal paste content.
+        const pasteCall = keyHandler.mock.calls.find((c) => c[0]?.paste);
+        expect(pasteCall).toBeDefined();
+        expect(pasteCall?.[0].sequence).toContain('0;5;5');
+      });
+
+      it('abandons a runaway SGR mouse buffer so later keystrokes still arrive', async () => {
+        const keyHandler = vi.fn();
+        const mouseHandler = vi.fn();
+        // A malformed `\x1b[<` with no terminator (e.g. stray subprocess output)
+        // must not swallow input indefinitely: once the reassembly buffer passes
+        // the SGR length cap it is abandoned, so a following keystroke is
+        // delivered normally instead of being buffered and discarded.
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        act(() => {
+          // Start SGR reassembly, then feed long garbage without a terminator
+          // to overflow the cap, followed by a plain 'a'.
+          stdin.emit('data', Buffer.from('\x1b[<'));
+          stdin.emit('data', Buffer.from('1'.repeat(60)));
+          stdin.emit('data', Buffer.from('a'));
+        });
+
+        await waitFor(() => {
+          expect(
+            keyHandler.mock.calls.some((c) => c[0]?.sequence === 'a'),
+          ).toBe(true);
+        });
+        // The garbage never reconstructs into a real mouse event.
+        expect(mouseHandler).not.toHaveBeenCalled();
       });
 
       it('should handle empty paste sequence', async () => {

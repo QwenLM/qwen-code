@@ -12,7 +12,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
-      // cli's daemonStatusProvider.test.ts imports `FakeAgent` /
+      // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private
       // `internal/testUtils` module. This alias overrides the runtime
       // resolution so vitest reads the .ts source directly instead of
@@ -41,6 +41,14 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/spawnChannel.ts',
       ),
+      '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
+        __dirname,
+        '../acp-bridge/src/ndJsonStream.ts',
+      ),
+      '@qwen-code/acp-bridge/logRedaction': path.resolve(
+        __dirname,
+        '../acp-bridge/src/logRedaction.ts',
+      ),
       '@qwen-code/acp-bridge/bridgeClient': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeClient.ts',
@@ -57,9 +65,17 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/bridgeFileSystem.ts',
       ),
+      '@qwen-code/acp-bridge/eventBus': path.resolve(
+        __dirname,
+        '../acp-bridge/src/eventBus.ts',
+      ),
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
+      ),
+      '@qwen-code/audio-capture': path.resolve(
+        __dirname,
+        '../audio-capture/src/index.ts',
       ),
     },
   },

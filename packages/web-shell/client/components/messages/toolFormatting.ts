@@ -1,18 +1,21 @@
 import type { ACPToolCall } from '../../adapters/types';
 
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
+export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
+  webfetch: 'WebFetch',
+  fetch: 'WebFetch',
   list_directory: 'ListFiles',
   lsp: 'Lsp',
   ask_user_question: 'AskUserQuestion',
@@ -27,6 +30,13 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   tool_search: 'ToolSearch',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',
+  enter_plan_mode: 'EnterPlanMode',
+  task_create: 'TaskCreate',
+  task_update: 'TaskUpdate',
+  task_list: 'TaskList',
+  team_create: 'TeamCreate',
+  team_delete: 'TeamDelete',
+  workflow: 'Workflow',
   web_search: 'WebSearch',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -36,7 +46,37 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export function formatToolDisplayName(toolName: string): string {
-  return TOOL_DISPLAY_NAMES[toolName] ?? toolName;
+  if (!toolName.trim()) return 'Tool';
+  const exact = TOOL_DISPLAY_NAMES[toolName];
+  if (exact) return exact;
+  const lower = toolName.toLowerCase();
+  if (lower === 'web_fetch' || lower === 'webfetch' || lower === 'fetch') {
+    return 'WebFetch';
+  }
+  return toolName;
+}
+
+/**
+ * Locale-aware tool display name for chat-stream badges. Looks up the
+ * `toolName.<wire_name>` i18n key; when the active language has no entry the
+ * translator returns the key verbatim, in which case we fall back to the
+ * English {@link formatToolDisplayName}. Pass the `t` from `useI18n()`.
+ */
+export function localizeToolDisplayName(
+  toolName: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  const displayName = formatToolDisplayName(toolName);
+  const keys = [
+    `toolName.${toolName}`,
+    `toolName.${toolName.toLowerCase()}`,
+    `toolName.${displayName.toLowerCase()}`,
+  ];
+  for (const key of keys) {
+    const translated = t(key);
+    if (translated !== key) return translated;
+  }
+  return displayName;
 }
 
 export function isAskUserQuestionToolName(toolName: string): boolean {
@@ -60,11 +100,38 @@ export function getToolDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
 ): string {
+  if (isSkillToolName(tool.toolName)) {
+    const skillName = getStringArg(tool.args, 'skill');
+    if (skillName) return truncateText(skillName, MAX_DESCRIPTION_LENGTH);
+  }
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd);
   if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
   return '';
+}
+
+export function getToolSummaryDescription(
+  tool: ACPToolCall,
+  workspaceCwd?: string,
+): string {
+  if (!isShellToolName(tool.toolName)) {
+    return getToolDescription(tool, workspaceCwd);
+  }
+
+  const description = getStringArg(tool.args, 'description');
+  if (description) return truncateText(description, MAX_DESCRIPTION_LENGTH);
+
+  const fromArgs = getDescriptionFromArgs(tool, workspaceCwd, {
+    includeTimeout: false,
+  });
+  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
+  return '';
+}
+
+export function getShellToolSemanticDescription(tool: ACPToolCall): string {
+  if (!isShellToolName(tool.toolName)) return '';
+  return getStringArg(tool.args, 'description');
 }
 
 export function extractText(tool: ACPToolCall): string | null {
@@ -80,10 +147,17 @@ export function extractText(tool: ACPToolCall): string | null {
 export function getToolResultSummary(tool: ACPToolCall): string {
   if (tool.status !== 'completed' && tool.status !== 'failed') return '';
 
+  const name = tool.toolName.toLowerCase();
+  if (name === 'grep_search' || name === 'grep' || name === 'search') {
+    const rawSummary = parseGrepSummary(
+      (extractRawOutputText(tool.rawOutput) ?? '').trim(),
+    );
+    if (rawSummary) return rawSummary;
+  }
+
   const text = extractText(tool);
   if (!text) return '';
 
-  const name = tool.toolName.toLowerCase();
   const lines = text.split('\n');
   const lineCount = lines.length;
 
@@ -107,7 +181,10 @@ export function getToolResultSummary(tool: ACPToolCall): string {
     return truncateText(firstLine, 80);
   }
 
-  if (name === 'grep' || name === 'search') {
+  if (name === 'grep_search' || name === 'grep' || name === 'search') {
+    const summary = parseGrepSummary(text.trim());
+    if (summary) return summary;
+
     const matchCount = lines.filter((l) => l.trim()).length;
     return `${matchCount} result(s)`;
   }
@@ -164,12 +241,20 @@ function getDescriptionFromTitle(
   return formatDescriptionPaths(title, workspaceCwd);
 }
 
+function parseGrepSummary(text: string): string | null {
+  if (text === 'No matches found') return text;
+  if (/^Found \d+ match(?:es)?(?: \(truncated\))?$/.test(text)) return text;
+  return null;
+}
+
 function getDescriptionFromArgs(
   tool: ACPToolCall,
   workspaceCwd?: string,
+  options: { includeTimeout?: boolean } = {},
 ): string {
   const args = tool.args || {};
   const name = tool.toolName.toLowerCase();
+  const includeTimeout = options.includeTimeout ?? true;
 
   if (args.command) {
     let description = String(args.command);
@@ -178,11 +263,12 @@ function getDescriptionFromArgs(
     }
     if (args.is_background) {
       description += ' [background]';
-    } else if (args.timeout) {
+    } else if (includeTimeout && args.timeout) {
       description += ` [timeout: ${String(args.timeout)}ms]`;
     }
-    if (args.description) {
-      description += ` (${String(args.description).replace(/\n/g, ' ')})`;
+    const argDescription = getStringArg(args, 'description');
+    if (argDescription) {
+      description += ` (${argDescription})`;
     }
     return truncateText(description, MAX_DESCRIPTION_LENGTH);
   }
@@ -229,6 +315,14 @@ function getDescriptionFromArgs(
   return '';
 }
 
+function getStringArg(
+  args: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  const value = args?.[key];
+  return typeof value === 'string' ? value.trim().replace(/\n/g, ' ') : '';
+}
+
 export function isShellToolName(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
@@ -237,6 +331,10 @@ export function isShellToolName(name: string): boolean {
     normalized === 'shell' ||
     normalized === 'execute_command'
   );
+}
+
+export function isSkillToolName(name: string): boolean {
+  return name.toLowerCase() === 'skill';
 }
 
 export function toolContainsCallId(
@@ -378,13 +476,16 @@ export function getAgentDescription(agent: ACPToolCall): string {
   return '';
 }
 
-export function getAgentCurrentToolHint(agent: ACPToolCall): string {
+export function getAgentCurrentToolHint(
+  agent: ACPToolCall,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   if (agent.status !== 'in_progress') return '';
   const subs = agent.subTools;
   if (!subs || subs.length === 0) return '';
   const last = subs[subs.length - 1];
   if (last.status !== 'in_progress' && last.status !== 'pending') return '';
-  let hint = last.toolName;
+  let hint = localizeToolDisplayName(last.toolName ?? '', t);
   if (last.title) {
     const colonIdx = last.title.indexOf(': ');
     hint += ' ' + (colonIdx > 0 ? last.title.slice(colonIdx + 2) : last.title);

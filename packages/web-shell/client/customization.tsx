@@ -8,6 +8,7 @@ import type { Components, Options } from 'react-markdown';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
+import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -15,18 +16,56 @@ export interface MarkdownRenderContext {
   source: MarkdownContentSource;
 }
 
+export interface WebShellCodeBlockRenderInfo {
+  /**
+   * Raw fenced-code language from the markdown class name, restricted to safe
+   * fence-language characters.
+   */
+  language: string;
+  /**
+   * Canonical Shiki language id after applying built-in aliases, or `text`
+   * when the language is unsupported by the fallback highlighter.
+   */
+  resolvedLanguage: string;
+  className?: string;
+  code: string;
+  /** True while the assistant message is still streaming partial content. */
+  isStreaming: boolean;
+  source: MarkdownContentSource;
+  theme: WebShellTheme;
+}
+
+/**
+ * Return a React node to replace the default code block rendering. Return
+ * `null`, `undefined`, or `false` to decline and fall back to the built-in code
+ * block renderer. Expensive renderers should debounce or defer work while
+ * `info.isStreaming` is true.
+ */
+export type CodeBlockRenderer = (
+  info: WebShellCodeBlockRenderInfo,
+) => ReactNode | null | undefined;
+
 export interface WebShellMarkdownCustomization {
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
   ) => string;
+  renderCodeBlock?: CodeBlockRenderer;
+  /**
+   * Custom markdown components override Web Shell's built-ins. In particular,
+   * `components.code` replaces the default code renderer, so `renderCodeBlock`
+   * will not be called for that source.
+   */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];
   rehypePlugins?: Options['rehypePlugins'];
 }
 
+export type MarkdownTableMode = 'basic' | 'advanced';
+
 export type ToolHeaderKind =
   | 'agent'
+  | 'ask'
   | 'edit'
   | 'fetch'
   | 'read'
@@ -49,12 +88,36 @@ export type ToolHeaderExtraRenderer = (
 ) => ReactNode;
 
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
+export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
+
+export interface UserMessageContentRenderInfo {
+  content: string;
+  images?: readonly { data: string; mimeType: string }[];
+}
+
+export type UserMessageContentRenderer = (
+  info: UserMessageContentRenderInfo,
+) => ReactNode;
+
+export type WebShellBuiltinComposerTagKind =
+  | 'extension'
+  | 'mcp'
+  | 'file'
+  | 'skill';
+
+export type WebShellComposerTagKind =
+  | WebShellBuiltinComposerTagKind
+  | (string & {});
+
+export type WebShellComposerTagIconMap = Readonly<Record<string, string>>;
 
 export interface WebShellComposerTag {
   id: string;
   label?: string;
   value?: string;
   removable?: boolean;
+  kind?: WebShellComposerTagKind;
+  serialized?: string;
 }
 
 export type WebShellComposerTagPlacement = 'top' | 'inline';
@@ -74,6 +137,26 @@ export interface WebShellComposerInput {
   submit?: boolean;
 }
 
+export interface WebShellAtItem {
+  id: string;
+  label: string;
+  description?: string;
+  detail?: string;
+  insertText?: string;
+  composerTag?: WebShellComposerTag;
+}
+
+export interface WebShellAtProvider {
+  id: string;
+  label: string;
+  description?: string;
+  order?: number;
+  search(params: {
+    query: string;
+    signal: AbortSignal;
+  }): Promise<readonly WebShellAtItem[]>;
+}
+
 export interface WebShellComposerApi {
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
@@ -86,6 +169,29 @@ export interface WebShellComposerApi {
   clear(options?: { text?: boolean; tags?: boolean }): void;
   submit(input?: WebShellComposerInput): void;
 }
+
+export interface WebShellComposerToolbarRenderInfo {
+  disabled: boolean;
+  isRunning: boolean;
+  currentMode: string;
+  currentModel: string;
+  sessionName?: string;
+}
+
+export type WebShellComposerToolbarStartRenderInfo =
+  WebShellComposerToolbarRenderInfo;
+
+export type WebShellComposerToolbarRightRenderInfo =
+  WebShellComposerToolbarRenderInfo;
+
+export type ComposerToolbarStartRenderer =
+  ComponentType<WebShellComposerToolbarStartRenderInfo>;
+
+export type ComposerToolbarEndRenderer =
+  ComponentType<WebShellComposerToolbarRenderInfo>;
+
+export type ComposerToolbarRightRenderer =
+  ComponentType<WebShellComposerToolbarRightRenderInfo>;
 
 // ---- Background task info (public type for footer renderer) ----
 
@@ -164,9 +270,26 @@ export interface WebShellFooterRenderInfo {
 
 export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
 
+// ---- Loading phrases ----
+
+/**
+ * Resolves the witty phrases cycled while a prompt is streaming. Receives the
+ * resolved UI language. Return phrases to override the built-in defaults, an
+ * empty array to hide the phrase entirely, or `undefined`/`null` to fall back
+ * to the built-in defaults for that language.
+ */
+export type LoadingPhrasesResolver = (
+  language: string,
+) => readonly string[] | undefined | null;
+
 export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  renderWelcomeFooter?: WelcomeFooterRenderer;
+  renderUserMessageContent?: UserMessageContentRenderer;
+  renderComposerToolbarStart?: ComposerToolbarStartRenderer;
+  renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
+  renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**
@@ -176,7 +299,9 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
+  loadingPhrases?: LoadingPhrasesResolver;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

@@ -19,6 +19,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   estimateContentChars,
   resolveCompactionTuning,
@@ -38,6 +39,8 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+
+const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
@@ -146,18 +149,25 @@ export interface CompactionThresholds {
  * Compute the three-tier threshold ladder for a given context window.
  *
  * Each tier is `max(proportional, absolute)`:
- *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
- *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
+ *   auto = max(pct * window,                               effectiveWindow - AUTOCOMPACT_BUFFER)
+ *   warn = max(0, max((pct - WARN_PCT_OFFSET) * window,    auto - WARN_BUFFER))
  *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
  *
- * Small windows (where the absolute branch goes negative) automatically
- * fall back to the proportional branch. Large windows are dominated by
- * the absolute branch, capping wasted reservation to ~33K instead of 30%
- * of the window.
+ * `pct` defaults to DEFAULT_PCT when not provided. Small windows (where
+ * the absolute branch goes negative) automatically fall back to the
+ * proportional branch. Large windows are dominated by the absolute branch,
+ * capping wasted reservation to ~33K instead of 30% of the window.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
-export function computeThresholds(window: number): CompactionThresholds {
+export function computeThresholds(
+  window: number,
+  pct?: number,
+): CompactionThresholds {
+  const effectivePct = Math.min(
+    1,
+    Math.max(0, pct !== undefined && Number.isFinite(pct) ? pct : DEFAULT_PCT),
+  );
   // Clamp to 0 for tiny windows (window < SUMMARY_RESERVE) so the surfaced
   // value in `/context` stays meaningful. The Math.max guards on auto/warn/hard
   // below absorb the floor — clamping does not shift those outputs because
@@ -166,13 +176,18 @@ export function computeThresholds(window: number): CompactionThresholds {
   const effectiveWindow = Math.max(0, window - SUMMARY_RESERVE);
 
   const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
-  const auto = Math.max(DEFAULT_PCT * window, absAuto);
+  const auto = Math.max(effectivePct * window, absAuto);
 
   const absWarn = auto - WARN_BUFFER;
-  const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
+  const warn = Math.max(
+    0,
+    Math.max((effectivePct - WARN_PCT_OFFSET) * window, absWarn),
+  );
 
   const rawHard = effectiveWindow - HARD_BUFFER;
-  // Guarantee hard > auto so compaction doesn't wait until the last moment.
+  // Guarantee hard >= auto so compaction doesn't wait until the last moment.
+  // When pct=1, auto equals the full window and hard collapses to auto
+  // (degenerate case: both thresholds trigger simultaneously).
   // For tiny/zero windows where auto is already at the proportional floor,
   // clamp hard to the window itself so it never exceeds the actual limit.
   const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
@@ -234,6 +249,13 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
+  /**
+   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
+   * When provided, the cheap-gate subtracts this from the context window
+   * before computing thresholds so auto-compression fires based on the
+   * real available input budget rather than the full window.
+   */
+  reservedOutputTokens?: number;
 }
 
 /**
@@ -337,10 +359,17 @@ export class ChatCompressionService {
     }
 
     if (!force) {
-      const contextLimit =
+      const rawContextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const { auto } = computeThresholds(contextLimit);
+      const contextLimit = Math.max(
+        0,
+        rawContextLimit - (opts.reservedOutputTokens ?? 0),
+      );
+      const { auto } = computeThresholds(
+        contextLimit,
+        config.getAutoCompactThreshold(),
+      );
       // Order of preference for the effective-token estimate:
       //   1. Caller already computed it (sendMessageStream hard-tier rescue)
       //   2. Compute it here from history + pending user message
@@ -375,6 +404,12 @@ export class ChatCompressionService {
           countToolResponseImages(chat.getHistoryShallow(true)) >=
             tuning.screenshotTriggerThreshold;
         if (!screenshotOverflow) {
+          debugLogger.debug(
+            `[compaction] cheap-gate NOOP: effectiveTokens=${effectiveTokens}, ` +
+              `auto=${auto}, contextLimit=${contextLimit}, ` +
+              `rawContextLimit=${rawContextLimit}, ` +
+              `reservedOutputTokens=${opts.reservedOutputTokens ?? 0}`,
+          );
           return {
             newHistory: null,
             info: {
@@ -477,7 +512,14 @@ export class ChatCompressionService {
 
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
+      skipOutputLanguagePreference: true,
       model,
+      // Stream so a slow compression inference keeps the HTTP connection alive.
+      // Non-streaming returns no bytes until the whole summary is generated, so
+      // behind a BFF gateway with a short `proxy_read_timeout` a long inference
+      // is killed with a 504 (surfaced as a 422) mid-compression, breaking the
+      // session. See https://github.com/QwenLM/qwen-code/issues/5861.
+      stream: true,
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,

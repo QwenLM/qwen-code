@@ -178,8 +178,9 @@ function getTaskExecutionTokenCount(rawOutput: unknown): number | undefined {
   if (typeof tokenCount === 'number' && tokenCount > 0) return tokenCount;
   const summary = obj['executionSummary'];
   if (typeof summary === 'object' && summary !== null) {
-    const totalTokens = (summary as Record<string, unknown>)['totalTokens'];
-    if (typeof totalTokens === 'number' && totalTokens > 0) return totalTokens;
+    const outputTokens = (summary as Record<string, unknown>)['outputTokens'];
+    if (typeof outputTokens === 'number' && outputTokens > 0)
+      return outputTokens;
   }
   return undefined;
 }

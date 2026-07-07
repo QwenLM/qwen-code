@@ -5,8 +5,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildMissedCronNotification,
   CronScheduler,
+  nextDurableFireMs,
   type CronJob,
 } from './cronScheduler.js';
+import { nextFireTime } from '../utils/cronParser.js';
 import { getLockFilePath } from './cronTasksLock.js';
 import {
   getCronFilePath,
@@ -291,6 +293,65 @@ describe('CronScheduler', () => {
       expect(fired).toHaveLength(1);
     });
 
+    it('honors a configured recurring max age', () => {
+      const oneDayMs = 24 * 60 * 60 * 1000;
+      const custom = new CronScheduler(null, oneDayMs);
+      try {
+        const job = custom.create('*/1 * * * *', 'short-lived', true);
+        expect(job.expiresAt - job.createdAt).toBe(oneDayMs);
+
+        const fired: CronJob[] = [];
+        custom.start((j) => fired.push(j));
+        custom.tick(new Date(job.expiresAt + 1000));
+        expect(fired).toHaveLength(1);
+        expect(custom.list()).toHaveLength(0);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('never expires recurring jobs when max age is Infinity', () => {
+      const custom = new CronScheduler(null, Infinity);
+      try {
+        const job = custom.create('*/1 * * * *', 'immortal', true);
+        expect(job.expiresAt).toBe(Infinity);
+
+        const fired: CronJob[] = [];
+        custom.start((j) => fired.push(j));
+        // Well past the 7-day default — still recurring, not removed.
+        custom.tick(new Date(job.createdAt + 30 * 24 * 60 * 60 * 1000));
+        expect(fired).toHaveLength(1);
+        expect(custom.list()).toHaveLength(1);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('treats a zero max age as never expiring, matching the config layer', () => {
+      // normalizeRecurringMaxAge owns the `0 → Infinity` contract for
+      // both the config layer and this constructor, so a direct caller
+      // passing 0 gets disabled expiry, not a silent 7-day default.
+      const custom = new CronScheduler(null, 0);
+      try {
+        const job = custom.create('*/1 * * * *', 'zero means never', true);
+        expect(job.expiresAt).toBe(Infinity);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('falls back to the default max age on invalid input', () => {
+      for (const bad of [-5, NaN]) {
+        const custom = new CronScheduler(null, bad);
+        try {
+          const job = custom.create('*/1 * * * *', 'guarded', true);
+          expect(job.expiresAt - job.createdAt).toBe(7 * 24 * 60 * 60 * 1000);
+        } finally {
+          custom.destroy();
+        }
+      }
+    });
+
     it('fires in next minute after first fire', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
@@ -399,6 +460,310 @@ describe('CronScheduler', () => {
       const job = scheduler.create('*/1 * * * *', 'temp', true);
       await scheduler.delete(job.id);
       expect(scheduler.getExitSummary()).toBeNull();
+    });
+  });
+
+  describe('session wakeups', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 30, 0));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('schedules a second-precise one-shot wakeup', () => {
+      const w = scheduler.scheduleWakeup(300, 'continue loop');
+
+      expect(w.clampedDelaySeconds).toBe(300);
+      expect(w.wasClamped).toBe(false);
+      expect(w.scheduledFor).toBe(
+        new Date(2025, 0, 15, 10, 35, 0).toISOString(),
+      );
+      expect(scheduler.sessionSize).toBe(1);
+      expect(scheduler.hasPendingWork).toBe(true);
+    });
+
+    it('rejects extending a pending wakeup chain past 24 hours and leaves no wakeup behind', () => {
+      scheduler.scheduleWakeup(3600, '/loop check status');
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check status'),
+      ).toThrow('24h session limit');
+      // The rejected re-arm clears the prior wakeup. A stale entry would have
+      // a past fireAtMs and fire one iteration past the 24h budget it enforces.
+      expect(scheduler.sessionSize).toBe(0);
+    });
+
+    it('keeps the chain clock across fires (session-level 24h budget)', () => {
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 0));
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      const first = scheduler.scheduleWakeup(3600, '/loop check status');
+      scheduler.tick(new Date(first.scheduledFor));
+      expect(fired.some((job) => job.prompt === '/loop check status')).toBe(
+        true,
+      );
+
+      // A fire does NOT reset the chain clock — re-arming within the 24h
+      // budget still works.
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check build'),
+      ).not.toThrow();
+
+      // The budget runs from the first wakeup and a fire does not restart it,
+      // so re-arming past 24h from the chain start is rejected.
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+      expect(() => scheduler.scheduleWakeup(3600, '/loop check build')).toThrow(
+        '24h session limit',
+      );
+    });
+
+    it('does not reset the chain clock when a pending wakeup is cancelled', () => {
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 0));
+      const w = scheduler.scheduleWakeup(3600, '/loop check status');
+      scheduler.cancelWakeup(w.id);
+
+      // Cancelling clears the pending wakeup but NOT the 24h chain budget —
+      // re-scheduling past the original 24h window is still rejected.
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check status'),
+      ).toThrow('24h session limit');
+    });
+
+    it('resets the chain clock on stop (new session)', () => {
+      vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 0));
+      scheduler.scheduleWakeup(3600, '/loop check status');
+      scheduler.stop();
+
+      // A new session starts a fresh 24h budget.
+      vi.setSystemTime(new Date(2025, 0, 16, 10, 0, 1));
+      expect(() =>
+        scheduler.scheduleWakeup(3600, '/loop check status'),
+      ).not.toThrow();
+    });
+
+    it('disable() marks the scheduler disabled and stops the tick', () => {
+      scheduler.start(() => {});
+      expect(scheduler.disabled).toBe(false);
+      expect(scheduler.running).toBe(true);
+
+      scheduler.disable();
+
+      // Disabled is a distinct, permanent state — a plain stop() leaves it
+      // restartable, but disable() bars re-arming for the session.
+      expect(scheduler.disabled).toBe(true);
+      expect(scheduler.running).toBe(false);
+    });
+
+    it('scheduleWakeup throws once the scheduler is disabled', () => {
+      scheduler.disable();
+      expect(() => scheduler.scheduleWakeup(300, '/loop check')).toThrow(
+        'scheduler is disabled',
+      );
+      expect(scheduler.sessionSize).toBe(0);
+    });
+
+    it('keeps second precision (does not round to the minute)', () => {
+      // 90s would round up to 2 min under the old cron path; the timer is exact.
+      const w = scheduler.scheduleWakeup(90, 'p');
+      expect(w.scheduledFor).toBe(
+        new Date(2025, 0, 15, 10, 31, 30).toISOString(),
+      );
+    });
+
+    it('clamps delaySeconds to [60, 3600] and flags wasClamped', () => {
+      expect(scheduler.scheduleWakeup(5, 'p').clampedDelaySeconds).toBe(60);
+      expect(scheduler.scheduleWakeup(9999, 'p').clampedDelaySeconds).toBe(
+        3600,
+      );
+      expect(scheduler.scheduleWakeup(5, 'p').wasClamped).toBe(true);
+      expect(scheduler.scheduleWakeup(300, 'p').wasClamped).toBe(false);
+    });
+
+    it('treats 60 and 3600 as in-range boundaries (not clamped)', () => {
+      expect(scheduler.scheduleWakeup(60, 'p').wasClamped).toBe(false);
+      expect(scheduler.scheduleWakeup(3600, 'p').wasClamped).toBe(false);
+    });
+
+    it('rounds in-range fractional input without marking it clamped', () => {
+      const w = scheduler.scheduleWakeup(60.4, 'p');
+      expect(w.clampedDelaySeconds).toBe(60);
+      expect(w.wasClamped).toBe(false);
+
+      const roundedToMin = scheduler.scheduleWakeup(59.6, 'p');
+      expect(roundedToMin.clampedDelaySeconds).toBe(60);
+      expect(roundedToMin.wasClamped).toBe(false);
+    });
+
+    it('falls back to the default heartbeat for non-finite delays', () => {
+      const w = scheduler.scheduleWakeup(Infinity, 'p');
+      expect(w.clampedDelaySeconds).toBe(1200);
+      expect(w.wasClamped).toBe(true);
+    });
+
+    it('treats NaN as non-finite and uses the default heartbeat', () => {
+      const w = scheduler.scheduleWakeup(Number.NaN, 'p');
+      expect(w.clampedDelaySeconds).toBe(1200);
+      expect(w.wasClamped).toBe(true);
+    });
+
+    it('destroy() clears pending wakeups', () => {
+      scheduler.scheduleWakeup(300, 'p');
+      scheduler.destroy();
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
+    });
+
+    it('fires a due wakeup through onFire exactly once, then removes it', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.scheduleWakeup(120, 'wake up');
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 31, 30)); // 90s — not due
+      expect(fired).toHaveLength(0);
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 32, 0)); // 120s — due
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('wake up');
+      expect(fired[0]!.fireAtMs).toBe(
+        new Date(2025, 0, 15, 10, 32, 0).getTime(),
+      );
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 33, 0)); // already fired+removed
+      expect(fired).toHaveLength(1);
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
+    });
+
+    it('fires due cron jobs and due wakeups in the same tick', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.create('* * * * *', 'cron prompt', false);
+      scheduler.scheduleWakeup(60, 'wakeup prompt');
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 31, 0));
+
+      expect(fired.map((job) => job.prompt)).toEqual([
+        'cron prompt',
+        'wakeup prompt',
+      ]);
+      expect(scheduler.sessionSize).toBe(0);
+    });
+
+    it('lists wakeups as active scheduler work', () => {
+      scheduler.scheduleWakeup(300, 'p');
+      expect(scheduler.list()).toMatchObject([
+        {
+          cronExpr: '@wakeup',
+          prompt: 'p',
+          recurring: false,
+          fireAtMs: new Date(2025, 0, 15, 10, 35, 0).getTime(),
+          jitterMs: 0,
+        },
+      ]);
+      expect(scheduler.size).toBe(1);
+    });
+
+    it('does not count wakeups against the cron job limit', () => {
+      for (let i = 0; i < 50; i++) {
+        scheduler.create('*/1 * * * *', `job-${i}`, true);
+      }
+
+      expect(() => scheduler.scheduleWakeup(300, 'wake up')).not.toThrow();
+      expect(scheduler.size).toBe(51);
+      expect(scheduler.sessionSize).toBe(51);
+    });
+
+    it('keeps only one pending wakeup per session', () => {
+      scheduler.scheduleWakeup(120, 'first');
+      const second = scheduler.scheduleWakeup(240, 'second');
+
+      expect(scheduler.sessionSize).toBe(1);
+      expect(second.replacedId).toEqual(expect.any(String));
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 32, 0));
+      expect(fired).toHaveLength(0);
+
+      scheduler.tick(new Date(second.scheduledFor));
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('second');
+    });
+
+    it('cancelWakeup removes a pending wakeup', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      const w = scheduler.scheduleWakeup(300, 'p');
+
+      expect(scheduler.cancelWakeup(w.id)).toBe(true);
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 35, 0));
+      expect(fired).toHaveLength(0);
+      expect(scheduler.cancelWakeup(w.id)).toBe(false);
+    });
+
+    it('cancelAllWakeups cancels the pending wakeup and returns the count', () => {
+      scheduler.scheduleWakeup(120, 'a');
+      scheduler.scheduleWakeup(240, 'b');
+      expect(scheduler.cancelAllWakeups()).toBe(1);
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.cancelAllWakeups()).toBe(0);
+    });
+
+    it('reports pending wakeups in the exit summary', () => {
+      scheduler.scheduleWakeup(300, 'continue checking the deployment status');
+
+      const summary = scheduler.getExitSummary()!;
+
+      expect(summary).toContain('1 active loop cancelled:');
+      expect(summary).toContain(new Date(2025, 0, 15, 10, 35, 0).toISOString());
+      expect(summary).toContain('continue checking the deployment status');
+    });
+
+    it('reports mixed session jobs and wakeups in the exit summary', () => {
+      scheduler.create('*/5 * * * *', 'cron check', false);
+      scheduler.scheduleWakeup(300, 'wakeup check');
+
+      const summary = scheduler.getExitSummary()!;
+
+      expect(summary).toContain('2 active loops cancelled:');
+      expect(summary).toContain('cron check');
+      expect(summary).toContain('wakeup check');
+    });
+
+    it('stop clears pending wakeups so they cannot fire after restart', () => {
+      const fired: CronJob[] = [];
+      scheduler.scheduleWakeup(300, 'stale wakeup');
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.stop();
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 35, 0));
+
+      expect(fired).toHaveLength(0);
+      expect(scheduler.sessionSize).toBe(0);
+      expect(scheduler.hasPendingWork).toBe(false);
+    });
+
+    it('does not persist wakeups as durable cron tasks', async () => {
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'wakeup-durable-'),
+      );
+      try {
+        const projectScheduler = new CronScheduler(tmpDir);
+        projectScheduler.scheduleWakeup(300, 'session wakeup');
+
+        await expect(readCronTasks(tmpDir)).resolves.toEqual([]);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -574,6 +939,95 @@ describe('CronScheduler', () => {
     });
   });
 
+  describe('durable enabled flag', () => {
+    let tmpDir: string;
+
+    beforeEach(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-enabled-test-'));
+      Storage.setRuntimeBaseDir(tmpDir);
+      scheduler = new CronScheduler(tmpDir);
+    });
+
+    afterEach(async () => {
+      await removeTmpDir(tmpDir);
+    });
+
+    const seed = (
+      overrides: Partial<DurableCronTask> & Pick<DurableCronTask, 'id'>,
+    ): DurableCronTask => ({
+      cron: '0 9 * * *',
+      prompt: `prompt-${overrides.id}`,
+      recurring: true,
+      createdAt: Date.now(),
+      lastFiredAt: null,
+      ...overrides,
+    });
+
+    it('loads enabled and legacy tasks but skips enabled:false ones', async () => {
+      await writeCronTasks(tmpDir, [
+        seed({ id: 'on', enabled: true }),
+        seed({ id: 'off', enabled: false }),
+        // No enabled field — a tool-created task must still fire.
+        seed({ id: 'legacy' }),
+      ]);
+
+      await scheduler.enableDurable('session-1');
+
+      const ids = scheduler.list().map((j) => j.id);
+      expect(ids).toContain('on');
+      expect(ids).toContain('legacy');
+      expect(ids).not.toContain('off');
+    });
+
+    it('never fires a disabled task even when its minute matches', async () => {
+      const onFire = vi.fn();
+      await writeCronTasks(tmpDir, [
+        seed({ id: 'off', cron: '30 10 * * *', enabled: false }),
+      ]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start(onFire);
+
+      // A minute the disabled task's cron matches — a live job would fire.
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      expect(onFire).not.toHaveBeenCalled();
+    });
+
+    it('drops a live job when the file flips it to disabled on reload', async () => {
+      await writeCronTasks(tmpDir, [seed({ id: 'x', enabled: true })]);
+      await scheduler.enableDurable('session-1');
+      expect(scheduler.list().map((j) => j.id)).toContain('x');
+
+      // Rewrite the file with the task disabled; the file watcher reloads
+      // (debounced) and the reconcile must remove the now-disabled job.
+      await writeCronTasks(tmpDir, [seed({ id: 'x', enabled: false })]);
+      await vi.waitFor(
+        () => {
+          expect(scheduler.list().map((j) => j.id)).not.toContain('x');
+        },
+        { timeout: 5000 },
+      );
+    });
+
+    it('does not let session-only jobs crowd out durable loads', async () => {
+      // 40 session-only jobs + 20 durable on disk. A combined 50-cap would load
+      // only 10 durable; the durable-only cap loads all 20 so a route-accepted
+      // create is actually loadable.
+      for (let i = 0; i < 40; i++) {
+        scheduler.create('0 9 * * *', `session ${i}`, true);
+      }
+      const durable = Array.from({ length: 20 }, (_unused, i) =>
+        seed({ id: `d${i}` }),
+      );
+      await writeCronTasks(tmpDir, durable);
+      await scheduler.enableDurable('session-1');
+
+      const loadedIds = new Set(scheduler.list().map((j) => j.id));
+      for (const d of durable) {
+        expect(loadedIds.has(d.id)).toBe(true);
+      }
+    });
+  });
+
   describe('durable ownership', () => {
     let tmpDir: string;
 
@@ -610,6 +1064,70 @@ describe('CronScheduler', () => {
       );
     }
 
+    it('survives a tasks file with a non-finite createdAt', async () => {
+      // JSON -1e999 parses to -Infinity. With a finite lastFiredAt the
+      // entry reads as an overdue, already-aged recurring task — the path
+      // that formats createdAt into the retroactive-expiry warning. The
+      // read layer must reject it (fix-or-delete contract) so enableDurable
+      // completes instead of throwing RangeError mid-load, and the file
+      // must be left on disk for the user to repair.
+      const raw =
+        `[{"id":"poison","cron":"* * * * *","prompt":"p","recurring":true,` +
+        `"createdAt":-1e999,"lastFiredAt":${Date.now() - 120_000}}]`;
+      const filePath = getCronFilePath(tmpDir);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, raw);
+
+      await expect(scheduler.enableDurable('session-1')).resolves.not.toThrow();
+      expect(scheduler.list()).toHaveLength(0);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe(raw);
+    });
+
+    it('applies a configured max age to durable tasks restored from disk', async () => {
+      // The reload path is the one that matters for configurability: a
+      // regression that ignores the passed max age here would silently
+      // revert every restored task to 7-day expiry after a restart.
+      const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+      const custom = new CronScheduler(tmpDir, twoDaysMs);
+      try {
+        // lastFiredAt now: not overdue, so no catch-up/final delivery races.
+        await writeCronTasks(tmpDir, [
+          { ...diskTask('shortlived'), lastFiredAt: Date.now() },
+        ]);
+        await custom.enableDurable('session-1');
+
+        const job = custom.list().find((j) => j.id === 'shortlived');
+        expect(job).toBeDefined();
+        expect(job!.expiresAt - job!.createdAt).toBe(twoDaysMs);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('restores durable tasks without expiry when max age is disabled', async () => {
+      const custom = new CronScheduler(tmpDir, Infinity);
+      try {
+        // Created well past the 7-day default: with expiry disabled the
+        // task must be restored as a live job, not aged out into a final
+        // fire + delete.
+        await writeCronTasks(tmpDir, [
+          {
+            ...diskTask('immortal'),
+            createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+            lastFiredAt: Date.now(),
+          },
+        ]);
+        await custom.enableDurable('session-1');
+
+        const job = custom.list().find((j) => j.id === 'immortal');
+        expect(job).toBeDefined();
+        expect(job!.expiresAt).toBe(Infinity);
+        expect(await readCronTasks(tmpDir)).toHaveLength(1);
+      } finally {
+        custom.destroy();
+      }
+    });
+
     it('owner fires durable tasks loaded from disk and persists lastFiredAt', async () => {
       await writeCronTasks(tmpDir, [diskTask('disktask')]);
       await scheduler.enableDurable('session-1');
@@ -625,6 +1143,452 @@ describe('CronScheduler', () => {
       const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
       await vi.waitFor(async () => {
         expect((await readCronTasks(tmpDir))[0]?.lastFiredAt).toBe(minuteMs);
+      });
+    });
+
+    it('appends a scheduled run record on each recurring fire (newest last)', async () => {
+      await writeCronTasks(tmpDir, [diskTask('rec1')]);
+      await scheduler.enableDurable('session-1');
+      scheduler.start(() => {});
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      const firstMinute = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      // The run records the session that fired it (here the durable owner).
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.runs).toEqual([
+          { at: firstMinute, kind: 'scheduled', sessionId: 'session-1' },
+        ]);
+      });
+
+      // A second fire a minute later appends — it does not replace.
+      scheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
+      const secondMinute = new Date(2025, 0, 15, 10, 31, 0).getTime();
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.runs).toEqual([
+          { at: firstMinute, kind: 'scheduled', sessionId: 'session-1' },
+          { at: secondMinute, kind: 'scheduled', sessionId: 'session-1' },
+        ]);
+      });
+    });
+
+    it('does not accrue run history for a one-shot (deleted on fire)', async () => {
+      // A recurring:false durable task is removed from disk the moment it
+      // fires, so there is no surviving entry to attach a run record to.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('once1'), recurring: false },
+      ]);
+      await scheduler.enableDurable('session-1');
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+      expect(fired).toHaveLength(1);
+      // Gone from disk (no lingering task carrying a runs ring).
+      await vi.waitFor(async () => {
+        expect(await readCronTasks(tmpDir)).toHaveLength(0);
+      });
+    });
+
+    // Settle + tear down a second scheduler sharing this tmpDir, so its
+    // fire-and-forget writes don't race the afterEach rm.
+    async function settle(s: CronScheduler): Promise<void> {
+      s.destroy();
+      const internals = s as unknown as {
+        pendingPersist: Promise<void>;
+        pendingRelease: Promise<void> | null;
+      };
+      await internals.pendingPersist;
+      await internals.pendingRelease;
+    }
+
+    it('a session-bound task fires only in its bound session (tick path)', async () => {
+      // Two tasks, each bound to a different session.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('taskA'), sessionId: 'sess-A' },
+        { ...diskTask('taskB'), sessionId: 'sess-B' },
+      ]);
+      // Scheduler A wins the per-project lock (owner); B does not (non-owner).
+      const firedA: CronJob[] = [];
+      await scheduler.enableDurable('sess-A');
+      scheduler.start((j) => firedA.push(j));
+      const schedB = new CronScheduler(tmpDir);
+      const firedB: CronJob[] = [];
+      await schedB.enableDurable('sess-B');
+      schedB.start((j) => firedB.push(j));
+
+      const when = new Date(2025, 0, 15, 10, 30, 59);
+      scheduler.tick(when);
+      schedB.tick(when);
+
+      // Each session fires ONLY its own bound task — the owner does not fire
+      // B's task, and B fires its own despite not holding the lock.
+      expect(firedA.map((j) => j.id)).toEqual(['taskA']);
+      expect(firedB.map((j) => j.id)).toEqual(['taskB']);
+
+      await settle(schedB);
+    });
+
+    it('a non-owner session catches up its own overdue bound task', async () => {
+      const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'boundOverdue',
+          cron: '0 * * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+          sessionId: 'sess-B',
+        },
+      ]);
+      // A holds the lock but the task is bound to B, not A.
+      const firedA: CronJob[] = [];
+      scheduler.start((j) => firedA.push(j));
+      await scheduler.enableDurable('sess-A');
+      // B is a non-owner, but the task IS bound to B.
+      const schedB = new CronScheduler(tmpDir);
+      const firedB: CronJob[] = [];
+      schedB.start((j) => firedB.push(j));
+      await schedB.enableDurable('sess-B');
+
+      // Only B catches it up (its own bound task), even though A owns the lock.
+      expect(firedA).toHaveLength(0);
+      expect(firedB.map((j) => j.id)).toEqual(['boundOverdue']);
+
+      await settle(schedB);
+    });
+
+    it('does not re-fire a delivered bound catch-up on a reload racing its persist', async () => {
+      const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'boundOverdue',
+          cron: '0 * * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+          sessionId: 'sess-B',
+        },
+      ]);
+      const fired: CronJob[] = [];
+      scheduler.start((j) => fired.push(j));
+
+      // Park the catch-up's lastFiredAt persist in flight, so the on-disk stamp
+      // stays stale while a second reload runs.
+      let release!: () => void;
+      updateGate.block = new Promise((resolve) => {
+        release = resolve;
+      });
+      const hit = new Promise<void>((resolve) => {
+        updateGate.onHit = resolve;
+      });
+
+      // Reload A: detects + DELIVERS the overdue catch-up (fires once), then
+      // parks the persist on the gate.
+      await scheduler.enableDurable('sess-B');
+      await hit;
+      expect(fired.map((j) => j.id)).toEqual(['boundOverdue']);
+
+      // Reload B — a foreign write tripping the watcher (loadFileTasks(false)) —
+      // BEFORE the persist lands, so it reads the stale disk stamp. The
+      // deliveredCatchUp guard must stop it re-detecting and firing again.
+      await (
+        scheduler as unknown as { loadFileTasks(b: boolean): Promise<void> }
+      ).loadFileTasks(false);
+      expect(fired.map((j) => j.id)).toEqual(['boundOverdue']); // still ONE fire
+
+      updateGate.block = null;
+      release();
+      await settle(scheduler);
+    });
+
+    it('guards an on-time tick fire from re-detection until its persist lands', async () => {
+      // Symmetric to the catch-up guard: an on-time tick fire also advances
+      // lastFiredAt asynchronously, so its id must be in firePersistPending while
+      // the write is in flight — otherwise a reload racing the persist (bound
+      // detection runs every reload) re-detects the just-fired slot as overdue.
+      const nowMs = Date.now();
+      const minute = nowMs - (nowMs % 60_000);
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'boundTick',
+          cron: '* * * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt: minute,
+          lastFiredAt: minute, // current slot already fired → not overdue at enable
+          sessionId: 'sess-B',
+        },
+      ]);
+      const fired: CronJob[] = [];
+      scheduler.start((j) => fired.push(j));
+      await scheduler.enableDurable('sess-B'); // no catch-up (not overdue)
+
+      let release!: () => void;
+      updateGate.block = new Promise((resolve) => {
+        release = resolve;
+      });
+      const hit = new Promise<void>((resolve) => {
+        updateGate.onHit = resolve;
+      });
+
+      // Fire the NEXT minute's slot on time (well past any jitter), parking the
+      // lastFiredAt persist on the gate.
+      scheduler.tick(new Date(minute + 90_000));
+      await hit;
+      expect(fired.map((j) => j.id)).toEqual(['boundTick']);
+      const internals = scheduler as unknown as {
+        firePersistPending: Set<string>;
+      };
+      expect(internals.firePersistPending.has('boundTick')).toBe(true); // guarded
+
+      updateGate.block = null;
+      release();
+      await settle(scheduler);
+      expect(internals.firePersistPending.has('boundTick')).toBe(false); // cleared
+    });
+
+    it('ref-counts firePersistPending so overlapping persists for one id do not clear early', () => {
+      // The same task can fire again before its previous lastFiredAt write lands
+      // (two persists in flight). A plain Set would drop the guard on the FIRST
+      // settle, exposing the second's window; the ref count holds it until both.
+      const internals = scheduler as unknown as {
+        firePersistPending: Map<string, number>;
+        markFirePersistPending(ids: string[]): void;
+        clearFirePersistPending(ids: string[]): void;
+      };
+      internals.markFirePersistPending(['x']); // persist A in flight
+      internals.markFirePersistPending(['x']); // persist B in flight (overlap)
+      expect(internals.firePersistPending.has('x')).toBe(true);
+      internals.clearFirePersistPending(['x']); // A settles
+      expect(internals.firePersistPending.has('x')).toBe(true); // B still pending
+      internals.clearFirePersistPending(['x']); // B settles
+      expect(internals.firePersistPending.has('x')).toBe(false); // now cleared
+    });
+
+    it('skips a durable job the consumer cannot run: no fire, lastFiredAt left untouched', async () => {
+      // A headless run can't expand a `<<loop.md>>` sentinel. Firing it would
+      // stamp + persist lastFiredAt while the work is skipped downstream,
+      // silently consuming the tick; setSkipDurableFire must leave such a job's
+      // schedule intact for the owning interactive session. A co-scheduled
+      // non-sentinel durable job proves the skip is selective AND lands its
+      // persist in the SAME tick write — so checking the sentinel stayed null
+      // once the sibling shows its stamp is race-free, not a timing gap.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('loopmd'), prompt: '<<loop.md>>' },
+        { ...diskTask('normal'), prompt: 'normal task' },
+      ]);
+      await scheduler.enableDurable('session-1');
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired.map((j) => j.prompt)).toEqual(['normal task']);
+
+      const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      await vi.waitFor(async () => {
+        const byId = Object.fromEntries(
+          (await readCronTasks(tmpDir)).map((t) => [t.id, t]),
+        );
+        expect(byId['normal']!.lastFiredAt).toBe(minuteMs); // fired → persisted
+        expect(byId['loopmd']!.lastFiredAt ?? null).toBeNull(); // skipped → untouched
+      });
+    });
+
+    it('deliverPending missed branch: skips a sentinel one-shot (no fire, left on disk), fires a sibling', async () => {
+      // CRITICAL regression lock. A missed durable <<loop.md>> sentinel a
+      // headless consumer can't run must NOT be fired NOR removed from disk —
+      // deleting it would lose the task forever though no consumer ran the
+      // loop.md work. The skip is selective: a co-missed non-sentinel one-shot
+      // in the SAME batch is still fired (batched notice) and removed.
+      // Mutation check: revert the missed-branch partition and this fails
+      // (sentinel gets batched into the notice AND deleted from disk).
+      // Past createdAt so each one-shot's single fire already elapsed (missed).
+      const past = Date.now() - 10 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd',
+          cron: '* * * * *',
+          prompt: '<<loop.md>>',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+        {
+          id: 'normal',
+          cron: '* * * * *',
+          prompt: 'normal one-shot',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      // Only the runnable sibling is notified; the sentinel is partitioned out.
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.missed).toBe(true);
+      expect(fired[0]!.prompt).toContain('normal one-shot');
+      expect(fired[0]!.prompt).not.toContain('<<loop.md>>');
+
+      // The skipped sentinel must NOT linger in pendingRemoval: it stays on disk
+      // (not removed), so a stuck guard would keep it out of both the job map and
+      // disk reconciliation forever. Delivery is synchronous within enableDurable,
+      // so this is race-free. Mutation check: drop the pendingRemoval.delete and
+      // this fails (the sentinel is stranded in pendingRemoval).
+      const pendingRemoval = (
+        scheduler as unknown as { pendingRemoval: Set<string> }
+      ).pendingRemoval;
+      expect(pendingRemoval.has('loopmd')).toBe(false);
+
+      // The sentinel survives on disk; only the fired sibling is removed.
+      await vi.waitFor(async () => {
+        expect((await readCronTasks(tmpDir)).map((t) => t.id)).toEqual([
+          'loopmd',
+        ]);
+      });
+    });
+
+    it('deliverPending missed branch: an ALL-sentinel batch fires nothing and leaves every task on disk', async () => {
+      // All-filtered companion to the mixed-batch lock above. When a headless
+      // load misses ONLY <<loop.md>> sentinels it can't run, the
+      // runnable.length > 0 guard must fire NOTHING (no empty carrier notice)
+      // AND never call removeMissedFromDisk, so every sentinel is preserved for
+      // its owning interactive session. Mutation check: drop the guard and the
+      // empty batch fires a bogus missed notification (durableTaskToJob over an
+      // undefined runnable[0]).
+      const past = Date.now() - 10 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd-a',
+          cron: '* * * * *',
+          prompt: '<<loop.md>>',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+        {
+          id: 'loopmd-b',
+          cron: '* * * * *',
+          prompt: '<<loop.md>>',
+          recurring: false,
+          createdAt: past,
+          lastFiredAt: null,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      // Nothing in the batch is runnable → no fire at all (delivery is
+      // synchronous within enableDurable, so this is race-free).
+      expect(fired).toEqual([]);
+
+      // Both sentinels survive — removeMissedFromDisk was never reached.
+      expect((await readCronTasks(tmpDir)).map((t) => t.id).sort()).toEqual([
+        'loopmd-a',
+        'loopmd-b',
+      ]);
+    });
+
+    it('deliverPending catch-up branch: skips a sentinel overdue-recurring (stamp left on disk), fires a sibling', async () => {
+      // 3h overdue, past any jitter window. The sentinel must not be fired and
+      // must keep its on-disk lastFiredAt (left out of persistCatchUpStamps) so
+      // the owning session re-detects the catch-up; the sibling fires raw and
+      // its advanced stamp persists.
+      const createdAt = Date.now() - 3 * 60 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd-c',
+          cron: '0 * * * *',
+          prompt: '<<loop.md>>',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+        {
+          id: 'normal-c',
+          cron: '0 * * * *',
+          prompt: 'overdue recurring',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      expect(fired.map((j) => j.prompt)).toEqual(['overdue recurring']);
+
+      // Sibling's catch-up stamp lands; once it does, the sentinel's untouched
+      // disk stamp is race-free, not a timing gap. Both stay on disk.
+      await vi.waitFor(async () => {
+        const byId = Object.fromEntries(
+          (await readCronTasks(tmpDir)).map((t) => [t.id, t]),
+        );
+        expect(byId['normal-c']!.lastFiredAt).toBeGreaterThan(createdAt);
+        expect(byId['loopmd-c']!.lastFiredAt).toBe(createdAt);
+      });
+    });
+
+    it('deliverPending final branch: skips a sentinel aged-recurring (no final fire, left on disk), fires a sibling', async () => {
+      // Aged past the 7-day max age → final raw fire + delete. The sentinel is
+      // left on disk (not in removeMissedFromDisk) for the owning session; the
+      // sibling gets its one final fire and is deleted.
+      const createdAt = Date.now() - 8 * 24 * 60 * 60_000;
+      const lastFiredAt = Date.now() - 2 * 60 * 60_000;
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'loopmd-f',
+          cron: '0 * * * *',
+          prompt: '<<loop.md>>',
+          recurring: true,
+          createdAt,
+          lastFiredAt,
+        },
+        {
+          id: 'normal-f',
+          cron: '0 * * * *',
+          prompt: 'aged recurring',
+          recurring: true,
+          createdAt,
+          lastFiredAt,
+        },
+      ]);
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.setSkipDurableFire((job) => job.prompt === '<<loop.md>>');
+      await scheduler.enableDurable('session-1');
+
+      expect(fired.map((j) => j.prompt)).toEqual(['aged recurring']);
+
+      // Same limbo guard as the missed branch: a skipped final task stays on
+      // disk, so it must not be stranded in pendingRemoval.
+      const pendingRemoval = (
+        scheduler as unknown as { pendingRemoval: Set<string> }
+      ).pendingRemoval;
+      expect(pendingRemoval.has('loopmd-f')).toBe(false);
+
+      // The fired sibling is deleted; the skipped sentinel stays on disk.
+      await vi.waitFor(async () => {
+        expect((await readCronTasks(tmpDir)).map((t) => t.id)).toEqual([
+          'loopmd-f',
+        ]);
       });
     });
 
@@ -710,6 +1674,17 @@ describe('CronScheduler', () => {
       expect(tasks[0]!.prompt).toBe('headless durable');
     });
 
+    it('createDurable leaves tasks unbound even after enableDurable', async () => {
+      // Regression guard: durable tasks created via cron_create must stay
+      // unbound so non-daemon paths (TUI/ACP/headless) keep the shared-lock
+      // model. Binding is the daemon keepalive's job, not createDurable's.
+      await scheduler.enableDurable('session-1');
+      await scheduler.createDurable('* * * * *', 'unbound', true);
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.sessionId).toBeUndefined();
+    });
+
     it('non-owner loads durable tasks for listing but does not fire them', async () => {
       await lockAsOtherSession();
       await writeCronTasks(tmpDir, [diskTask('foreign1')]);
@@ -752,14 +1727,16 @@ describe('CronScheduler', () => {
         vi.useRealTimers();
         usingFakeTimers = false;
 
-        // The probe acquired the lock and flipped this session to owner.
+        // The probe acquired the lock.
         await vi.waitFor(async () => {
           const raw = await fs.readFile(getLockFilePath(tmpDir), 'utf-8');
           expect(JSON.parse(raw).sessionId).toBe('session-1');
         });
-        // Now an owner, the durable job fires.
-        scheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
-        expect(fired.map((j) => j.id)).toContain('probe-job');
+        // The lock write can be visible before the probe's .then flips isOwner.
+        await vi.waitFor(() => {
+          scheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
+          expect(fired.map((j) => j.id)).toEqual(['probe-job']);
+        });
       } finally {
         if (usingFakeTimers) vi.useRealTimers();
       }
@@ -899,6 +1876,31 @@ describe('CronScheduler', () => {
       // The stamped minute also blocks the tick loop from double-firing.
       scheduler.tick(new Date());
       expect(fired).toHaveLength(1);
+    });
+
+    it('records a late fire as a catch-up run', async () => {
+      const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
+      await writeCronTasks(tmpDir, [
+        {
+          id: 'cu1',
+          cron: '0 * * * *',
+          prompt: 'overdue recurring',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+      ]);
+
+      scheduler.start(() => {});
+      await scheduler.enableDurable('session-1');
+
+      // The catch-up stamp + its 'catch-up' run land together.
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0]!;
+        expect(task.runs).toHaveLength(1);
+        expect(task.runs![0]!.kind).toBe('catch-up');
+        expect(task.runs![0]!.at).toBe(task.lastFiredAt);
+      });
     });
 
     it('does not catch-up overdue recurring tasks as a non-owner', async () => {
@@ -1300,5 +2302,76 @@ describe('buildMissedCronNotification', () => {
     expect(text).toContain('whether to run each one now');
     expect(text).toContain('first prompt');
     expect(text).toContain('second prompt');
+  });
+});
+
+describe('nextDurableFireMs', () => {
+  const anchor = 1_700_000_000_000;
+  const recurring = (over: Partial<DurableCronTask> = {}): DurableCronTask => ({
+    id: 'job',
+    cron: '0 9 * * *',
+    prompt: 'p',
+    recurring: true,
+    createdAt: anchor,
+    lastFiredAt: anchor,
+    ...over,
+  });
+
+  it('adds the tick jitter on top of the cron boundary (never before it)', () => {
+    // Ground truth: the tick fires at boundary + jitter. The helper must land
+    // in [boundary, boundary + recurring jitter cap], anchored on lastFiredAt.
+    const boundary = nextFireTime('0 9 * * *', new Date(anchor)).getTime();
+    const fire = nextDurableFireMs(recurring());
+    expect(fire).not.toBeNull();
+    expect(fire!).toBeGreaterThanOrEqual(boundary); // jitter is non-negative
+    expect(fire! - boundary).toBeLessThanOrEqual(15 * 60_000); // capped at 15m
+  });
+
+  it('is deterministic for a given task', () => {
+    expect(nextDurableFireMs(recurring())).toBe(nextDurableFireMs(recurring()));
+  });
+
+  it('actually applies a per-task jitter (not the bare boundary)', () => {
+    // The bug being fixed returned the bare boundary for every task. With jitter
+    // wired, distinct ids offset differently, so across a batch at least one
+    // lands strictly after the boundary — and none before it.
+    const boundary = nextFireTime('0 9 * * *', new Date(anchor)).getTime();
+    const fires = Array.from({ length: 40 }, (_, i) =>
+      nextDurableFireMs(recurring({ id: `job-${i}` })),
+    );
+    expect(fires.every((f) => f !== null && f >= boundary)).toBe(true);
+    expect(fires.some((f) => f! > boundary)).toBe(true);
+  });
+
+  it('anchors a recurring task on lastFiredAt (different fire → different result)', () => {
+    const early = nextDurableFireMs(recurring({ lastFiredAt: anchor }));
+    const later = nextDurableFireMs(
+      recurring({ lastFiredAt: anchor + 5 * 86_400_000 }),
+    );
+    expect(early).not.toBe(later);
+  });
+
+  it('anchors a one-shot task on createdAt, ignoring lastFiredAt', () => {
+    const base = {
+      id: 'os',
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      createdAt: anchor,
+    };
+    const a = nextDurableFireMs({
+      ...base,
+      recurring: false,
+      lastFiredAt: anchor,
+    });
+    const b = nextDurableFireMs({
+      ...base,
+      recurring: false,
+      lastFiredAt: anchor + 5 * 86_400_000,
+    });
+    expect(a).toBe(b); // lastFiredAt does not move a one-shot's projection
+  });
+
+  it('returns null for a cron that cannot be projected', () => {
+    expect(nextDurableFireMs(recurring({ cron: 'not a cron' }))).toBeNull();
   });
 });

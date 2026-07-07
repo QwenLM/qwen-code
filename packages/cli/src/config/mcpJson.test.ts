@@ -31,6 +31,17 @@ describe('loadProjectMcpServers', () => {
     expect(result.errors).toEqual([]);
   });
 
+  it('returns a fresh empty result when .mcp.json is absent', () => {
+    const first = loadProjectMcpServers(dir);
+    first.servers['stale'] = { command: 'node' };
+    first.errors.push('stale error');
+
+    const second = loadProjectMcpServers(dir);
+    expect(second.servers).toEqual({});
+    expect(second.errors).toEqual([]);
+    expect(second).not.toBe(first);
+  });
+
   it('loads servers and tags each with scope: project', () => {
     write(
       JSON.stringify({
@@ -49,6 +60,34 @@ describe('loadProjectMcpServers', () => {
     });
     expect(servers['remote']).toMatchObject({
       httpUrl: 'https://example.test/mcp',
+      scope: 'project',
+    });
+  });
+
+  it('normalizes Claude-style type-based transports (.mcp.json is a Claude convention)', () => {
+    write(
+      JSON.stringify({
+        mcpServers: {
+          httpServer: { type: 'http', url: 'https://example.test/mcp' },
+          sseServer: { type: 'sse', url: 'https://example.test/sse' },
+          stdioServer: { type: 'stdio', command: 'node', args: ['s.js'] },
+        },
+      }),
+    );
+    const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+
+    expect(servers['httpServer']).toEqual({
+      httpUrl: 'https://example.test/mcp',
+      scope: 'project',
+    });
+    expect(servers['sseServer']).toEqual({
+      url: 'https://example.test/sse',
+      scope: 'project',
+    });
+    expect(servers['stdioServer']).toEqual({
+      command: 'node',
+      args: ['s.js'],
       scope: 'project',
     });
   });

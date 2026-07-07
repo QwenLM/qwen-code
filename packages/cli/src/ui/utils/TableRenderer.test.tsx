@@ -475,19 +475,13 @@ describe('<TableRenderer />', () => {
     expectAllLinesToHaveSameVisibleWidth(output);
   });
 
-  // TODO: re-enable after ink 7 re-upgrade. The `[39m` (foreground-only
-  // reset) variant added in #4050 only wraps "colored reset" at width=18 under
-  // ink 7's <Text> wrapping; ink 6 keeps it on a single line. The functional
-  // assertions (foreground cleared, equal widths) still pass — only the
-  // wrap-position assertion is ink-7-specific.
-  it.skip('does not preserve foreground after an explicit foreground reset', () => {
+  it('does not preserve foreground after an explicit foreground reset', () => {
     const output = renderTable(
       ['Color'],
       [['\u001b[38;5;45mcolored\u001b[39m reset']],
       18,
     );
 
-    expectWrappedContinuation(output, 'colored reset', 'reset');
     expect(foregroundAtText(output, 'reset')).toBeUndefined();
     expectAllLinesToHaveSameVisibleWidth(output);
   });
@@ -829,5 +823,193 @@ describe('<TableRenderer />', () => {
         expectAllLinesToHaveSameVisibleWidth(output);
       }
     }
+  });
+
+  describe('maxHeight clamp (streaming preview)', () => {
+    const renderWithMaxHeight = (
+      headers: string[],
+      rows: string[][],
+      maxHeight: number | undefined,
+      contentWidth = 80,
+    ) => {
+      const { lastFrame } = renderWithProviders(
+        <TableRenderer
+          headers={headers}
+          rows={rows}
+          contentWidth={contentWidth}
+          maxHeight={maxHeight}
+        />,
+      );
+      return lastFrame() ?? '';
+    };
+
+    const manyRows = Array.from({ length: 40 }, (_, i) => [`r${i}`, `v${i}`]);
+
+    it('renders unchanged when the table fits within maxHeight', () => {
+      const output = renderWithMaxHeight(
+        ['A', 'B'],
+        [
+          ['1', 'one'],
+          ['2', 'two'],
+        ],
+        50,
+      );
+      expect(stripAnsi(output)).not.toContain('more rows streaming');
+      expect(output).toContain('one');
+      expect(output).toContain('two');
+    });
+
+    it('clips a tall table to maxHeight and appends the streaming cue', () => {
+      const output = renderWithMaxHeight(['A', 'B'], manyRows, 10);
+      expect(getVisibleLines(output).length).toBeLessThanOrEqual(10);
+      expect(stripAnsi(output)).toContain('more rows streaming');
+    });
+
+    it('is a passthrough when maxHeight is undefined (full table)', () => {
+      const output = renderWithMaxHeight(['A', 'B'], manyRows, undefined);
+      expect(stripAnsi(output)).not.toContain('more rows streaming');
+      expect(stripAnsi(output)).toContain('r39');
+    });
+
+    it('also clamps the vertical fallback format', () => {
+      // A narrow contentWidth forces the vertical (key/value) layout; it must
+      // still be clipped to maxHeight with the cue.
+      const output = renderWithMaxHeight(['A', 'B'], manyRows, 8, 20);
+      expect(getVisibleLines(output).length).toBeLessThanOrEqual(8);
+      expect(stripAnsi(output)).toContain('more rows streaming');
+    });
+  });
+
+  describe('streaming table rendering (format stability)', () => {
+    it('renders a header-only box (no divider) when there are no data rows', () => {
+      // The live empty box shown while the first row streams: header + borders
+      // only. The header/body divider must be skipped so it does not stack on
+      // the bottom border and read as an empty second row.
+      const output =
+        renderWithProviders(
+          <TableRenderer
+            headers={['Alpha', 'Beta']}
+            rows={[]}
+            contentWidth={80}
+          />,
+        ).lastFrame() ?? '';
+      const clean = stripAnsi(output);
+      expect(clean).toContain('Alpha');
+      expect(clean).toContain('┌');
+      expect(clean).toContain('└');
+      expect(clean).not.toContain('├');
+    });
+
+    it('keeps the zero-row header box horizontal on a narrow terminal', () => {
+      // The width trigger would otherwise force the vertical format, which with
+      // no rows renders an empty string — a blank box instead of the header.
+      const output =
+        renderWithProviders(
+          <TableRenderer
+            headers={['Alpha', 'Beta']}
+            rows={[]}
+            contentWidth={20}
+          />,
+        ).lastFrame() ?? '';
+      const clean = stripAnsi(output);
+      expect(clean).toContain('Alpha');
+      expect(clean).toContain('┌');
+    });
+
+    it('keeps the zero-row box visible when it exceeds a very narrow terminal', () => {
+      // The maxLineWidth safety check is a second path to the vertical format;
+      // for a zero-row box that would render an empty string (blank). The header
+      // box must stay visible rather than vanish.
+      const output =
+        renderWithProviders(
+          <TableRenderer
+            headers={['C1', 'C2', 'C3', 'C4', 'C5', 'C6']}
+            rows={[]}
+            contentWidth={25}
+          />,
+        ).lastFrame() ?? '';
+      const clean = stripAnsi(output);
+      expect(clean).toContain('┌');
+      expect(clean).toContain('C1');
+    });
+
+    const headers = ['A', 'B'];
+    const firstRowOnly = [['x', 'y']];
+    const withWiderRow = [
+      ['x', 'y'],
+      ['x', 'a considerably wider streaming cell'],
+    ];
+    const topBorderWidth = (frame: string) => {
+      const line =
+        stripAnsi(frame)
+          .split('\n')
+          .find((l) => l.includes('┌')) ?? '';
+      return stringWidth(line.trim());
+    };
+    // Defaults to streaming (this block covers streaming behavior); pass false
+    // to exercise a completed table's all-rows format decision.
+    const render = (rows: string[][], isStreaming = true) =>
+      renderWithProviders(
+        <TableRenderer
+          headers={headers}
+          rows={rows}
+          contentWidth={80}
+          isStreaming={isStreaming}
+        />,
+      ).lastFrame() ?? '';
+
+    it('widens the table when a wider row is appended (redraw on wider)', () => {
+      // Widths always track the current rows: appending a wider row re-sizes
+      // (redraws) the whole table rather than staying frozen to the first row.
+      expect(topBorderWidth(render(withWiderRow))).toBeGreaterThan(
+        topBorderWidth(render(firstRowOnly)),
+      );
+    });
+
+    it('picks the vertical format for a tall-wrapping first row', () => {
+      // A single row tall enough to trip the vertical fallback renders vertical
+      // — the same whether streaming or committed (its one row IS the first row).
+      const tall = [
+        [Array.from({ length: 80 }, (_, i) => `w${i}`).join(' '), 'y'],
+      ];
+      expect(stripAnsi(render(tall))).not.toContain('┌'); // vertical list
+      expect(stripAnsi(render(tall, false))).not.toContain('┌');
+    });
+
+    it('does not flip to vertical when a tall row is appended after a short first row', () => {
+      // The vertical decision is anchored to the header + FIRST row. A short
+      // first row renders horizontal; appending a later tall-wrapping row must
+      // NOT flip the whole table to vertical mid-stream — it stays a (taller)
+      // horizontal grid. Guards the no-flip guarantee against later rows.
+      const tallLaterRow = Array.from({ length: 80 }, (_, i) => `w${i}`).join(
+        ' ',
+      );
+      const output = stripAnsi(
+        render([
+          ['x', 'y'],
+          [tallLaterRow, 'y'],
+        ]),
+      );
+      expect(output).toContain('┌'); // still horizontal (box drawn)
+    });
+
+    it('DOES use the vertical format for the same table once committed', () => {
+      // A committed (non-pending) table has all rows and no flip concern, so it
+      // measures every row: a short first row + a tall later row goes vertical,
+      // which is more readable than a tall horizontal grid.
+      const tallLaterRow = Array.from({ length: 80 }, (_, i) => `w${i}`).join(
+        ' ',
+      );
+      const output = stripAnsi(
+        render(
+          [
+            ['x', 'y'],
+            [tallLaterRow, 'y'],
+          ],
+          false,
+        ),
+      );
+      expect(output).not.toContain('┌'); // vertical list
+    });
   });
 });

@@ -43,12 +43,15 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getToolRegistry: vi.fn().mockReturnValue({
       getAllTools: vi.fn().mockReturnValue([]),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
     }),
+    getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getChatCompression: vi.fn().mockReturnValue(undefined),
+    getAutoCompactThreshold: vi.fn(),
   } as unknown as Config;
 }
 
@@ -68,12 +71,15 @@ describe('collectContextData (contextCommand)', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         getAllTools: vi.fn().mockReturnValue([]),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
       }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
   });
 
@@ -90,12 +96,54 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
 
+  it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
+    // uiTelemetryService is a module-level singleton shared by every session
+    // in a `serve` daemon. Reading it here would report whichever session most
+    // recently completed a turn. The active chat carries the correct
+    // per-session value and must win.
+    mockGetLastPromptTokenCount.mockReturnValue(999_000); // wrong session's global value
+    const getLastPromptTokenCount = vi.fn().mockReturnValue(50_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({ getLastPromptTokenCount }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(getLastPromptTokenCount).toHaveBeenCalled();
+    expect(data.totalTokens).toBe(50_000);
+    // 50K < warn(147K); if the 999K global had leaked through it would be `hard`.
+    expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('falls back to the global singleton when the session chat is not initialized', async () => {
+    // First /context or --continue resume before any send: getChat() would
+    // throw, so collectContextData must use the global value instead.
+    mockGetLastPromptTokenCount.mockReturnValue(60_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(false),
+        getChat: vi.fn(() => {
+          throw new Error('Chat not initialized');
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.totalTokens).toBe(60_000);
+  });
+
   it('excludes deferred-but-not-revealed tools from the per-tool breakdown (#4508)', async () => {
-    // Regression: /context used to surface every deferred tool (MCP tools,
-    // plus low-frequency built-ins like web_fetch / monitor / cron_*) even
-    // when ToolSearch had not loaded any of them, inflating the displayed
-    // token count for the common default-on case.
-    const isDeferredToolRevealed = vi.fn().mockReturnValue(false);
+    const isDeferredAndHidden = vi
+      .fn()
+      .mockImplementation(
+        (name: string) => name === 'web_fetch' || name === 'mcp__server__tool',
+      );
     const hiddenBuiltin = {
       name: 'web_fetch',
       schema: { name: 'web_fetch', description: 'large schema' },
@@ -116,21 +164,63 @@ describe('collectContextData (contextCommand)', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         getAllTools: vi.fn().mockReturnValue([hiddenBuiltin, hiddenMcp]),
         getFunctionDeclarations: vi.fn().mockReturnValue([]),
-        isDeferredToolRevealed,
+        isDeferredAndHidden,
       }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
 
     expect(data.builtinTools).toHaveLength(0);
     expect(data.mcpTools).toHaveLength(0);
-    expect(isDeferredToolRevealed).toHaveBeenCalledWith('web_fetch');
-    expect(isDeferredToolRevealed).toHaveBeenCalledWith('mcp__server__tool');
+    expect(isDeferredAndHidden).toHaveBeenCalledWith('web_fetch');
+    expect(isDeferredAndHidden).toHaveBeenCalledWith('mcp__server__tool');
+  });
+
+  it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {
+    const visibleTool = {
+      name: 'web_fetch',
+      schema: { name: 'web_fetch', description: 'visible tool schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const hiddenDeferred = {
+      name: 'monitor',
+      schema: { name: 'monitor', description: 'hidden tool schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const config = {
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        contextWindowSize: 32_000,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([visibleTool, hiddenDeferred]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([visibleTool.schema]),
+        isDeferredAndHidden: vi
+          .fn()
+          .mockImplementation((name: string) => name === 'monitor'),
+      }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0].name).toBe('web_fetch');
   });
 });
 
@@ -204,5 +294,16 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.thresholds.auto).toBe(167_000);
     const text = formatContextUsageText(data);
     expect(text).not.toMatch(/Compaction thresholds/);
+  });
+
+  it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
+    // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
+    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    const config = makeMockConfig(32_000);
+    vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
+    const data = await collectContextData(config, false);
+
+    expect(data.breakdown.thresholds).toBeDefined();
+    expect(data.breakdown.thresholds!.auto).toBe(16_000);
   });
 });

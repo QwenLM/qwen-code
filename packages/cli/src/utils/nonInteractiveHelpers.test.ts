@@ -31,6 +31,7 @@ import {
   createToolProgressHandler,
   createAgentToolProgressHandler,
   functionResponsePartsToString,
+  insertAfterFunctionResponses,
   toolResultContent,
 } from './nonInteractiveHelpers.js';
 
@@ -733,6 +734,64 @@ describe('createAgentToolProgressHandler', () => {
     );
   });
 
+  it('forwards subagent tool args and response parts for JSON output', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 'tool-1',
+          response: { output: 'Success from responseParts' },
+        },
+      },
+    ];
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'success',
+          responseParts,
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+        status: 'executing',
+      }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+      }),
+      expect.objectContaining({
+        callId: 'tool-1',
+        responseParts,
+      }),
+      'parent-tool-id',
+    );
+  });
+
   it('should not duplicate tool_use emissions', () => {
     const { handler } = createAgentToolProgressHandler(
       mockConfig,
@@ -1202,5 +1261,42 @@ describe('toolResultContent', () => {
       errorType: undefined,
     };
     expect(toolResultContent(response)).toBeUndefined();
+  });
+});
+
+describe('insertAfterFunctionResponses', () => {
+  const fr = (id: string): Part => ({
+    functionResponse: { id, name: 'tool', response: { ok: true } },
+  });
+
+  it('inserts additions before the first non-functionResponse part', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), { text: 'reminder' }, { text: 'prompt' }]);
+  });
+
+  it('appends additions when every part is a functionResponse', () => {
+    const parts: Part[] = [fr('a'), fr('b')];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), fr('b'), { text: 'reminder' }]);
+  });
+
+  it('prepends additions when the first part is not a functionResponse', () => {
+    const parts: Part[] = [{ text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([{ text: 'reminder' }, { text: 'prompt' }]);
+  });
+
+  it('is a no-op shape with empty additions and does not mutate the input', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, []);
+    expect(result).toEqual([fr('a'), { text: 'prompt' }]);
+    expect(result).not.toBe(parts);
+  });
+
+  it('returns just the additions for empty parts', () => {
+    expect(insertAfterFunctionResponses([], [{ text: 'reminder' }])).toEqual([
+      { text: 'reminder' },
+    ]);
   });
 });

@@ -32,6 +32,9 @@ describe('build artifact — package boundary', () => {
     const bundle = readBundle();
     expect(bundle).toContain('from "react"');
     expect(bundle).toContain('from "react/jsx-runtime"');
+    expect(bundle).not.toContain('react/jsx-dev-runtime');
+    expect(bundle).not.toContain('jsxDEV');
+    expect(bundle).not.toContain('fileName:');
   });
 
   it('externalizes @qwen-code/sdk subpaths', () => {

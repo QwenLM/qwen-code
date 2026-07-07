@@ -3,8 +3,10 @@ import {
   normalize,
   tokenLimit,
   knownTokenLimit,
+  escalatedOutputTokenLimit,
   DEFAULT_TOKEN_LIMIT,
   DEFAULT_OUTPUT_TOKEN_LIMIT,
+  ESCALATED_MAX_TOKENS,
 } from './tokenLimits.js';
 
 describe('normalize', () => {
@@ -92,6 +94,10 @@ describe('normalize', () => {
 });
 
 describe('tokenLimit', () => {
+  it('uses 200K as the global default context window', () => {
+    expect(DEFAULT_TOKEN_LIMIT).toBe(200_000);
+  });
+
   describe('Google Gemini', () => {
     it('should return 1M for Gemini 3.x (latest)', () => {
       expect(tokenLimit('gemini-3-pro-preview')).toBe(1000000);
@@ -335,7 +341,11 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for GLM', () => {
-      expect(tokenLimit('glm-5', 'output')).toBe(16384);
+      expect(tokenLimit('glm-5.2', 'output')).toBe(131072);
+      expect(tokenLimit('GLM-5.2', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5.1', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5-turbo', 'output')).toBe(131072);
       expect(tokenLimit('glm-4.7', 'output')).toBe(16384);
     });
 
@@ -373,5 +383,35 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('QWEN3-MAX', 'output')).toBe(32768);
       expect(tokenLimit('qwen3-max-20250601', 'output')).toBe(32768);
     });
+  });
+});
+
+describe('escalatedOutputTokenLimit', () => {
+  it('uses the escalated floor for unknown models with a large window', () => {
+    expect(escalatedOutputTokenLimit('unknown-model', 200_000)).toBe(
+      ESCALATED_MAX_TOKENS,
+    );
+  });
+
+  it('caps the reservation at half a small custom window (issue #6144)', () => {
+    // A 64K local model must not have the flat 64K escalation floor
+    // reserved — that would leave only 1,536 tokens of input budget.
+    expect(escalatedOutputTokenLimit('qwen3coder-64k', 65_536)).toBe(32_768);
+  });
+
+  it('uses the model output limit when larger than the floor and within the cap', () => {
+    // claude-sonnet-4-6 declares a 65,536 output limit; half of 200K is 100K.
+    expect(escalatedOutputTokenLimit('claude-sonnet-4-6', 200_000)).toBe(
+      65_536,
+    );
+  });
+
+  it('falls back to DEFAULT_TOKEN_LIMIT for the cap when the window is unset', () => {
+    expect(escalatedOutputTokenLimit('unknown-model')).toBe(
+      Math.min(ESCALATED_MAX_TOKENS, Math.floor(DEFAULT_TOKEN_LIMIT / 2)),
+    );
+    expect(escalatedOutputTokenLimit('unknown-model', 0)).toBe(
+      Math.min(ESCALATED_MAX_TOKENS, Math.floor(DEFAULT_TOKEN_LIMIT / 2)),
+    );
   });
 });

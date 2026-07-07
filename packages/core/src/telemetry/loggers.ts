@@ -48,9 +48,12 @@ import {
   EVENT_ARENA_SESSION_ENDED,
   EVENT_PROMPT_SUGGESTION,
   EVENT_SPECULATION,
+  EVENT_WORKFLOW_KEYWORD,
+  EVENT_WORKFLOW_RUN,
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
+  EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -115,6 +118,8 @@ import type {
   ArenaSessionEndedEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  WorkflowKeywordEvent,
+  WorkflowRunEvent,
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
@@ -122,6 +127,8 @@ import type {
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
+import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -130,6 +137,11 @@ function getCommonAttributes(config: Config): LogAttributes {
   return {
     'session.id': config.getSessionId(),
   };
+}
+
+function recordUiTelemetryEventToChat(config: Config, uiEvent: UiEvent): void {
+  if (isChatRecordingSuppressed()) return;
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
 }
 
 export { getCommonAttributes };
@@ -189,6 +201,10 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
     attributes['auth_type'] = event.auth_type;
   }
 
+  if (event.model) {
+    attributes['model'] = event.model;
+  }
+
   if (shouldLogUserPrompts(config)) {
     attributes['prompt'] = event.prompt;
   }
@@ -228,7 +244,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logToolCallEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -271,7 +287,9 @@ export function logToolOutputTruncated(
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
-    'event.name': 'tool_output_truncated',
+    // event class's `eventName` (short, no prefix) leaks via spread — override with
+    // full namespaced constant for OTel compliance. Same pattern as other event loggers.
+    'event.name': EVENT_TOOL_OUTPUT_TRUNCATED,
     'event.timestamp': new Date().toISOString(),
   };
 
@@ -398,7 +416,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -467,7 +485,10 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
-    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+    if (config.getUsageStatisticsEnabled()) {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+    }
+    recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -1009,6 +1030,17 @@ export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
   logger.emit(logRecord);
 }
 
+export function recordSkillInvocation(
+  config: Config,
+  event: { skillName: string; success: boolean },
+): void {
+  uiTelemetryService.recordSkillInvocation(
+    event.skillName,
+    event.success,
+    config.getSessionId(),
+  );
+}
+
 export function logUserFeedback(
   config: Config,
   event: UserFeedbackEvent,
@@ -1019,7 +1051,7 @@ export function logUserFeedback(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  recordUiTelemetryEventToChat(config, uiEvent);
   QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -1140,6 +1172,9 @@ export function logPromptSuggestion(
   if (event.accept_method) {
     attributes['accept_method'] = event.accept_method;
   }
+  if (event.accept_source) {
+    attributes['accept_source'] = event.accept_source;
+  }
   if (event.time_to_accept_ms !== undefined) {
     attributes['time_to_accept_ms'] = event.time_to_accept_ms;
   }
@@ -1195,6 +1230,39 @@ export function logSpeculation(config: Config, event: SpeculationEvent): void {
     attributes,
   };
   logger.emit(logRecord);
+}
+
+// ─── Workflow Log Functions (#4721) ──────────────────────────────────────────
+
+export function logWorkflowKeyword(
+  config: Config,
+  event: WorkflowKeywordEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_KEYWORD,
+    'event.timestamp': event['event.timestamp'],
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({ body: 'Workflow keyword trigger fired.', attributes });
+}
+
+export function logWorkflowRun(config: Config, event: WorkflowRunEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_RUN,
+    'event.timestamp': event['event.timestamp'],
+    status: event.status,
+    agents_dispatched: event.agents_dispatched,
+    agents_completed: event.agents_completed,
+    phase_count: event.phase_count,
+    tokens_spent: event.tokens_spent,
+    duration_ms: event.duration_ms,
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({ body: `Workflow run ${event.status}.`, attributes });
 }
 
 // ─── Auto-Memory Log Functions ───────────────────────────────────────────────

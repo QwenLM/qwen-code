@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/acp-bridge",
-  "version": "0.18.2",
+  "version": "0.19.7",
   "description": "Shared ACP bridge core (createHttpAcpBridge factory, BridgeClient, defaultSpawnChannelFactory, BridgeFileSystem injection seam) + primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
   "repository": {
     "type": "git",
@@ -47,6 +47,14 @@
       "types": "./dist/bridgeTypes.d.ts",
       "import": "./dist/bridgeTypes.js"
     },
+    "./sessionArtifacts": {
+      "types": "./dist/sessionArtifacts.d.ts",
+      "import": "./dist/sessionArtifacts.js"
+    },
+    "./daemonEventTypes": {
+      "types": "./dist/daemonEventTypes.d.ts",
+      "import": "./dist/daemonEventTypes.js"
+    },
     "./bridgeOptions": {
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
@@ -54,6 +62,14 @@
     "./spawnChannel": {
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
+    },
+    "./ndJsonStream": {
+      "types": "./dist/ndJsonStream.d.ts",
+      "import": "./dist/ndJsonStream.js"
+    },
+    "./logRedaction": {
+      "types": "./dist/logRedaction.d.ts",
+      "import": "./dist/logRedaction.js"
     },
     "./bridgeClient": {
       "types": "./dist/bridgeClient.d.ts",

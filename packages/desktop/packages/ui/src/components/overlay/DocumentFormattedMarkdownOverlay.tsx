@@ -56,6 +56,8 @@ export interface DocumentFormattedMarkdownOverlayProps {
   isStreaming?: boolean
   /** Optional external request to open a specific annotation */
   openAnnotationRequest?: ExternalOpenAnnotationRequest | null
+  /** Render inline inside a docked side panel instead of taking over the viewport */
+  embedded?: boolean
 }
 
 export function DocumentFormattedMarkdownOverlay({
@@ -77,6 +79,7 @@ export function DocumentFormattedMarkdownOverlay({
   sendMessageKey = 'enter',
   isStreaming = false,
   openAnnotationRequest,
+  embedded = false,
 }: DocumentFormattedMarkdownOverlayProps) {
   return (
     <FullscreenOverlayBase
@@ -86,10 +89,12 @@ export function DocumentFormattedMarkdownOverlay({
       typeBadge={typeBadge}
       copyContent={content}
       error={error ? { label: 'Write Failed', message: error } : undefined}
+      embedded={embedded}
     >
       {/* Content wrapper — min-h-full for vertical centering within FullscreenOverlayBase's scroll container.
-          Scrolling and gradient fade mask are handled by FullscreenOverlayBase. */}
-      <div className="min-h-full flex flex-col justify-center px-6 py-16">
+          Scrolling and gradient fade mask are handled by FullscreenOverlayBase. Docked mode uses tighter
+          padding so the document reads well in a narrow side panel. */}
+      <div className={embedded ? 'min-h-full flex flex-col justify-center px-3 py-6' : 'min-h-full flex flex-col justify-center px-6 py-16'}>
         {/* Content card - my-auto centers vertically when content is small, flows naturally when large */}
         <div className="bg-background rounded-[16px] shadow-strong w-full max-w-[960px] h-fit mx-auto my-auto">
           {/* Plan header (variant="plan" only) */}
@@ -101,7 +106,7 @@ export function DocumentFormattedMarkdownOverlay({
           )}
 
           {/* Content area */}
-          <div className="px-10 pt-8 pb-8">
+          <div className={embedded ? 'px-5 pt-6 pb-6' : 'px-10 pt-8 pb-8'}>
             <div className="text-sm">
               {messageId && onAddAnnotation ? (
                 <AnnotatableMarkdownDocument

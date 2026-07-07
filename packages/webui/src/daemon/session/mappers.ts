@@ -11,6 +11,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -21,15 +22,18 @@ import type {
 
 export function mapProviderStatus(
   status: DaemonWorkspaceProvidersStatus | undefined,
+  preferredCurrentModel?: string,
 ): {
   models: DaemonModelInfo[];
   currentModel?: string;
+  currentMode?: string;
   contextWindow?: number;
 } {
   if (!status) return { models: [] };
   const seen = new Set<string>();
   const models: DaemonModelInfo[] = [];
-  let currentModel = status.current?.modelId;
+  let currentModel = preferredCurrentModel ?? status.current?.modelId;
+  const currentMode = status.approvalMode;
   let contextWindow: number | undefined;
 
   for (const provider of status.providers) {
@@ -37,7 +41,7 @@ export function mapProviderStatus(
       if (!currentModel && model.isCurrent) currentModel = model.modelId;
       if (
         contextWindow === undefined &&
-        (model.isCurrent || model.modelId === currentModel)
+        (currentModel ? model.modelId === currentModel : model.isCurrent)
       ) {
         contextWindow = model.contextLimit;
       }
@@ -67,6 +71,62 @@ export function mapProviderStatus(
     }
   }
 
+  return { models, currentModel, currentMode, contextWindow };
+}
+
+export function mapSessionContextModels(
+  status: DaemonSessionContextStatus | undefined,
+):
+  | {
+      models: DaemonModelInfo[];
+      currentModel?: string;
+      contextWindow?: number;
+    }
+  | undefined {
+  const modelState = getRecord(status?.state?.models);
+  if (!modelState) return undefined;
+
+  const currentModel =
+    getString(modelState, 'currentModelId') ??
+    getString(modelState, 'currentModel');
+  const availableModels = modelState['availableModels'];
+  const models: DaemonModelInfo[] = [];
+  let contextWindow: number | undefined;
+
+  if (Array.isArray(availableModels)) {
+    for (const rawModel of availableModels) {
+      const model = getRecord(rawModel);
+      const modelId =
+        getString(model, 'modelId') ??
+        getString(model, 'id') ??
+        getString(model, 'value');
+      if (!modelId) continue;
+      const meta = getRecord(model?.['_meta']);
+      const modelContextWindow =
+        getNumber(meta, 'contextLimit') ??
+        getNumber(meta, 'contextWindow') ??
+        getNumber(model, 'contextLimit') ??
+        getNumber(model, 'contextWindow');
+      if (
+        contextWindow === undefined &&
+        currentModel !== undefined &&
+        modelId === currentModel
+      ) {
+        contextWindow = modelContextWindow;
+      }
+      models.push({
+        id: modelId,
+        baseModelId:
+          getString(model, 'baseModelId') ?? stripAcpAuthSuffix(modelId),
+        label: getString(model, 'name') ?? getString(model, 'label') ?? modelId,
+        ...(modelContextWindow !== undefined
+          ? { contextWindow: modelContextWindow }
+          : {}),
+      });
+    }
+  }
+
+  if (!currentModel && models.length === 0) return undefined;
   return { models, currentModel, contextWindow };
 }
 
@@ -99,6 +159,47 @@ export function mapSupportedCommands(
   return {
     commands: mergeCommands(commands, skillCommands),
     skills: status.availableSkills,
+  };
+}
+
+/**
+ * Maps the session-less `/workspace/skills` status into slash-command entries.
+ *
+ * Session creation is deferred until the first prompt, so before any session
+ * exists the only way to populate skill-backed slash commands (e.g. `/review`)
+ * is this workspace-level status, which the daemon answers from `Config`'s
+ * SkillManager without a live session. The shape mirrors the skills portion of
+ * {@link mapSupportedCommands} so the deferred bootstrap and the post-attach
+ * snapshot stay consistent — except workspace status carries real descriptions
+ * and argument hints, which we surface here.
+ */
+export function mapWorkspaceSkills(
+  status: DaemonWorkspaceSkillsStatus | undefined,
+): {
+  commands: DaemonCommandInfo[];
+  skills: string[];
+} {
+  if (!status) return { commands: [], skills: [] };
+
+  const availableSkills = status.skills.filter(
+    (skill) => skill.status === 'ok',
+  );
+
+  const commands = availableSkills.map((skill) => ({
+    name: skill.name,
+    description: skill.description || '',
+    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+    raw: {
+      name: skill.name,
+      description: skill.description || '',
+      input: skill.argumentHint ? { hint: skill.argumentHint } : null,
+      _meta: { source: 'skill' },
+    } satisfies DaemonAvailableCommand,
+  }));
+
+  return {
+    commands,
+    skills: availableSkills.map((skill) => skill.name),
   };
 }
 
@@ -141,9 +242,14 @@ export function updateConnectionFromDaemonEvent(
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
+      // An available_commands_update is the daemon's authoritative snapshot of
+      // the current slash commands, so assign it directly (matching `skills`)
+      // rather than keeping the previous list when it is empty — otherwise a
+      // command list that shrank to empty would leave stale entries
+      // autocompleting.
       setConnection((current) => ({
         ...current,
-        commands: commands.length > 0 ? commands : current.commands,
+        commands,
         skills,
       }));
     }
@@ -193,6 +299,15 @@ export function getCurrentMode(
 ): string | undefined {
   const modes = getRecord(status?.state?.modes);
   return getString(modes, 'currentModeId') ?? getString(modes, 'currentMode');
+}
+
+export function getCurrentModel(
+  status: DaemonSessionContextStatus | undefined,
+): string | undefined {
+  const models = getRecord(status?.state?.models);
+  return (
+    getString(models, 'currentModelId') ?? getString(models, 'currentModel')
+  );
 }
 
 /**
@@ -356,4 +471,13 @@ function getNumber(
   return typeof value === 'number' && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+function stripAcpAuthSuffix(modelId: string): string {
+  const closeIdx = modelId.lastIndexOf(')');
+  const openIdx = modelId.lastIndexOf('(');
+  if (openIdx >= 0 && closeIdx === modelId.length - 1 && openIdx < closeIdx) {
+    return modelId.slice(0, openIdx);
+  }
+  return modelId;
 }

@@ -13,6 +13,7 @@ import {
   isSlashCommand,
   findMidInputSlashCommand,
   getBestSlashCommandMatch,
+  isMidInputCompletableCommand,
 } from '../utils/commandUtils.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import { useAtCompletion } from './useAtCompletion.js';
@@ -30,6 +31,20 @@ export enum CompletionMode {
   SLASH = 'SLASH',
 }
 
+function isExactMidInputModelInvocableCommand(
+  partialCommand: string,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  const query = partialCommand.toLowerCase();
+  // Match canonical names only. The ghost-text fallback (getBestSlashCommandMatch)
+  // matches names too, so an exact altName routes through the dropdown instead —
+  // fzf surfaces altNames there, avoiding a no-feedback dead zone.
+  return slashCommands.some(
+    (cmd) =>
+      isMidInputCompletableCommand(cmd) && cmd.name.toLowerCase() === query,
+  );
+}
+
 export interface UseCommandCompletionReturn {
   suggestions: Suggestion[];
   activeSuggestionIndex: number;
@@ -40,9 +55,11 @@ export interface UseCommandCompletionReturn {
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   resetCompletionState: () => void;
+  dismissCompletion: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
+  completionMode: CompletionMode;
   /** Inline ghost text for mid-input slash commands (not at line start). */
   midInputGhostText: {
     text: string;
@@ -63,6 +80,108 @@ export function useCommandCompletion(
   active: boolean = true,
   recentCommands?: RecentSlashCommands,
 ): UseCommandCompletionReturn {
+  const cursorRow = buffer.cursor[0];
+  const cursorCol = buffer.cursor[1];
+
+  const {
+    completionMode,
+    query,
+    completionStart,
+    completionEnd,
+    isMidInputSlashCompletion,
+  } = useMemo(() => {
+    const currentLine = buffer.lines[cursorRow] || '';
+
+    // Check for @ completion first, so that typing @ after a slash command
+    // still triggers file search (see #2518).
+    const codePoints = toCodePoints(currentLine);
+    for (let i = cursorCol - 1; i >= 0; i--) {
+      const char = codePoints[i];
+
+      if (char === ' ') {
+        let backslashCount = 0;
+        for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
+          backslashCount++;
+        }
+        if (backslashCount % 2 === 0) {
+          break;
+        }
+      } else if (char === '@' && (i === 0 || /\s/.test(codePoints[i - 1]))) {
+        let end = codePoints.length;
+        for (let i = cursorCol; i < codePoints.length; i++) {
+          if (codePoints[i] === ' ') {
+            let backslashCount = 0;
+            for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
+              backslashCount++;
+            }
+
+            if (backslashCount % 2 === 0) {
+              end = i;
+              break;
+            }
+          }
+        }
+        const pathStart = i + 1;
+        const partialPath = currentLine.substring(pathStart, end);
+        return {
+          completionMode: CompletionMode.AT,
+          query: partialPath,
+          completionStart: pathStart,
+          completionEnd: end,
+          isMidInputSlashCompletion: false,
+        };
+      }
+    }
+
+    if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
+      return {
+        completionMode: CompletionMode.SLASH,
+        query: currentLine,
+        completionStart: 0,
+        completionEnd: currentLine.length,
+        isMidInputSlashCompletion: false,
+      };
+    }
+
+    const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
+    const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
+    if (
+      midCmd &&
+      !isExactMidInputModelInvocableCommand(
+        midCmd.partialCommand,
+        slashCommands,
+      )
+    ) {
+      const lineStartOffset = logicalPosToOffset(buffer.lines, cursorRow, 0);
+      const startOnLine = midCmd.startPos - lineStartOffset;
+      if (startOnLine >= 0) {
+        return {
+          completionMode: CompletionMode.SLASH,
+          query: midCmd.token,
+          completionStart: startOnLine,
+          completionEnd: startOnLine + midCmd.token.length,
+          isMidInputSlashCompletion: true,
+        };
+      }
+    }
+
+    return {
+      completionMode: CompletionMode.IDLE,
+      query: null,
+      completionStart: -1,
+      completionEnd: -1,
+      isMidInputSlashCompletion: false,
+    };
+  }, [cursorRow, cursorCol, buffer.lines, buffer.text, slashCommands]);
+
+  const slashCommandsForCompletion = useMemo(
+    () =>
+      isMidInputSlashCompletion
+        ? slashCommands.filter(isMidInputCompletableCommand)
+        : slashCommands,
+    [isMidInputSlashCompletion, slashCommands],
+  );
+
   const {
     suggestions,
     activeSuggestionIndex,
@@ -70,6 +189,7 @@ export function useCommandCompletion(
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
+    dismissed,
 
     setSuggestions,
     setShowSuggestions,
@@ -79,73 +199,10 @@ export function useCommandCompletion(
     setVisibleStartIndex,
 
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
-  } = useCompletion();
-
-  const cursorRow = buffer.cursor[0];
-  const cursorCol = buffer.cursor[1];
-
-  const { completionMode, query, completionStart, completionEnd } =
-    useMemo(() => {
-      const currentLine = buffer.lines[cursorRow] || '';
-
-      // Check for @ completion first, so that typing @ after a slash command
-      // still triggers file search (see #2518).
-      const codePoints = toCodePoints(currentLine);
-      for (let i = cursorCol - 1; i >= 0; i--) {
-        const char = codePoints[i];
-
-        if (char === ' ') {
-          let backslashCount = 0;
-          for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
-            backslashCount++;
-          }
-          if (backslashCount % 2 === 0) {
-            break;
-          }
-        } else if (char === '@' && (i === 0 || /\s/.test(codePoints[i - 1]))) {
-          let end = codePoints.length;
-          for (let i = cursorCol; i < codePoints.length; i++) {
-            if (codePoints[i] === ' ') {
-              let backslashCount = 0;
-              for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
-                backslashCount++;
-              }
-
-              if (backslashCount % 2 === 0) {
-                end = i;
-                break;
-              }
-            }
-          }
-          const pathStart = i + 1;
-          const partialPath = currentLine.substring(pathStart, end);
-          return {
-            completionMode: CompletionMode.AT,
-            query: partialPath,
-            completionStart: pathStart,
-            completionEnd: end,
-          };
-        }
-      }
-
-      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
-        return {
-          completionMode: CompletionMode.SLASH,
-          query: currentLine,
-          completionStart: 0,
-          completionEnd: currentLine.length,
-        };
-      }
-
-      return {
-        completionMode: CompletionMode.IDLE,
-        query: null,
-        completionStart: -1,
-        completionEnd: -1,
-      };
-    }, [cursorRow, cursorCol, buffer.lines]);
+  } = useCompletion({ query });
 
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
@@ -159,7 +216,7 @@ export function useCommandCompletion(
   const slashCompletionRange = useSlashCompletion({
     enabled: completionMode === CompletionMode.SLASH,
     query,
-    slashCommands,
+    slashCommands: slashCommandsForCompletion,
     commandContext,
     recentCommands,
     setSuggestions,
@@ -181,6 +238,11 @@ export function useCommandCompletion(
       resetCompletionState();
       return;
     }
+    // If the user explicitly dismissed the dropdown (e.g., via Enter accept),
+    // do not re-open it until the query changes again.
+    if (dismissed) {
+      return;
+    }
     // Show suggestions if we are loading OR if there are results to display.
     setShowSuggestions(isLoadingSuggestions || suggestions.length > 0);
   }, [
@@ -189,6 +251,7 @@ export function useCommandCompletion(
     isLoadingSuggestions,
     reverseSearchActive,
     active,
+    dismissed,
     resetCompletionState,
     setShowSuggestions,
   ]);
@@ -220,7 +283,8 @@ export function useCommandCompletion(
         if (
           start === end &&
           start > 1 &&
-          (buffer.lines[cursorRow] || '')[start - 1] !== ' '
+          (buffer.lines[cursorRow] || '')[start - 1] !== ' ' &&
+          (buffer.lines[cursorRow] || '')[start - 1] !== '/'
         ) {
           suggestionText = ' ' + suggestionText;
         }
@@ -265,6 +329,7 @@ export function useCommandCompletion(
     const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
     const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
     if (midCmd) {
+      if (isMidInputSlashCompletion) return null;
       const match = getBestSlashCommandMatch(
         midCmd.partialCommand,
         slashCommands,
@@ -310,6 +375,7 @@ export function useCommandCompletion(
     active,
     reverseSearchActive,
     recentCommands,
+    isMidInputSlashCompletion,
   ]);
 
   return {
@@ -322,9 +388,11 @@ export function useCommandCompletion(
     setActiveSuggestionIndex,
     setShowSuggestions,
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
     handleAutocomplete,
+    completionMode,
     midInputGhostText,
   };
 }

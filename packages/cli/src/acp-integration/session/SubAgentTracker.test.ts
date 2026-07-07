@@ -549,13 +549,13 @@ describe('SubAgentTracker', () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: { outcome: 'cancelled' },
       });
-      const onAskUserQuestionCancel = vi.fn();
+      const onPermissionCancel = vi.fn();
       tracker = new SubAgentTracker(
         mockContext,
         mockClient,
         'parent-call-123',
         'test-subagent',
-        onAskUserQuestionCancel,
+        onPermissionCancel,
       );
       tracker.setup(eventEmitter, abortController.signal);
 
@@ -581,23 +581,23 @@ describe('SubAgentTracker', () => {
           },
         );
       });
-      expect(onAskUserQuestionCancel).toHaveBeenCalledOnce();
+      expect(onPermissionCancel).toHaveBeenCalledOnce();
       expect(respondSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        onAskUserQuestionCancel.mock.invocationCallOrder[0],
+        onPermissionCancel.mock.invocationCallOrder[0],
       );
     });
 
-    it('does not notify when a non-question subagent tool is cancelled', async () => {
+    it('notifies when a non-question subagent tool is cancelled', async () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: { outcome: 'cancelled' },
       });
-      const onAskUserQuestionCancel = vi.fn();
+      const onPermissionCancel = vi.fn();
       tracker = new SubAgentTracker(
         mockContext,
         mockClient,
         'parent-call-123',
         'test-subagent',
-        onAskUserQuestionCancel,
+        onPermissionCancel,
       );
       tracker.setup(eventEmitter, abortController.signal);
 
@@ -619,30 +619,29 @@ describe('SubAgentTracker', () => {
           },
         );
       });
-      expect(onAskUserQuestionCancel).not.toHaveBeenCalled();
+      expect(onPermissionCancel).toHaveBeenCalledOnce();
+      expect(respondSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        onPermissionCancel.mock.invocationCallOrder[0],
+      );
     });
 
-    it('notifies when nested ask_user_question permission request fails', async () => {
+    it('notifies when nested permission request fails', async () => {
       requestPermissionSpy.mockRejectedValue(new Error('Network error'));
-      const onAskUserQuestionCancel = vi.fn();
+      const onPermissionCancel = vi.fn();
       tracker = new SubAgentTracker(
         mockContext,
         mockClient,
         'parent-call-123',
         'test-subagent',
-        onAskUserQuestionCancel,
+        onPermissionCancel,
       );
       tracker.setup(eventEmitter, abortController.signal);
 
       const respondSpy = vi.fn().mockResolvedValue(undefined);
       const event = createApprovalEvent({
-        name: ToolNames.ASK_USER_QUESTION,
-        callId: 'call-ask',
-        confirmationDetails: {
-          type: 'ask_user_question',
-          title: 'Question',
-          questions: [{ question: 'Continue?', header: 'Question' }],
-        } as AgentApprovalRequestEvent['confirmationDetails'],
+        name: 'shell',
+        callId: 'call-shell',
+        confirmationDetails: createInfoConfirmation(),
         respond: respondSpy,
       });
 
@@ -651,40 +650,36 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
       });
-      expect(onAskUserQuestionCancel).toHaveBeenCalledOnce();
-      expect(onAskUserQuestionCancel.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(onPermissionCancel).toHaveBeenCalledOnce();
+      expect(onPermissionCancel.mock.invocationCallOrder[0]).toBeLessThan(
         respondSpy.mock.invocationCallOrder[0],
       );
     });
 
-    it('notifies when nested ask_user_question permission failure cannot respond', async () => {
+    it('notifies when nested permission failure cannot respond', async () => {
       requestPermissionSpy.mockRejectedValue(new Error('Network error'));
-      const onAskUserQuestionCancel = vi.fn();
+      const onPermissionCancel = vi.fn();
       tracker = new SubAgentTracker(
         mockContext,
         mockClient,
         'parent-call-123',
         'test-subagent',
-        onAskUserQuestionCancel,
+        onPermissionCancel,
       );
       tracker.setup(eventEmitter, abortController.signal);
 
       const respondSpy = vi.fn().mockRejectedValue(new Error('Already closed'));
       const event = createApprovalEvent({
-        name: ToolNames.ASK_USER_QUESTION,
-        callId: 'call-ask',
-        confirmationDetails: {
-          type: 'ask_user_question',
-          title: 'Question',
-          questions: [{ question: 'Continue?', header: 'Question' }],
-        } as AgentApprovalRequestEvent['confirmationDetails'],
+        name: 'shell',
+        callId: 'call-shell',
+        confirmationDetails: createInfoConfirmation(),
         respond: respondSpy,
       });
 
       eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
-        expect(onAskUserQuestionCancel).toHaveBeenCalledOnce();
+        expect(onPermissionCancel).toHaveBeenCalledOnce();
       });
       expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });

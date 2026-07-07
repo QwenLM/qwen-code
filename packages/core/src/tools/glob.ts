@@ -12,6 +12,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
+  resolvePath,
   isSubpath,
   unescapePath,
 } from '../utils/paths.js';
@@ -26,6 +27,7 @@ import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
@@ -114,7 +116,7 @@ class GlobToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );
@@ -141,6 +143,46 @@ class GlobToolInvocation extends BaseToolInvocation<
       effectivePattern = escape(effectivePattern);
     }
 
+    const projectRoot = this.config.getTargetDir();
+    const fileFilteringOptions = this.getFileFilteringOptions();
+
+    // Prune ignored directories DURING traversal (glob's `childrenIgnored`)
+    // rather than only post-filtering the results. Delegating to
+    // FileDiscoveryService reuses the real .gitignore/.qwenignore semantics
+    // (anchoring, negation/re-inclusion, nested ignore files) — a hand-rolled
+    // gitignore→glob pattern conversion cannot reproduce these correctly.
+    const isTraversalIgnored = (entry: {
+      fullpath(): string;
+      isDirectory(): boolean;
+    }): boolean => {
+      try {
+        const relativePath = path.relative(projectRoot, entry.fullpath());
+        // Never prune paths outside the project root (e.g. an external search
+        // dir); ignore rules are only defined relative to the root.
+        if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
+          return false;
+        }
+        // Append trailing '/' for directories so the ignore library matches
+        // directory-only patterns like `node_modules/`.
+        const ignorePath = entry.isDirectory()
+          ? relativePath + '/'
+          : relativePath;
+        return this.fileService.shouldIgnoreFile(
+          ignorePath,
+          fileFilteringOptions,
+        );
+      } catch (error) {
+        // Fail open: if an ignore check throws, don't prune. The post-filter
+        // below is the source of truth, so a missed prune only costs a little
+        // extra traversal, whereas a false prune would hide real matches and
+        // be indistinguishable from a legitimately empty result.
+        debugLogger.debug(
+          `traversal ignore check failed for ${entry.fullpath()}: ${getErrorMessage(error)}`,
+        );
+        return false;
+      }
+    };
+
     const entries = (await glob(effectivePattern, {
       cwd: searchDir,
       withFileTypes: true,
@@ -150,20 +192,23 @@ class GlobToolInvocation extends BaseToolInvocation<
       dot: true,
       follow: false,
       signal,
+      ignore: {
+        ignored: isTraversalIgnored,
+        childrenIgnored: isTraversalIgnored,
+      },
     })) as GlobPath[];
 
     // Filter using paths relative to the project root (the base that
     // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
     // Using searchDir-relative paths would cause ignore rules to be
     // evaluated against incorrect paths when searchDir != projectRoot.
-    const projectRoot = this.config.getTargetDir();
     const relativePaths = entries.map((p) =>
       path.relative(projectRoot, p.fullpath()),
     );
 
     const { filteredPaths } = this.fileService.filterFilesWithReport(
       relativePaths,
-      this.getFileFilteringOptions(),
+      fileFilteringOptions,
     );
 
     const normalizePathForComparison = (p: string) =>
@@ -303,6 +348,9 @@ class GlobToolInvocation extends BaseToolInvocation<
       respectQwenIgnore:
         options?.respectQwenIgnore ??
         DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+      customIgnoreFiles:
+        options?.customIgnoreFiles ??
+        DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
     };
   }
 }

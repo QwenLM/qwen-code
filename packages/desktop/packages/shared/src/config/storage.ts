@@ -14,7 +14,7 @@ import {
   createWorkspaceAtPath,
   isValidWorkspace,
 } from '../workspaces/storage.ts';
-import { findIconFile } from '../utils/icon.ts';
+import { findIconFile, isIconUrl } from '../utils/icon.ts';
 import { extractWorkspaceSlugFromPath } from '../utils/workspace-slug.ts';
 import { initializeDocs } from '../docs/index.ts';
 import { expandPath, toPortablePath, getBundledAssetsDir } from '../utils/paths.ts';
@@ -66,6 +66,8 @@ export interface StoredConfig {
   // Input settings
   autoCapitalisation?: boolean;  // Auto-capitalize first letter when typing (default: true)
   sendMessageKey?: 'enter' | 'cmd-enter';  // Key to send messages (default: 'enter')
+  voiceModel?: string;  // ASR model id for voice dictation (default: 'qwen3-asr-flash')
+  voiceEnabled?: boolean;  // show the voice dictation mic in the composer (default: true)
   spellCheck?: boolean;  // Enable spell check in input (default: false)
   // Power settings
   keepAwakeWhileRunning?: boolean;  // Prevent screen sleep while sessions are running (default: false)
@@ -473,6 +475,41 @@ export function setSendMessageKey(key: 'enter' | 'cmd-enter'): void {
 }
 
 /**
+ * Get the ASR model id used for voice dictation.
+ * Defaults to 'qwen3-asr-flash' if not set.
+ */
+export function getVoiceModel(): string {
+  return loadStoredConfig()?.voiceModel ?? 'qwen3-asr-flash';
+}
+
+/**
+ * Set the ASR model id used for voice dictation.
+ */
+export function setVoiceModel(model: string): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.voiceModel = model;
+  saveConfig(config);
+}
+
+/**
+ * Whether the voice dictation mic is shown in the composer. Defaults to true.
+ */
+export function getVoiceEnabled(): boolean {
+  return loadStoredConfig()?.voiceEnabled ?? true;
+}
+
+/**
+ * Enable or disable voice dictation in the composer.
+ */
+export function setVoiceEnabled(enabled: boolean): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.voiceEnabled = enabled;
+  saveConfig(config);
+}
+
+/**
  * Get whether spell check is enabled in the input.
  */
 export function getSpellCheck(): boolean {
@@ -869,7 +906,7 @@ export function getWorkspaces(): Workspace[] {
     // If workspace has a stored iconUrl that's a remote URL, use it
     // Otherwise check for local icon file
     let iconUrl = w.iconUrl;
-    if (!iconUrl || (!iconUrl.startsWith('http://') && !iconUrl.startsWith('https://'))) {
+    if (!iconUrl || !isIconUrl(iconUrl)) {
       const localIcon = findWorkspaceIcon(w.rootPath);
       if (localIcon) {
         // Convert absolute path to file:// URL for Electron renderer

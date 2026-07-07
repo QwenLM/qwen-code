@@ -21,6 +21,7 @@ export interface SleepInhibitorHandle {
 
 export interface SleepInhibitorConfig {
   platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
   spawn?: (
     command: string,
     args: string[],
@@ -34,6 +35,14 @@ const NOOP_HANDLE: SleepInhibitorHandle = {
 };
 
 const MAX_INHIBITOR_REASON_LENGTH = 120;
+const LINUX_DISPLAY_ENV_VARS = ['DISPLAY', 'WAYLAND_DISPLAY', 'MIR_SOCKET'];
+const SSH_ENV_VARS = ['SSH_CONNECTION', 'SSH_TTY', 'SSH_CLIENT'];
+
+function isHeadlessSshSession(env: NodeJS.ProcessEnv): boolean {
+  const hasSshSession = SSH_ENV_VARS.some((key) => Boolean(env[key]));
+  const hasDisplay = LINUX_DISPLAY_ENV_VARS.some((key) => Boolean(env[key]));
+  return hasSshSession && !hasDisplay;
+}
 
 /**
  * Sanitize the inhibitor reason before it is passed to `systemd-inhibit
@@ -55,12 +64,17 @@ export class SleepInhibitor {
   private activeCount = 0;
   private child: ChildProcess | undefined;
   private spawnFailedForCurrentRun = false;
+  private exitedWhileActiveLogged = false;
   private readonly platform: NodeJS.Platform;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly spawn: NonNullable<SleepInhibitorConfig['spawn']>;
   private readonly logger: NonNullable<SleepInhibitorConfig['logger']>;
+  private noAskPasswordSupported: boolean | undefined;
+  private probing = false;
 
   constructor(config: SleepInhibitorConfig = {}) {
     this.platform = config.platform ?? defaultPlatform();
+    this.env = config.env ?? process.env;
     this.spawn =
       config.spawn ??
       ((command, args, options) => defaultSpawn(command, args, options ?? {}));
@@ -73,7 +87,7 @@ export class SleepInhibitor {
     if (this.activeCount === 1) {
       this.spawnFailedForCurrentRun = false;
       this.start(reason);
-    } else if (!this.child && !this.spawnFailedForCurrentRun) {
+    } else if (!this.child && !this.spawnFailedForCurrentRun && !this.probing) {
       this.start(reason);
     }
 
@@ -106,19 +120,66 @@ export class SleepInhibitor {
     if (this.activeCount === 0) {
       this.stop();
       this.spawnFailedForCurrentRun = false;
+      this.exitedWhileActiveLogged = false;
     }
   }
 
   private start(reason: string): void {
-    if (this.child || this.spawnFailedForCurrentRun) {
+    if (this.child || this.spawnFailedForCurrentRun || this.probing) {
       return;
     }
 
+    if (this.platform === 'linux' && !isHeadlessSshSession(this.env)) {
+      if (this.noAskPasswordSupported === undefined) {
+        this.probing = true;
+        this.probeNoAskPassword(() => {
+          this.probing = false;
+          if (this.activeCount > 0) {
+            this.doStart(reason);
+          }
+        });
+        return;
+      }
+    }
+    this.doStart(reason);
+  }
+
+  /**
+   * Spawn `systemd-inhibit --help` and inspect the output to determine whether
+   * `--no-ask-password` is supported. The result is cached so the probe only
+   * runs once per process lifetime.
+   */
+  private probeNoAskPassword(callback: () => void): void {
+    try {
+      const probe = this.spawn('systemd-inhibit', ['--help'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      let settled = false;
+      const settle = (supported: boolean): void => {
+        if (settled) return;
+        settled = true;
+        this.noAskPasswordSupported = supported;
+        callback();
+      };
+      probe.stdout?.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      probe.stderr?.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      probe.on('error', () => settle(false));
+      probe.on('close', () => settle(output.includes('--no-ask-password')));
+    } catch {
+      this.noAskPasswordSupported = false;
+      callback();
+    }
+  }
+
+  private doStart(reason: string): void {
     const command = this.getCommand(reason);
     if (!command) {
-      this.logger.debug(
-        `Sleep inhibition is unsupported on platform ${this.platform}.`,
-      );
+      this.logger.debug(this.getUnavailableMessage());
       // Latch so we don't re-check and re-log the unsupported platform on
       // every subsequent acquire() within the same run.
       this.spawnFailedForCurrentRun = true;
@@ -150,7 +211,12 @@ export class SleepInhibitor {
         if (this.child === child) {
           this.child = undefined;
         }
-        if (this.activeCount > 0 && !this.spawnFailedForCurrentRun) {
+        if (
+          this.activeCount > 0 &&
+          !this.spawnFailedForCurrentRun &&
+          !this.exitedWhileActiveLogged
+        ) {
+          this.exitedWhileActiveLogged = true;
           this.logger.debug(
             `Sleep inhibitor exited while active: code=${String(code)} signal=${String(signal)}`,
           );
@@ -174,6 +240,7 @@ export class SleepInhibitor {
   dispose(): void {
     this.activeCount = 0;
     this.spawnFailedForCurrentRun = false;
+    this.exitedWhileActiveLogged = false;
     this.stop();
   }
 
@@ -196,7 +263,7 @@ export class SleepInhibitor {
     ];
     const env: NodeJS.ProcessEnv = {};
     for (const key of allowList) {
-      const value = process.env[key];
+      const value = this.env[key];
       if (value !== undefined) {
         env[key] = value;
       }
@@ -239,18 +306,24 @@ export class SleepInhibitor {
         // way to block that, so this does not fully match the Linux
         // systemd-inhibit semantics on battery.
         return { command: 'caffeinate', args: ['-is'] };
-      case 'linux':
-        return {
-          command: 'systemd-inhibit',
-          args: [
-            '--what=sleep',
-            '--who=Qwen Code',
-            `--why=${sanitizeInhibitorReason(reason)}`,
-            '--mode=block',
-            'sleep',
-            'infinity',
-          ],
-        };
+      case 'linux': {
+        if (isHeadlessSshSession(this.env)) {
+          return undefined;
+        }
+        const args: string[] = [];
+        if (this.noAskPasswordSupported) {
+          args.push('--no-ask-password');
+        }
+        args.push(
+          '--what=sleep',
+          '--who=Qwen Code',
+          `--why=${sanitizeInhibitorReason(reason)}`,
+          '--mode=block',
+          'sleep',
+          'infinity',
+        );
+        return { command: 'systemd-inhibit', args };
+      }
       case 'win32':
         return {
           command: 'powershell.exe',
@@ -266,6 +339,13 @@ export class SleepInhibitor {
       default:
         return undefined;
     }
+  }
+
+  private getUnavailableMessage(): string {
+    if (this.platform === 'linux' && isHeadlessSshSession(this.env)) {
+      return 'Sleep inhibition skipped for headless SSH session.';
+    }
+    return `Sleep inhibition is unsupported on platform ${this.platform}.`;
   }
 }
 

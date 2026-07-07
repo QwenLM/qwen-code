@@ -20,6 +20,14 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -34,15 +42,161 @@ export class StreamContentError extends Error {
   }
 }
 
+/**
+ * Thrown when a streaming response goes silent past the inactivity timeout.
+ * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
+ * transport error, identical to a real socket read timeout.
+ */
+export class StreamInactivityTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly idleMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
+    super(
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
+    );
+    this.name = 'StreamInactivityTimeoutError';
+  }
+}
+
+/**
+ * Resolve the effective streaming inactivity timeout (ms). Precedence:
+ * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
+ * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
+ * knob > the built-in default. A malformed env value is ignored (with a
+ * `console.warn`) rather than failing the request.
+ */
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  // 1. Explicit config field (programmatic) wins:
+  //    - `<= 0` disables the watchdog (downstream `idleMs > 0` guard skips it).
+  //    - Values above the JS timer ceiling are rejected: setTimeout silently
+  //      compresses them to 1ms, which would fire near-immediately.
+  //    - NaN/Infinity/non-integer are invalid.
+  const fromConfig = config.streamIdleTimeoutMs;
+  if (typeof fromConfig === 'number') {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
+    ) {
+      return fromConfig;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `falling back to ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}/default.`,
+    );
+  }
+  // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
+  //    notation/floats/signs so a typo can't silently become a surprising
+  //    timeout. `0` disables; values above the timer ceiling are rejected.
+  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+        return parsed;
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
+    );
+  }
+  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+}
+
+/**
+ * Wraps a streaming chunk source with an inactivity watchdog. If no chunk
+ * arrives for `idleMs`, `abortRequest()` is invoked (to abort the underlying
+ * request and free the socket) and the iterator throws — a user `AbortError`
+ * when the parent signal was cancelled, otherwise a retryable ETIMEDOUT. The
+ * timer resets on every chunk (including thinking/reasoning deltas), so an
+ * actively streaming model is never interrupted.
+ */
+async function* withStreamInactivityTimeout(
+  source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  idleMs: number,
+  abortRequest: () => void,
+  parentSignal: AbortSignal | undefined,
+): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+  const it = source[Symbol.asyncIterator]();
+  const streamStartedAt = Date.now();
+  let chunksReceived = 0;
+  try {
+    while (true) {
+      const nextPromise = it.next();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          if (parentSignal?.aborted) {
+            // Plain Error (not DOMException) so error redaction's prototype
+            // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          } else {
+            abortRequest();
+            reject(
+              new StreamInactivityTimeoutError(
+                idleMs,
+                chunksReceived,
+                Date.now() - streamStartedAt,
+              ),
+            );
+          }
+        }, idleMs);
+        timer.unref?.();
+      });
+      let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+      try {
+        result = await Promise.race([nextPromise, timeout]);
+      } catch (err) {
+        // Once abortRequest() aborts the request, the orphaned next() rejects
+        // with an AbortError; swallow it so it is not an unhandled rejection.
+        void Promise.resolve(nextPromise).catch(() => {});
+        throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) return;
+      chunksReceived += 1;
+      yield result.value;
+    }
+  } finally {
+    abortRequest();
+    try {
+      await it.return?.();
+    } catch {
+      // The abort above is the cleanup that matters; ignore return failures.
+    }
+  }
+}
+
 export type { PipelineConfig } from './types.js';
 
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  // Resolved once (config field > env > default) so the env read + any
+  // invalid-value warning happen per pipeline, not per streaming request.
+  private readonly streamIdleTimeoutMs: number;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      this.contentGeneratorConfig,
+    );
   }
 
   async execute(
@@ -93,37 +247,44 @@ export class ContentGenerationPipeline {
       userPromptId,
       true,
       async (openaiRequest, context) => {
-        // Per-request child — same rationale as the non-streaming path.
+        // Always use a per-request controller so the inactivity watchdog can
+        // abort the SDK request even when the caller did not provide a signal.
         const parentSignal = request.config?.abortSignal;
-        const perRequestAc = parentSignal
-          ? createChildAbortController(parentSignal)
-          : undefined;
+        const perRequestAc = createChildAbortController(parentSignal);
         let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
         try {
           // Stage 1: Create OpenAI stream. Wrapped in try so a network /
           // DNS / proxy error during the SDK call still cleans up the
           // per-request child (same pattern as the non-streaming path).
           stream = (await this.client.chat.completions.create(openaiRequest, {
-            signal: perRequestAc?.signal,
+            signal: perRequestAc.signal,
           })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
         } catch (e) {
-          perRequestAc?.abort();
+          perRequestAc.abort();
           throw e;
         }
 
+        // Inactivity watchdog: the SDK `timeout` only bounds connect + first
+        // response, so a stream that returns 200 then goes silent is otherwise
+        // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
+        // chunks. `<= 0` disables it.
+        const idleMs = this.streamIdleTimeoutMs;
+        const guarded =
+          idleMs > 0
+            ? withStreamInactivityTimeout(
+                stream,
+                idleMs,
+                () => perRequestAc.abort(),
+                parentSignal,
+              )
+            : stream;
+
         // Stage 2: Process stream with conversion and logging.
-        // When a per-request controller exists, wrap in an async generator
-        // that aborts it once the stream is fully consumed or abandoned, so
-        // the child signal's reverse-cleanup fires and the parent listener
-        // is released.
-        if (!perRequestAc) {
-          return this.processStreamWithLogging(stream, context, request);
-        }
-        // Capture the narrowed controller so the closure below sees a non-
-        // nullable type (TS does not propagate narrowing into nested funcs).
-        const ac = perRequestAc;
+        // Wrap in an async generator that aborts the per-request controller
+        // once the stream is fully consumed or abandoned, releasing the SDK
+        // request and any parent listener.
         const innerStream = this.processStreamWithLogging(
-          stream,
+          guarded,
           context,
           request,
         );
@@ -131,7 +292,7 @@ export class ContentGenerationPipeline {
           try {
             yield* innerStream;
           } finally {
-            ac.abort();
+            perRequestAc.abort();
           }
         }
         return drainThenCleanup();
@@ -246,6 +407,17 @@ export class ContentGenerationPipeline {
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
+        throw redactProxyError(error);
+      }
+
+      // Bypass handleError: it strips `code` from timeout errors, which would
+      // prevent classifyRetryError from recognizing retryable ETIMEDOUT.
+      if (error instanceof StreamInactivityTimeoutError) {
+        debugLogger.warn('OpenAI stream inactivity timeout', {
+          idleMs: error.idleMs,
+          chunksReceived: error.chunksReceived,
+          streamLifetimeMs: error.streamLifetimeMs,
+        });
         throw redactProxyError(error);
       }
 
@@ -412,13 +584,39 @@ export class ContentGenerationPipeline {
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
       const model = (context.model ?? '').toLowerCase();
-      if (
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-          this.contentGeneratorConfig,
-        ) &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
-        typed['enable_thinking'] = false;
+      if (model.startsWith('qwen') || model === 'coder-model') {
+        if (
+          DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+            this.contentGeneratorConfig,
+          )
+        ) {
+          typed['enable_thinking'] = false;
+        } else {
+          // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
+          // the model's chat template server-side and read the thinking switch
+          // from `chat_template_kwargs`, not a top-level `enable_thinking`
+          // (which they silently ignore). Send it there so hybrid qwen models
+          // actually stop emitting <think> when reasoning is disabled — e.g.
+          // the auto-mode permission classifier's short structured-output
+          // calls, which otherwise spend their small token budget on thinking
+          // and fail closed. Servers that don't recognise `chat_template_kwargs`
+          // ignore the unknown field, so the switch is a harmless no-op there.
+          //
+          // Drop any top-level `enable_thinking` a provider preset injected via
+          // extra_body (provider-config.ts emits it for models configured with
+          // `enableThinking: true`): leaving it would contradict the
+          // `chat_template_kwargs` opt-out on servers that honour both, and
+          // keeps this path from leaking the qwen-specific field top-level.
+          delete typed['enable_thinking'];
+          const existing = (typed['chat_template_kwargs'] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          typed['chat_template_kwargs'] = {
+            ...existing,
+            enable_thinking: false,
+          };
+        }
       }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
@@ -630,6 +828,10 @@ export class ContentGenerationPipeline {
         // message is spec-compliant and safe for permissive providers too.
         // Opt out via generationConfig.splitToolMedia = false.
         true,
+      toolResultContentFormat:
+        providerOverrides.toolResultContentFormat ??
+        this.contentGeneratorConfig.toolResultContentFormat ??
+        'parts',
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

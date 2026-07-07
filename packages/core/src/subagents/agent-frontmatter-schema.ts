@@ -10,7 +10,7 @@
  * Mirrors Claude Code 2.1.168's `.claude/agents/<name>.md` schema verbatim so
  * a user can drop a Claude Code agent file into `.qwen/agents/` and have it
  * parse identically. The internal verification source (DL7 / Ig5 / GN / kc /
- * P37 / _Y) is documented in `docs/declarative-agents-port.md`.
+ * P37 / _Y) is documented in `docs/design/declarative-agents-port.md`.
  *
  * Parsing follows DL7's "lenient" posture: invalid optional fields are dropped
  * to undefined rather than thrown — the caller layer is responsible for

@@ -32,6 +32,10 @@ import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
  */
 export type ServeMode = 'http-bridge' | 'native';
 
+export type ServeChannelSelection =
+  | { mode: 'all' }
+  | { mode: 'names'; names: string[] };
+
 export interface ServeOptions {
   hostname: string;
   port: number;
@@ -123,6 +127,28 @@ export interface ServeOptions {
    */
   enableSessionShell?: boolean;
   /**
+   * Path to a PEM certificate file. When both `tlsCert` and `tlsKey`
+   * are set, the daemon serves over HTTPS (`https.createServer`) instead
+   * of plain HTTP. Both must be provided together. The main motivation is
+   * mobile/cross-device access: browsers only expose secure-context APIs
+   * (`getUserMedia` for voice input, WebRTC) over HTTPS or `localhost`, so
+   * a LAN IP like `192.168.x.x` needs TLS. Scope is TLS termination only —
+   * no auto-generation, no ACME. TLS is orthogonal to the bearer-token
+   * auth layer; both still apply on non-loopback binds.
+   */
+  tlsCert?: string;
+  /**
+   * Path to a PEM private key file. See `tlsCert` — both must be set
+   * together to enable HTTPS.
+   */
+  tlsKey?: string;
+  /**
+   * Serve the built Web Shell SPA at the daemon root (default true). Set
+   * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
+   * Web Shell assets aren't present in the build.
+   */
+  serveWebShell?: boolean;
+  /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
@@ -179,6 +205,12 @@ export interface ServeOptions {
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
+   * Wall-clock timeout in ms for a single human permission /
+   * ask_user_question response in daemon (ACP) mode. 0 = disabled
+   * (wait forever). Default: 300000 (5 min).
+   */
+  permissionResponseTimeoutMs?: number;
+  /**
    * Enable per-tier HTTP rate limiting. Off by default. When enabled,
    * requests exceeding per-tier limits receive 429 + Retry-After.
    */
@@ -191,6 +223,30 @@ export interface ServeOptions {
   rateLimitRead?: number;
   /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
   rateLimitWindowMs?: number;
+  /**
+   * Accept client-hosted MCP servers over the daemon WS (issue #5626,
+   * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
+   * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
+   * daemon's agent can call tools that execute in the client (e.g. the Chrome
+   * extension's browser tools). `runQwenServe` only enables this when a caller
+   * or environment variable opts in.
+   */
+  clientMcpOverWs?: boolean;
+  /**
+   * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
+   * connect to a new `/cdp` WebSocket and drive ONE real tab via the extension's
+   * `chrome.debugger`, reusing browser automation tools. `runQwenServe` enables this for
+   * Chrome extension origins or explicit env opt-in; callers may pass `false`.
+   */
+  cdpTunnelOverWs?: boolean;
+  /** Forward the experimental LSP opt-in to spawned ACP children. */
+  experimentalLsp?: boolean;
+  /**
+   * Experimental: channels to host in a daemon-managed worker process.
+   * Omitted means plain daemon mode with no channel worker.
+   */
+  channelSelection?: ServeChannelSelection;
 }
 
 /**

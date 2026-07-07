@@ -9,7 +9,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TaskUpdateTool } from './task-update.js';
-import { createTask } from '../agents/team/tasks.js';
+import { createTask, getTask } from '../agents/team/tasks.js';
+import type { ApprovalMode, Config } from '../config/config.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
+
+const DEFAULT_MODE = 'default' as ApprovalMode;
+const PLAN_MODE = 'plan' as ApprovalMode;
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/test';
@@ -29,10 +34,11 @@ const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 let tmpDir: string;
 const TEAM = 'test-team';
 
-function makeConfig() {
+function makeConfig(approvalMode = DEFAULT_MODE) {
   return {
     getTeamContext: () => ({ teamName: TEAM }),
-  } as unknown as import('../config/config.js').Config;
+    getApprovalMode: () => approvalMode,
+  } as unknown as Config;
 }
 
 beforeEach(async () => {
@@ -91,6 +97,92 @@ describe('TaskUpdateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('not found');
+  });
+
+  it('allows plan-required teammates to claim a task before approval', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Plan first',
+      description: 'desc',
+    });
+    const planTool = new TaskUpdateTool(makeConfig(PLAN_MODE));
+    const invocation = planTool.build({
+      taskId: task.id,
+      status: 'in_progress',
+    });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'planner',
+        teamName: TEAM,
+        agentId: 'planner@test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    const reloaded = await getTask(TEAM, task.id);
+    expect(reloaded?.status).toBe('in_progress');
+    expect(reloaded?.owner).toBe('planner');
+  });
+
+  it('blocks plan-required teammates from mutating tasks before approval', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Plan first',
+      description: 'desc',
+    });
+    const planTool = new TaskUpdateTool(makeConfig(PLAN_MODE));
+    const invocation = planTool.build({
+      taskId: task.id,
+      description: 'New executable instruction.',
+    });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'planner',
+        teamName: TEAM,
+        agentId: 'planner@test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('waiting for leader approval');
+    const reloaded = await getTask(TEAM, task.id);
+    expect(reloaded?.description).toBe('desc');
+  });
+
+  it('does not let plan-required teammates reclaim non-pending tasks before approval', async () => {
+    const task = await createTask(TEAM, {
+      subject: 'Completed',
+      description: 'desc',
+    });
+    await tool
+      .build({ taskId: task.id, status: 'completed' })
+      .execute(new AbortController().signal);
+
+    const planTool = new TaskUpdateTool(makeConfig(PLAN_MODE));
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'planner',
+        teamName: TEAM,
+        agentId: 'planner@test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        planTool
+          .build({ taskId: task.id, status: 'in_progress' })
+          .execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('unowned pending task');
+    const reloaded = await getTask(TEAM, task.id);
+    expect(reloaded?.status).toBe('completed');
   });
 
   it('validates required taskId', () => {

@@ -25,6 +25,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 vi.mock('../../config/settings.js', () => ({
+  SettingScope: {
+    User: 'User',
+    Workspace: 'Workspace',
+    System: 'System',
+    SystemDefaults: 'SystemDefaults',
+  },
   loadSettings: vi.fn().mockReturnValue({
     merged: {},
   }),

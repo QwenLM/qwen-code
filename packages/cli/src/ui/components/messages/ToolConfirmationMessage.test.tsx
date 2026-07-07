@@ -356,6 +356,29 @@ describe('ToolConfirmationMessage', () => {
 
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
+
+    it('should NOT show "Modify with external editor" when hideModify is true', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{ ...editConfirmationDetails, hideModify: true }}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        {
+          settings: {
+            merged: { general: { preferredEditor: 'vscode' } },
+          } as unknown as LoadedSettings,
+        },
+      );
+
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
   });
 
   describe('compactMode', () => {

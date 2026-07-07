@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { HistoryReplayer } from './HistoryReplayer.js';
+import {
+  HistoryReplayer,
+  MISSING_TOOL_RESULT_MESSAGE,
+} from './HistoryReplayer.js';
 import type { SessionContext } from './types.js';
 import type {
   Config,
@@ -18,10 +21,22 @@ import type {
 describe('HistoryReplayer', () => {
   let mockContext: SessionContext;
   let sendUpdateSpy: ReturnType<typeof vi.fn>;
+  let setActiveRecordIdSpy: ReturnType<typeof vi.fn>;
+  let sentUpdateContexts: Array<{
+    activeRecordId: string | null;
+    activeRecordTimestamp: string | undefined;
+  }>;
   let replayer: HistoryReplayer;
 
   beforeEach(() => {
+    let activeRecordId: string | null = null;
+    let activeRecordTimestamp: string | undefined;
+    sentUpdateContexts = [];
     sendUpdateSpy = vi.fn().mockResolvedValue(undefined);
+    setActiveRecordIdSpy = vi.fn((id: string | null, timestamp?: string) => {
+      activeRecordId = id;
+      activeRecordTimestamp = timestamp;
+    });
     const mockToolRegistry = {
       getTool: vi.fn().mockReturnValue(null),
     } as unknown as ToolRegistry;
@@ -31,13 +46,21 @@ describe('HistoryReplayer', () => {
       config: {
         getToolRegistry: () => mockToolRegistry,
       } as unknown as Config,
-      sendUpdate: sendUpdateSpy,
-    };
+      sendUpdate: vi.fn(async (update) => {
+        sentUpdateContexts.push({ activeRecordId, activeRecordTimestamp });
+        await sendUpdateSpy(update);
+      }),
+      setActiveRecordId: setActiveRecordIdSpy,
+    } as unknown as SessionContext;
 
     replayer = new HistoryReplayer(mockContext);
   });
 
   const toEpochMs = (ts: string) => new Date(ts).getTime();
+  const sentUpdates = () =>
+    sendUpdateSpy.mock.calls.map(
+      (call: unknown[]) => call[0] as Record<string, unknown>,
+    );
 
   const createUserRecord = (text: string): ChatRecord => ({
     uuid: 'user-uuid',
@@ -268,6 +291,7 @@ describe('HistoryReplayer', () => {
           },
         }),
       );
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
     });
 
     it('should use function call id as callId when available', async () => {
@@ -294,6 +318,334 @@ describe('HistoryReplayer', () => {
           toolCallId: 'custom-call-id',
         }),
       );
+    });
+
+    it('should fail dangling function calls after replay completes', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record]);
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call_update',
+      ]);
+      expect(updates[1]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-missing',
+        status: 'failed',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: MISSING_TOOL_RESULT_MESSAGE,
+            },
+          },
+        ],
+        _meta: {
+          toolName: 'run_shell_command',
+          provenance: 'builtin',
+          timestamp: toEpochMs(record.timestamp),
+        },
+      });
+      expect(setActiveRecordIdSpy).toHaveBeenCalledWith(
+        record.uuid,
+        record.timestamp,
+      );
+      expect(sentUpdateContexts[1]).toEqual({
+        activeRecordId: record.uuid,
+        activeRecordTimestamp: record.timestamp,
+      });
+    });
+
+    it('should not synthesize missing-result failures for calls without source ids', async () => {
+      const records: ChatRecord[] = [
+        {
+          ...createAssistantRecord(''),
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { path: 'test.ts' },
+                },
+              },
+            ],
+          },
+        },
+        createToolResultRecord('read_file', 'File contents here'),
+      ];
+
+      await replayer.replay(records);
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call_update',
+      ]);
+      expect(updates[1]).toMatchObject({
+        toolCallId: 'call-123',
+        status: 'completed',
+      });
+    });
+
+    it('should fail dangling calls before rethrowing replay errors', async () => {
+      const danglingRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+      const failingRecord = createUserRecord('this send fails');
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'user_message_chunk') {
+            throw new Error('replay failed');
+          }
+        },
+      );
+
+      await expect(
+        replayer.replay([danglingRecord, failingRecord]),
+      ).rejects.toThrow('replay failed');
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'user_message_chunk',
+        'tool_call_update',
+      ]);
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'call-missing',
+        status: 'failed',
+      });
+    });
+
+    it('should throw dangling errors and continue failing later dangling calls', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-a',
+                name: 'read_file',
+                args: { path: 'a.ts' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-b',
+                name: 'read_file',
+                args: { path: 'b.ts' },
+              },
+            },
+          ],
+        },
+      };
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (
+            update['sessionUpdate'] === 'tool_call_update' &&
+            update['toolCallId'] === 'call-a'
+          ) {
+            throw new Error('first synthetic failure failed');
+          }
+        },
+      );
+
+      await expect(replayer.replay([record])).rejects.toThrow(
+        'first synthetic failure failed',
+      );
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call',
+        'tool_call_update',
+        'tool_call_update',
+      ]);
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'call-a',
+        status: 'failed',
+      });
+      expect(updates[3]).toMatchObject({
+        toolCallId: 'call-b',
+        status: 'failed',
+      });
+    });
+
+    it('should aggregate replay and dangling cleanup errors', async () => {
+      const danglingRecord: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-missing',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+      const failingRecord = createUserRecord('this send fails');
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'user_message_chunk') {
+            throw new Error('replay failed');
+          }
+          if (update['sessionUpdate'] === 'tool_call_update') {
+            throw new Error('dangling cleanup failed');
+          }
+        },
+      );
+
+      let caughtError: unknown;
+      try {
+        await replayer.replay([danglingRecord, failingRecord]);
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(AggregateError);
+      expect((caughtError as AggregateError).message).toBe(
+        'Replay and dangling-cleanup both failed',
+      );
+      expect(
+        (caughtError as AggregateError).errors.map((error) =>
+          error instanceof Error ? error.message : String(error),
+        ),
+      ).toEqual(['replay failed', 'dangling cleanup failed']);
+    });
+
+    it('should not fail function calls that have matching tool results', async () => {
+      const records: ChatRecord[] = [
+        {
+          ...createAssistantRecord(''),
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-123',
+                  name: 'read_file',
+                  args: { path: 'test.ts' },
+                },
+              },
+            ],
+          },
+        },
+        createToolResultRecord('read_file', 'File contents here'),
+      ];
+
+      await replayer.replay(records);
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call_update',
+      ]);
+      expect(updates[1]).toMatchObject({
+        toolCallId: 'call-123',
+        status: 'completed',
+      });
+    });
+
+    it('should only fail dangling calls when matched and dangling calls are mixed', async () => {
+      const records: ChatRecord[] = [
+        {
+          ...createAssistantRecord(''),
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-123',
+                  name: 'read_file',
+                  args: { path: 'test.ts' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call-missing',
+                  name: 'run_shell_command',
+                  args: { command: 'sleep 10' },
+                },
+              },
+            ],
+          },
+        },
+        createToolResultRecord('read_file', 'File contents here'),
+      ];
+
+      await replayer.replay(records);
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+        'tool_call',
+        'tool_call_update',
+        'tool_call_update',
+      ]);
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'call-123',
+        status: 'completed',
+      });
+      expect(updates[3]).toMatchObject({
+        toolCallId: 'call-missing',
+        status: 'failed',
+      });
+    });
+
+    it('should not track skipped TodoWrite starts as dangling tool calls', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'todo-call',
+                name: 'todo_write',
+                args: { todos: [] },
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
   });
 
@@ -393,6 +745,40 @@ describe('HistoryReplayer', () => {
         }),
       );
     });
+
+    it('should use functionResponse id as callId when toolCallResult.callId is missing', async () => {
+      const record: ChatRecord = {
+        ...createToolResultRecord('test_tool'),
+        uuid: 'fallback-uuid',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'response-call-id',
+                name: 'test_tool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: undefined as unknown as string,
+          responseParts: [],
+          resultDisplay: 'Result',
+          error: undefined,
+          errorType: undefined,
+        },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCallId: 'response-call-id',
+        }),
+      );
+    });
   });
 
   describe('system records', () => {
@@ -426,7 +812,7 @@ describe('HistoryReplayer', () => {
               { text: "I'll read that file for you.", thought: true },
               {
                 functionCall: {
-                  id: 'call-read',
+                  id: 'call-123',
                   name: 'read_file',
                   args: { path: 'test.ts' },
                 },

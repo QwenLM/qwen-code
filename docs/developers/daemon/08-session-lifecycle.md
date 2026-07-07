@@ -205,8 +205,26 @@ attach or subscriber remains, the session is reaped. The endpoint returns 204.
 ### Batch Session Delete
 
 `POST /sessions/delete` accepts `{ sessionIds: string[] }` (up to 100 ids),
-closes bridge sessions, and deletes transcript files. It uses
-`Promise.allSettled` for resilience and returns `{ removed, notFound, errors }`.
+closes bridge sessions, and deletes active or archived transcript files. If both
+active and archived JSONL files exist for the same id, hard delete removes both
+so operators can clear the conflict. It cleans active and archived worktree
+sidecars, but leaves file-history snapshots, subagent transcripts, and runtime
+sidecars intact. It uses `Promise.allSettled` for resilience and returns
+`{ removed, notFound, errors }`.
+
+### Session Archive
+
+`POST /sessions/archive` moves inactive session JSONL files from `chats/` into
+`chats/archive/`. If the target session is live, the daemon first enters a
+per-session archive gate and performs a strict close that requires the ACP child
+to flush `ChatRecordingService`; archive leaves the JSONL in place if close or
+flush fails.
+
+`POST /sessions/unarchive` moves archived JSONL files back to `chats/`. This is
+only a storage-state transition; clients must call `session/load` or
+`session/resume` afterward. Archived sessions return `409 session_archived` for
+load/resume, and mutations racing an archive transition return
+`409 session_archiving`.
 
 ### Context Usage (`session_context_usage` capability tag)
 
@@ -217,12 +235,25 @@ closes bridge sessions, and deletes transcript files. It uses
 
 `GET /session/:id/stats` returns usage statistics: model metrics
 (input/output tokens, cache reads/writes, total cost), per-tool call counts and
-latencies, and file edit counts.
+latencies, file edit counts, and per-skill invocation counts for the live
+session. The `skills` block reflects skill body loads and skill slash commands
+within this session only; it is not a cross-session activity aggregate.
 
 ### Session Tasks (`session_tasks` capability tag)
 
 `GET /session/:id/tasks` returns a background-task snapshot for agent tasks,
-shell tasks, monitor tasks, and their lifecycle states.
+shell tasks, monitor tasks, and their lifecycle states. Agent entries spawned
+by another sub-agent carry optional lineage fields (`parentAgentId`,
+`parentName`, `depth`) so clients can render nested sub-agents as a tree; see
+the payload example in `qwen-serve-protocol.md`.
+
+### Session LSP Status (`session_lsp` capability tag)
+
+`GET /session/:id/lsp` returns sanitized per-session LSP status for daemon
+clients: enablement, aggregate server counts, unavailable/initialization state,
+and per-server `name`, `status`, `languages`, `transport`, `command`, and
+`error`. Disabled or unavailable LSP is represented as HTTP 200 status data,
+not as a transport error.
 
 ### Compacted Replay
 
@@ -248,7 +279,7 @@ new session arrives.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
 - `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
 
 ## Caveats & Known Limits
 

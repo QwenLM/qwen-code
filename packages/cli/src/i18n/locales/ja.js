@@ -236,18 +236,17 @@ export default {
   'Open in editor': 'エディタで開く',
   'Edit tools': 'ツールを編集',
   'Edit color': '色を編集',
-  '❌ Error:': '❌ エラー:',
+  '✗ Error:': '✗ エラー:',
   'Are you sure you want to delete agent "{{name}}"?':
     'エージェント "{{name}}" を削除してもよろしいですか?',
   'Project Level (.qwen/agents/)': 'プロジェクトレベル (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'ユーザーレベル (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!':
-    '✅ サブエージェントの作成に成功しました!',
+  '✓ Subagent Created Successfully!': '✓ サブエージェントの作成に成功しました!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'サブエージェント "{{name}}" を {{level}} に保存しました',
   'Name: ': '名前: ',
   'Location: ': '場所: ',
-  '❌ Error saving subagent:': '❌ サブエージェント保存エラー:',
+  '✗ Error saving subagent:': '✗ サブエージェント保存エラー:',
   'Warnings:': '警告:',
   'Step {{n}}: Choose Location': 'ステップ {{n}}: 場所を選択',
   'Step {{n}}: Choose Generation Method': 'ステップ {{n}}: 作成方法を選択',
@@ -360,10 +359,53 @@ export default {
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
-  'check session stats. Usage: /stats [model|tools]':
-    'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
+  'Show daily token usage statistics.': '日次 token 使用統計を表示',
+  'Show monthly token usage statistics.': '月次 token 使用統計を表示',
+  'Export token usage statistics to CSV or JSON.':
+    'token 使用統計を CSV または JSON にエクスポート',
+  'No usage data.': '使用データはありません。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens（{{requests}} リクエスト）',
+  'Daily token usage for {{value}}': '{{value}} の日次 token 使用量',
+  'Monthly token usage for {{value}}': '{{value}} の月次 token 使用量',
+  'Total: {{tokens}} tokens': '合計: {{tokens}} tokens',
+  'Requests: {{requests}}': 'リクエスト数: {{requests}}',
+  'Breakdown:': '内訳:',
+  'Input: {{tokens}}': '入力: {{tokens}}',
+  'Output: {{tokens}}': '出力: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'キャッシュ（入力に含まれる）: {{tokens}}',
+  'Thoughts: {{tokens}}': '思考: {{tokens}}',
+  'By model:': 'モデル別:',
+  'By auth type:': '認証タイプ別:',
+  'By model/auth type:': 'モデル/認証タイプ別:',
+  'By source:': 'ソース別:',
+  'Failed to load token usage stats: {{error}}':
+    'token 使用統計の読み込みに失敗しました: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv または --format json を指定してください。',
+  'Expected a file path after --output.':
+    '--output の後にファイルパスを指定してください。',
+  'Unexpected argument: {{argument}}': '予期しない引数: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '使い方: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'token 使用量のエクスポート先はプロジェクト作業ディレクトリ内である必要があります。',
+  'Export target does not exist: {{path}}':
+    'エクスポート先が存在しません: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    '作業ディレクトリ内でエクスポートパスを解決できません。',
+  'Could not create a temporary export file.':
+    '一時エクスポートファイルを作成できませんでした。',
+  'Token usage exported to {{format}}: {{path}}':
+    'token 使用量を {{format}} にエクスポートしました: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'token 使用統計のエクスポートに失敗しました: {{error}}',
+  'Unclosed quote in arguments.': '引数の引用符が閉じられていません。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注: 生成時間（TTFT/TPS）は生成メトリクスに属します。',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'ワークスペースにディレクトリを追加。複数パスはカンマで区切ってください',
@@ -880,6 +922,7 @@ export default {
   'No tasks currently running': '現在実行中のタスクはありません',
   'No entry to show.': '表示するエントリはありません。',
   'needs approval': '承認待ち',
+  'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
   'Approve or deny the request above':
@@ -904,9 +947,9 @@ export default {
     'セッションの続行方法を選択してください:',
   'Start new chat session': '新しいチャットセッションを開始',
   'Continue previous conversation': '前回の会話を続行',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 おかえりなさい!(最終更新: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 全体目標:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'おかえりなさい!(最終更新: {{timeAgo}})',
+  'Overall Goal:': '全体目標:',
   'Connect a Provider': 'プロバイダーに接続',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '続行するにはプロバイダーに接続してください。Ctrl+C をもう一度押すと終了します',
@@ -1044,8 +1087,8 @@ export default {
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
   'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers を起動中({{count}} 初期化中)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers を起動中({{count}} 初期化中)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注: 初回起動には時間がかかる場合があります。ツールの利用可能状況は自動的に更新されます',
   'Starting... (first startup may take longer)':
@@ -1062,8 +1105,9 @@ export default {
   'Tools:': 'ツール:',
   'Parameters:': 'パラメータ:',
   'Prompts:': 'プロンプト:',
+  'Resources:': 'リソース:',
   Blocked: 'ブロック',
-  '💡 Tips:': '💡 ヒント:',
+  '★ Tips:': '★ ヒント:',
   Use: '使用',
   'to show server and tool descriptions': 'サーバーとツールの説明を表示',
   'to show tool parameter schemas': 'tool parameter schemas を表示',
@@ -1325,8 +1369,8 @@ export default {
     'Coding Plan の API Key を入力してください: ',
   'Select authentication method:': '認証方法を選択:',
   '\n=== Authentication Status ===\n': '\n=== 認証ステータス ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  認証方法が設定されていません。\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  認証方法が設定されていません。\n',
   'Run one of the following commands to get started:\n':
     '以下のコマンドのいずれかを実行して開始してください:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1347,8 +1391,8 @@ export default {
   '  Current Model: {{model}}': '  現在のモデル: {{model}}',
   '  Config Version: {{version}}': '  設定バージョン: {{version}}',
   '  Status: API key configured\n': '  ステータス: API Key 設定済み\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  認証方法: Alibaba Cloud Coding Plan（不完全）',
   '  Issue: API key not found in environment or settings\n':
     '  問題: 環境変数または設定に API Key が見つかりません\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1368,6 +1412,8 @@ export default {
   'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '推論対応モデルの思考の強さを設定します（{{tiers}}）。プロバイダーごとにマッピング・制限されます。',
   'Exited plan mode. Previous approval mode restored.':
     'プランモードを終了しました。以前の承認モードに戻りました。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1695,6 +1741,12 @@ export default {
   'ANTHROPIC_BASE_URL environment variable not found.':
     '環境変数 ANTHROPIC_BASE_URL が見つかりません。',
   'Invalid auth method selected.': '無効な認証方式が選択されました。',
+  ' (this project)': ' (このプロジェクト)',
+  ' (global)': ' (グローバル)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'モデルの選択をプロジェクト設定に永続化（ワークスペーススコープ）',
+  'Persist the model selection to the user settings (global scope)':
+    'モデルの選択をユーザー設定に永続化（グローバルスコープ）',
   'API Key': 'API Key',
   '(default)': '(デフォルト)',
   '(not set)': '(未設定)',
@@ -1756,6 +1808,26 @@ export default {
     '次回のセッション期限切れクリーンアップでファイルが削除されるまで、以降の dream はロック中としてスキップされる可能性があります。',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'スケジューラーゲートがこの dream のタイムスタンプを認識しませんでした。次の dream サイクルは通常より早く再実行される可能性があります。',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '履歴を折りたたみました：{{n}} 件のメッセージが非表示です。/history expand-now で表示します。',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（モデルレジストリにありません）',
   'Attribution: commit': 'コミットの帰属表示',

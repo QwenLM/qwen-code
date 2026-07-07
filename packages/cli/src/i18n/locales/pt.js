@@ -276,7 +276,7 @@ export default {
   'Open in editor': 'Abrir no editor',
   'Edit tools': 'Editar ferramentas',
   'Edit color': 'Editar cor',
-  '❌ Error:': '❌ Erro:',
+  '✗ Error:': '✗ Erro:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Tem certeza que deseja excluir o agente "{{name}}"?',
 
@@ -285,12 +285,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Nível de Projeto (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Nível de Usuário (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Subagente criado com sucesso!',
+  '✓ Subagent Created Successfully!': '✓ Subagente criado com sucesso!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'O subagente "{{name}}" foi salvo no nível {{level}}.',
   'Name: ': 'Nome: ',
   'Location: ': 'Localização: ',
-  '❌ Error saving subagent:': '❌ Erro ao salvar subagente:',
+  '✗ Error saving subagent:': '✗ Erro ao salvar subagente:',
   'Warnings:': 'Avisos:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'O nome "{{name}}" já existe no nível {{level}} - o subagente existente será substituído',
@@ -443,12 +443,57 @@ export default {
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
-  'check session stats. Usage: /stats [model|tools]':
-    'verificar estatísticas da sessão. Uso: /stats [model|tools]',
   'Show model-specific usage statistics.':
     'Mostrar estatísticas de uso específicas do modelo.',
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
+  'Show daily token usage statistics.':
+    'Mostrar estatísticas diárias de uso de tokens.',
+  'Show monthly token usage statistics.':
+    'Mostrar estatísticas mensais de uso de tokens.',
+  'Export token usage statistics to CSV or JSON.':
+    'Exportar estatísticas de uso de tokens para CSV ou JSON.',
+  'No usage data.': 'Nenhum dado de uso.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requisições)',
+  'Daily token usage for {{value}}': 'Uso diário de tokens para {{value}}',
+  'Monthly token usage for {{value}}': 'Uso mensal de tokens para {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requisições: {{requests}}',
+  'Breakdown:': 'Detalhamento:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Saída: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (incluído na entrada): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raciocínio: {{tokens}}',
+  'By model:': 'Por modelo:',
+  'By auth type:': 'Por tipo de autenticação:',
+  'By model/auth type:': 'Por modelo/tipo de autenticação:',
+  'By source:': 'Por origem:',
+  'Failed to load token usage stats: {{error}}':
+    'Falha ao carregar estatísticas de uso de tokens: {{error}}',
+  'Expected --format csv or --format json.':
+    'Esperado --format csv ou --format json.',
+  'Expected a file path after --output.':
+    'Esperado um caminho de arquivo após --output.',
+  'Unexpected argument: {{argument}}': 'Argumento inesperado: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Uso: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'O caminho de exportação do uso de tokens deve estar dentro do diretório de trabalho do projeto.',
+  'Export target does not exist: {{path}}':
+    'O destino da exportação não existe: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Não foi possível resolver o caminho de exportação dentro do diretório de trabalho.',
+  'Could not create a temporary export file.':
+    'Não foi possível criar um arquivo temporário de exportação.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Uso de tokens exportado para {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Falha ao exportar estatísticas de uso de tokens: {{error}}',
+  'Unclosed quote in arguments.': 'Aspas não fechadas nos argumentos.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Observação: o tempo de geração (TTFT/TPS) pertence às métricas de geração.',
   'exit the cli': 'sair da cli',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -1135,9 +1180,9 @@ export default {
     'Escolha como proceder com sua sessão:',
   'Start new chat session': 'Iniciar nova sessão de chat',
   'Continue previous conversation': 'Continuar conversa anterior',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bem-vindo de volta! (Última atualização: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objetivo Geral:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bem-vindo de volta! (Última atualização: {{timeAgo}})',
+  'Overall Goal:': 'Objetivo Geral:',
   'Connect a Provider': 'Conectar um provedor',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Você deve conectar um provedor para prosseguir. Pressione Ctrl+C novamente para sair.',
@@ -1308,8 +1353,8 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': 'Nenhum MCP servers configurado.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers estão iniciando ({{count}} inicializando)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers estão iniciando ({{count}} inicializando)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Nota: A primeira inicialização pode demorar mais. A disponibilidade da ferramenta será atualizada automaticamente.',
   'Configured MCP servers:': 'MCP servers configurados:',
@@ -1331,8 +1376,9 @@ export default {
   'Tools:': 'Ferramentas:',
   'Parameters:': 'Parâmetros:',
   'Prompts:': 'Prompts:',
+  'Resources:': 'Recursos:',
   Blocked: 'Bloqueado',
-  '💡 Tips:': '💡 Dicas:',
+  '★ Tips:': '★ Dicas:',
   'to show server and tool descriptions':
     'para mostrar descrições de servidores e ferramentas',
   'to show tool parameter schemas': 'para mostrar tool parameter schemas',
@@ -1464,6 +1510,8 @@ export default {
   'No tasks currently running': 'Nenhuma tarefa em execução',
   'No entry to show.': 'Nenhuma entrada para mostrar.',
   'needs approval': 'precisa de aprovação',
+  'rejected — edit config to re-approve':
+    'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
     'Agente em segundo plano precisa de aprovação',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
@@ -1780,8 +1828,8 @@ export default {
   'Enter your Coding Plan API key: ': 'Insira sua API Key do Coding Plan: ',
   'Select authentication method:': 'Selecione o método de autenticação:',
   '\n=== Authentication Status ===\n': '\n=== Status de Autenticação ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  Nenhum método de autenticação configurado.\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  Nenhum método de autenticação configurado.\n',
   'Run one of the following commands to get started:\n':
     'Execute um dos seguintes comandos para começar:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1802,8 +1850,8 @@ export default {
   '  Current Model: {{model}}': '  Modelo atual: {{model}}',
   '  Config Version: {{version}}': '  Versão da configuração: {{version}}',
   '  Status: API key configured\n': '  Status: API Key configurada\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
   '  Issue: API key not found in environment or settings\n':
     '  Problema: API Key não encontrada no ambiente ou configurações\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1823,6 +1871,8 @@ export default {
     'Pressione Ctrl+O para exibir a saída completa da ferramenta',
   'Switch to plan mode or exit plan mode':
     'Alternar para o modo de planejamento ou sair do modo de planejamento',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Define a intensidade de raciocínio dos modelos compatíveis ({{tiers}}); mapeada e limitada por provedor.',
   'Exited plan mode. Previous approval mode restored.':
     'Modo de planejamento encerrado. Modo de aprovação anterior restaurado.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1976,6 +2026,26 @@ export default {
     'Dreams posteriores podem ser ignorados como bloqueados até que a próxima varredura de sessões obsoletas limpe o arquivo.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'O gate do agendador não viu o timestamp deste dream; o próximo ciclo de dream pode disparar novamente antes do normal.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Histórico recolhido: {{n}} mensagens ocultas. Use /history expand-now para mostrar.',
+
   // === Same-as-English optimization ===
   '(workspace)': '(espaço de trabalho)',
   'Ref:': 'Referência:',

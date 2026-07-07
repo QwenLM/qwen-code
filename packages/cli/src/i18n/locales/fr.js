@@ -284,7 +284,7 @@ export default {
   'Open in editor': "Ouvrir dans l'éditeur",
   'Edit tools': 'Modifier les outils',
   'Edit color': 'Modifier la couleur',
-  '❌ Error:': '❌ Erreur :',
+  '✗ Error:': '✗ Erreur :',
   'Are you sure you want to delete agent "{{name}}"?':
     'Êtes-vous sûr de vouloir supprimer l\'agent "{{name}}" ?',
 
@@ -293,13 +293,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Niveau projet (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Niveau utilisateur (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Sous-agent créé avec succès !',
+  '✓ Subagent Created Successfully!': '✓ Sous-agent créé avec succès !',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Le sous-agent "{{name}}" a été enregistré au niveau {{level}}.',
   'Name: ': 'Nom : ',
   'Location: ': 'Emplacement : ',
-  '❌ Error saving subagent:':
-    '❌ Erreur lors de la sauvegarde du sous-agent :',
+  '✗ Error saving subagent:': '✗ Erreur lors de la sauvegarde du sous-agent :',
   'Warnings:': 'Avertissements :',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Le nom "{{name}}" existe déjà au niveau {{level}} - le sous-agent existant sera écrasé',
@@ -494,12 +493,59 @@ export default {
   'Auto Edit': 'Édition automatique',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activer/désactiver le mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'vérifier les stats de session. Utilisation : /stats [modèle|outils]',
   'Show model-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques au modèle.",
   'Show tool-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques aux outils.",
+  'Show daily token usage statistics.':
+    "Afficher les statistiques quotidiennes d'utilisation des tokens.",
+  'Show monthly token usage statistics.':
+    "Afficher les statistiques mensuelles d'utilisation des tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exporter les statistiques d'utilisation des tokens en CSV ou JSON.",
+  'No usage data.': "Aucune donnée d'utilisation.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}} : {{tokens}} tokens ({{requests}} requêtes)',
+  'Daily token usage for {{value}}':
+    'Utilisation quotidienne des tokens pour {{value}}',
+  'Monthly token usage for {{value}}':
+    'Utilisation mensuelle des tokens pour {{value}}',
+  'Total: {{tokens}} tokens': 'Total : {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requêtes : {{requests}}',
+  'Breakdown:': 'Détail :',
+  'Input: {{tokens}}': 'Entrée : {{tokens}}',
+  'Output: {{tokens}}': 'Sortie : {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (inclus dans l’entrée) : {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raisonnement : {{tokens}}',
+  'By model:': 'Par modèle :',
+  'By auth type:': "Par type d'authentification :",
+  'By model/auth type:': "Par modèle/type d'authentification :",
+  'By source:': 'Par source :',
+  'Failed to load token usage stats: {{error}}':
+    "Échec du chargement des statistiques d'utilisation des tokens : {{error}}",
+  'Expected --format csv or --format json.':
+    '--format csv ou --format json attendu.',
+  'Expected a file path after --output.':
+    'Un chemin de fichier est attendu après --output.',
+  'Unexpected argument: {{argument}}': 'Argument inattendu : {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Utilisation : /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "Le chemin d'export de l'utilisation des tokens doit rester dans le répertoire de travail du projet.",
+  'Export target does not exist: {{path}}':
+    "La cible d'export n'existe pas : {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "Impossible de résoudre le chemin d'export dans le répertoire de travail.",
+  'Could not create a temporary export file.':
+    "Impossible de créer un fichier d'export temporaire.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Utilisation des tokens exportée en {{format}} : {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "Échec de l'export des statistiques d'utilisation des tokens : {{error}}",
+  'Unclosed quote in arguments.': 'Guillemet non fermé dans les arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Remarque : les temps de génération (TTFT/TPS) relèvent des métriques de génération.',
   'exit the cli': 'quitter le CLI',
   'Manage workspace directories':
     "Gérer les répertoires de l'espace de travail",
@@ -1177,9 +1223,9 @@ export default {
     'Choisissez comment poursuivre votre session :',
   'Start new chat session': 'Démarrer une nouvelle session de chat',
   'Continue previous conversation': 'Continuer la conversation précédente',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bon retour ! (Dernière mise à jour : {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objectif global :',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bon retour ! (Dernière mise à jour : {{timeAgo}})',
+  'Overall Goal:': 'Objectif global :',
   'Connect a Provider': 'Connecter un fournisseur',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Vous devez connecter un fournisseur pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.',
@@ -1242,6 +1288,12 @@ export default {
   // Boîtes de dialogue - Modèle
   // ============================================================================
   'Select Model': 'Sélectionner un modèle',
+  ' (this project)': ' (ce projet)',
+  ' (global)': ' (global)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'Persister la sélection du modèle dans les paramètres du projet (étendue workspace)',
+  'Persist the model selection to the user settings (global scope)':
+    'Persister la sélection du modèle dans les paramètres utilisateur (étendue globale)',
   'API Key': 'API Key',
   '(default)': '(par défaut)',
   '(not set)': '(non défini)',
@@ -1347,8 +1399,8 @@ export default {
   // Statut MCP
   // ============================================================================
   'No MCP servers configured.': 'Aucun MCP servers configuré.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Les MCP servers démarrent ({{count}} en initialisation)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ Les MCP servers démarrent ({{count}} en initialisation)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Remarque : Le premier démarrage peut prendre plus de temps. La disponibilité des outils se mettra à jour automatiquement.',
   'Configured MCP servers:': 'MCP servers configurés :',
@@ -1370,8 +1422,9 @@ export default {
   'Tools:': 'Outils :',
   'Parameters:': 'Paramètres :',
   'Prompts:': 'Invites :',
+  'Resources:': 'Ressources :',
   Blocked: 'Bloqué',
-  '💡 Tips:': '💡 Conseils :',
+  '★ Tips:': '★ Conseils :',
   Use: 'Utilisez',
   'to show server and tool descriptions':
     'pour afficher les descriptions des serveurs et des outils',
@@ -1493,6 +1546,8 @@ export default {
   'No tasks currently running': 'Aucune tâche en cours',
   'No entry to show.': 'Aucune entrée à afficher.',
   'needs approval': 'nécessite une approbation',
+  'rejected — edit config to re-approve':
+    'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
     "L'agent en arrière-plan nécessite une approbation",
   'Approve or deny the request above':
@@ -1818,8 +1873,8 @@ export default {
   'Select authentication method:':
     "Sélectionner la méthode d'authentification :",
   '\n=== Authentication Status ===\n': "\n=== Statut d'authentification ===\n",
-  '⚠️  No authentication method configured.\n':
-    "⚠️  Aucune méthode d'authentification configurée.\n",
+  '⚠  No authentication method configured.\n':
+    "⚠  Aucune méthode d'authentification configurée.\n",
   'Run one of the following commands to get started:\n':
     "Exécutez l'une des commandes suivantes pour commencer :\n",
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1842,8 +1897,8 @@ export default {
   '  Current Model: {{model}}': '  Modèle actuel : {{model}}',
   '  Config Version: {{version}}': '  Version de config : {{version}}',
   '  Status: API key configured\n': '  Statut : API Key configurée\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    "⚠️  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    "⚠  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
   '  Issue: API key not found in environment or settings\n':
     "  Problème : API Key introuvable dans l'environnement ou les paramètres\n",
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1864,6 +1919,8 @@ export default {
     'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ({{tiers}}) ; mappée et limitée selon le fournisseur.",
   'Exited plan mode. Previous approval mode restored.':
     "Mode plan quitté. Mode d'approbation précédent restauré.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1987,6 +2044,26 @@ export default {
   '% context used': '% de contexte utilisé',
   'Context exceeds limit! Use /compress or /clear to reduce.':
     'Le contexte dépasse la limite ! Utilisez /compress ou /clear pour le réduire.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Historique réduit : {{n}} messages masqués. Utilisez /history expand-now pour afficher.',
+
   // === Same-as-English optimization ===
   Auth: 'Authentification',
   Auto: 'Automatique',

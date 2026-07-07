@@ -29,6 +29,17 @@ const MINIMAL_PNG = Buffer.from(
   'base64'
 );
 
+// RIFF containers share the "RIFF" prefix; bytes 8-11 carry the actual form tag.
+const riffBuffer = (form: string) =>
+  Buffer.concat([
+    Buffer.from([0x52, 0x49, 0x46, 0x46]), // "RIFF"
+    Buffer.from([0x24, 0x00, 0x00, 0x00]), // chunk size (non-zero, like a real file)
+    Buffer.from(form, 'ascii'), // form tag at bytes 8-11
+    Buffer.alloc(16),
+  ]);
+const MINIMAL_WEBP = riffBuffer('WEBP');
+const MINIMAL_WAV = riffBuffer('WAVE');
+
 // Large PNG-like binary: PNG magic + binary junk with null bytes (>= 256 base64 chars, >= 128 decoded bytes)
 const LARGE_PNG_BINARY = (() => {
   const buf = Buffer.alloc(300);
@@ -381,6 +392,14 @@ describe('detectExtensionFromMagic', () => {
 
   test('returns empty for tiny buffer', () => {
     expect(detectExtensionFromMagic(Buffer.from([0x89]))).toBe('');
+  });
+
+  test('detects WebP from the RIFF form tag, not as WAV', () => {
+    expect(detectExtensionFromMagic(MINIMAL_WEBP)).toBe('.webp');
+  });
+
+  test('still detects WAV from the RIFF/WAVE form tag', () => {
+    expect(detectExtensionFromMagic(MINIMAL_WAV)).toBe('.wav');
   });
 });
 

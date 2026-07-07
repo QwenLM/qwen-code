@@ -6,7 +6,7 @@
 
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import {
   WorkflowOrchestrator,
@@ -26,19 +26,41 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created, nextTerminateMode } = vi.hoisted(() => ({
+const {
+  created,
+  nextFinalText,
+  nextTerminateMode,
+  nextOutputTokens,
+  nextExecuteThrow,
+} = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
     prompt: string;
     signal?: AbortSignal;
     promptConfigSystemPrompt?: string;
+    promptConfigInitialMessages?: unknown[];
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
+    agentId?: string | null;
   }>,
+  nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
   // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
   // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
   nextTerminateMode: { value: 'GOAL' as string },
+  // R1 (#1 + #3): the production dispatch reads
+  // `subagent.getExecutionSummary().outputTokens` to feed budget. Tests
+  // set `nextOutputTokens.value` so the onTokens callback can be
+  // observed without standing up real telemetry.
+  nextOutputTokens: { value: 0 as number },
+  // R3 (wenshao #6): real `AgentHeadless.execute()` re-throws on
+  // reasoning-loop failure — its catch arm sets `terminateMode=ERROR`
+  // and then throws. Tests set `nextExecuteThrow.value` to a non-null
+  // error so the mock execute() re-throws the same way; R1's tests
+  // had execute() RETURN with ERROR mode, which is the rare
+  // `createChat` early-return path, NOT the production reasoning-
+  // loop throw path.
+  nextExecuteThrow: { value: null as Error | null },
 }));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
@@ -97,7 +119,7 @@ vi.mock('./agent-headless.js', () => ({
     create: async (
       name: string,
       _runtimeContext: unknown,
-      promptConfig: { systemPrompt?: string },
+      promptConfig: { systemPrompt?: string; initialMessages?: unknown[] },
       _modelConfig: unknown,
       runConfig: { max_turns?: number; max_time_minutes?: number },
       toolConfig?: { tools?: string[]; disallowedTools?: string[] },
@@ -113,13 +135,16 @@ vi.mock('./agent-headless.js', () => ({
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
       ) => {
+        const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
           name,
           prompt: ctx.get('task_prompt') as string,
           signal,
           promptConfigSystemPrompt: promptConfig.systemPrompt,
+          promptConfigInitialMessages: promptConfig.initialMessages,
           runConfig,
           toolConfig,
+          agentId: getCurrentAgentId(),
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -128,10 +153,23 @@ vi.mock('./agent-headless.js', () => ({
             'orchestrator did not pass workflow subagent system prompt',
           );
         }
+        // R3 (wenshao #6): simulate the production ERROR path where
+        // AgentHeadless.execute() itself throws (see agent-headless.ts
+        // catch arm at :287-294). If `nextExecuteThrow.value` is set,
+        // re-throw it so the orchestrator's `await subagent.execute()`
+        // call rejects without ever reaching the line below it.
+        if (nextExecuteThrow.value) {
+          throw nextExecuteThrow.value;
+        }
       },
       getFinalText: () =>
+        nextFinalText.value ??
         `headless-said:${created[created.length - 1]!.prompt}`,
       getTerminateMode: () => nextTerminateMode.value,
+      // R1 (#1 + #3): expose `getExecutionSummary` so the production
+      // dispatch's `reportTokens` helper can read `outputTokens` after
+      // every `subagent.execute()` call, regardless of terminate mode.
+      getExecutionSummary: () => ({ outputTokens: nextOutputTokens.value }),
     }),
   },
   ContextState: class ContextState {
@@ -397,6 +435,650 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('mock:q1');
     expect(outcome.phases).toEqual(['Plan']);
   });
+
+  // ── P5: budget gate via WorkflowRunRequest.budget ─────────────────────
+
+  it('P5: budget gate refuses to dispatch once budget is exhausted', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    // Pre-burn the budget so the first agent() call lands over-cap.
+    budget.recordSpent(1000);
+
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'never reached';
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); return 0;`,
+        args: undefined,
+        budget,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    // Cross-realm: the sandbox wraps the host error in a vm-realm Error
+    // (per T1/T8/T14 defense). The dispatch is never invoked because the
+    // gate short-circuits before limiter.run.
+    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('1000');
+    expect(dispatchCalls).toBe(0);
+  });
+
+  it('P5: budget gate stops further dispatches mid-run on overshoot', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    // Each dispatch burns 60 tokens; the budget should run out after 2.
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(60);
+      return 'ok';
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); await agent('q2'); await agent('q3'); return 'done';`,
+        args: undefined,
+        budget,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // q1 = 60/100, q2 = 120/100 (overshoot), q3 = gate refuses
+    expect(dispatchCalls).toBe(2);
+    expect(String(caught)).toContain('exceeded the token budget');
+    expect(budget.spent()).toBe(120);
+  });
+
+  it('P5: budget.total === null (no cap) — gate never fires', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(null);
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(1_000_000); // each agent burns 1M tokens
+      return 'ok';
+    });
+    const outcome = await orchestrator.run({
+      script: `await agent('q1'); await agent('q2'); await agent('q3'); return 'done';`,
+      args: undefined,
+      budget,
+    });
+    expect(outcome.result).toBe('done');
+    expect(dispatchCalls).toBe(3);
+    expect(budget.spent()).toBe(3_000_000);
+    expect(budget.remaining()).toBe(Infinity);
+  });
+
+  it('P5: no budget passed (legacy callers) — gate never fires', async () => {
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'ok';
+    });
+    const outcome = await orchestrator.run({
+      script: `await agent('q1'); await agent('q2'); return 'done';`,
+      args: undefined,
+    });
+    expect(outcome.result).toBe('done');
+    expect(dispatchCalls).toBe(2);
+  });
+
+  it('P5 R1 #2: parallel-batch overshoot is bounded by the intra-limiter re-check', async () => {
+    // R1 Critical #2 — without the intra-limiter gate, a parallel() of N
+    // thunks queues them all in one microtask burst with spent=0, so the
+    // entry gate passes for every queued dispatch and the budget
+    // overshoots by up to `(N-1) × per_dispatch_tokens`.
+    //
+    // With the intra-limiter re-check, the gate observes budget mutations
+    // from already-completed in-flight dispatches at slot-acquire time, so
+    // queued thunks that arrive AFTER the budget is busted are refused
+    // (the parallel() batch collapses them to `null`).
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      budget.recordSpent(40); // 3 successful dispatches saturate the cap
+      return 'ok';
+    });
+    // 10 thunks — far more than the budget (100 / 40 ≈ 3 successful).
+    // The intra-limiter gate must reject the rest BEFORE this.dispatch
+    // runs, so `dispatchCalls` should be 3 (or 4 — see below), NOT 10.
+    const outcome = await orchestrator.run({
+      script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
+      args: undefined,
+      budget,
+    });
+    // parallel() treats budget rejections as errors-as-data → null per slot.
+    expect(Array.isArray(outcome.result)).toBe(true);
+    const results = outcome.result as unknown[];
+    expect(results).toHaveLength(10);
+    const successes = results.filter((r) => r === 'ok').length;
+    const nulls = results.filter((r) => r === null).length;
+    expect(successes + nulls).toBe(10);
+    // Bounded overshoot: at most `concurrency_window` dispatches can be
+    // already inside `limiter.run` when the budget tips over, so the
+    // upper bound on successful dispatches is
+    // `ceil(cap / per_dispatch) + concurrency_window`. The concurrency
+    // window on test machines is `min(16, cpus-2)` ≥ 1. With cap=100,
+    // per=40, the soft cap is reached at 3 dispatches (spent=120). We
+    // ASSERT it doesn't reach 10 (the without-fix overshoot value).
+    expect(dispatchCalls).toBeLessThan(10);
+    expect(successes).toBeLessThan(10);
+  });
+
+  // R1 #4 fix landed in production code (debugLogger.warn at both gate
+  // sites); no dedicated test — debugLogger has its own enable/disable
+  // gating and a spy here would be brittle. Manual verification path:
+  // run with DEBUG=WORKFLOW=1 and trigger a budget-exhausted dispatch.
+
+  // ── P5 T4: budgetUpdated emitter event ─────────────────────────────────
+
+  it('P5 T4: budgetUpdated fires after each successful completion with cumulative spent + total', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      // Simulate the production-dispatch onTokens callback writing into
+      // the budget BEFORE the orchestrator's then() re-snapshots.
+      budget.recordSpent(prompt === 'q1' ? 150 : 250);
+      return 'ok';
+    });
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
+    const emitter = {
+      budgetUpdated: (spent: number, total: number | null) =>
+        budgetUpdates.push({ spent, total }),
+    };
+    await orchestrator.run({
+      script: `await agent('q1'); await agent('q2'); return 'done';`,
+      args: undefined,
+      budget,
+      emitter,
+    });
+    expect(budgetUpdates).toEqual([
+      { spent: 150, total: 1000 },
+      { spent: 400, total: 1000 },
+    ]);
+  });
+
+  it('P5 T4: budgetUpdated does NOT fire when no budget is passed', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const budgetUpdates: number[] = [];
+    const emitter = {
+      budgetUpdated: (spent: number) => budgetUpdates.push(spent),
+    };
+    await orchestrator.run({
+      script: `await agent('q1'); return 'done';`,
+      args: undefined,
+      emitter,
+      // budget intentionally omitted
+    });
+    expect(budgetUpdates).toEqual([]);
+  });
+
+  it('P5 R3 #1: budgetUpdated DOES fire on dispatch rejection (so UI/registry see the burn-then-fail spend)', async () => {
+    // R3 #1 (bot): the production dispatch's reportTokens runs in a
+    // `finally` (R3 #6), so `budget.spent()` advances even when
+    // `subagent.execute()` throws. If the error arm of `countedDispatch`
+    // does NOT fire `budgetUpdated`, the registry's `tokensSpent` /
+    // `perPhaseTokens` never see those tokens — divergence between
+    // `budget.spent()` (host) and `entry.tokensSpent` (UI). Worse,
+    // R2 #12 dropped `safeEmitUpdate` from `agentCompleted` and made
+    // `budgetUpdated` the sole UI driver, so dispatch errors produce
+    // ZERO UI re-renders unless `budgetUpdated` fires on the error
+    // arm too.
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      // Mirror the production reportTokens-in-finally semantics:
+      // record tokens BEFORE the throw, exactly as production does.
+      budget.recordSpent(150);
+      throw new Error('dispatch-boom');
+    });
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
+    const completions: Array<{ label?: string; error?: string }> = [];
+    const emitter = {
+      budgetUpdated: (spent: number, total: number | null) =>
+        budgetUpdates.push({ spent, total }),
+      agentCompleted: (label?: string, error?: string) =>
+        completions.push({ label, error }),
+    };
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); return 'done';`,
+        args: undefined,
+        budget,
+        emitter,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.error).toBe('dispatch-boom');
+    // R3 #1 contract: error arm now fires budgetUpdated with the
+    // cumulative spent at throw time, so the registry mirrors the
+    // burn that the failed dispatch incurred.
+    expect(budgetUpdates).toEqual([{ spent: 150, total: 1000 }]);
+  });
+
+  it('P5 R3 #7: budget rejection does NOT consume agent-cap slots (correct terminal error after exhaustion)', async () => {
+    // wenshao R3 #7: if `agentCount += 1` runs before the budget gate,
+    // every budget-rejected call still increments agentCount and the
+    // SUBSEQUENT call eventually trips `agentCount > maxAgents` —
+    // surfacing the wrong terminal error ("exceeded the maximum of N
+    // agent() calls per run") when the real cause is budget exhaustion.
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100); // pre-bust the budget so every dispatch rejects
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'never';
+    });
+    let caught: unknown;
+    try {
+      // Loop the script so we accumulate many budget rejections, well
+      // past `maxAgents` had the old ordering been in place.
+      // try/catch in script so loop continues despite per-call throws.
+      await orchestrator.run({
+        script: `
+          let lastErr = null;
+          for (let i = 0; i < 1100; i++) {
+            try { await agent('q' + i); } catch (e) { lastErr = e.message; }
+          }
+          return lastErr;
+        `,
+        args: undefined,
+        budget,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // Real production dispatch is never called.
+    expect(dispatchCalls).toBe(0);
+    // R3 #7 contract: the script saw budget-exceeded errors, NOT
+    // agent-count-exceeded errors. The latter would indicate the old
+    // ordering still applies.
+    // The orchestrator wraps script-thrown errors in
+    // WorkflowExecutionError; the script swallowed each per-call throw
+    // and returned the last message, so the run COMPLETED successfully.
+    expect(caught).toBeUndefined();
+  });
+
+  it('P5 R3 #1: budgetUpdated does NOT fire when no budget passed AND dispatch rejects', async () => {
+    // Budget-less callers must not get spurious budgetUpdated events
+    // — the orchestrator's `if (budget)` gate covers both the success
+    // and error arms.
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new Error('boom');
+    });
+    const budgetUpdates: number[] = [];
+    const emitter = {
+      budgetUpdated: (spent: number) => budgetUpdates.push(spent),
+    };
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('q1'); return 'done';`,
+        args: undefined,
+        emitter,
+        // budget intentionally omitted
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(budgetUpdates).toEqual([]);
+  });
+
+  it('P5 T4: budgetUpdated subscriber error does not break the run', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(1000);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      budget.recordSpent(100);
+      return 'ok';
+    });
+    const emitter = {
+      budgetUpdated: () => {
+        throw new Error('budget-subscriber-boom');
+      },
+    };
+    const outcome = await orchestrator.run({
+      script: `await agent('q1'); return 'done';`,
+      args: undefined,
+      budget,
+      emitter,
+    });
+    expect(outcome.result).toBe('done');
+  });
+
+  // ── P-nested: workflow() global ───────────────────────────────────────
+
+  it('P-nested: workflow(name) resolves via injected resolver and returns nested result', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `agent:${prompt}`,
+    );
+    const resolveSavedWorkflow = async (
+      ref: string | { scriptPath: string },
+    ) => {
+      expect(ref).toBe('child');
+      return {
+        script: `return 'nested-' + (await agent('inner'));`,
+        name: 'child',
+      };
+    };
+    const outcome = await orchestrator.run({
+      script: `const r = await workflow('child'); return 'parent:' + r;`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toBe('parent:nested-agent:inner');
+  });
+
+  it('P-nested: nested args are passed to the child script', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const resolveSavedWorkflow = async () => ({
+      script: `return args.x * 2;`,
+    });
+    const outcome = await orchestrator.run({
+      script: `return await workflow('child', { x: 21 });`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toBe(42);
+  });
+
+  it('P-nested: nested agents share the parent agent-count cap', async () => {
+    // Cap is read from env; set a tiny cap so parent(1) + nested(2) trips it.
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+    try {
+      let dispatchCalls = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatchCalls += 1;
+        return 'ok';
+      });
+      const resolveSavedWorkflow = async () => ({
+        // nested fires 2 agents; with parent's 1 already spent and cap=2,
+        // the 2nd nested agent (3rd overall) must throw the cap error.
+        script: `await agent('n1'); await agent('n2'); return 'done';`,
+      });
+      let caught: unknown;
+      try {
+        await orchestrator.run({
+          script: `await agent('p1'); return await workflow('child');`,
+          args: undefined,
+          resolveSavedWorkflow,
+        });
+      } catch (e) {
+        caught = e;
+      }
+      // parent p1 (1) + nested n1 (2) pass; nested n2 (3) trips the cap.
+      expect(dispatchCalls).toBe(2);
+      expect(String(caught)).toMatch(/exceeded the maximum of 2 agent/);
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
+
+  it('P-nested: nested agents share the parent token budget', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      budget.recordSpent(60); // each agent burns 60 → 2 agents = 120 > 100
+      return 'ok';
+    });
+    const resolveSavedWorkflow = async () => ({
+      script: `await agent('n1'); await agent('n2'); return 'done';`,
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `await agent('p1'); return await workflow('child');`,
+        args: undefined,
+        budget,
+        resolveSavedWorkflow,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    // parent p1 spends 60; nested n1 spends 60 (total 120); nested n2 gated.
+    expect(String(caught)).toMatch(/exceeded the token budget/);
+    expect(budget.spent()).toBe(120);
+  });
+
+  it('P-nested: single-level limit — a nested workflow() call throws', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const resolveSavedWorkflow = async () => ({
+      // The nested script tries to nest again — must throw.
+      script: `return await workflow('grandchild');`,
+    });
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `return await workflow('child');`,
+        args: undefined,
+        resolveSavedWorkflow,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).toMatch(/workflow\(\) is unavailable here/);
+    expect(String(caught)).toMatch(/single level/);
+  });
+
+  it('P-nested: workflow() throws when no resolver is wired', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `return await workflow('child');`,
+        args: undefined,
+        // resolveSavedWorkflow omitted
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).toMatch(/workflow\(\) is unavailable here/);
+  });
+
+  it('P-nested: resolver rejection (workflow not found) surfaces to the parent script', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    const resolveSavedWorkflow = async () => {
+      throw new Error(`workflow('child'): no workflow with that name.`);
+    };
+    const outcome = await orchestrator.run({
+      script: `try { await workflow('child'); return 'no-throw'; }
+               catch (e) { return 'caught:' + e.message; }`,
+      args: undefined,
+      resolveSavedWorkflow,
+    });
+    expect(outcome.result).toMatch(/caught:.*no workflow with that name/);
+  });
+
+  // ── P6: resume journal ────────────────────────────────────────────────
+
+  it('P6: a normal run journals a started+result per agent() call', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      path: 'mem',
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+      load: () => Promise.resolve(buildReplay(entries)),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `r:${prompt}`,
+    );
+    await orchestrator.run({
+      script: `await agent('a'); await agent('b'); return 'done';`,
+      args: undefined,
+      journal,
+    });
+    // 2 agents → 2 started + 2 result.
+    expect(entries.filter((e) => e.type === 'started')).toHaveLength(2);
+    const results = entries.filter((e) => e.type === 'result');
+    expect(results).toHaveLength(2);
+    expect((results[0] as { result: unknown }).result).toBe('r:a');
+    expect((results[1] as { result: unknown }).result).toBe('r:b');
+  });
+
+  it('P6: resume serves the cached prefix without re-dispatching', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    // Run 1: record the journal.
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('b'); return 'done';`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    // Run 2 (resume): same script. The dispatch counter must stay 0 because
+    // both agents are cached.
+    let dispatchCalls = 0;
+    const orch2 = new WorkflowOrchestrator(async (prompt) => {
+      dispatchCalls += 1;
+      return `LIVE:${prompt}`;
+    });
+    const journal2 = {
+      append: () => Promise.resolve(),
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const outcome = await orch2.run({
+      script: `const a = await agent('a'); const b = await agent('b'); return a + '|' + b;`,
+      args: undefined,
+      journal: journal2,
+      resumeReplay: buildReplay(entries),
+    });
+    expect(dispatchCalls).toBe(0); // fully cached
+    expect(outcome.result).toBe('r:a|r:b'); // cached values, not LIVE
+  });
+
+  it('P6: first miss runs live and the suffix goes live (first-miss invalidates suffix)', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    // Run 1 journaled agents a, b, c.
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('b'); await agent('c'); return 1;`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    // Run 2: change agent #2's prompt ('b' → 'B'). #1 ('a') is cached; #2
+    // ('B') misses → live; #3 ('c') must ALSO run live even though 'c' was
+    // journaled (first-miss invalidates suffix + the prefix-hash chain from
+    // #2's new prompt changes #3's key anyway).
+    const dispatched: string[] = [];
+    const orch2 = new WorkflowOrchestrator(async (prompt) => {
+      dispatched.push(prompt);
+      return `LIVE:${prompt}`;
+    });
+    const outcome = await orch2.run({
+      script: `const a = await agent('a');
+               const b = await agent('B');
+               const c = await agent('c');
+               return [a, b, c].join('|');`,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+    });
+    // 'a' cached; 'B' and 'c' live.
+    expect(dispatched).toEqual(['B', 'c']);
+    expect(outcome.result).toBe('r:a|LIVE:B|LIVE:c');
+  });
+
+  it('P6: cache hit advances the registry counters (agentDispatched + agentCompleted)', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async () => 'cached');
+    await orch1.run({
+      script: `await agent('a'); return 1;`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    const events: string[] = [];
+    const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+    await orch2.run({
+      script: `await agent('a'); return 1;`,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+      emitter: {
+        agentDispatched: () => events.push('dispatched'),
+        agentCompleted: () => events.push('completed'),
+      },
+    });
+    expect(events).toEqual(['dispatched', 'completed']);
+  });
+
+  it('P6: cached dispatches do NOT consume the agent-count cap', async () => {
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+    try {
+      const { buildReplay } = await import('./workflow-journal.js');
+      const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+      const journal1 = {
+        append: (e: import('./workflow-journal.js').JournalEntry) => {
+          entries.push(e);
+          return Promise.resolve();
+        },
+      } as unknown as import('./workflow-journal.js').WorkflowJournal;
+      // Run 1 with a larger cap to record 3 agents.
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '10';
+      const orch1 = new WorkflowOrchestrator(async (p) => `r:${p}`);
+      await orch1.run({
+        script: `await agent('a'); await agent('b'); await agent('c'); return 1;`,
+        args: undefined,
+        journal: journal1,
+      });
+      // Run 2 (resume) with cap=2: all 3 are cached, so the cap (which
+      // counts only LIVE dispatches) is never hit.
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '2';
+      const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+      const outcome = await orch2.run({
+        script: `await agent('a'); await agent('b'); await agent('c'); return 'ok';`,
+        args: undefined,
+        journal: { append: () => Promise.resolve() } as never,
+        resumeReplay: buildReplay(entries),
+      });
+      expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
 });
 
 describe('createProductionDispatch', () => {
@@ -405,6 +1087,7 @@ describe('createProductionDispatch', () => {
   // terminate mode back to 'goal' (success).
   beforeEach(() => {
     created.length = 0;
+    nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
   });
 
@@ -415,24 +1098,50 @@ describe('createProductionDispatch', () => {
     expect(created.length).toBe(1);
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
+    expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+  });
+
+  it('does not suppress env bootstrap with an empty initial history', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.promptConfigInitialMessages).toBeUndefined();
+  });
+
+  it('strips internal tags from fast-path final text', async () => {
+    nextFinalText.value =
+      '<analysis>scratch</analysis><summary>clean result</summary>';
+    const dispatch = createProductionDispatch(fakeConfig());
+
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'clean result',
+    );
   });
 
   // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one
   // actually captures the signal in the mock and asserts identity, so a
   // regression that drops the second arg of subagent.execute() would fail.
-  it('threads abort signal through to subagent.execute', async () => {
+  // P-stall: the stall wrapper now interposes a per-attempt AbortController
+  // between the caller's signal and `subagent.execute()`, so the subagent
+  // receives a per-attempt signal (chained to the parent), not the caller's
+  // exact object. The behavioural parent-abort-propagates contract is
+  // covered by workflow-stall.test.ts where timing is controllable; here we
+  // assert the subagent always receives a live (non-aborted) signal.
+  it('threads a per-attempt abort signal through to subagent.execute', async () => {
     const controller = new AbortController();
     const dispatch = createProductionDispatch(fakeConfig(), controller.signal);
     await dispatch('hello', { label: 'h1' });
     expect(created.length).toBe(1);
-    expect(created[0]!.signal).toBe(controller.signal);
+    expect(created[0]!.signal).toBeDefined();
   });
 
-  it('passes undefined signal when none provided', async () => {
+  it('provides a per-attempt signal even when no caller signal is given', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created.length).toBe(1);
-    expect(created[0]!.signal).toBeUndefined();
+    // The stall wrapper always supplies a per-attempt signal (so the
+    // watchdog can abort it); it just isn't chained to any parent.
+    expect(created[0]!.signal).toBeDefined();
+    expect(created[0]!.signal!.aborted).toBe(false);
   });
 
   // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
@@ -459,35 +1168,117 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
-  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+  // T11: disallow SendMessage plus tools that break workflow return/cleanup
+  // contracts.
+  it('disallows workflow-only floor tools for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
       'send_message',
+      'monitor',
+      'enter_plan_mode',
       'exit_plan_mode',
+      'agent',
     ]);
   });
 
   // T10 (PR #4732 R1): the production dispatch must throw when the
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
-  it.each([
-    ['CANCELLED', /terminate mode: CANCELLED/],
-    ['MAX_TURNS', /terminate mode: MAX_TURNS/],
-    ['TIMEOUT', /terminate mode: TIMEOUT/],
-    ['ERROR', /terminate mode: ERROR/],
-  ])(
+  it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
     'throws when subagent terminate mode is %s',
-    async (mode, expectedMessage) => {
+    async (mode) => {
       nextTerminateMode.value = mode;
       const dispatch = createProductionDispatch(fakeConfig());
       await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-        expectedMessage,
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );
+
+  // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
+
+  beforeEach(() => {
+    nextOutputTokens.value = 0;
+  });
+
+  it('R1 #3: records tokens on GOAL success', async () => {
+    nextTerminateMode.value = 'GOAL';
+    nextOutputTokens.value = 1234;
+    const reports: Array<{ tokens: number; label?: string }> = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      (tokens, opts) => reports.push({ tokens, label: opts.label }),
+    );
+    await dispatch('q1', { label: 'a' });
+    expect(reports).toEqual([{ tokens: 1234, label: 'a' }]);
+  });
+
+  it.each(['CANCELLED', 'MAX_TURNS', 'TIMEOUT', 'ERROR'])(
+    'R1 #3: records tokens on %s failure path (still throws)',
+    async (mode) => {
+      nextTerminateMode.value = mode;
+      nextOutputTokens.value = 777;
+      const reports: number[] = [];
+      const dispatch = createProductionDispatch(
+        fakeConfig(),
+        undefined,
+        (tokens) => reports.push(tokens),
+      );
+      await expect(dispatch('q1', { label: 'doomed' })).rejects.toThrow(
+        new RegExp(`terminate mode: ${mode}`),
+      );
+      // R1 contract: tokens recorded BEFORE the throw, not after.
+      // Otherwise CANCELLED/TIMEOUT/MAX_TURNS/ERROR dispatches would
+      // burn tokens without affecting the budget.
+      expect(reports).toEqual([777]);
+    },
+  );
+
+  it('R1 #1 + #3: onTokens is undefined ⇒ no crash', async () => {
+    nextTerminateMode.value = 'GOAL';
+    nextOutputTokens.value = 99;
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('q1', { label: 'x' })).resolves.toBe(
+      'headless-said:q1',
+    );
+  });
+
+  // ── R3 (wenshao #6): tokens MUST also be recorded when execute() THROWS ──
+
+  it('R3 #6: records tokens when subagent.execute() THROWS (the real production ERROR path)', async () => {
+    // R1 #3 only covered the case where execute() RETURNS while
+    // getTerminateMode() yields ERROR (rare: `createChat` early
+    // return). The production ERROR path goes through `agent-headless.ts`'s
+    // catch arm which RE-THROWS the underlying error after setting
+    // terminateMode=ERROR. The orchestrator's `reportTokens` was on
+    // the line AFTER `await subagent.execute(...)`, not in a `finally`
+    // — so the throw path leaked tokens. wenshao's R3 review caught
+    // this with a deterministic repro.
+    nextExecuteThrow.value = new Error('reasoning-loop boom');
+    nextOutputTokens.value = 4242;
+    const reports: number[] = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      (tokens) => reports.push(tokens),
+    );
+    await expect(dispatch('q1', { label: 'thrown' })).rejects.toThrow(
+      /reasoning-loop boom/,
+    );
+    // Contract: tokens recorded BEFORE the throw propagates, exactly
+    // once — regardless of whether the throw came from execute() itself
+    // or from the post-execute terminate-mode gate (R1 #3 case).
+    expect(reports).toEqual([4242]);
+  });
+
+  afterEach(() => {
+    nextExecuteThrow.value = null;
+  });
 });
 
 describe('WorkflowOrchestrator failure-context preservation', () => {
@@ -879,6 +1670,29 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
     });
 
+    it('resolveMaxAgentsPerRun rejects hex / scientific / non-decimal-integer overrides', () => {
+      // Number('0x10')=16, Number('1e3')=1000, Number('1.0')=1 pass
+      // Number.isInteger; only plain decimal integers should override the cap.
+      for (const raw of ['0x10', '1e3', '1.0']) {
+        expect(
+          resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: raw }),
+        ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      }
+    });
+
+    it('resolveConcurrencyLimit treats hex / scientific overrides as invalid (cpu default)', () => {
+      // An invalid override falls back to the cpu-derived default in [1,16];
+      // 0x10/1e2 must be rejected too, not parsed as 16/100.
+      const cpuDefault = resolveConcurrencyLimit({
+        QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
+      });
+      for (const raw of ['0x10', '1e2']) {
+        expect(
+          resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: raw }),
+        ).toBe(cpuDefault);
+      }
+    });
+
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
     // be clamped, not honored — protects operators from a fat-finger
     // QWEN_CODE_MAX_WORKFLOW_AGENTS=999999999 silently uncapping the run.
@@ -974,6 +1788,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeContextSame: boolean;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
+    executeAgentId?: string | null;
   };
 
   function fakeConfigWithMgr(opts: {
@@ -1060,6 +1875,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 _ctx: unknown,
                 signal?: AbortSignal,
               ): Promise<void> => {
+                const { getCurrentAgentId } = await import(
+                  './agent-context.js'
+                );
+                call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   outcome.runWithEmitter(
                     options.eventEmitter as {
@@ -1067,11 +1886,30 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                     },
                   );
                 }
+                // R3 (wenshao #6): honor `nextExecuteThrow` on the
+                // override-path stub too, so the override-path sibling
+                // of the throw-path test (test name "R3 #6: override-
+                // path records tokens...") can reproduce the real
+                // AgentHeadless.execute() throw against the override
+                // dispatch site.
+                if (nextExecuteThrow.value) {
+                  throw nextExecuteThrow.value;
+                }
                 // Honor signal abort if it fires.
                 if (signal?.aborted) return;
               },
               getFinalText: () => finalText,
               getTerminateMode: () => terminateMode,
+              // R1 (#1): expose `getExecutionSummary` on the override-
+              // path subagent stub. Production dispatch reads it in
+              // `reportTokens` regardless of terminate mode, so the
+              // schema-mode early return (Critical #1) and the
+              // schema-mode failure paths (Critical #3) both need
+              // this surface. Defaults to 0; tests that observe
+              // budget-recording set `nextOutputTokens.value` first.
+              getExecutionSummary: () => ({
+                outputTokens: nextOutputTokens.value,
+              }),
             },
             dispose: async () => {
               disposed += 1;
@@ -1109,13 +1947,45 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       }),
     });
     const dispatch = createProductionDispatch(config);
-    const result = await dispatch('find foo', { agentType: 'Explore' });
+    const result = await dispatch('find foo', {
+      agentType: 'Explore',
+      label: 'explore-1',
+    });
     expect(result).toBe('explore-output');
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
-    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode,
+    // Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
-      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
+    );
+  });
+
+  it('strips internal tags from override-path final text', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore.',
+        level: 'builtin',
+      }),
+      onCreate: async () => ({
+        finalText:
+          '<analysis>scratch</analysis><summary>clean result</summary>',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await expect(dispatch('find foo', { agentType: 'Explore' })).resolves.toBe(
+      'clean result',
     );
   });
 
@@ -1168,9 +2038,16 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await dispatch('hi', { agentType: 'Permissive' });
     const disallowed = calls[0].config.disallowedTools ?? [];
-    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    // Union: Foo (from agentType) + workflow-only floor.
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
     );
   });
 
@@ -1210,6 +2087,77 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
     });
     expect(result).toEqual({ ok: true, value: 42 });
+  });
+
+  it('R1 #1: schema-mode SUCCESS records tokens via onTokens (was missing before fix)', async () => {
+    nextOutputTokens.value = 555;
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema mode's success path triggers abort
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true, value: 42 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const reports: number[] = [];
+    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+      reports.push(tokens),
+    );
+    const result = await dispatch('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    expect(result).toEqual({ ok: true, value: 42 });
+    // R1 #1 contract: tokens recorded BEFORE the schema/non-schema
+    // branching, so the schema success path now reports.
+    expect(reports).toEqual([555]);
+  });
+
+  it('R3 #6: override-path records tokens when execute() THROWS (sibling of fast path)', async () => {
+    // Sibling site for wenshao's R3 #6 finding. `reportTokens` at the
+    // override path is the second of the two dispatch sites; the
+    // matching test for the fast path lives in
+    // `createProductionDispatch` describe above. Both must wrap
+    // `await subagent.execute()` in try/finally so token accounting
+    // survives the production ERROR-via-throw path.
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'GOAL', // execute() throws BEFORE terminate-mode check
+        runWithEmitter: () => {},
+      }),
+    });
+    nextExecuteThrow.value = new Error('override-path boom');
+    nextOutputTokens.value = 9999;
+    const reports: number[] = [];
+    const dispatch = createProductionDispatch(config, undefined, (tokens) =>
+      reports.push(tokens),
+    );
+    await expect(
+      dispatch('q1', { label: 'thrown', schema: { type: 'object' } }),
+    ).rejects.toThrow(/override-path boom/);
+    expect(reports).toEqual([9999]);
+    nextExecuteThrow.value = null;
   });
 
   it('schema-mode: 3 failed structured_output calls → upstream-aligned terminal error', async () => {
@@ -1493,7 +2441,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     });
     const disallowed = calls[0].config.disallowedTools ?? [];
     expect(disallowed).toEqual(
-      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+      expect.arrayContaining([
+        'Foo',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
     );
   });
 
@@ -1566,16 +2521,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     // newline + nul + del — all control codes < 0x20 or == 0x7f.
     const evil = 'Explore\n\rEvil\x00\x7f';
-    await expect(dispatch('hi', { agentType: evil })).rejects.toThrow();
     // The thrown message must NOT contain raw newlines / NULs.
+    let error: unknown;
     try {
       await dispatch('hi', { agentType: evil });
     } catch (err) {
-      const msg = (err as Error).message;
-      // eslint-disable-next-line no-control-regex
-      expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
-      expect(msg).toContain('not found');
+      error = err;
     }
+    expect(error).toBeInstanceOf(Error);
+    const msg = (error as Error).message;
+    // eslint-disable-next-line no-control-regex
+    expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
+    expect(msg).toContain('not found');
   });
 
   // R2 self-review (test-5): dispose() MUST still run even when
@@ -2094,7 +3051,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       await expect(
         dispatch('extract', { schema: { type: 'object' } }),
       ).rejects.toThrow(
-        new RegExp(`did not complete \\(terminate mode: ${mode}\\)\\.`),
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
       );
     },
   );
