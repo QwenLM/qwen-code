@@ -40,7 +40,11 @@ import {
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
-import { extractErrorMessage, extractErrorCode } from './bridge.js';
+import {
+  classifyTurnErrorKind,
+  extractErrorMessage,
+  extractErrorCode,
+} from './bridge.js';
 import { SERVE_STATUS_EXT_METHODS } from './status.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
@@ -3371,6 +3375,42 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.promptCalls[2]?._meta?.['qwen.daemon.retry']).toBe(
         undefined,
       );
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('adds structured errorKind when a turn ends with terminated', async () => {
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new RequestError(-32603, 'terminated');
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const turnError = (async () => {
+        for await (const event of iter) {
+          if (event.type === 'turn_error') return event;
+        }
+        throw new Error('turn_error was not published');
+      })();
+
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'stream may fail' }],
+        }),
+      ).rejects.toThrow('terminated');
+
+      const event = await turnError;
+      expect(event.data).toMatchObject({
+        message: 'terminated',
+        errorKind: 'model_stream_interrupted',
+      });
 
       abort.abort();
       await bridge.shutdown();
@@ -10284,6 +10324,21 @@ describe('extractErrorCode', () => {
 
   it('returns undefined when code is not string or number', () => {
     expect(extractErrorCode({ code: true })).toBeUndefined();
+  });
+});
+
+describe('classifyTurnErrorKind', () => {
+  it('classifies bare terminated errors as model stream interruptions', () => {
+    expect(classifyTurnErrorKind('terminated')).toBe(
+      'model_stream_interrupted',
+    );
+    expect(classifyTurnErrorKind(' terminated ')).toBe(
+      'model_stream_interrupted',
+    );
+  });
+
+  it('leaves unrelated turn errors unclassified', () => {
+    expect(classifyTurnErrorKind('API rate limit exceeded')).toBeUndefined();
   });
 });
 

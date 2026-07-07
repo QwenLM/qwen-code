@@ -723,6 +723,49 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('allows manual retry after a model stream interrupted turn error', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover this stream',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    mockSessionActions.sendPrompt.mockClear();
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-stream-interrupted',
+          text: 'Model response stream was interrupted. Please retry.',
+          data: { errorKind: 'model_stream_interrupted' },
+        },
+      ];
+      rerender();
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover this stream',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        retry: true,
+      }),
+    );
+  });
+
   it('gates queued submissions and only enqueues after approval', async () => {
     let approve: (() => void) | undefined;
     const onSubmitBefore = vi.fn(

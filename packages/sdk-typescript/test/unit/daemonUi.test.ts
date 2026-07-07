@@ -1163,6 +1163,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
     );
   });
 
+  it('preserves structured model stream interruption turn errors', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 44,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+          code: '-32603',
+          errorKind: 'model_stream_interrupted',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: 'error',
+        source: 'turn_error',
+        recoverable: true,
+        code: '-32603',
+        errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-1',
+        text: 'terminated',
+      },
+    ]);
+  });
+
+  it('keeps older daemon terminated turn error text unchanged', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 45,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+      },
+    ]);
+  });
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({

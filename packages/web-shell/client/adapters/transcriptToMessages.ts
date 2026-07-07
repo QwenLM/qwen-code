@@ -35,6 +35,7 @@ type DaemonPermissionTranscriptBlock = Extract<
 
 type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
   source?: string;
+  errorKind?: string;
   data?: unknown;
 };
 
@@ -50,6 +51,7 @@ interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
   midTurnInserted?: (message: string) => string;
+  modelStreamInterrupted?: string;
 }
 
 interface TranscriptMessageOptions {
@@ -61,6 +63,20 @@ function isIgnoredWebShellStatus(text: string): boolean {
     text.startsWith('language_changed (unrecognized daemon event):') ||
     text.startsWith('Model switched: ')
   );
+}
+
+function getErrorDisplayText(
+  block: ExtendedDaemonStatusTranscriptBlock,
+  labels?: TranscriptMessageLabels,
+): string {
+  if (
+    block.errorKind === 'model_stream_interrupted' ||
+    (block.source === 'turn_error' &&
+      block.text.trim().toLowerCase() === 'terminated')
+  ) {
+    return labels?.modelStreamInterrupted ?? block.text;
+  }
+  return block.text;
 }
 
 function getSessionBranchDisplayName(data: unknown): string | null {
@@ -571,15 +587,20 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'error': {
         const errorBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const errorKind = errorBlock.errorKind;
         messages.push({
           id: block.id,
           role: 'system',
-          content: errorBlock.text,
+          content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
           retryable: errorBlock.source === 'turn_error',
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
-          ...(errorBlock.data !== undefined ? { data: errorBlock.data } : {}),
+          ...(errorKind
+            ? { data: { ...(getRecord(errorBlock.data) ?? {}), errorKind } }
+            : errorBlock.data !== undefined
+              ? { data: errorBlock.data }
+              : {}),
         });
         needsNewContentMessage = true;
         break;

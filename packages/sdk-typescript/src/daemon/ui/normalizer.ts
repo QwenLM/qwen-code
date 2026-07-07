@@ -159,6 +159,7 @@ export function normalizeDaemonEvent(
     }
     case 'turn_error': {
       const code = getString(event.data, 'code');
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
       return [
         {
@@ -167,6 +168,7 @@ export function normalizeDaemonEvent(
           source: 'turn_error',
           recoverable: true,
           ...(code ? { code } : {}),
+          ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
           text:
             getString(event.data, 'message') ??
