@@ -190,6 +190,20 @@ describe('cronTextHandler', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
+  it('ignores chunks when _inCronFlow is 0 (gate)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 0;
+
+    triggerTextChunk('sess-gate', 'should be ignored');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-gate')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
   it('maintains separate buffers for different sessionIds', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;

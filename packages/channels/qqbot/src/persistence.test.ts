@@ -170,6 +170,10 @@ describe('saveQQState', () => {
     replyMsgId.set('u1', { msgId: 'msg_abc', timestamp: 1000 });
     msgSeqMap.set('msg_abc', 3);
     groupActiveMsgEnabled.set('g1', true);
+    const botOpenIdByGroup = (
+      ch as unknown as { botOpenIdByGroup: Map<string, string> }
+    ).botOpenIdByGroup;
+    botOpenIdByGroup.set('g1', 'abc123def456abc123def456abc123de');
 
     (ch as unknown as { saveQQState: () => void }).saveQQState();
     vi.advanceTimersByTime(500);
@@ -185,6 +189,9 @@ describe('saveQQState', () => {
     ]);
     expect(parsed.msgSeqMap).toEqual([['msg_abc', 3]]);
     expect(parsed.groupActiveMsgEnabled).toEqual([['g1', true]]);
+    expect(parsed.botOpenIdByGroup).toEqual([
+      ['g1', 'abc123def456abc123def456abc123de'],
+    ]);
   });
 
   it('debounces multiple calls within 500ms into a single write', () => {

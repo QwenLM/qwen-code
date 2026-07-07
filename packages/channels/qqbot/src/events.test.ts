@@ -574,6 +574,20 @@ describe('handleGroupAll', () => {
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
 
+  it('policy=keyword word-boundary: 不含关键词子串不触发 (e.g. "helpful" ≠ "help")', async () => {
+    const ch = makeChannel({
+      groupAllPolicy: 'keyword',
+      keywordTriggers: ['help'],
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({ content: 'this is helpful info' }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
   it('sets replyMsgId for all messages passing the policy gate (including non-@)', () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
