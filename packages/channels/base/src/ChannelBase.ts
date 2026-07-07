@@ -1859,10 +1859,10 @@ export abstract class ChannelBase {
 
     if (intent.kind === 'clear_request') {
       const pendingKey = `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${envelope.senderId ?? ''}`;
-      this.pendingClears.set(pendingKey, Date.now() + 60_000);
+      this.setPendingClear(pendingKey);
       await this.sendMessage(
         envelope.chatId,
-        'This clears channel memory for this chat. Say "确认清空记忆" to proceed.',
+        'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
       );
       return;
     }
@@ -1963,6 +1963,16 @@ export abstract class ChannelBase {
       !normalized.startsWith('/') &&
       CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE.test(normalized)
     );
+  }
+
+  private setPendingClear(key: string): void {
+    const now = Date.now();
+    for (const [pendingKey, expiresAt] of this.pendingClears) {
+      if (expiresAt < now) {
+        this.pendingClears.delete(pendingKey);
+      }
+    }
+    this.pendingClears.set(key, now + 60_000);
   }
 
   private async classifyChannelMemoryIntent(

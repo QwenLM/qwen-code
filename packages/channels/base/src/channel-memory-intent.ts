@@ -12,6 +12,7 @@ const REMEMBER_PATTERNS: RegExp[] = [
   /^帮我记一下[:：,，]?\s*(.+)$/su,
   /^帮我记住[:：,，]?\s*(.+)$/su,
   /^以后记住[:：,，]?\s*(.+)$/su,
+  /^保存[:：,，]?\s*(.+)$/su,
   /^remember:\s*(.+)$/isu,
   /^remember that\s+(.+)$/isu,
 ];
@@ -28,6 +29,7 @@ const CLEAR_REQUEST_PATTERNS: RegExp[] = [
   /^清空记忆$/u,
   /^清除记忆$/u,
   /^忘掉这个聊天的所有记忆$/u,
+  /^把.+的?记忆清空$/u,
   /^clear memory$/iu,
 ];
 
@@ -62,7 +64,7 @@ export function parseChannelMemoryIntent(
   }
   for (const pattern of REMEMBER_PATTERNS) {
     const match = trimmed.match(pattern);
-    const remembered = match?.[1]?.trim();
+    const remembered = match?.[1]?.replace(PROMPT_UNSAFE_INVISIBLES, '').trim();
     if (remembered) {
       return { kind: 'remember', text: remembered };
     }

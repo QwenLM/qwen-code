@@ -949,7 +949,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([
         {
           chatId: 'chat1',
-          text: 'This clears channel memory for this chat. Say "确认清空记忆" to proceed.',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
         },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
@@ -1202,7 +1202,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([
         {
           chatId: 'chat1',
-          text: 'This clears channel memory for this chat. Say "确认清空记忆" to proceed.',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
         },
       ]);
 
@@ -1243,7 +1243,7 @@ describe('ChannelBase', () => {
       expect(ch.sent).toEqual([
         {
           chatId: 'group-1',
-          text: 'This clears channel memory for this chat. Say "确认清空记忆" to proceed.',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
         },
       ]);
 
@@ -1277,11 +1277,16 @@ describe('ChannelBase', () => {
       };
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
 
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
       await ch.handleInbound(
         envelope({ text: '确认清空记忆', senderId: 'alice' }),
       );
 
       expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
         { chatId: 'chat1', text: 'No channel memory saved.' },
       ]);
       expect(bridge.prompt).not.toHaveBeenCalled();
@@ -1298,11 +1303,16 @@ describe('ChannelBase', () => {
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
 
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
       await ch.handleInbound(
         envelope({ text: '确认清空记忆', senderId: 'alice' }),
       );
 
       expect(ch.sent).toEqual([
+        {
+          chatId: 'chat1',
+          text: 'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+        },
         {
           chatId: 'chat1',
           text: 'Failed to clear channel memory: An error occurred while accessing channel memory.',
@@ -4844,6 +4854,7 @@ describe('ChannelBase', () => {
       const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
 
       await ch.handleInbound(envelope({ text: 'first', senderId: 'alice' }));
+      await ch.handleInbound(envelope({ text: '清空记忆', senderId: 'alice' }));
       await ch.handleInbound(
         envelope({ text: '确认清空记忆', senderId: 'alice' }),
       );
