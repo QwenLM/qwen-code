@@ -1184,6 +1184,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFastModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    modelDialogPersistScope,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -3787,6 +3788,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      modelDialogPersistScope,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -3927,6 +3929,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      modelDialogPersistScope,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,

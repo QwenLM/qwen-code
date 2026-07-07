@@ -89,8 +89,8 @@ body {
  */
 [data-user-selectable],
 [data-user-selectable] *,
-[role='dialog']:not([data-mobile-drawer]),
-[role='dialog']:not([data-mobile-drawer]) *,
+[role='dialog']:not([data-sidebar-shell]),
+[role='dialog']:not([data-sidebar-shell]) *,
 .cm-content,
 .cm-line,
 input,

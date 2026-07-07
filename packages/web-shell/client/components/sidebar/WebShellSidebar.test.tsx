@@ -68,6 +68,7 @@ type MockSession = {
   isArchived?: boolean;
   isPinned?: boolean;
   groupId?: string | null;
+  color?: 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | null;
 };
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
@@ -110,6 +111,12 @@ function renderSidebar(
   overrides: Partial<{
     onOpenSettings: () => void;
     onOpenDaemonStatus: () => void;
+    onOpenScheduledTasks: () => void;
+    onOpenSessions: () => void;
+    canOpenSessionsOverview: boolean;
+    onOpenSplitView: () => void;
+    canOpenSplitView: boolean;
+    onNewSession: () => Promise<boolean> | boolean;
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
     sessionListReloadToken: number;
@@ -127,6 +134,9 @@ function renderSidebar(
             onCollapsedChange={noop}
             onOpenSettings={noop}
             onOpenDaemonStatus={noop}
+            onOpenScheduledTasks={noop}
+            onOpenSessions={noop}
+            onOpenSplitView={noop}
             onNewSession={() => false}
             onLoadSession={noop}
             onError={noop}
@@ -243,6 +253,66 @@ describe('WebShellSidebar — daemon status entry', () => {
   });
 });
 
+describe('WebShellSidebar — session overview entry', () => {
+  it('offers the entry point only on large screens', () => {
+    const small = renderSidebar(false, { canOpenSessionsOverview: false });
+    expect(
+      small.container.querySelector('[aria-label="Session Overview"]'),
+    ).toBeNull();
+
+    const large = renderSidebar(false, { canOpenSessionsOverview: true });
+    expect(
+      large.container.querySelector('[aria-label="Session Overview"]'),
+    ).not.toBeNull();
+  });
+
+  it('invokes onOpenSessions when the footer button is clicked', () => {
+    const onOpenSessions = vi.fn();
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      onOpenSessions,
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session Overview"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenSessions).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar — split view entry', () => {
+  it('offers the split view entry only on large screens', () => {
+    const small = renderSidebar(false, { canOpenSplitView: false });
+    expect(
+      small.container.querySelector('[aria-label="Split View"]'),
+    ).toBeNull();
+
+    const large = renderSidebar(false, { canOpenSplitView: true });
+    expect(
+      large.container.querySelector('[aria-label="Split View"]'),
+    ).not.toBeNull();
+  });
+
+  it('invokes onOpenSplitView when the footer button is clicked', () => {
+    const onOpenSplitView = vi.fn();
+    const { container } = renderSidebar(false, {
+      canOpenSplitView: true,
+      onOpenSplitView,
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Split View"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenSplitView).toHaveBeenCalledTimes(1);
+  });
+});
+
 function click(el: Element | null): void {
   expect(el).not.toBeNull();
   act(() => {
@@ -318,7 +388,7 @@ describe('WebShellSidebar — session organization', () => {
       await Promise.resolve();
     });
     const organizeButton = document.body.querySelector<HTMLButtonElement>(
-      '[aria-label="Move to group"]',
+      '[aria-label="Group"]',
     );
     expect(organizeButton).not.toBeNull();
     act(() => {
@@ -371,6 +441,12 @@ describe('WebShellSidebar — session organization', () => {
       name: 'Backend',
       color: 'green',
     });
+    // Creating a group for a session assigns it and clears any color tag —
+    // color and named group are mutually exclusive in the UI.
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { groupId: 'group-1', color: null },
+    );
     promptSpy.mockRestore();
   });
 
@@ -411,7 +487,7 @@ describe('WebShellSidebar — session organization', () => {
       await Promise.resolve();
     });
     const organizeButton = document.body.querySelector<HTMLButtonElement>(
-      '[aria-label="Move to group"]',
+      '[aria-label="Group"]',
     );
     expect(organizeButton).not.toBeNull();
     act(() => {
@@ -440,7 +516,8 @@ describe('WebShellSidebar — session organization', () => {
         }),
       );
     });
-    expect(document.activeElement?.textContent).toContain('Backend');
+    // One ArrowDown from "Ungrouped" now lands on the first color quick-pick.
+    expect(document.activeElement?.textContent).toContain('Red');
     const groupOption = Array.from(
       menu!.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Backend'));
@@ -449,10 +526,102 @@ describe('WebShellSidebar — session organization', () => {
       groupOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
+    // Assigning a named group clears any color tag (single-choice).
     expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
       '550e8400-e29b-41d4-a716-446655440000',
-      { groupId: 'group-1' },
+      { groupId: 'group-1', color: null },
     );
+  });
+
+  it('offers the six color quick-picks and assigns the chosen color', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.updateSessionOrganization.mockResolvedValue({
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      groupId: null,
+      color: 'red',
+      isPinned: false,
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+      }),
+    ];
+
+    renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const organizeButton = document.body.querySelector<HTMLButtonElement>(
+      '[aria-label="Group"]',
+    );
+    expect(organizeButton).not.toBeNull();
+    act(() => {
+      organizeButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const menu = document.body.querySelector<HTMLElement>(
+      '[role="menu"][aria-label="Group"]',
+    );
+    expect(menu).not.toBeNull();
+    const radioLabels = Array.from(
+      menu!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ).map((button) => button.textContent ?? '');
+    // Ungrouped + all six colors are offered as single-choice radios.
+    for (const name of [
+      'Ungrouped',
+      'Red',
+      'Orange',
+      'Yellow',
+      'Green',
+      'Blue',
+      'Purple',
+    ]) {
+      expect(radioLabels.some((label) => label.includes(name))).toBe(true);
+    }
+
+    const redOption = Array.from(
+      menu!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ).find((button) => button.textContent?.includes('Red'));
+    expect(redOption).not.toBeNull();
+    await act(async () => {
+      redOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // Picking a color clears any named-group assignment (single-choice).
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { color: 'red', groupId: null },
+    );
+  });
+
+  it('groups sessions into color sections ahead of the recent bucket', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockActive.sessions = [
+      makeSession('session-red', { displayName: 'Red work', color: 'red' }),
+      makeSession('session-plain', { displayName: 'Loose end', color: null }),
+    ];
+
+    const { container } = renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // A "Red" color section exists and holds the tagged session.
+    const redSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Red"]',
+    );
+    expect(redSection).not.toBeNull();
+    expect(redSection!.textContent).toContain('Red work');
+    // The untagged session falls through to the Recent bucket.
+    expect(container.textContent).toContain('Recent');
+    expect(container.textContent).toContain('Loose end');
   });
 
   it('renders organized sessions as collapsible group sections', async () => {

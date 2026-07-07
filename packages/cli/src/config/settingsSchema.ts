@@ -2699,6 +2699,21 @@ const SETTINGS_SCHEMA = {
       'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
     showInDialog: false,
     properties: {
+      maxParallelAgents: {
+        type: 'number',
+        label: 'Max Parallel Agents',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 1,
+        description:
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'integer',
+          minimum: 1,
+        },
+      },
       displayMode: {
         type: 'enum',
         label: 'Display Mode',

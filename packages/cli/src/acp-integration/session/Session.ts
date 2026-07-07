@@ -1151,7 +1151,9 @@ export class Session implements SessionContext {
 
   getRewindableUserTurnCount(): number {
     const apiHistory = this.captureHistorySnapshot();
-    const startIndex = getStartupContextLength(apiHistory);
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
     let count = 0;
 
     for (let i = startIndex; i < apiHistory.length; i++) {
@@ -1187,7 +1189,9 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = getStartupContextLength(apiHistory);
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
 
     if (targetTurnIndex === 0) {
       return startIndex;

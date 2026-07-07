@@ -1,4 +1,4 @@
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { normalizeProxyUrl } from '@qwen-code/qwen-code-core';
 
 /**
@@ -15,7 +15,9 @@ export function resolveProxy(
 ): string | undefined {
   const proxyUrl = resolveProxyUrl(cliProxy, settingsProxy);
   if (proxyUrl) {
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+    setGlobalDispatcher(
+      new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
+    );
   }
   return proxyUrl;
 }

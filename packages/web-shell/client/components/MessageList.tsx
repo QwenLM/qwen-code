@@ -29,6 +29,7 @@ import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
+import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
@@ -48,7 +49,6 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
-  shellOutputMaxLines: number;
   activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
@@ -114,6 +114,11 @@ export type DisplayItem =
       timestamp?: number;
     };
 
+interface LocateFlashTarget {
+  messageId: string;
+  callId?: string;
+}
+
 export type TurnTimelineNodeKind =
   | 'thought'
   | 'commentary'
@@ -135,6 +140,7 @@ export interface SessionTimelineEntry {
   detail: string;
   timestamp?: number;
   nodeKinds: TurnTimelineNodeKind[];
+  isScheduledTask?: boolean;
 }
 
 export interface SessionTimelineRange {
@@ -619,6 +625,16 @@ function timelineLabelForTurn(message: Message): string {
   return compact;
 }
 
+function isScheduledTaskMessage(message: {
+  role: Message['role'];
+  source?: string;
+}): boolean {
+  return (
+    message.role === 'user' &&
+    (message.source === 'cron' || message.source === 'loop')
+  );
+}
+
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat
 // auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
@@ -756,6 +772,7 @@ export function getSessionTimelineEntries(
       detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
       timestamp: turnStart.timestamp,
       nodeKinds,
+      ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
     });
   };
 
@@ -773,6 +790,20 @@ export function getSessionTimelineEntries(
   pushTurn();
 
   return entries;
+}
+
+function TimelineClockIcon() {
+  return (
+    <svg
+      className={styles.sessionTimelineDetailsIcon}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.5v4l-2.5 2" />
+    </svg>
+  );
 }
 
 function toolTimelineSignature(tool: ACPToolCall): string {
@@ -1309,6 +1340,33 @@ export function findDisplayItemIndex(
   return -1;
 }
 
+function displayItemMatchesLocateTarget(
+  item: DisplayItem,
+  target: LocateFlashTarget | null,
+): boolean {
+  if (!target) return false;
+  const callId = target.callId;
+  if (item.type === 'message') {
+    if (item.message.id === target.messageId) return true;
+    return (
+      !!callId &&
+      item.message.role === 'tool_group' &&
+      item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+    );
+  }
+  if (item.type === 'parallel_agents') {
+    return (
+      !!callId && item.agents.some((agent) => toolContainsCallId(agent, callId))
+    );
+  }
+  if (item.type === 'turn_content') {
+    return item.items.some((child) =>
+      displayItemMatchesLocateTarget(child, target),
+    );
+  }
+  return false;
+}
+
 export interface MessageListHandle {
   /**
    * Scroll the transcript so the given message is visible and briefly
@@ -1636,8 +1694,21 @@ const SessionTimeline = memo(function SessionTimeline({
                     data-testid="session-timeline-detail"
                     data-title={entry.label}
                     data-detail={entry.detail}
+                    data-scheduled-task={
+                      entry.isScheduledTask ? 'true' : undefined
+                    }
                     aria-hidden="true"
-                  />
+                  >
+                    <span className={styles.sessionTimelineDetailsTitle}>
+                      {entry.isScheduledTask && <TimelineClockIcon />}
+                      <span className={styles.sessionTimelineDetailsTitleText}>
+                        {entry.label}
+                      </span>
+                    </span>
+                    <span className={styles.sessionTimelineDetailsDetail}>
+                      {entry.detail}
+                    </span>
+                  </span>
                 </button>
               </li>
             );
@@ -1712,7 +1783,6 @@ export const MessageList = memo(
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
       autoScrollTailIntoView = false,
       hideSessionTimeline = false,
       showRetryHint = false,
@@ -2245,17 +2315,19 @@ export const MessageList = memo(
     ]);
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
-    // transcript" button) with a brief highlight on the target row.
-    const [flashKey, setFlashKey] = useState<string | null>(null);
+    // transcript" button) with a brief highlight on the target message.
+    const [flashTarget, setFlashTarget] = useState<LocateFlashTarget | null>(
+      null,
+    );
     useEffect(() => {
-      if (!flashKey) return;
-      const timer = setTimeout(() => setFlashKey(null), 1600);
+      if (!flashTarget) return;
+      const timer = setTimeout(() => setFlashTarget(null), 1600);
       return () => clearTimeout(timer);
-    }, [flashKey]);
+    }, [flashTarget]);
 
-    // Scroll a visible row to center and flash it.
+    // Scroll a visible row to center and flash the target message inside it.
     const performScrollToRow = useCallback(
-      (rowIndex: number) => {
+      (rowIndex: number, target: LocateFlashTarget) => {
         // Explicit navigation away from the tail — pause follow so the
         // auto-scroll driver doesn't yank the viewport straight back down,
         // and engage the same cooldown scrollToBottom uses so the scroll
@@ -2284,14 +2356,12 @@ export const MessageList = memo(
             scheduleScrollOverflowReport();
           }
         }, 150);
-        const key = getItemKey(rowIndex);
-        setFlashKey(null);
-        requestAnimationFrame(() => setFlashKey(key));
+        setFlashTarget(null);
+        requestAnimationFrame(() => setFlashTarget(target));
       },
       [
         useVirtualScroll,
         virtualizer,
-        getItemKey,
         setShouldFollow,
         scheduleSessionTimelineRangeUpdate,
         scheduleScrollOverflowReport,
@@ -2302,7 +2372,7 @@ export const MessageList = memo(
       visibleItems: readonly DisplayItem[];
       displayItems: readonly DisplayItem[];
       headerOffset: number;
-      performScrollToRow: (rowIndex: number) => void;
+      performScrollToRow: (rowIndex: number, target: LocateFlashTarget) => void;
     }>({
       visibleItems: [],
       displayItems: [],
@@ -2318,10 +2388,7 @@ export const MessageList = memo(
 
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
-    const pendingScrollRef = useRef<{
-      messageId: string;
-      callId?: string;
-    } | null>(null);
+    const pendingScrollRef = useRef<LocateFlashTarget | null>(null);
 
     const scrollToMessage = useCallback(
       (messageId: string, callId?: string): boolean => {
@@ -2345,7 +2412,10 @@ export const MessageList = memo(
             return true;
           }
           pendingScrollRef.current = null;
-          performScrollToRow(visibleIndex + headerOffset);
+          performScrollToRow(visibleIndex + headerOffset, {
+            messageId,
+            callId,
+          });
           return true;
         }
         // Not on screen — it may be folded inside a collapsed turn. Locate it
@@ -2383,7 +2453,7 @@ export const MessageList = memo(
       );
       if (idx < 0) return;
       pendingScrollRef.current = null;
-      performScrollToRow(idx + headerOffset);
+      performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
@@ -2596,10 +2666,18 @@ export const MessageList = memo(
           if (displayItem.type === 'parallel_agents') {
             return (
               <MessageTimestamp timestamp={displayItem.timestamp}>
-                <ParallelAgentsGroup
-                  agents={displayItem.agents}
-                  pendingApproval={pendingApproval}
-                />
+                <div
+                  className={
+                    displayItemMatchesLocateTarget(displayItem, flashTarget)
+                      ? flashStyles.flash
+                      : undefined
+                  }
+                >
+                  <ParallelAgentsGroup
+                    agents={displayItem.agents}
+                    pendingApproval={pendingApproval}
+                  />
+                </div>
               </MessageTimestamp>
             );
           }
@@ -2646,7 +2724,10 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 displayItem.message.id === lastCompletedAssistantId
               }
-              shellOutputMaxLines={shellOutputMaxLines}
+              isLocateFlashing={displayItemMatchesLocateTarget(
+                displayItem,
+                flashTarget,
+              )}
             />
           );
         };
@@ -2675,24 +2756,21 @@ export const MessageList = memo(
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        flashTarget,
         finalAssistantIdsByTurn,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         onBranchSession,
-        shellOutputMaxLines,
         handleToggleCollapse,
       ],
     );
 
     const getRowClassName = useCallback(
-      (key: string, item?: DisplayItem): string | undefined =>
-        joinClassNames(
-          flashKey === key ? styles.rowFlash : undefined,
-          item ? getChatRowClassName(item) : undefined,
-        ),
-      [flashKey],
+      (item?: DisplayItem): string | undefined =>
+        item ? getChatRowClassName(item) : undefined,
+      [],
     );
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
@@ -2741,10 +2819,9 @@ export const MessageList = memo(
         />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -2752,15 +2829,17 @@ export const MessageList = memo(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
                 )}
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
@@ -2776,7 +2855,7 @@ export const MessageList = memo(
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(key, item)}
+                className={getRowClassName(item)}
               >
                 {renderVirtualItem(index)}
               </div>

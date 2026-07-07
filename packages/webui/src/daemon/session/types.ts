@@ -77,6 +77,10 @@ export interface DaemonConnectionState {
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
   error?: string;
+  /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
+  errorStatus?: number;
+  /** True only when the server confirmed the current session is missing. */
+  missingSession?: boolean;
 }
 
 export interface DaemonTokenUsage {

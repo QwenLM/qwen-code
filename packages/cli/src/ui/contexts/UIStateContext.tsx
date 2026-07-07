@@ -71,6 +71,7 @@ export interface UIState {
   isFastModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
+  modelDialogPersistScope: 'workspace' | 'user' | undefined;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
