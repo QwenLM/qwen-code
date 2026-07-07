@@ -14209,6 +14209,28 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     expect(locals.workspaceRegistry!.primary.trusted).toBe(true);
   });
 
+  it('threads primary runtime env metadata into the default registry runtime', async () => {
+    const { createServeApp } = await import('./server.js');
+    const primaryRuntimeEnv = {
+      mode: 'runtime-overlay',
+      overlayKeys: ['OPENAI_API_KEY'],
+      envFilePaths: [],
+      effectiveEnv: { OPENAI_API_KEY: 'runtime-key' },
+    } as const;
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { primaryRuntimeEnv } as Parameters<typeof createServeApp>[2],
+    );
+    const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
+
+    expect(locals.workspaceRegistry!.primary.env).toBe(primaryRuntimeEnv);
+  });
+
   it('uses an injected workspace registry as the primary runtime source', async () => {
     const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();

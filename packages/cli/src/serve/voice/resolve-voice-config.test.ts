@@ -67,6 +67,7 @@ describe('loadDaemonVoiceContext', () => {
     const context = loadDaemonVoiceContext('/work/voice', { env: injectedEnv });
 
     expect(context.voiceModel).toBe('qwen3-asr-flash');
+    expect(context.env).toBe(injectedEnv);
     expect(mocks.getAuthTypeFromEnv).toHaveBeenCalledWith(injectedEnv);
     expect(mocks.resolveCliGenerationConfig).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -76,11 +77,15 @@ describe('loadDaemonVoiceContext', () => {
     );
     expect(mocks.resolveVoiceTranscriptionConfig).toHaveBeenCalledWith(
       expect.objectContaining({
+        env: injectedEnv,
         settings: expect.objectContaining({
           merged: expect.objectContaining({ voiceModel: 'qwen3-asr-flash' }),
         }),
         voiceModel: 'qwen3-asr-flash',
       }),
     );
+    expect(mocks.loadSettings).toHaveBeenCalledWith('/work/voice', {
+      skipLoadEnvironment: true,
+    });
   });
 });

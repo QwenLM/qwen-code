@@ -30,7 +30,10 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import {
+  DEFAULT_INHERITED_ENV_VARS,
+  StdioClientTransport,
+} from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -141,11 +144,26 @@ export function buildTransport(
   return new StdioClientTransport({
     command: cfg.command!,
     args: cfg.args ?? [],
-    // spawn() treats `env` as a complete replacement, not a merge. Always pass
-    // the runtime base env so stdio children do not fall back to process.env.
-    env: { ...baseEnv, ...(cfg.env ?? {}) } as Record<string, string>,
+    // Passing `env` prevents the SDK from reading live process.env. Keep the
+    // SDK's narrow default allowlist, but source those values from the runtime
+    // snapshot before applying explicit server env overrides.
+    env: buildStdioServerEnv(baseEnv, cfg.env),
     cwd: cfg.cwd,
   });
+}
+
+function buildStdioServerEnv(
+  baseEnv: Readonly<Record<string, string | undefined>>,
+  serverEnv: Record<string, string> | undefined,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of DEFAULT_INHERITED_ENV_VARS) {
+    const value = baseEnv[key];
+    if (value !== undefined && !value.startsWith('()')) {
+      env[key] = value;
+    }
+  }
+  return { ...env, ...(serverEnv ?? {}) };
 }
 
 /** Exported for unit testing the MCP content normalization rules. */

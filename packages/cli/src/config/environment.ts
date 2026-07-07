@@ -503,6 +503,9 @@ export function loadEnvironment(
   // settings.json could otherwise redirect global state after path bootstrap.
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
+      if (RELOAD_EXCLUDED_KEYS.has(key)) {
+        continue;
+      }
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
         continue;
       }

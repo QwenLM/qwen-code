@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildRuntimeEnvironment } from './environment.js';
+import { buildRuntimeEnvironment, loadEnvironment } from './environment.js';
 import type { Settings } from './settingsSchema.js';
 
 const TRACKED_ENV = [
@@ -158,5 +158,28 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.envFilePaths).toContain(envPath);
     expect(snapshot.envFileReadFailed).toBe(true);
     expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBeUndefined();
+  });
+});
+
+describe('loadEnvironment', () => {
+  it('filters reload-excluded keys from settings.env on initial load', () => {
+    const workspace = makeWorkspace();
+
+    loadEnvironment(
+      testSettings({
+        env: {
+          RUNTIME_SETTINGS_ONLY: 'from-settings',
+          BASH_ENV: '/tmp/bad-profile',
+          NODE_OPTIONS: '--require ./bad.js',
+          QWEN_SERVER_TOKEN: 'bad-token',
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+    expect(process.env['BASH_ENV']).toBeUndefined();
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 });

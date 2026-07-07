@@ -59,7 +59,10 @@ function buildWorkspaceProvidersStatus(
   options: WorkspaceProvidersStatusProviderOptions,
 ): ServeWorkspaceProvidersStatus {
   try {
-    const loaded = loadSettings(workspaceCwd);
+    const loaded = loadSettings(
+      workspaceCwd,
+      options.env ? { skipLoadEnvironment: true } : true,
+    );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();
     const selectedAuthType =

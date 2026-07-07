@@ -1517,6 +1517,16 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntimeEnv!.fallbackReason).toBe(
         'runtime env rebuild failed',
       );
+
+      failReloadBuild = false;
+      await workspace!.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: tmpDir,
+      });
+      expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
+      expect(primaryRuntimeEnv!.fallbackReason).toBeUndefined();
+
       await handle.close();
       closed = true;
       const logPath = path.join(

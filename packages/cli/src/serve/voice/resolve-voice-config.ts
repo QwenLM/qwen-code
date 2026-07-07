@@ -28,6 +28,7 @@ export interface DaemonVoiceContext {
   settings: LoadedSettings;
   /** A `ModelsConfig` — satisfies the resolver's structural `getAllConfiguredModels`. */
   models: VoiceModelLookup;
+  env?: Readonly<Record<string, string | undefined>>;
   voiceModel: string;
   /** True for realtime models (open an upstream WS); false → batch on stop. */
   streaming: boolean;
@@ -75,7 +76,10 @@ export function loadDaemonVoiceContext(
   workspaceCwd: string,
   options: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): DaemonVoiceContext {
-  const settings = loadSettings(workspaceCwd);
+  const settings = loadSettings(
+    workspaceCwd,
+    options.env ? { skipLoadEnvironment: true } : true,
+  );
   const voiceModel = readVoiceModel(settings);
   if (!voiceModel) {
     throw new Error('No voice model is configured for this workspace.');
@@ -85,10 +89,16 @@ export function loadDaemonVoiceContext(
     options.env ?? snapshotProcessEnv(),
   );
   // Validates transcribable + baseUrl + apiKey presence (throws otherwise).
-  resolveVoiceTranscriptionConfig({ config: models, settings, voiceModel });
+  resolveVoiceTranscriptionConfig({
+    config: models,
+    settings,
+    voiceModel,
+    env: options.env,
+  });
   return {
     settings,
     models,
+    ...(options.env ? { env: options.env } : {}),
     voiceModel,
     streaming: isStreamingVoiceModel(voiceModel),
   };

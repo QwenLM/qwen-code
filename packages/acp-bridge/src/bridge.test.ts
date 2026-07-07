@@ -9452,6 +9452,31 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('reports freshSessionAdmission release failures without failing fresh spawns', async () => {
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'thread',
+        freshSessionAdmission: () => ({
+          release: () => {
+            throw new Error('release broken');
+          },
+        }),
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(session.sessionId).toBeTruthy();
+      expect(diagnostics).toEqual([
+        {
+          line: 'qwen serve: fresh session admission release failed: release broken',
+          level: 'warn',
+        },
+      ]);
+      await bridge.shutdown();
+    });
+
     it('does not call freshSessionAdmission for single-scope attaches', async () => {
       const freshSessionAdmission = vi.fn(() => ({
         release: vi.fn(),

@@ -85,6 +85,7 @@ async function defaultOpenStream(
       config: ctx.models,
       settings: ctx.settings,
       voiceModel: ctx.voiceModel,
+      env: ctx.env,
     });
     await assertVoiceBaseUrlNetworkAllowed(cfg);
     return await openVoiceStreamWithRetry(() =>
@@ -104,7 +105,12 @@ function defaultTranscribe(
 ): Promise<string> {
   return transcribeVoiceAudio(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
-    { config: ctx.models, settings: ctx.settings, voiceModel: ctx.voiceModel },
+    {
+      config: ctx.models,
+      settings: ctx.settings,
+      voiceModel: ctx.voiceModel,
+      env: ctx.env,
+    },
   ).catch((error: unknown) => {
     debugLogger.debug(
       `[voice-ws] batch transcription error: ${errMessage(error)}`,
