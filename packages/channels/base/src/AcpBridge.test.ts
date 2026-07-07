@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
@@ -44,6 +45,13 @@ const child = vi.hoisted(() => {
 
   return {
     instances: [] as MockChild[],
+    clients: [] as Array<{
+      requestPermission: (params: unknown) => Promise<unknown>;
+    }>,
+    connections: [] as Array<{
+      initialize: ReturnType<typeof vi.fn>;
+      cancel: ReturnType<typeof vi.fn>;
+    }>,
     MockChild,
     spawn: vi.fn(() => {
       const instance = new MockChild();
@@ -65,9 +73,16 @@ vi.mock('node:stream', () => ({
 vi.mock('@agentclientprotocol/sdk', () => ({
   PROTOCOL_VERSION: 1,
   ndJsonStream: vi.fn(() => ({})),
-  ClientSideConnection: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn().mockResolvedValue(undefined),
-  })),
+  ClientSideConnection: vi.fn().mockImplementation((createClient) => {
+    const client = createClient();
+    const connection = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      cancel: vi.fn().mockResolvedValue(undefined),
+    };
+    child.clients.push(client);
+    child.connections.push(connection);
+    return connection;
+  }),
 }));
 
 type TestableAcpBridge = AcpBridge & {
@@ -91,6 +106,8 @@ type TestableAcpBridge = AcpBridge & {
 describe('AcpBridge', () => {
   beforeEach(() => {
     child.instances.length = 0;
+    child.clients.length = 0;
+    child.connections.length = 0;
     child.spawn.mockClear();
   });
 
@@ -349,5 +366,238 @@ describe('AcpBridge', () => {
     );
 
     expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('relays ACP permission requests instead of auto-approving them', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const request = {
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Allow' },
+        { optionId: 'cancel', name: 'Deny' },
+      ],
+    };
+
+    const pending = child.clients[0]!.requestPermission(request);
+    await Promise.resolve();
+
+    expect(permissionRequest).toHaveBeenCalledTimes(1);
+    const event = permissionRequest.mock.calls[0]![0];
+    expect(event).toMatchObject({
+      sessionId: 'session-1',
+      request,
+    });
+    expect(event.requestId).toMatch(/^acp-permission-/);
+
+    const response = { outcome: { outcome: 'selected', optionId: 'cancel' } };
+    await expect(
+      (
+        bridge as unknown as TestableAcpBridge & {
+          respondToPermission(
+            requestId: string,
+            response: typeof response,
+          ): Promise<boolean>;
+        }
+      ).respondToPermission(event.requestId, response),
+    ).resolves.toBe(true);
+    await expect(pending).resolves.toEqual(response);
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: event.requestId,
+      outcome: response.outcome,
+    });
+    await expect(
+      (
+        bridge as unknown as TestableAcpBridge & {
+          respondToPermission(
+            requestId: string,
+            response: typeof response,
+          ): Promise<boolean>;
+        }
+      ).respondToPermission(event.requestId, response),
+    ).resolves.toBe(false);
+  });
+
+  it('allows permission request listeners to respond synchronously', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    };
+    bridge.on('permissionRequest', (event) => {
+      void bridge.respondToPermission(event.requestId, response);
+    });
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'proceed_once', name: 'Allow' }],
+    });
+
+    await expect(pending).resolves.toEqual(response);
+  });
+
+  it('falls back to the tool call id for permission requests without a session id', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    const event = permissionRequest.mock.calls[0]![0];
+    expect(event.sessionId).toBe('tool-1');
+    await bridge.respondToPermission(event.requestId, {
+      outcome: { outcome: 'cancelled' },
+    });
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('resolves matching pending permissions as cancelled when a session is cancelled', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const first = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    const second = child.clients[0]!.requestPermission({
+      sessionId: 'session-2',
+      toolCall: {
+        toolCallId: 'tool-2',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    const firstEvent = permissionRequest.mock.calls[0]![0];
+    const secondEvent = permissionRequest.mock.calls[1]![0];
+    await bridge.cancelSession('session-1');
+
+    expect(child.connections[0]!.cancel).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+    });
+    await expect(first).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: firstEvent.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).not.toHaveBeenCalledWith({
+      requestId: secondEvent.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
+
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    };
+    await expect(
+      bridge.respondToPermission(secondEvent.requestId, response),
+    ).resolves.toBe(true);
+    await expect(second).resolves.toEqual(response);
+  });
+
+  it('resolves pending permissions as cancelled when the ACP child exits', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionResolved = vi.fn();
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    child.instances[0]!.emit('exit', 1, null);
+
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: 'acp-permission-1',
+      outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('resolves pending permissions as cancelled on stop', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    bridge.stop();
+
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
   });
 });

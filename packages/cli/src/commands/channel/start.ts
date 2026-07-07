@@ -32,6 +32,7 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
@@ -213,6 +214,7 @@ async function startSingle(
       })
     : undefined;
   registerToolCallDispatch(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   try {
@@ -266,6 +268,7 @@ async function startSingle(
         channel.disconnect();
         await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
@@ -374,6 +377,7 @@ async function startAll(
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   // Connect all channels
@@ -472,6 +476,7 @@ async function startAll(
           process.exit(1);
         }
         registerToolCallDispatch(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
