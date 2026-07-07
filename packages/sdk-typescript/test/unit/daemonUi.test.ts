@@ -2255,6 +2255,33 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes settings_reloaded as a settings refresh signal', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_reloaded', {
+        env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+        changedKeys: ['env', 'hooks'],
+        childReloaded: true,
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'settings_reloaded',
+        scope: 'workspace',
+        value: expect.objectContaining({
+          childReloaded: true,
+          sessionsRefreshed: ['session-1'],
+        }) as unknown,
+      }),
+    ]);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'debug' }),
+    );
+  });
+
   it('normalizes workspace_initialized actions', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('workspace_initialized', { path: '/w', action: 'created' }),
