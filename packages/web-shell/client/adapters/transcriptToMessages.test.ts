@@ -2173,6 +2173,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
           source: 'turn_error' as const,
           errorKind: 'model_stream_interrupted' as const,
           text: 'terminated',
+          data: { diagnosticId: 'abc' },
           clientReceivedAt: 1,
           createdAt: 1,
           updatedAt: 1,
@@ -2193,13 +2194,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
         variant: 'error',
         retryable: true,
         source: 'turn_error',
-        data: { errorKind: 'model_stream_interrupted' },
+        data: {
+          diagnosticId: 'abc',
+          errorKind: 'model_stream_interrupted',
+        },
         timestamp: 1,
       },
     ]);
   });
 
-  it('keeps the terminated fallback for older daemon turn errors in web-shell', () => {
+  it('upgrades older daemon terminated turn errors to localized text', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [
         {

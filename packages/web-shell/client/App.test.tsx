@@ -741,8 +741,8 @@ describe('App session callbacks', () => {
           kind: 'error',
           source: 'turn_error',
           id: 'turn-error-stream-interrupted',
-          text: 'Model response stream was interrupted. Please retry.',
-          data: { errorKind: 'model_stream_interrupted' },
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
         },
       ];
       rerender();

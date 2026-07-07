@@ -33,11 +33,7 @@ type DaemonPermissionTranscriptBlock = Extract<
   { kind: 'permission' }
 >;
 
-type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
-  source?: string;
-  errorKind?: string;
-  data?: unknown;
-};
+type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock;
 
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
@@ -71,6 +67,7 @@ function getErrorDisplayText(
 ): string {
   if (
     block.errorKind === 'model_stream_interrupted' ||
+    // Older daemons emit this turn_error before they know about errorKind.
     (block.source === 'turn_error' &&
       block.text.trim().toLowerCase() === 'terminated')
   ) {

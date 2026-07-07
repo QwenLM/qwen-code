@@ -1190,6 +1190,36 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps structured model stream interruption on transcript blocks', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      normalizeDaemonEvent({
+        id: 46,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+          code: '-32603',
+          errorKind: 'model_stream_interrupted',
+          promptId: 'prompt-1',
+        },
+      }),
+      { now: 101 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+        code: '-32603',
+        errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-1',
+      },
+    ]);
+  });
+
   it('keeps older daemon terminated turn error text unchanged', () => {
     expect(
       normalizeDaemonEvent({

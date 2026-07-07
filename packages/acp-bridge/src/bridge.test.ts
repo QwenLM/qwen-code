@@ -10332,6 +10332,9 @@ describe('classifyTurnErrorKind', () => {
     expect(classifyTurnErrorKind('terminated')).toBe(
       'model_stream_interrupted',
     );
+    expect(classifyTurnErrorKind('Terminated')).toBe(
+      'model_stream_interrupted',
+    );
     expect(classifyTurnErrorKind(' terminated ')).toBe(
       'model_stream_interrupted',
     );
