@@ -419,6 +419,7 @@ describe('helpers', () => {
       RUNTIME_ONLY: 'yes',
       A2UI_TOKEN: 'base',
       OPENAI_API_KEY: 'runtime-key',
+      QWEN_SERVER_TOKEN: 'daemon-secret',
       BASH_FUNC_bad: '() { ignored; }',
       SHELL_FUNC: '() { ignored; }',
     };
@@ -426,7 +427,10 @@ describe('helpers', () => {
       {
         command: 'node',
         args: ['server.mjs'],
-        env: { A2UI_TOKEN: 'secret' },
+        env: {
+          A2UI_TOKEN: 'secret',
+          QWEN_SERVER_TOKEN: 'explicit-secret',
+        },
         cwd: '/workspace',
       },
       runtimeEnv,
@@ -458,8 +462,10 @@ describe('helpers', () => {
     });
     expect(withEnv.options.env?.['BASH_FUNC_bad']).toBeUndefined();
     expect(withEnv.options.env?.['SHELL_FUNC']).toBeUndefined();
+    expect(withEnv.options.env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(withoutEnv.options.env?.['PATH']).toBe('/runtime/bin');
     expect(withoutEnv.options.env?.['A2UI_TOKEN']).toBe('base');
+    expect(withoutEnv.options.env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('callA2uiAction connects, calls the action tool, and closes resources', async () => {

@@ -1355,7 +1355,9 @@ export async function runQwenServe(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
-  const daemonRuntimeBaseEnv = Object.freeze({ ...process.env });
+  let daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+    ...process.env,
+  });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -2053,6 +2055,16 @@ export async function runQwenServe(
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
     };
+    const pruneDaemonRuntimeBaseEnv = (keys: readonly string[]): void => {
+      if (keys.length === 0) return;
+      // Reload-owned keys must be absent from the base so the fresh
+      // workspace env/settings parse can add current values and drop removals.
+      const nextBaseEnv: NodeJS.ProcessEnv = { ...daemonRuntimeBaseEnv };
+      for (const key of keys) {
+        delete nextBaseEnv[key];
+      }
+      daemonRuntimeBaseEnv = Object.freeze(nextBaseEnv);
+    };
     const replaceRuntimeEffectiveEnv = (
       nextEnv: Readonly<NodeJS.ProcessEnv>,
     ): void => {
@@ -2440,6 +2452,10 @@ export async function runQwenServe(
             fresh.merged,
             workspace,
           );
+          pruneDaemonRuntimeBaseEnv([
+            ...result.updatedKeys,
+            ...result.removedKeys,
+          ]);
           let refreshedRuntimeEnv: ReturnType<
             EnvironmentRuntime['buildRuntimeEnvironment']
           >;

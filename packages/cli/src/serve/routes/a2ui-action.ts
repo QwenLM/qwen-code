@@ -34,6 +34,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { QWEN_SERVER_TOKEN_ENV } from '../channel-worker-env.js';
 import { snapshotProcessEnv } from '../env-snapshot.js';
 
 const A2UI_MIME = 'application/a2ui+json';
@@ -41,6 +42,9 @@ const A2UI_MIME = 'application/a2ui+json';
 // (a2ui.org/guides/a2ui_over_mcp).
 const ACTION_TOOL = 'action';
 const CALL_TIMEOUT_MS = 15_000;
+const SCRUBBED_STDIO_ENV_KEYS: ReadonlySet<string> = new Set([
+  QWEN_SERVER_TOKEN_ENV,
+]);
 
 export interface McpServerConfigLike {
   command?: string;
@@ -157,12 +161,17 @@ function buildStdioServerEnv(
     if (
       value !== undefined &&
       !key.startsWith('BASH_FUNC_') &&
-      !value.startsWith('()')
+      !value.startsWith('()') &&
+      !SCRUBBED_STDIO_ENV_KEYS.has(key)
     ) {
       env[key] = value;
     }
   }
-  return { ...env, ...(serverEnv ?? {}) };
+  const merged = { ...env, ...(serverEnv ?? {}) };
+  for (const key of SCRUBBED_STDIO_ENV_KEYS) {
+    delete merged[key];
+  }
+  return merged;
 }
 
 /** Exported for unit testing the MCP content normalization rules. */
