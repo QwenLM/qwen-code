@@ -26,6 +26,9 @@ export async function reloadPluginsRuntime(options: {
   config: Config;
   reloadCommands?: () => void | Promise<void>;
 }): Promise<ReloadPluginsSummary> {
+  if (options.config.isSafeMode()) {
+    throw new Error('Extension reload is disabled in safe mode.');
+  }
   const manager = options.config.getExtensionManager();
   await manager.refreshCache();
   await manager.refreshTools();
@@ -37,6 +40,8 @@ export async function refreshExtensionContentRuntime(options: {
   config: Config;
   reloadCommands?: () => void | Promise<void>;
 }): Promise<void> {
+  if (options.config.isSafeMode()) return;
+
   const manager = options.config.getExtensionManager();
   const errors: unknown[] = [];
   try {

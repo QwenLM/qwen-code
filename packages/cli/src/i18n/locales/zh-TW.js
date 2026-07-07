@@ -2167,4 +2167,6 @@ export default {
     '擴充內容重新整理失敗：{{message}}。執行 /reload-plugins 來套用更新。',
   'Failed to refresh extension content. Run /reload-plugins to apply updates.':
     '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '擴充重新載入未完成。執行 /reload-plugins 重試。',
 };

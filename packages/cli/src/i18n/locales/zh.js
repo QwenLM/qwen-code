@@ -2369,4 +2369,6 @@ export default {
     '扩展内容刷新失败：{{message}}。运行 /reload-plugins 来应用更新。',
   'Failed to refresh extension content. Run /reload-plugins to apply updates.':
     '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '扩展重新加载未完成。运行 /reload-plugins 重试。',
 };

@@ -17,7 +17,9 @@ export type ExtensionRuntimeRefreshConfig = Pick<
   | 'getSubagentManager'
   | 'getHookSystem'
   | 'refreshHierarchicalMemory'
->;
+> & {
+  reinitializeLsp?: Config['reinitializeLsp'];
+};
 
 export async function refreshExtensionRuntime(
   config: ExtensionRuntimeRefreshConfig | undefined,
@@ -30,6 +32,14 @@ export async function refreshExtensionRuntime(
   // list). A failure here is user-visible because extension MCP tools will be
   // unavailable, so let callers surface it.
   await config.reinitializeMcpServers(config.getSettingsMcpServers());
+  const lspResult = await config.reinitializeLsp?.();
+  const failedLspServers = lspResult?.reconcile.failed ?? [];
+  let lspReloadError: unknown;
+  if (failedLspServers.length > 0) {
+    lspReloadError = new Error(
+      `LSP reload partially failed: ${failedLspServers.join(', ')}`,
+    );
+  }
 
   // Skills, subagents, and hooks refresh in parallel. Use allSettled (rather
   // than Promise.all) so a rejection from one leg does not prevent the other
@@ -78,5 +88,8 @@ export async function refreshExtensionRuntime(
 
   if (hookReloadError) {
     throw hookReloadError;
+  }
+  if (lspReloadError) {
+    throw lspReloadError;
   }
 }

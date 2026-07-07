@@ -89,10 +89,12 @@ export class ExtensionRefreshState {
   }
 
   markExtensionsReloadFailed(reason = EXTENSION_RELOAD_FAILED_REASON): void {
+    const changedDuringReload = this.changedDuringReload;
+    const contentChangedDuringReload = this.contentChangedDuringReload;
     this.extensionRefreshNeeded = true;
     this.reloadInProgress = false;
-    this.changedDuringReload = false;
-    this.contentChangedDuringReload = false;
+    this.changedDuringReload = changedDuringReload;
+    this.contentChangedDuringReload = contentChangedDuringReload;
     this.suppressUntil = 0;
     this.events.emit(AppEvent.ExtensionsReloaded);
     this.events.emit(AppEvent.ExtensionRefreshNeeded, reason);
@@ -100,6 +102,10 @@ export class ExtensionRefreshState {
 
   needsExtensionRefresh(): boolean {
     return this.extensionRefreshNeeded;
+  }
+
+  isReloadInProgress(): boolean {
+    return this.reloadInProgress;
   }
 
   beginSuppression(onSettle?: () => void): () => void {

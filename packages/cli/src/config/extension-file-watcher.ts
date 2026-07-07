@@ -18,11 +18,7 @@ import { ExtensionRefreshState } from './extension-refresh-state.js';
 
 const debugLogger = createDebugLogger('EXTENSION_FILE_WATCHER');
 
-const TOP_LEVEL_FILES = new Set([
-  'extension-enablement.json',
-  'extension-preferences.json',
-  'marketplaces.json',
-]);
+const TOP_LEVEL_FILES = new Set(['extension-enablement.json']);
 
 const EXTENSION_FILES = new Set([
   'qwen-extension.json',
@@ -43,7 +39,7 @@ export class ExtensionFileWatcher {
   private bootstrapWatcher?: FSWatcher;
   private mutationListenerDisposer?: () => void;
   private mutationSuppressionEnds = new Map<number, () => void>();
-  private contextFiles = new Set<string>();
+  private staleFiles = new Set<string>();
   private watching = false;
   private watchGeneration = 0;
 
@@ -58,7 +54,7 @@ export class ExtensionFileWatcher {
     this.watching = true;
     const generation = ++this.watchGeneration;
     this.subscribeExtensionManagerMutations();
-    this.contextFiles = this.getContextFiles();
+    this.staleFiles = this.getStaleFiles();
     const roots = this.getWatchRoots();
 
     if (roots.length > 0) {
@@ -144,7 +140,7 @@ export class ExtensionFileWatcher {
     return [...roots];
   }
 
-  private getContextFiles(): Set<string> {
+  private getStaleFiles(): Set<string> {
     const files = new Set<string>();
     for (const extension of this.config.getActiveExtensions()) {
       for (const filePath of extension.contextFiles) {
@@ -160,8 +156,31 @@ export class ExtensionFileWatcher {
       for (const name of names) {
         files.add(path.resolve(extension.path, name));
       }
+      this.addManifestFileReference(
+        files,
+        extension.path,
+        extension.config.hooks,
+      );
+      this.addManifestFileReference(
+        files,
+        extension.path,
+        extension.config.lspServers,
+      );
     }
     return files;
+  }
+
+  private addManifestFileReference(
+    files: Set<string>,
+    extensionPath: string,
+    value: unknown,
+  ): void {
+    if (typeof value !== 'string') return;
+    files.add(
+      path.isAbsolute(value)
+        ? path.resolve(value)
+        : path.resolve(extensionPath, value),
+    );
   }
 
   private watchExtensionsParent(): void {
@@ -196,7 +215,7 @@ export class ExtensionFileWatcher {
     event: WatchEvent,
     changedPath: string,
   ): RefreshAction | false {
-    if (this.contextFiles.has(changedPath)) {
+    if (this.staleFiles.has(changedPath)) {
       return 'stale';
     }
     if (changedPath === path.resolve(this.extensionsDir)) {

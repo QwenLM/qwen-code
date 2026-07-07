@@ -17,6 +17,7 @@ describe('reloadPluginsRuntime', () => {
     const refreshTools = vi.fn();
     const reloadCommands = vi.fn();
     const config = {
+      isSafeMode: () => false,
       getExtensionManager: () => ({
         refreshCache,
         refreshTools,
@@ -63,6 +64,27 @@ describe('reloadPluginsRuntime', () => {
       lspServerCount: 1,
     });
   });
+
+  it('rejects without refreshing extensions in safe mode', async () => {
+    const refreshCache = vi.fn();
+    const refreshTools = vi.fn();
+    const reloadCommands = vi.fn();
+    const config = {
+      isSafeMode: () => true,
+      getExtensionManager: () => ({
+        refreshCache,
+        refreshTools,
+      }),
+    } as unknown as Config;
+
+    await expect(
+      reloadPluginsRuntime({ config, reloadCommands }),
+    ).rejects.toThrow('Extension reload is disabled in safe mode.');
+
+    expect(refreshCache).not.toHaveBeenCalled();
+    expect(refreshTools).not.toHaveBeenCalled();
+    expect(reloadCommands).not.toHaveBeenCalled();
+  });
 });
 
 describe('refreshExtensionContentRuntime', () => {
@@ -72,6 +94,7 @@ describe('refreshExtensionContentRuntime', () => {
     const refreshSubagentCache = vi.fn();
     const reloadCommands = vi.fn();
     const config = {
+      isSafeMode: () => false,
       getExtensionManager: () => ({ refreshCache }),
       getSkillManager: () => ({ refreshCache: refreshSkillCache }),
       getSubagentManager: () => ({ refreshCache: refreshSubagentCache }),
@@ -93,6 +116,7 @@ describe('refreshExtensionContentRuntime', () => {
     const refreshSubagentCache = vi.fn();
     const reloadCommands = vi.fn();
     const config = {
+      isSafeMode: () => false,
       getExtensionManager: () => ({ refreshCache }),
       getSkillManager: () => ({ refreshCache: refreshSkillCache }),
       getSubagentManager: () => ({ refreshCache: refreshSubagentCache }),
@@ -113,6 +137,7 @@ describe('refreshExtensionContentRuntime', () => {
     const refreshSkillCache = vi.fn();
     const reloadCommands = vi.fn();
     const config = {
+      isSafeMode: () => false,
       getExtensionManager: () => ({ refreshCache }),
       getSkillManager: () => ({ refreshCache: refreshSkillCache }),
       getSubagentManager: () => undefined,
@@ -125,5 +150,21 @@ describe('refreshExtensionContentRuntime', () => {
     expect(refreshCache).toHaveBeenCalledOnce();
     expect(refreshSkillCache).toHaveBeenCalledOnce();
     expect(reloadCommands).toHaveBeenCalledOnce();
+  });
+
+  it('skips content refresh in safe mode', async () => {
+    const refreshCache = vi.fn();
+    const reloadCommands = vi.fn();
+    const config = {
+      isSafeMode: () => true,
+      getExtensionManager: () => ({ refreshCache }),
+    } as unknown as Config;
+
+    await expect(
+      refreshExtensionContentRuntime({ config, reloadCommands }),
+    ).resolves.toBeUndefined();
+
+    expect(refreshCache).not.toHaveBeenCalled();
+    expect(reloadCommands).not.toHaveBeenCalled();
   });
 });

@@ -200,6 +200,39 @@ describe('extension refresh state', () => {
     }
   });
 
+  it('preserves changes that arrive before a reload failure', () => {
+    const staleListener = vi.fn();
+    const contentListener = vi.fn();
+    refreshState.on(AppEvent.ExtensionRefreshNeeded, staleListener);
+    refreshState.on(AppEvent.ExtensionContentChanged, contentListener);
+
+    try {
+      refreshState.notifyExtensionsReloadStarted();
+      expect(refreshState.isReloadInProgress()).toBe(true);
+      expect(refreshState.markExtensionContentChanged('content changed')).toBe(
+        false,
+      );
+      expect(refreshState.markExtensionsChanged('manifest changed')).toBe(
+        false,
+      );
+
+      refreshState.markExtensionsReloadFailed('reload failed');
+      expect(refreshState.isReloadInProgress()).toBe(false);
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+      expect(staleListener).toHaveBeenCalledWith('reload failed');
+
+      refreshState.clearExtensionsChanged();
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+      expect(staleListener).toHaveBeenCalledWith(
+        'extension files changed during reload',
+      );
+      expect(contentListener).not.toHaveBeenCalled();
+    } finally {
+      refreshState.off(AppEvent.ExtensionRefreshNeeded, staleListener);
+      refreshState.off(AppEvent.ExtensionContentChanged, contentListener);
+    }
+  });
+
   it('settles only after all overlapping suppressions end', () => {
     const onSettle = vi.fn();
     const endFirst = refreshState.beginSuppression(onSettle);

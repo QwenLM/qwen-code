@@ -80,6 +80,25 @@ import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
+interface RuntimeLspReinitializeResult {
+  reconcile: {
+    added: string[];
+    removed: string[];
+    restarted: string[];
+    unchanged: string[];
+    failed: string[];
+  };
+  skipped: Array<{ name: string }>;
+}
+
+interface RuntimeLspClient {
+  reinitialize?: () => Promise<RuntimeLspReinitializeResult>;
+}
+
+interface RuntimeLspConfig {
+  reinitializeLsp?: () => Promise<RuntimeLspReinitializeResult | undefined>;
+}
+
 function clearCorruptionEnvVars(): void {
   delete process.env[ENV_CORRUPTED_PATH];
   delete process.env[ENV_WAS_RECOVERED];
@@ -618,9 +637,10 @@ export async function main() {
     registerLspHotReload(config, registerCleanup);
 
     const extensionRefreshState = new ExtensionRefreshState();
-    const extensionFileWatcher = isBareMode(argv.bare)
-      ? undefined
-      : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
+    const extensionFileWatcher =
+      isBareMode(argv.bare) || config.isSafeMode()
+        ? undefined
+        : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();
     if (extensionFileWatcher) {
       const restartExtensionWatcher = () =>
@@ -1092,9 +1112,15 @@ export function registerLspHotReload(
   config: Config,
   registerCleanup: (fn: () => void | Promise<void>) => void,
 ): void {
+  const lspClient = config.getLspClient?.() as
+    | (ReturnType<Config['getLspClient']> & RuntimeLspClient)
+    | undefined;
+  const runtimeConfig = config as Config & RuntimeLspConfig;
+  const reinitializeLsp = runtimeConfig.reinitializeLsp;
   if (
     config.isLspEnabled?.() !== true ||
-    !config.getLspClient?.()?.reinitialize
+    !lspClient?.reinitialize ||
+    !reinitializeLsp
   ) {
     return;
   }
@@ -1113,7 +1139,7 @@ export function registerLspHotReload(
     );
     let errorReported = false;
     try {
-      const result = await config.reinitializeLsp();
+      const result = await reinitializeLsp();
       if (result) {
         const failedServers = getRuntimeReloadFailedNames(result.reconcile);
         debugLogger.info(

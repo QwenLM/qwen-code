@@ -163,6 +163,22 @@ describe('ExtensionFileWatcher', () => {
     expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
   });
 
+  it('does not mark preferences or marketplace metadata as stale', () => {
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+
+    fireAllEvent(0, 'change', `${extensionsDir}/extension-preferences.json`);
+    fireAllEvent(0, 'change', `${extensionsDir}/marketplaces.json`);
+
+    expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
+    expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
+  });
+
   it('auto-refreshes command, skill, and agent content changes', () => {
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
@@ -220,6 +236,32 @@ describe('ExtensionFileWatcher', () => {
 
     expect(refreshState.markExtensionsChanged).toHaveBeenCalledTimes(2);
     expect(refreshState.markExtensionContentChanged).toHaveBeenCalledOnce();
+  });
+
+  it('marks refresh needed for file-backed hook and LSP config changes', () => {
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([
+        {
+          path: `${extensionsDir}/alpha`,
+          config: {
+            hooks: 'config/hooks.json',
+            lspServers: '/tmp/alpha-lsp.json',
+          },
+          installMetadata: undefined,
+          contextFiles: [],
+        },
+      ]),
+      extensionsDir,
+      refreshState,
+    );
+    watcher.startWatching();
+
+    fireAllEvent(0, 'change', `${extensionsDir}/alpha/config/hooks.json`);
+    fireAllEvent(0, 'change', '/tmp/alpha-lsp.json');
+
+    expect(refreshState.markExtensionsChanged).toHaveBeenCalledTimes(2);
+    expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
   });
 
   it('does not watch inactive linked extension sources or context files', () => {

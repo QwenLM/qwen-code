@@ -304,6 +304,9 @@ export const useSlashCommandProcessor = (
         }
         refreshPasses++;
         extensionContentRefreshPendingRef.current = false;
+        if (activeExtensionRefreshState.isReloadInProgress()) {
+          return;
+        }
         if (activeExtensionRefreshState.needsExtensionRefresh()) {
           return;
         }

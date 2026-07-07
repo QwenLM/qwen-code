@@ -2119,4 +2119,6 @@ export default {
     'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
   'Failed to refresh extension content. Run /reload-plugins to apply updates.':
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
 };
