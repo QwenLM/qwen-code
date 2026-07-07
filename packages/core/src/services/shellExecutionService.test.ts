@@ -147,6 +147,20 @@ const EXPECTED_MERGED_WINDOWS_PATH =
 
 let originalProcessEnv: NodeJS.ProcessEnv;
 
+async function withoutGitPagerEnv(run: () => Promise<unknown>): Promise<void> {
+  const originalGitPager = process.env['GIT_PAGER'];
+  delete process.env['GIT_PAGER'];
+  try {
+    await run();
+  } finally {
+    if (originalGitPager === undefined) {
+      delete process.env['GIT_PAGER'];
+    } else {
+      process.env['GIT_PAGER'] = originalGitPager;
+    }
+  }
+}
+
 const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
   const lines = Array.isArray(text) ? text : text.split('\n');
   const expected: AnsiOutput = Array.from(
@@ -3224,10 +3238,12 @@ describe('ShellExecutionService child_process fallback', () => {
         shell: 'cmd',
       });
 
-      await simulateExecutionWithConfig(
-        'echo hello',
-        (cp) => cp.emit('exit', 0, null),
-        shellExecutionConfigWithoutPager,
+      await withoutGitPagerEnv(() =>
+        simulateExecutionWithConfig(
+          'echo hello',
+          (cp) => cp.emit('exit', 0, null),
+          shellExecutionConfigWithoutPager,
+        ),
       );
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
@@ -3248,7 +3264,9 @@ describe('ShellExecutionService child_process fallback', () => {
         shell: 'cmd',
       });
 
-      await simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null));
+      await withoutGitPagerEnv(() =>
+        simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null)),
+      );
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('cat');

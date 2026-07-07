@@ -44,6 +44,15 @@ describe('shellPagerEnv', () => {
     });
   });
 
+  it('treats an empty pager as an explicit request to disable pager env values', () => {
+    expect(
+      getShellPagerEnv('', { includeGitPager: true, platform: 'linux' }),
+    ).toEqual({
+      PAGER: '',
+      GIT_PAGER: '',
+    });
+  });
+
   it('preserves explicit pager configuration on Windows', () => {
     expect(
       getShellPagerEnv('more', { includeGitPager: true, platform: 'win32' }),

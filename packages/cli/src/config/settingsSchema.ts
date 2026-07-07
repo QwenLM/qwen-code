@@ -2191,7 +2191,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as string | undefined,
             description:
-              'The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows.',
+              'The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.',
             showInDialog: false,
           },
           showColor: {

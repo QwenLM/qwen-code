@@ -1011,7 +1011,7 @@
               "default": true
             },
             "pager": {
-              "description": "The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows.",
+              "description": "The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.",
               "type": "string"
             },
             "showColor": {
