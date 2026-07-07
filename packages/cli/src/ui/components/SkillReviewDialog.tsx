@@ -24,8 +24,11 @@ import {
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import type { PendingSkillView } from '../contexts/UIStateContext.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 type Choice = 'keep' | 'discard' | 'keepAll' | 'discardAll' | 'turnOff';
+
+const debugLogger = createDebugLogger('SKILL_REVIEW_DIALOG');
 
 /** How many lines of the staged SKILL.md to show before truncating. */
 const PREVIEW_MAX_HEIGHT = 12;
@@ -193,8 +196,12 @@ export const SkillReviewDialog = ({
           // editor exits (below) still works.
         }
       })
-      .catch(() => {
-        if (!cancelled) setPreview({ status: 'error' });
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        // ENOENT / EACCES / EIO all render the same "Preview unavailable" —
+        // keep the underlying cause reachable via the debug log.
+        debugLogger.warn(`skill preview read failed for ${stagedPath}:`, err);
+        setPreview({ status: 'error' });
       });
     return () => {
       cancelled = true;
@@ -420,7 +427,11 @@ export const SkillReviewDialog = ({
 
       {actionError ? (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{actionError}</Text>
+          {/* Error messages can embed the staged path, whose basename derives
+              from the model-generated skill name — sanitize like the rest. */}
+          <Text color={theme.status.error}>
+            {sanitizeMultilineForDisplay(actionError)}
+          </Text>
         </Box>
       ) : null}
 

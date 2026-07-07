@@ -5416,6 +5416,9 @@ export class Config {
    * settings, so persisting a settings change alone would not take effect until
    * the next launch; the skill-review scheduler reads `getAutoSkillEnabled()`
    * live, so flipping this stops (or resumes) reviews immediately.
+   *
+   * @remarks `getAutoSkillEnabled()` additionally gates on bare/safe mode, so
+   * it can still return false after `setAutoSkillEnabled(true)`.
    */
   setAutoSkillEnabled(enabled: boolean): void {
     this.enableAutoSkill = enabled;

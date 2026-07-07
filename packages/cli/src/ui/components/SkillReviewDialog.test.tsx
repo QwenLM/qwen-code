@@ -511,6 +511,20 @@ describe('SkillReviewDialog', () => {
     expect(launchEditor).toHaveBeenCalledWith(skills[0]!.stagedManifestPath);
   });
 
+  it('Ctrl+O and Cmd+O do not launch the editor', () => {
+    renderDialog(skills);
+    pressKey('o', { ctrl: true });
+    pressKey('o', { meta: true });
+    expect(launchEditor).not.toHaveBeenCalled();
+  });
+
+  it('Esc dismisses the dialog (decide later)', () => {
+    const onDismiss = vi.fn();
+    renderDialog(skills, { onDismiss });
+    pressKey('escape');
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes the preview with the saved edits after the editor closes', async () => {
     const editedPath = skills[0]!.stagedManifestPath;
     // Simulate the user editing and saving the file inside the editor.
