@@ -139,6 +139,22 @@ describe('channel webhook routes', () => {
     expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
   });
 
+  it('rejects inherited target refs like __proto__', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: '__proto__',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(404);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
   it.each(['eventType', 'targetRef', 'title'])(
     'rejects missing required string field %s',
     async (field) => {

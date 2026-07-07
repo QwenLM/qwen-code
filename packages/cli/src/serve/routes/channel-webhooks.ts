@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Application, Request } from 'express';
 import type {
   ChannelWebhookConfig,
@@ -31,18 +32,18 @@ export function registerChannelWebhookRoutes(
       return;
     }
 
-    const sourceConfig =
-      deps.channelsConfig[channelName]?.webhooks?.sources[source];
-    if (!sourceConfig) {
+    const sources = deps.channelsConfig[channelName]?.webhooks?.sources;
+    if (!sources || !Object.hasOwn(sources, source)) {
       res.status(404).json({ error: 'Unknown channel webhook source' });
       return;
     }
+    const sourceConfig = sources[source];
 
     const secret = sourceConfig.secret;
     if (
       typeof secret !== 'string' ||
       secret.length === 0 ||
-      req.get('x-qwen-webhook-secret') !== secret
+      !matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)
     ) {
       res.status(401).json({ error: 'Invalid webhook secret' });
       return;
@@ -62,7 +63,7 @@ export function registerChannelWebhookRoutes(
       return;
     }
 
-    if (!sourceConfig.targets[targetRef]) {
+    if (!Object.hasOwn(sourceConfig.targets, targetRef)) {
       res.status(404).json({ error: 'Unknown channel webhook target' });
       return;
     }
@@ -110,6 +111,19 @@ function readRequiredBodyString(
     return undefined;
   }
   return value;
+}
+
+function matchesWebhookSecret(
+  candidate: string | undefined,
+  expected: string,
+): boolean {
+  if (typeof candidate !== 'string') {
+    return false;
+  }
+
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const candidateDigest = createHash('sha256').update(candidate).digest();
+  return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
 function readPayload(body: Record<string, unknown>): Record<string, unknown> {

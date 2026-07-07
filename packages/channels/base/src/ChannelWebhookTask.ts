@@ -43,17 +43,17 @@ export function resolveChannelWebhookTarget(
   source: string,
   targetRef: string,
 ): SessionTarget {
-  const sourceConfig = config.sources[source];
-  if (!sourceConfig) {
+  if (!Object.hasOwn(config.sources, source)) {
     throw new Error(`Unknown webhook source "${source}".`);
   }
+  const sourceConfig = config.sources[source];
 
-  const targetConfig = sourceConfig.targets[targetRef];
-  if (!targetConfig) {
+  if (!Object.hasOwn(sourceConfig.targets, targetRef)) {
     throw new Error(
       `Unknown webhook target "${targetRef}" for source "${source}".`,
     );
   }
+  const targetConfig = sourceConfig.targets[targetRef];
 
   const target: SessionTarget = {
     channelName,

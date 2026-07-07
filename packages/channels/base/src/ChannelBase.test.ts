@@ -8464,6 +8464,19 @@ describe('ChannelBase', () => {
         ).toThrow('Unknown webhook target "random" for source "github-ci".');
       });
 
+      it('rejects inherited webhook target refs like __proto__', () => {
+        expect(() =>
+          resolveChannelWebhookTarget(
+            'dingtalk-main',
+            config,
+            'github-ci',
+            '__proto__',
+          ),
+        ).toThrow(
+          'Unknown webhook target "__proto__" for source "github-ci".',
+        );
+      });
+
       it('builds a bounded unattended webhook prompt', () => {
         const target = resolveChannelWebhookTarget(
           'dingtalk-main',
