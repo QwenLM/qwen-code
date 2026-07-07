@@ -79,6 +79,7 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
+  source?: string;
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
