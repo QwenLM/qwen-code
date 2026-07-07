@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import {
@@ -36,11 +37,16 @@ vi.mock('./indexer.js', () => ({
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
 
-function createConfig(projectRoot: string, managed = true): Config {
+function createConfig(
+  projectRoot: string,
+  managed = true,
+  overrides: Partial<Config> = {},
+): Config {
   return {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
+    ...overrides,
   } as unknown as Config;
 }
 
@@ -170,6 +176,56 @@ describe('remember memory helper', () => {
     expect(params.taskPrompt).toContain('Remember the project uses vitest.');
     expect(params.taskPrompt).toContain('<user-content>');
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('lets managed-memory writes bypass base ask rules', async () => {
+    const touched = path.join(getUserAutoMemoryRoot(), 'user.md');
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(true),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      evaluate: vi.fn().mockResolvedValue('ask'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved user memory.',
+      filesTouched: [touched],
+      filesWritten: [touched],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot, true, {
+        getPermissionManager: () => basePm as PermissionManager,
+      }),
+      projectRoot,
+      content: 'Remember the user prefers quiet output.',
+      contextMode: 'clean',
+    });
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+    };
+    const pm = params.config.getPermissionManager() as PermissionManager;
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: touched,
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(projectRoot, 'README.md'),
+      }),
+    ).resolves.toBe('deny');
   });
 
   it('classifies only successful memory writes', async () => {

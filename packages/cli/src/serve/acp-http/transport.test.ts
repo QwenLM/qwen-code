@@ -486,7 +486,12 @@ class FakeBridge {
     return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
   }
   async runWorkspaceMemoryForget() {
-    return { summary: 'forgot', removedEntries: [], touchedTopics: [] };
+    return {
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    };
   }
   async runWorkspaceMemoryDream() {
     return { summary: 'dreamed', touchedTopics: [], dedupedEntries: 0 };

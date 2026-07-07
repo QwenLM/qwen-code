@@ -17,9 +17,19 @@ import {
   parseAutoMemoryEntries,
   renderAutoMemoryBody,
 } from './entries.js';
-import { rebuildManagedAutoMemoryIndex } from './indexer.js';
-import { getAutoMemoryMetadataPath } from './paths.js';
-import { scanAutoMemoryTopicDocuments } from './scan.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
+} from './indexer.js';
+import {
+  getAutoMemoryMetadataPath,
+  isAutoMemPath,
+  isUserAutoMemPath,
+} from './paths.js';
+import {
+  scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
+} from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
 
@@ -36,6 +46,7 @@ export interface AutoMemoryForgetResult {
   query: string;
   removedEntries: AutoMemoryForgetMatch[];
   touchedTopics: AutoMemoryType[];
+  touchedScopes: AutoMemoryStorageScope[];
   systemMessage?: string;
 }
 
@@ -48,9 +59,12 @@ export interface AutoMemoryForgetSelectionResult {
 interface IndexedForgetCandidate extends AutoMemoryForgetMatch {
   id: string;
   entryIndex: number;
+  storageScope: AutoMemoryStorageScope;
   why?: string;
   howToApply?: string;
 }
+
+export type AutoMemoryStorageScope = 'user' | 'project';
 
 const FORGET_SELECTION_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -80,27 +94,38 @@ async function listIndexedForgetCandidates(
   abortSignal?: AbortSignal,
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scanUserAutoMemoryTopicDocuments(),
+  ]);
   abortSignal?.throwIfAborted();
   const candidates: IndexedForgetCandidate[] = [];
 
-  for (const doc of docs) {
+  for (const { docs, storageScope } of [
+    { docs: userDocs, storageScope: 'user' as const },
+    { docs: projectDocs, storageScope: 'project' as const },
+  ]) {
     abortSignal?.throwIfAborted();
-    const entries = parseAutoMemoryEntries(doc.body);
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      candidates.push({
-        // Use a stable per-entry ID so the model can target individual entries
-        // in multi-entry files without accidentally removing siblings.
-        id:
-          entries.length === 1 ? doc.relativePath : `${doc.relativePath}:${i}`,
-        topic: doc.type,
-        summary: entry.summary,
-        filePath: doc.filePath,
-        entryIndex: i,
-        why: entry.why,
-        howToApply: entry.howToApply,
-      });
+    for (const doc of docs) {
+      abortSignal?.throwIfAborted();
+      const entries = parseAutoMemoryEntries(doc.body);
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const entryId =
+          entries.length === 1 ? doc.relativePath : `${doc.relativePath}:${i}`;
+        candidates.push({
+          // Prefix the storage scope so same relative paths in user/project
+          // memory never collide in model-selected ids.
+          id: `${storageScope}:${entryId}`,
+          storageScope,
+          topic: doc.type,
+          summary: entry.summary,
+          filePath: doc.filePath,
+          entryIndex: i,
+          why: entry.why,
+          howToApply: entry.howToApply,
+        });
+      }
     }
   }
 
@@ -129,6 +154,7 @@ function buildForgetSelectionPrompt(
       [
         `Candidate ${index + 1}`,
         `id: ${candidate.id}`,
+        `scope: ${candidate.storageScope}`,
         `topic: ${candidate.topic}`,
         `summary: ${candidate.summary}`,
         `why: ${candidate.why ?? '(none)'}`,
@@ -294,14 +320,22 @@ export async function forgetManagedAutoMemoryMatches(
       query: '',
       removedEntries: [],
       touchedTopics: [],
+      touchedScopes: [],
       systemMessage: undefined,
     };
   }
-  await ensureAutoMemoryScaffold(projectRoot, now);
+  if (
+    matches.some(
+      (match) => classifyMemoryScope(match.filePath, projectRoot) === 'project',
+    )
+  ) {
+    await ensureAutoMemoryScaffold(projectRoot, now);
+  }
   options.abortSignal?.throwIfAborted();
 
   const removedEntries: AutoMemoryForgetMatch[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
+  const touchedScopes = new Set<AutoMemoryStorageScope>();
 
   // Group matches by file so we can do per-entry removal rather than
   // blindly deleting entire files (which would destroy unrelated entries in
@@ -326,6 +360,7 @@ export async function forgetManagedAutoMemoryMatches(
         await fs.unlink(filePath);
         removedEntries.push(...fileMatches);
         for (const m of fileMatches) touchedTopics.add(m.topic);
+        touchedScopes.add(classifyMemoryScope(filePath, projectRoot));
         continue;
       }
 
@@ -390,6 +425,7 @@ export async function forgetManagedAutoMemoryMatches(
       for (const m of removedFileEntries) {
         touchedTopics.add(m.topic);
       }
+      touchedScopes.add(classifyMemoryScope(filePath, projectRoot));
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(
@@ -400,17 +436,22 @@ export async function forgetManagedAutoMemoryMatches(
     }
   }
 
-  if (touchedTopics.size > 0) {
+  if (touchedScopes.has('project')) {
     options.abortSignal?.throwIfAborted();
     await bumpMetadata(projectRoot, now);
     options.abortSignal?.throwIfAborted();
     await rebuildManagedAutoMemoryIndex(projectRoot);
+  }
+  if (touchedScopes.has('user')) {
+    options.abortSignal?.throwIfAborted();
+    await rebuildUserAutoMemoryIndex();
   }
 
   return {
     query: '',
     removedEntries,
     touchedTopics: [...touchedTopics],
+    touchedScopes: sortTouchedScopes(touchedScopes),
     systemMessage:
       removedEntries.length > 0
         ? `Managed auto-memory forgot ${removedEntries.length} entr${removedEntries.length === 1 ? 'y' : 'ies'} from: ${[...touchedTopics].map((topic) => `${topic}/`).join(', ')}`
@@ -427,7 +468,12 @@ export async function forgetManagedAutoMemoryEntries(
   options.abortSignal?.throwIfAborted();
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
-    return { query: trimmedQuery, removedEntries: [], touchedTopics: [] };
+    return {
+      query: trimmedQuery,
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    };
   }
 
   const selection = await selectManagedAutoMemoryForgetCandidates(
@@ -442,4 +488,26 @@ export async function forgetManagedAutoMemoryEntries(
     { abortSignal: options.abortSignal },
   );
   return { ...result, query: trimmedQuery };
+}
+
+function classifyMemoryScope(
+  filePath: string,
+  projectRoot: string,
+): AutoMemoryStorageScope {
+  if (isUserAutoMemPath(filePath)) {
+    return 'user';
+  }
+  if (isAutoMemPath(filePath, projectRoot)) {
+    return 'project';
+  }
+  // Direct callers historically supplied project-memory matches without going
+  // through the scanner. Preserve that behavior for compatibility.
+  return 'project';
+}
+
+function sortTouchedScopes(
+  scopes: Iterable<AutoMemoryStorageScope>,
+): AutoMemoryStorageScope[] {
+  const unique = new Set(scopes);
+  return (['user', 'project'] as const).filter((scope) => unique.has(scope));
 }
