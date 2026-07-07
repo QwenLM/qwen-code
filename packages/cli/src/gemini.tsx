@@ -49,6 +49,7 @@ import {
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
+import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
 import {
   cleanupCheckpoints,
   registerCleanup,
@@ -73,7 +74,6 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { preconnectApi } from './utils/apiPreconnect.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 
 const debugLogger = createDebugLogger('STARTUP');
@@ -687,20 +687,7 @@ export async function main() {
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
-    // Startup optimization: preconnect API to warm TCP+TLS connection
-    // Fires early; cost is one HEAD request even for local-only commands
-    try {
-      const modelsConfig = config.getModelsConfig();
-      const authType = modelsConfig.getCurrentAuthType();
-      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
-      const proxy = config.getProxy();
-      preconnectApi(authType, { resolvedBaseUrl, proxy });
-    } catch (error) {
-      // If we can't get authType, skip preconnect - it's optional optimization
-      debugLogger.debug(
-        `Preconnect skipped due to error getting authType: ${error}`,
-      );
-    }
+    startEarlyStartupPrefetches(config);
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -764,7 +751,16 @@ export async function main() {
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
     const { initializeApp } = await import('./core/initializer.js');
-    const initializationResult = await initializeApp(config, settings);
+    let input = config.getQuestion();
+    const hasRemoteInput = Boolean(config.getInputFile?.());
+    const deferIdeConnection =
+      config.isInteractive() &&
+      !config.getExperimentalZedIntegration() &&
+      !input &&
+      !hasRemoteInput;
+    const initializationResult = await initializeApp(config, settings, {
+      deferIdeConnection,
+    });
     profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
@@ -775,26 +771,6 @@ export async function main() {
       process.exit(0);
     }
 
-    // Background housekeeping: file-history cleanup and (future) other
-    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
-    // don't create the file-history dirs this cleans, so they skip.
-    // Dynamic import keeps --help / one-shot --prompt paths from loading
-    // this code at all. Timers inside are .unref()'d so they never block
-    // process exit.
-    if (config.isInteractive()) {
-      // .catch() is intentional: a dynamic-import or module-init failure
-      // (theoretically near-impossible — the module has no top-level side
-      // effects — but defense in depth matches the runPass try/catch in
-      // scheduler.ts) becomes a swallowed log instead of an unhandled
-      // promise rejection that crashes the REPL.
-      void import('./utils/housekeeping/scheduler.js')
-        .then((m) => m.startBackgroundHousekeeping(config, settings))
-        .catch((err) => {
-          debugLogger.warn('failed to start background housekeeping:', err);
-        });
-    }
-
-    let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
         ...(config.isSafeMode()
@@ -872,6 +848,9 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        {
+          postRenderConnectIde: deferIdeConnection,
+        },
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.

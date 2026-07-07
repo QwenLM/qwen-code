@@ -928,6 +928,11 @@ export interface ConfigParameters {
   accessibility?: AccessibilitySettings;
   showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
+  /**
+   * Delay SDK startup for interactive render paths. Telemetry settings still
+   * remain readable from Config; only the global SDK side effect is deferred.
+   */
+  deferTelemetryInitialization?: boolean;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
@@ -1582,6 +1587,7 @@ export class Config {
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: ResolvedTelemetrySettings;
+  private readonly telemetryInitializationDeferred: boolean;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -1822,6 +1828,8 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.telemetryInitializationDeferred =
+      params.deferTelemetryInitialization ?? false;
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
@@ -1986,7 +1994,10 @@ export class Config {
       onModelChange: this.handleModelChange.bind(this),
     });
 
-    if (this.telemetrySettings.enabled) {
+    if (
+      this.telemetrySettings.enabled &&
+      !this.telemetryInitializationDeferred
+    ) {
       initializeTelemetry(this);
     }
 
@@ -5000,6 +5011,10 @@ export class Config {
 
   getTelemetryEnabled(): boolean {
     return this.telemetrySettings.enabled ?? false;
+  }
+
+  isTelemetryInitializationDeferred(): boolean {
+    return this.telemetryInitializationDeferred;
   }
 
   getTelemetryLogPromptsEnabled(): boolean {

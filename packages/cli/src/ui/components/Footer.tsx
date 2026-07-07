@@ -97,6 +97,16 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+    </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+    <Text color={theme.status.warning}>
+      {t('IDE connection unavailable: {{message}}', {
+        message: uiState.startupIdeConnectionStatus.message,
+      })}
+    </Text>
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />

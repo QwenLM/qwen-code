@@ -82,6 +82,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    startupIdeConnectionStatus: { state: 'idle' },
     isConfigInitialized: true,
     ...overrides,
   }) as UIState;
@@ -145,6 +146,48 @@ describe('<Footer />', () => {
   it('hides the "workflow active" indicator by default', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).not.toContain('workflow active');
+  });
+
+  it('shows deferred IDE connection progress', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connecting' },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connecting... context may be unavailable',
+    );
+  });
+
+  it('shows deferred IDE connection failures', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: {
+          state: 'failed',
+          message: 'ide_connect timed out after 10000ms',
+        },
+      }),
+    );
+
+    expect(lastFrame()).toContain(
+      'IDE connection unavailable: ide_connect timed out after 10000ms',
+    );
+  });
+
+  it('hides the deferred IDE status after connection succeeds', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        startupIdeConnectionStatus: { state: 'connected' },
+      }),
+    );
+
+    expect(lastFrame()).not.toContain('IDE connecting');
+    expect(lastFrame()).not.toContain('IDE connection unavailable');
+    expect(lastFrame()).toContain('? for shortcuts');
   });
 
   it('shows the active scheduled task count', () => {
