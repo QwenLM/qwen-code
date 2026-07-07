@@ -869,6 +869,9 @@ describe('startCommand.handler', () => {
           clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
         },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
       }),
     );
   });
@@ -904,6 +907,9 @@ describe('startCommand.handler', () => {
           clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
         },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
       }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(

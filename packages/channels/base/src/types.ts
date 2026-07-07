@@ -209,6 +209,18 @@ export interface ChannelMemoryCallbacks {
   ): Promise<ChannelMemoryWriteResult>;
 }
 
+export interface ChannelMemoryIntentClassifierResult {
+  intent: 'remember' | 'list' | 'clear_all' | 'none';
+  memory?: string;
+  confidence: number;
+}
+
+export interface ChannelMemoryIntentClassifier {
+  classifyChannelMemoryIntent(
+    text: string,
+  ): Promise<ChannelMemoryIntentClassifierResult>;
+}
+
 /**
  * A channel plugin registers a channel type and provides a factory
  * to create adapter instances. Both built-in adapters and external

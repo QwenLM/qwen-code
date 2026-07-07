@@ -955,6 +955,88 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
+  it('passes mention-stripped text with platform format characters to base', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code 查看记忆\u200b' },
+      }),
+      headers: { messageId: 'm1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '查看记忆\u200b',
+        isGroup: true,
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('does not consume text after a mention followed by a format character', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code\u200b查看记忆' },
+      }),
+      headers: { messageId: 'm1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '\u200b查看记忆',
+        isGroup: true,
+        isMentioned: true,
+      }),
+    );
+  });
+
   it('ignores non-string message metadata when logging parsed JSON', () => {
     const channel = createChannel();
     const downstream = {
