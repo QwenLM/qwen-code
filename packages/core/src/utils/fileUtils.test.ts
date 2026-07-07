@@ -1996,15 +1996,16 @@ describe('fileUtils', () => {
       expect(result.linesShown).toEqual([1, 2]);
     });
 
-    it('should reject default full file-system reads for large text files', async () => {
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
-        'x'.repeat(11 * 1024 * 1024),
-      );
+    it('should preserve default full file-system reads for large text files', async () => {
+      const content = `head\n${'x'.repeat(11 * 1024 * 1024)}`;
+      actualNodeFs.writeFileSync(testTextFilePath, content);
 
-      await expect(
-        fsService.readTextFile({ path: testTextFilePath }),
-      ).rejects.toThrow(/File too large for full read/);
+      const result = await fsService.readTextFile({ path: testTextFilePath });
+
+      expect(result.content).toBe(content);
+      expect(result._meta?.originalLineCount).toBe(2);
+      expect(result._meta?.originalLineCountExact).toBe(true);
+      expect(result._meta?.truncatedByBytes).not.toBe(true);
     });
 
     it('should stream explicit offset reads for large text files', async () => {
@@ -2085,7 +2086,7 @@ describe('fileUtils', () => {
       ).rejects.toThrow(/abort/i);
     });
 
-    it('should propagate aborts before rejecting large unbounded full reads', async () => {
+    it('should propagate aborts before large unbounded full reads', async () => {
       actualNodeFs.writeFileSync(
         testTextFilePath,
         'x'.repeat(11 * 1024 * 1024),

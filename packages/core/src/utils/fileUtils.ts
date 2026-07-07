@@ -339,12 +339,6 @@ export async function readFileWithLineAndLimit(params: {
 
   signal?.throwIfAborted();
 
-  if (stats.isFile() && stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE) {
-    throw new Error(
-      `File too large for full read (${stats.size} bytes). Use offset/limit to read a range.`,
-    );
-  }
-
   const { content, encoding, bom } = await readFileWithEncodingInfo(
     filePath,
     signal,
