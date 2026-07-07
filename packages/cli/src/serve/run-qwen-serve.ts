@@ -27,6 +27,7 @@ import {
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
 } from './fast-path-settings.js';
+import { resolveSingleWorkspaceInput } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -153,6 +154,11 @@ const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
+
+type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
+  token?: string;
+  workspace?: string | string[];
+};
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 
@@ -1321,7 +1327,7 @@ function runSynchronousRequestGate(
  * hard rule, not a warning, per the threat model in the design issue.
  */
 export async function runQwenServe(
-  optsIn: Omit<ServeOptions, 'token'> & { token?: string },
+  optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
@@ -1381,11 +1387,13 @@ export async function runQwenServe(
   const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
     optsIn.allowOrigins,
   );
+  const rawWorkspace = resolveSingleWorkspaceInput(optsIn.workspace);
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
+    workspace: rawWorkspace,
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
       (!envFlagDisabled(clientMcpOverWsEnv) &&
@@ -1625,7 +1633,6 @@ export async function runQwenServe(
   // multiple daemon processes, not intra-daemon routing.
   //
   // Boot-loud validation: absolute path, exists, is a directory.
-  const rawWorkspace = opts.workspace ?? process.cwd();
   if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
       `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
@@ -2026,7 +2033,7 @@ export async function runQwenServe(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
-        `daemon:${daemonWorkspaceHash}:${process.pid}`,
+        `daemon:${process.pid}`,
         {
           otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
           telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
@@ -2529,6 +2536,7 @@ export async function runQwenServe(
         pathLocks: sharedPathLocks,
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       }),
+      primaryWorkspaceTrusted: trustedWorkspace,
       daemonLog,
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({
@@ -2705,7 +2713,7 @@ export async function runQwenServe(
         performance.now() - runStartedAt,
       );
       profileCheckpoint('serve_listener_ready');
-      finalizeStartupProfile(daemonLog.getDaemonId() || 'serve');
+      finalizeStartupProfile(`serve-${process.pid}`);
 
       // Listener-level connection cap, set inside the listen callback
       // because Node only exposes the underlying `Server` after

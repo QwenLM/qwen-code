@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 type StreamingState = 'idle' | 'responding';
 
 type MockConnection = {
-  status: 'connected';
+  status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
   clientId: string;
   displayName: string | undefined;
@@ -18,6 +18,9 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  error?: string;
+  errorStatus?: number;
+  missingSession?: boolean;
 };
 
 type ChatEditorTestProps = {
@@ -63,6 +66,9 @@ const {
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      attachSession: vi.fn().mockResolvedValue(undefined),
+      closeSession: vi.fn().mockResolvedValue(undefined),
+      clearSession: vi.fn().mockResolvedValue(undefined),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -289,10 +295,12 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
     WebShellSidebar: (props: {
       sessionListReloadToken?: number;
       onOpenDaemonStatus?: () => void;
+      onOpenSessions?: () => void;
+      onOpenSplitView?: () => void;
     }) => {
       sidebarTokens.push(props.sessionListReloadToken);
-      // Expose the Daemon Status opener so tests can exercise the
-      // activePanel === 'status' branch (there is no slash command for it).
+      // Expose the Daemon Status / Session Overview openers so tests can
+      // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
         'div',
         { 'data-testid': 'sidebar' },
@@ -304,6 +312,24 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onOpenDaemonStatus,
           },
           'daemon status',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-sessions-overview',
+            type: 'button',
+            onClick: props.onOpenSessions,
+          },
+          'sessions overview',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-split-view',
+            type: 'button',
+            onClick: props.onOpenSplitView,
+          },
+          'split view',
         ),
       );
     },
@@ -328,6 +354,22 @@ mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
+mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
+vi.doMock('./components/SplitView', async () => {
+  const React = await import('react');
+  return {
+    SplitView: (props: { onExit?: () => void }) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'split-view-mock' },
+        React.createElement(
+          'button',
+          { 'data-testid': 'split-back', type: 'button', onClick: props.onExit },
+          'back',
+        ),
+      ),
+  };
+});
 // Capturing mock: stores the onRunPrompt handler (App's real runTaskManually)
 // so tests can drive the manual-run orchestration directly, then renders a bare
 // node like the other dialog mocks.
@@ -438,14 +480,22 @@ function makePendingPermissionBlock(
 beforeEach(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
-    value: vi.fn().mockReturnValue({
-      matches: false,
+    // Query-aware: report a large screen (min-width matches) so the Session
+    // Overview entry point is available, while keeping the mobile (max-width)
+    // query false as the other tests expect.
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: typeof query === 'string' && query.includes('min-width'),
+      media: query,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
-    }),
+    })),
   });
   mockConnection.sessionId = 'session-1';
+  mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
+  mockConnection.error = undefined;
+  mockConnection.errorStatus = undefined;
+  mockConnection.missingSession = false;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   testState.prompt = 'hello';
@@ -468,6 +518,10 @@ beforeEach(() => {
   mockSessionActions.createSession.mockResolvedValue({
     sessionId: 'session-1',
   });
+  mockSessionActions.attachSession.mockResolvedValue(undefined);
+  mockSessionActions.closeSession.mockResolvedValue(undefined);
+  mockSessionActions.clearSession.mockResolvedValue(undefined);
+  mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
@@ -499,6 +553,148 @@ afterEach(() => {
 });
 
 describe('App session callbacks', () => {
+  it.each([404, 410])(
+    'shows a missing-session empty state with a new-session action for %d',
+    async (status) => {
+      mockConnection.status = 'disconnected';
+      mockConnection.sessionId = undefined;
+      mockConnection.error = 'Session load failed';
+      mockConnection.errorStatus = status;
+      mockConnection.missingSession = true;
+
+      const onSessionIdChange = vi.fn();
+      const { container } = renderApp({
+        onSessionIdChange,
+      });
+      await flush();
+
+      expect(container.textContent).toContain('Current session does not exist');
+      const submit = container.querySelector('[data-testid="submit"]');
+      expect(submit?.closest('[class*="chatSubtreeHidden"]')).not.toBeNull();
+      expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
+
+      await act(async () => {
+        Array.from(container.querySelectorAll('button'))
+          .find((button) => button.textContent === 'New session')
+          ?.click();
+        await Promise.resolve();
+      });
+
+      expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+      expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+      expect(onSessionIdChange).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not show missing-session state for non-404/410 errors', async () => {
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Server error';
+    mockConnection.errorStatus = 500;
+    mockConnection.missingSession = false;
+
+    const { container } = renderApp({ onSessionIdChange: vi.fn() });
+    await flush();
+
+    expect(container.textContent).not.toContain(
+      'Current session does not exist',
+    );
+  });
+
+  it('does not show missing-session state while connecting', async () => {
+    mockConnection.status = 'connecting';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
+
+    const { container } = renderApp({ onSessionIdChange: vi.fn() });
+    await flush();
+
+    expect(container.textContent).not.toContain(
+      'Current session does not exist',
+    );
+  });
+
+  it('does not notify session change when missing-session new chat fails', async () => {
+    mockConnection.status = 'disconnected';
+    mockConnection.sessionId = undefined;
+    mockConnection.error = 'Session load failed';
+    mockConnection.errorStatus = 404;
+    mockConnection.missingSession = true;
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('network'));
+
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'New session')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('preserves active goal for the same session and clears it after session changes', async () => {
+    const activeGoals: unknown[] = [];
+    const { rerender } = renderApp({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('web-shell-goal-status-active', {
+          detail: {
+            active: true,
+            condition: 'ship it',
+            setAt: 123,
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(activeGoals.at(-1)).toMatchObject({
+      condition: 'ship it',
+      setAt: 123,
+    });
+
+    mockConnection.errorStatus = 404;
+    rerender({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    expect(activeGoals.at(-1)).toMatchObject({
+      condition: 'ship it',
+      setAt: 123,
+    });
+
+    mockConnection.sessionId = 'session-2';
+    rerender({
+      renderFooter: (props) => {
+        activeGoals.push(props.activeGoal);
+        return null;
+      },
+    });
+    await flush();
+
+    expect(activeGoals.at(-1)).toBeNull();
+  });
+
   it('gates direct submissions and dispatches submit events with delayed sidebar reload', async () => {
     vi.useFakeTimers();
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
@@ -781,6 +977,245 @@ describe('App session callbacks', () => {
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
       rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('opens the Session Overview panel from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    // The panelHost aria-label distinguishes which panel is up.
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('opens the split view from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    // The outer chat subtree is hidden (display:none + aria-hidden) behind the
+    // split, so keyboard/AT can't reach the outer composer/toolbar. Assert the
+    // node is present first, so a missing subtree fails rather than passing
+    // vacuously through the optional chain.
+    const messages = container.querySelector('[data-testid="messages"]');
+    expect(messages).not.toBeNull();
+    expect(messages?.closest('[aria-hidden="true"]')).not.toBeNull();
+  });
+
+  it('returns to the Session Overview when leaving the split view', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    // Split closed; the Session Overview panel is shown instead of the chat.
+    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('enters the split view from a ?split= URL and consumes the param', async () => {
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+      // The one-shot param is stripped so a reload/exit doesn't force it back.
+      expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('keeps the split view open when an approval becomes pending (unlike the scheduled-tasks page)', async () => {
+    // Each split pane owns its own session's approval, so an approval on the
+    // outer main session must NOT yank the user out of the split.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    // The outer session's approval overlay must NOT render behind the split —
+    // otherwise its global keyboard shortcuts could confirm an unseen approval.
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).toBeNull();
+  });
+
+  it('surfaces the outer approval as a split notice and returns to chat when clicked', async () => {
+    // The overlay is suppressed under the split, so the outer approval would be
+    // invisible; a notice banner (with a way back) is the only signal.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    const notice = container.querySelector(
+      '[data-testid="split-approval-notice"]',
+    );
+    expect(notice).not.toBeNull();
+    // Its button leaves the split (mainView -> 'chat') so the approval overlay,
+    // which only renders in chat, becomes visible and actionable.
+    await act(async () => {
+      notice!
+        .querySelector('button')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+  });
+
+  it('auto-closes the split view when the screen shrinks below the breakpoint', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    // Shrinking below the large-screen breakpoint folds the split back to chat.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
+    // Drive isLargeScreen through a controllable media query: open the panel on
+    // a large screen, then flip below the breakpoint and confirm it closes.
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
       await Promise.resolve();
     });
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();

@@ -1,0 +1,244 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  DaemonSessionProvider,
+  useConnection,
+  useSessions,
+} from '@qwen-code/webui/daemon-react-sdk';
+import { useI18n } from '../i18n';
+import { ChatPane } from './ChatPane';
+import { ErrorBoundary } from './ErrorBoundary';
+import { MAX_SPLIT_PANES } from '../utils/splitUrl';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SESSION_ORGANIZATION_FEATURE,
+} from '../constants/sessions';
+import styles from './SplitView.module.css';
+
+const MAX_PANES = MAX_SPLIT_PANES;
+
+export interface SplitViewProps {
+  /** Sessions to open initially (e.g. the selection from the overview). */
+  initialSessionIds?: string[];
+  /** Leave the split view (back to the single-session chat). */
+  onExit: () => void;
+  onError?: (error: unknown, fallback: string) => void;
+}
+
+/**
+ * Shows 2+ independent interactive chats side by side in one window. Each pane
+ * is its own `DaemonSessionProvider` (own session, SSE, transcript, approvals),
+ * all sharing the one `DaemonWorkspaceProvider` above the app. Browser focus
+ * naturally scopes the keyboard to the pane the user clicks into, so panes never
+ * fight over which session an approval or Enter belongs to.
+ */
+export function SplitView({
+  initialSessionIds,
+  onExit,
+  onError,
+}: SplitViewProps) {
+  const { t } = useI18n();
+  const connection = useConnection();
+  const currentSessionId = connection.sessionId;
+  const organizationEnabled =
+    connection.capabilities?.features?.includes(
+      SESSION_ORGANIZATION_FEATURE,
+    ) ?? false;
+  const { sessions } = useSessions({
+    autoLoad: true,
+    pageSize: SESSION_LIST_PAGE_SIZE,
+    archiveState: 'active',
+    ...(organizationEnabled
+      ? { view: 'organized' as const, group: 'all' }
+      : {}),
+  });
+
+  const [paneIds, setPaneIds] = useState<string[]>(() => {
+    const seed = Array.from(new Set((initialSessionIds ?? []).filter(Boolean)));
+    if (seed.length > 0) return seed.slice(0, MAX_PANES);
+    return currentSessionId ? [currentSessionId] : [];
+  });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const addWrapRef = useRef<HTMLDivElement | null>(null);
+  // A per-tab/per-mount nonce: two browser tabs opening the same split must not
+  // register the same daemon client id, or suppressOwnUserEcho would treat one
+  // tab's prompt as the other's own echo and drop it from the transcript.
+  const [instanceId] = useState(() =>
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2),
+  );
+
+  // Dismiss the "add session" picker on Escape or a click outside it.
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!addWrapRef.current?.contains(event.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPickerOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [pickerOpen]);
+
+  const titleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const session of sessions) {
+      map.set(
+        session.sessionId,
+        session.displayName?.trim() || session.sessionId.slice(0, 8),
+      );
+    }
+    return map;
+  }, [sessions]);
+
+  const addPane = useCallback((sessionId: string) => {
+    setPaneIds((prev) =>
+      prev.includes(sessionId) || prev.length >= MAX_PANES
+        ? prev
+        : [...prev, sessionId],
+    );
+    setPickerOpen(false);
+  }, []);
+
+  // Closing the last pane is a natural "I'm done" gesture — return to the
+  // overview instead of stranding the user on an empty split. Guarded so an
+  // initial empty seed (no current session) doesn't bounce straight back out.
+  const hadPanesRef = useRef(false);
+  useEffect(() => {
+    if (paneIds.length > 0) {
+      hadPanesRef.current = true;
+    } else if (hadPanesRef.current) {
+      onExit();
+    }
+  }, [paneIds, onExit]);
+
+  const removePane = useCallback((sessionId: string) => {
+    setPaneIds((prev) => prev.filter((id) => id !== sessionId));
+  }, []);
+
+  const available = useMemo(
+    () => sessions.filter((session) => !paneIds.includes(session.sessionId)),
+    [sessions, paneIds],
+  );
+  const canAdd = paneIds.length < MAX_PANES && available.length > 0;
+
+  return (
+    <div className={styles.split} data-testid="split-view">
+      <header className={styles.toolbar}>
+        <button
+          type="button"
+          className={styles.backButton}
+          onClick={onExit}
+          aria-label={t('common.back')}
+          title={t('common.back')}
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M15 18l-6-6 6-6"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+        <span className={styles.title}>{t('splitView.title')}</span>
+        <span className={styles.count}>
+          {t('splitView.count', { count: paneIds.length })}
+        </span>
+        <div className={styles.addWrap} ref={addWrapRef}>
+          <button
+            type="button"
+            className={styles.addButton}
+            disabled={!canAdd}
+            aria-haspopup="listbox"
+            aria-expanded={pickerOpen}
+            onClick={() => setPickerOpen((open) => !open)}
+          >
+            + {t('splitView.addPane')}
+          </button>
+          {pickerOpen && available.length > 0 && (
+            <ul className={styles.picker} role="listbox">
+              {available.map((session) => (
+                <li key={session.sessionId} role="option" aria-selected="false">
+                  <button
+                    type="button"
+                    className={styles.pickerItem}
+                    onClick={() => addPane(session.sessionId)}
+                  >
+                    {titleById.get(session.sessionId) ??
+                      session.sessionId.slice(0, 8)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </header>
+
+      <div className={styles.panes}>
+        {paneIds.length === 0 ? (
+          <div className={styles.empty}>{t('splitView.empty')}</div>
+        ) : (
+          paneIds.map((sessionId) => (
+            <div className={styles.paneSlot} key={sessionId}>
+              {/* Contain a render crash to its own pane — a malformed block in
+                  one session must not white-screen the whole split. */}
+              <ErrorBoundary
+                label={`split-pane:${sessionId}`}
+                resetKeys={[sessionId]}
+                fallback={(error) => (
+                  <div className={styles.paneError} role="alert">
+                    <div className={styles.paneErrorTitle}>
+                      {titleById.get(sessionId) ?? sessionId.slice(0, 8)}
+                    </div>
+                    <div className={styles.paneErrorMessage}>
+                      {t('splitView.paneError')}: {error.message}
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.paneErrorClose}
+                      onClick={() => removePane(sessionId)}
+                    >
+                      {t('splitView.closePane')}
+                    </button>
+                  </div>
+                )}
+              >
+                <DaemonSessionProvider
+                  sessionId={sessionId}
+                  // Distinct from the main view's client (and from any other
+                  // tab's panes) for the same session, so the attachments don't
+                  // collide on one client identity.
+                  clientId={`split-pane:${instanceId}:${sessionId}`}
+                  suppressOwnUserEcho
+                >
+                  <ChatPane
+                    title={titleById.get(sessionId)}
+                    isCurrent={sessionId === currentSessionId}
+                    onClose={() => removePane(sessionId)}
+                    onError={onError}
+                  />
+                </DaemonSessionProvider>
+              </ErrorBoundary>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
