@@ -77,6 +77,7 @@ export function createServeFeatures(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable,
+        a2aEnabled: opts.a2aEnabled === true,
         sessionShellCommandEnabled,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,

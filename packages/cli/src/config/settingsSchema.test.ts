@@ -159,6 +159,14 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().proxy.showInDialog).toBe(false);
     });
 
+    it('defines the a2a settings namespace as advanced hidden config', () => {
+      const a2a = getSettingsSchema().a2a;
+
+      expect(a2a.type).toBe('object');
+      expect(a2a.requiresRestart).toBe(true);
+      expect(a2a.showInDialog).toBe(false);
+    });
+
     it('should have plansDirectory setting in schema', () => {
       expect(getSettingsSchema().plansDirectory).toBeDefined();
       expect(getSettingsSchema().plansDirectory.type).toBe('string');

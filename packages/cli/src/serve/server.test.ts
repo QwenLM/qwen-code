@@ -351,6 +351,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'daemon_a2a_discovery',
+  'daemon_a2a_peer_call',
+  'daemon_a2a_mcp_tool',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'voice_transcribe',
@@ -1928,6 +1931,24 @@ describe('createServeApp', () => {
       ).toContain('voice_transcribe');
     });
 
+    it('advertises A2A features only when the runtime toggle is on', () => {
+      for (const feature of [
+        'daemon_a2a_discovery',
+        'daemon_a2a_peer_call',
+        'daemon_a2a_mcp_tool',
+      ] as const) {
+        expect(
+          getAdvertisedServeFeatures(undefined, { a2aEnabled: true }),
+        ).toContain(feature);
+        expect(
+          getAdvertisedServeFeatures(undefined, { a2aEnabled: false }),
+        ).not.toContain(feature);
+        expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+          feature,
+        );
+      }
+    });
+
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
       // Iterate the Map so any future conditional tag added here whose
       // predicate isn't honored by `getAdvertisedServeFeatures` fails
@@ -2098,6 +2119,24 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               cdpTunnelOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (
+          feature === 'daemon_a2a_discovery' ||
+          feature === 'daemon_a2a_peer_call' ||
+          feature === 'daemon_a2a_mcp_tool'
+        ) {
+          expect(predicate({ a2aEnabled: true })).toBe(true);
+          expect(predicate({ a2aEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              a2aEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -2447,29 +2486,42 @@ describe('createServeApp', () => {
 
   describe('GET /capabilities', () => {
     it('returns the v1 envelope', async () => {
-      const app = createServeApp(baseOpts);
-      const res = await request(app)
-        .get('/capabilities')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(200);
-      expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
-      expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
-      expect(res.body.mode).toBe('http-bridge');
-      // F2 (#4175 commit 5): the server.ts call site flips
-      // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
-      // (so a daemon booted without the kill switch advertises the F2
-      // pool surface by default). Voice transcription is conditional on
-      // a usable batch ASR model, so the default isolated test settings
-      // do not advertise it.
-      expect(res.body.features).toEqual(
-        getAdvertisedServeFeatures(undefined, {
-          mcpPoolActive: true,
-        }),
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-capabilities-'),
       );
-      expect(res.body.modelServices).toEqual([]);
-      expect(res.body.limits).toMatchObject({
-        maxPendingPromptsPerSession: 5,
-      });
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        resetHomeEnvBootstrapForTesting();
+
+        const app = createServeApp(baseOpts);
+        const res = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
+        expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
+        expect(res.body.mode).toBe('http-bridge');
+        // F2 (#4175 commit 5): the server.ts call site flips
+        // `mcpPoolActive` to default-ON via `opts.mcpPoolActive !== false`
+        // (so a daemon booted without the kill switch advertises the F2
+        // pool surface by default). Voice transcription is conditional on
+        // a usable batch ASR model, so the isolated test settings do not
+        // advertise it.
+        expect(res.body.features).toEqual(
+          getAdvertisedServeFeatures(undefined, {
+            mcpPoolActive: true,
+          }),
+        );
+        expect(res.body.modelServices).toEqual([]);
+        expect(res.body.limits).toMatchObject({
+          maxPendingPromptsPerSession: 5,
+        });
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
