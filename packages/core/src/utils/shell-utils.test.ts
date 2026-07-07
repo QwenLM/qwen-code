@@ -673,6 +673,9 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill -9 $(timeout 5 pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(nice pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(nohup pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand("kill -9 $(bash -c 'pgrep node')")).toBe(true);
+    expect(detectSelfKillCommand("kill -9 $(sh -c 'pgrep node')")).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(\\pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 `command pgrep node`')).toBe(true);
   });
 
@@ -743,6 +746,12 @@ describe('detectSelfKillCommand', () => {
       ),
     ).toBe(true);
     expect(detectSelfKillCommand('pgrep node | parallel kill')).toBe(true);
+    expect(detectSelfKillCommand("pgrep node | parallel 'kill -9 {}'")).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | parallel "kill -9 {}"')).toBe(
+      true,
+    );
     expect(
       detectSelfKillCommand(`pgrep node | xargs sh -c 'kill -9 "$@"' --`),
     ).toBe(true);
@@ -751,6 +760,9 @@ describe('detectSelfKillCommand', () => {
   it('does not false-positive when kill is an argument to another command', () => {
     expect(detectSelfKillCommand('pgrep node | xargs echo kill')).toBe(false);
     expect(detectSelfKillCommand('pgrep node | xargs printf kill')).toBe(false);
+    expect(detectSelfKillCommand('pgrep node | parallel echo kill')).toBe(
+      false,
+    );
   });
 
   it('allows targeted process kills and unrelated process patterns', () => {
@@ -805,6 +817,39 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('pgrep node | xargs -rI {} kill -9 {}')).toBe(
       true,
     );
+    expect(detectSelfKillCommand('pgrep node | xargs -dI kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs -dn kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs -EI kill')).toBe(true);
+  });
+
+  it('detects xargs execution wrappers dispatching to kill', () => {
+    expect(detectSelfKillCommand('pgrep node | xargs env kill -9')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs nice kill -9')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs nohup kill -9')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | xargs timeout 5 kill -9')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | xargs strace kill -9')).toBe(
+      true,
+    );
+  });
+
+  it('detects control-flow dispatching pgrep output to kill', () => {
+    expect(
+      detectSelfKillCommand('for pid in $(pgrep node); do kill -9 $pid; done'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'while IFS= read -r pid; do kill -9 "$pid"; done < <(pgrep node)',
+      ),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand(
+        'mapfile -t pids < <(pgrep node); kill -9 "${pids[@]}"',
+      ),
+    ).toBe(true);
   });
 
   it('does not false-positive on exact pgrep substring misses', () => {

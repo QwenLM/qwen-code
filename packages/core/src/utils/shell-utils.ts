@@ -426,6 +426,10 @@ const ENV_OPTIONS_WITH_VALUES = new Set([
   '--chdir',
 ]);
 
+const TIMEOUT_OPTIONS_WITH_VALUES = new Set(['-s', '--signal', '-k']);
+const NICE_OPTIONS_WITH_VALUES = new Set(['-n', '--adjustment']);
+const STRACE_OPTIONS_WITH_VALUES = new Set(['-o', '-e', '-p', '-s', '-u']);
+
 const KILLALL_OPTIONS_WITH_VALUES = new Set([
   '-n',
   '--ns',
@@ -496,9 +500,11 @@ function xargsOptionConsumesNext(token: string): boolean {
       XARGS_OPTIONS_WITH_VALUES.has(normalized) && !optionHasInlineValue(token)
     );
   }
-  for (const option of XARGS_OPTIONS_WITH_VALUES) {
-    if (!option.startsWith('--') && token.includes(option[1]!)) {
-      return token.endsWith(option[1]!);
+
+  for (let index = 1; index < token.length; index++) {
+    const option = `-${token[index]!}`;
+    if (XARGS_OPTIONS_WITH_VALUES.has(option)) {
+      return index === token.length - 1;
     }
   }
   return false;
@@ -645,6 +651,41 @@ function unwrapExecutionPrefixes(tokens: string[]): string[] {
       continue;
     }
 
+    if (root === 'nice') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        NICE_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'nohup') {
+      index++;
+      continue;
+    }
+
+    if (root === 'timeout') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        TIMEOUT_OPTIONS_WITH_VALUES,
+      );
+      if (index < tokens.length) {
+        index++;
+      }
+      continue;
+    }
+
+    if (root === 'strace') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        STRACE_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
     break;
   }
 
@@ -781,7 +822,13 @@ function pkillTargetsSelf(tokens: string[]): boolean {
 }
 
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
+  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
+
+const SHELL_WRAPPER_COMMAND_SUBSTITUTION =
+  /\$\(\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')\s*\)|`\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')\s*`/gi;
+
+const PROCESS_SUBSTITUTION_PGREP =
+  /<\s*<\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)/gi;
 
 const BARE_SELF_PROCESS_PATTERN = new RegExp(`^(${SELF_PROCESS_NAMES})$`, 'i');
 
@@ -807,17 +854,9 @@ function isSubstringSelfTarget(value: string): boolean {
 
 function argMatchesSelfAsRegex(arg: string): boolean {
   if (!/[[\]\\()|.^$*+?{}]/.test(arg)) return false;
-  const selfNames = [
-    'node',
-    'node.exe',
-    'qwen',
-    'qwen-code',
-    'qwen.exe',
-    'qwen-code.exe',
-  ];
   try {
     const re = new RegExp(arg, 'i');
-    return selfNames.some((name) => re.test(name));
+    return SELF_NAMES_LIST.some((name) => re.test(name));
   } catch {
     return false;
   }
@@ -884,32 +923,73 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
   );
 }
 
+function pgrepRawArgsTargetSelf(command: string, rawArgs: string): boolean {
+  const normalizedArgs = rawArgs.replace(/\$'([^']*)'/g, "'$1'");
+  const parsed = parseShellSegment(`${command} ${normalizedArgs}`);
+  if (parsed) {
+    return pgrepTargetsSelf(parsed, command);
+  }
+
+  const unquotedArgs = rawArgs.replace(
+    /\$?'([^']*)'|"([^"]*)"/g,
+    (
+      _match,
+      singleQuoted: string | undefined,
+      doubleQuoted: string | undefined,
+    ) => singleQuoted ?? doubleQuoted ?? '',
+  );
+  return pgrepTargetsSelf(
+    [command, ...unquotedArgs.trim().split(/\s+/)],
+    command,
+  );
+}
+
+function pgrepCommandTargetsSelf(command: string): boolean {
+  const parsed = parseShellSegment(command);
+  if (!parsed) return pgrepRawArgsTargetSelf('pgrep', command);
+  const tokens = unwrapExecutionPrefixes(parsed);
+  const root = normalizeExecutableName(tokens[0] ?? '');
+  return (
+    (root === 'pgrep' || root === 'pidof') && pgrepTargetsSelf(tokens, root)
+  );
+}
+
+function tokenInvokesKill(token: string): boolean {
+  const executable = token.trim().split(/\s+/)[0] ?? '';
+  return normalizeExecutableName(executable) === 'kill';
+}
+
 function xargsInvokesKill(segment: string | undefined): boolean {
   if (!segment) return false;
   const parsed = parseShellSegment(segment);
   if (!parsed) return /\bxargs\b.*\bkill\b/i.test(segment);
   const tokens = unwrapExecutionPrefixes(parsed);
   if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') return false;
-  for (let i = 1; i < tokens.length; i++) {
-    const token = tokens[i]!;
+  const postXargs = tokens.slice(1);
+  let startIndex = 0;
+  for (; startIndex < postXargs.length; startIndex++) {
+    const token = postXargs[startIndex]!;
     if (token === '--') {
-      return normalizeExecutableName(tokens[i + 1] ?? '') === 'kill';
+      startIndex++;
+      break;
     }
     if (isOptionToken(token)) {
-      if (xargsOptionConsumesNext(token) && i + 1 < tokens.length) {
-        i++;
+      if (xargsOptionConsumesNext(token) && startIndex + 1 < postXargs.length) {
+        startIndex++;
       }
       continue;
     }
-    const command = normalizeExecutableName(token);
-    if (command === 'kill') return true;
-    if (
-      ['sh', 'bash', 'zsh'].includes(command) &&
-      tokens.slice(i + 1).some((arg) => /\bkill\b/i.test(arg))
-    ) {
-      return true;
-    }
-    return false;
+    break;
+  }
+
+  const remaining = unwrapExecutionPrefixes(postXargs.slice(startIndex));
+  const command = normalizeExecutableName(remaining[0] ?? '');
+  if (command === 'kill') return true;
+  if (
+    ['sh', 'bash', 'zsh'].includes(command) &&
+    remaining.slice(1).some((arg) => /\bkill\b/i.test(arg))
+  ) {
+    return true;
   }
   return false;
 }
@@ -920,9 +1000,8 @@ function downstreamSegmentContainsKill(segment: string | undefined): boolean {
   const tokens = parsed ? unwrapExecutionPrefixes(parsed) : [];
   const root = normalizeExecutableName(tokens[0] ?? '');
   if (root === 'parallel') {
-    return tokens
-      .slice(1)
-      .some((token) => normalizeExecutableName(token) === 'kill');
+    const commandToken = tokens.slice(1).find((token) => !isOptionToken(token));
+    return commandToken ? tokenInvokesKill(commandToken) : false;
   }
   return (
     /\bwhile\b[\s\S]*\bread\b[\s\S]*;\s*do\b[\s\S]*\bkill\b/i.test(segment) ||
@@ -934,36 +1013,66 @@ function killCommandTargetsSelf(segment: string): boolean {
   for (const match of segment.matchAll(KILL_COMMAND_SUBSTITUTION_PGREP)) {
     const matchedCommand = match[1] ?? match[3] ?? 'pgrep';
     const rawArgs = match[2] ?? match[4] ?? '';
-    const normalizedArgs = rawArgs.replace(/\$'([^']*)'/g, "'$1'");
-    const parsed = parseShellSegment(`${matchedCommand} ${normalizedArgs}`);
-    if (parsed) {
-      if (pgrepTargetsSelf(parsed, matchedCommand)) {
-        return true;
-      }
-      continue;
-    }
-    const unquotedArgs = rawArgs.replace(
-      /\$?'([^']*)'|"([^"]*)"/g,
-      (
-        _match,
-        singleQuoted: string | undefined,
-        doubleQuoted: string | undefined,
-      ) => singleQuoted ?? doubleQuoted ?? '',
-    );
-    const fallbackTokens = [
-      matchedCommand,
-      ...unquotedArgs.trim().split(/\s+/),
-    ];
-    if (pgrepTargetsSelf(fallbackTokens, matchedCommand)) {
+    if (pgrepRawArgsTargetSelf(matchedCommand, rawArgs)) {
       return true;
     }
   }
   return false;
 }
 
+function shellWrapperSubstitutionTargetsSelf(segment: string): boolean {
+  for (const match of segment.matchAll(SHELL_WRAPPER_COMMAND_SUBSTITUTION)) {
+    const script = match[1] ?? match[2] ?? match[3] ?? match[4] ?? '';
+    if (pgrepCommandTargetsSelf(script)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function processSubstitutionTargetsSelf(command: string): boolean {
+  for (const match of command.matchAll(PROCESS_SUBSTITUTION_PGREP)) {
+    const matchedCommand = match[1] ?? 'pgrep';
+    const rawArgs = match[2] ?? '';
+    if (pgrepRawArgsTargetSelf(matchedCommand, rawArgs)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shellControlFlowTargetsSelf(command: string): boolean {
+  if (
+    /\bfor\b[\s\S]*\bin\b[\s\S]*(?:\$\(|`)[\s\S]*\bdo\b[\s\S]*\bkill\b/i.test(
+      command,
+    ) &&
+    killCommandTargetsSelf(command)
+  ) {
+    return true;
+  }
+
+  if (
+    /\bwhile\b[\s\S]*\bread\b[\s\S]*\bdo\b[\s\S]*\bkill\b[\s\S]*<\s*<\(/i.test(
+      command,
+    ) &&
+    processSubstitutionTargetsSelf(command)
+  ) {
+    return true;
+  }
+
+  return (
+    /\bmapfile\b[\s\S]*<\s*<\([^;]*;\s*kill\b/i.test(command) &&
+    processSubstitutionTargetsSelf(command)
+  );
+}
+
 export function detectSelfKillCommand(command: string): boolean {
   if (!/kill/i.test(command)) {
     return false;
+  }
+
+  if (shellControlFlowTargetsSelf(command)) {
+    return true;
   }
 
   const segments = getCommandSegments(command);
@@ -1002,6 +1111,9 @@ export function detectSelfKillCommand(command: string): boolean {
       }
     }
     if (root === 'kill' && killCommandTargetsSelf(segment)) {
+      return true;
+    }
+    if (root === 'kill' && shellWrapperSubstitutionTargetsSelf(segment)) {
       return true;
     }
   }
