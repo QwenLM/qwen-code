@@ -79,6 +79,17 @@ describe('extractRememberErrorDetails', () => {
     expect(details).not.toContain('secret-token-value');
   });
 
+  it('normalizes line separators before redacting credentials', () => {
+    for (const separator of ['\u2028', '\u2029']) {
+      const details = extractRememberErrorDetails(
+        new Error(`Authorization: Bearer${separator}secret-token-value`),
+      );
+
+      expect(details).toBe('Authorization: <redacted>');
+      expect(details).not.toContain('secret-token-value');
+    }
+  });
+
   it('sanitizes control characters', () => {
     expect(extractRememberErrorDetails(new Error('line1\nline2\ttab'))).toBe(
       'line1 line2 tab',

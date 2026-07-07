@@ -3468,6 +3468,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('omits details for workspace memory failures without a detail source', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue({
+      code: 'remember_failed',
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember me.',
+      })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32099,
+      data: { errorKind: 'remember_failed' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('runs workspace memory forget without requiring a session', async () => {
     const forget = vi.fn().mockResolvedValue({
       systemMessage: 'Forgot 1 entry.',

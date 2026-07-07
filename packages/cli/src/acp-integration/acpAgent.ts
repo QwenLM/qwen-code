@@ -5922,9 +5922,11 @@ class QwenAgent implements Agent {
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(-32099, 'Workspace memory forget failed', {
-            ...workspaceMemoryErrorData(code, err),
-          });
+          throw new RequestError(
+            -32099,
+            'Workspace memory forget failed',
+            workspaceMemoryErrorData(code, err),
+          );
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
@@ -5973,9 +5975,11 @@ class QwenAgent implements Agent {
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(-32099, 'Workspace memory dream failed', {
-            ...workspaceMemoryErrorData(code, err),
-          });
+          throw new RequestError(
+            -32099,
+            'Workspace memory dream failed',
+            workspaceMemoryErrorData(code, err),
+          );
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
