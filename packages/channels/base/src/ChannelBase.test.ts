@@ -1342,6 +1342,42 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('natural clear confirm expires after the TTL window', async () => {
+      vi.useFakeTimers();
+      try {
+        const channelMemory = {
+          readChannelMemory: vi.fn().mockResolvedValue(''),
+          appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+          clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        };
+        const ch = createChannel(
+          { allowedUsers: ['alice'] },
+          { channelMemory },
+        );
+
+        await ch.handleInbound(
+          envelope({ text: '清空记忆', senderId: 'alice' }),
+        );
+
+        await vi.advanceTimersByTimeAsync(60_001);
+        ch.sent = [];
+        await ch.handleInbound(
+          envelope({ text: '确认清空记忆', senderId: 'alice' }),
+        );
+
+        expect(channelMemory.clearChannelMemory).not.toHaveBeenCalled();
+        expect(ch.sent).toEqual([
+          {
+            chatId: 'chat1',
+            text: 'No pending clear request. Say "清空记忆" first.',
+          },
+        ]);
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('natural clear reports when no memory was saved', async () => {
       const channelMemory = {
         readChannelMemory: vi.fn().mockResolvedValue(''),
