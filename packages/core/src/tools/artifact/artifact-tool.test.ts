@@ -134,6 +134,31 @@ describe('ArtifactTool', () => {
     expect(res.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
   });
 
+  it('forwards cancellation signals to source file reads', async () => {
+    const file = path.join(workdir, 'page.html');
+    const controller = new AbortController();
+    const readTextFile = vi.fn(async () => ({ content: '<p>x</p>' }));
+    const signalAwareTool = new ArtifactTool(
+      {
+        ...makeConfig(),
+        getFileSystemService: () => ({ readTextFile }),
+      } as unknown as Config,
+      {
+        kind: 'oss',
+        publish: async () => ({ id: 'x', url: 'https://h/x' }),
+      },
+      openSpy as unknown as UrlOpener,
+    );
+
+    await signalAwareTool.build({ file_path: file }).execute(controller.signal);
+
+    expect(readTextFile).toHaveBeenCalledWith({
+      path: file,
+      maxOutputBytes: MAX_ARTIFACT_BYTES,
+      signal: controller.signal,
+    });
+  });
+
   it('returns EXECUTION_FAILED when the publisher throws', async () => {
     const file = await writeFragment('page.html', '<p>x</p>');
     const failingTool = new ArtifactTool(

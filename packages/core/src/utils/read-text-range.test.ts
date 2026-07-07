@@ -91,6 +91,38 @@ describe('readTextRange', () => {
     expect(result.truncatedByBytes).toBe(false);
   });
 
+  it('streams a large UTF-8 file from the beginning when no range is provided', async () => {
+    const filePath = await writeFile('large.log', largeUtf8Lines(65_000));
+
+    const result = await readTextRange({
+      path: filePath,
+      maxOutputBytes: 10_000,
+    });
+
+    expect(result.content).toContain('line-1');
+    expect(result.content).toContain('line-2');
+    expect(result.content).not.toContain('line-65000');
+    expect(result.originalLineCount).toBeGreaterThan(1);
+    expect(result.originalLineCountExact).toBe(false);
+    expect(result.truncatedByBytes).toBe(true);
+  });
+
+  it('returns empty content when a large UTF-8 range starts beyond EOF', async () => {
+    const filePath = await writeFile('large.log', largeUtf8Lines(65_000));
+
+    const result = await readTextRange({
+      path: filePath,
+      offset: 100_000,
+      limit: 10,
+      maxOutputBytes: 10_000,
+    });
+
+    expect(result.content).toBe('');
+    expect(result.originalLineCount).toBe(65_000);
+    expect(result.originalLineCountExact).toBe(true);
+    expect(result.truncatedByBytes).toBe(false);
+  });
+
   it('preserves CRLF content and line-ending metadata for large files', async () => {
     const content = Array.from(
       { length: 65_000 },

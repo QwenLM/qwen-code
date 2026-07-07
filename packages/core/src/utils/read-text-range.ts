@@ -16,8 +16,8 @@ import {
 
 export interface ReadTextRangeRequest {
   path: string;
-  offset: number;
-  limit: number;
+  offset?: number;
+  limit?: number;
   maxOutputBytes: number;
   signal?: AbortSignal;
   stats?: Stats;
@@ -89,8 +89,8 @@ function normalizeMaxBytes(maxOutputBytes: number): number {
 
 function sliceDecodedContent(
   content: string,
-  offset: number,
-  limit: number,
+  offset: number | undefined,
+  limit: number | undefined,
   maxOutputBytes: number,
 ): Pick<
   ReadTextRangeResult,
@@ -101,8 +101,11 @@ function sliceDecodedContent(
 > {
   const lines = content.split('\n');
   const originalLineCount = lines.length;
-  const start = Math.min(Math.max(0, offset), originalLineCount);
-  const end = Math.min(start + Math.max(0, limit), originalLineCount);
+  const start = Math.min(Math.max(0, offset ?? 0), originalLineCount);
+  const end =
+    limit === undefined
+      ? originalLineCount
+      : Math.min(start + Math.max(0, limit), originalLineCount);
   const selected = lines.slice(start, end).join('\n');
   const truncated = truncateUtf8(selected, maxOutputBytes);
 
@@ -123,8 +126,9 @@ async function readLargeUtf8Range(
     throw new LargeNonUtf8TextError(encoding);
   }
 
-  const offset = Math.max(0, request.offset);
-  const endLine = offset + Math.max(0, request.limit);
+  const offset = Math.max(0, request.offset ?? 0);
+  const endLine =
+    offset + Math.max(0, request.limit ?? Number.POSITIVE_INFINITY);
   let currentLine = 0;
   let output = '';
   let outputBytes = 0;
