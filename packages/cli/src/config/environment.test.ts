@@ -84,10 +84,13 @@ describe('buildRuntimeEnvironment', () => {
 
     const snapshot = buildRuntimeEnvironment(
       testSettings({
-        advanced: { excludedEnvVars: ['RUNTIME_EXCLUDED'] },
+        advanced: {
+          excludedEnvVars: ['RUNTIME_EXCLUDED', 'RUNTIME_SETTINGS_EXCLUDED'],
+        },
         env: {
           RUNTIME_SETTINGS: 'settings-loses',
           RUNTIME_SETTINGS_ONLY: 'from-settings',
+          RUNTIME_SETTINGS_EXCLUDED: 'settings-excluded',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
         },
       }),
@@ -103,6 +106,7 @@ describe('buildRuntimeEnvironment', () => {
       'from-settings',
     );
     expect(snapshot.effectiveEnv['RUNTIME_EXCLUDED']).toBeUndefined();
+    expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_EXCLUDED']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_RUNTIME_DIR']).toBeUndefined();
     expect(snapshot.overlayKeys).toEqual([

@@ -1355,6 +1355,7 @@ export async function runQwenServe(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
+  const daemonRuntimeBaseEnv = Object.freeze({ ...process.env });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -2036,10 +2037,10 @@ export async function runQwenServe(
       ? settingsRuntime.environment.buildRuntimeEnvironment(
           runtimeBootSettings.merged,
           boundWorkspace,
-          process.env,
+          daemonRuntimeBaseEnv,
         )
       : {
-          effectiveEnv: Object.freeze({ ...process.env }),
+          effectiveEnv: Object.freeze({ ...daemonRuntimeBaseEnv }),
           overlayKeys: Object.freeze([] as string[]),
           envFilePaths: Object.freeze([] as string[]),
         };
@@ -2433,17 +2434,17 @@ export async function runQwenServe(
               settingsRuntime.environment.buildRuntimeEnvironment(
                 fresh.merged,
                 workspace,
-                process.env,
+                daemonRuntimeBaseEnv,
               );
           } catch (err) {
             daemonLog.warn(
-              'failed to rebuild runtime env snapshot after daemon env reload; falling back to process.env',
+              'failed to rebuild runtime env snapshot after daemon env reload; falling back to daemon base env',
               {
                 error: err instanceof Error ? err.message : String(err),
               },
             );
             refreshedRuntimeEnv = {
-              effectiveEnv: { ...process.env },
+              effectiveEnv: { ...daemonRuntimeBaseEnv },
               overlayKeys: [] as string[],
               envFilePaths: [] as string[],
             };

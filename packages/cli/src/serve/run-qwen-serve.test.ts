@@ -34,6 +34,7 @@ import type {
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import * as settingsRuntime from '../config/settings.js';
+import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import type {
   ChannelWorkerSnapshot,
@@ -1299,6 +1300,95 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
       } else {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      await handle.close();
+    }
+  });
+
+  it('uses the boot-frozen daemon base env when rebuilding runtime env after workspace reload', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),
+    );
+    const originalBase = process.env['QWEN_TEST_BOOT_BASE'];
+    const originalLeak = process.env['QWEN_TEST_RELOAD_LEAK'];
+    process.env['QWEN_TEST_BOOT_BASE'] = 'base';
+    delete process.env['QWEN_TEST_RELOAD_LEAK'];
+
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockImplementation(() => {
+      process.env['QWEN_TEST_RELOAD_LEAK'] = 'workspace-a';
+      return {
+        updatedKeys: ['QWEN_TEST_RELOAD_LEAK'],
+        removedKeys: [],
+      };
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const buildRuntimeEnvironment = vi.spyOn(
+      environmentRuntime,
+      'buildRuntimeEnvironment',
+    );
+    let workspace:
+      | {
+          reload(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
+        }
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        workspace = deps?.workspace as typeof workspace;
+        return express();
+      },
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workspace).toBeDefined();
+
+      await workspace!.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: tmpDir,
+      });
+
+      const reloadBaseEnv = buildRuntimeEnvironment.mock.calls.at(-1)?.[2];
+      expect(reloadBaseEnv?.['QWEN_TEST_BOOT_BASE']).toBe('base');
+      expect(reloadBaseEnv?.['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
+    } finally {
+      if (originalBase === undefined) {
+        delete process.env['QWEN_TEST_BOOT_BASE'];
+      } else {
+        process.env['QWEN_TEST_BOOT_BASE'] = originalBase;
+      }
+      if (originalLeak === undefined) {
+        delete process.env['QWEN_TEST_RELOAD_LEAK'];
+      } else {
+        process.env['QWEN_TEST_RELOAD_LEAK'] = originalLeak;
       }
       await handle.close();
     }

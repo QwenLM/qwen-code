@@ -423,8 +423,11 @@ export function buildRuntimeEnvironment(
   }
 
   if (settings.env) {
+    const excludedVars =
+      settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const [key, value] of Object.entries(settings.env)) {
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
     }
