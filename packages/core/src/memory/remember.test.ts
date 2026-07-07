@@ -41,6 +41,7 @@ function createConfig(projectRoot: string, managed = true): Config {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
+    getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 }
 

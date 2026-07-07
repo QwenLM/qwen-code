@@ -1132,6 +1132,11 @@ export interface ConfigParameters {
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
   autoSkillConfirm?: boolean;
   /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Unset → per-agent defaults; 0 → no time limit.
+   */
+  memoryAgentTimeoutMinutes?: number;
+  /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
    * the main session model, reducing latency and cost.
@@ -1712,6 +1717,7 @@ export class Config {
   private readonly teamMemoryShareabilityChecked = new Set<string>();
   private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
+  private readonly memoryAgentTimeoutMinutes: number | undefined;
   private fastModel?: string;
   private visionModel?: string;
   private readonly modelFallbacks: string[];
@@ -2033,6 +2039,7 @@ export class Config {
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
+    this.memoryAgentTimeoutMinutes = params.memoryAgentTimeoutMinutes;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
@@ -5467,6 +5474,15 @@ export class Config {
 
   getAutoSkillConfirmEnabled(): boolean {
     return this.autoSkillConfirm && !this.getBareMode();
+  }
+
+  /**
+   * Max runtime in minutes for background memory agents (extraction, dream,
+   * remember, skill review). Resolves the `memory.agentTimeoutMinutes`
+   * setting. Unset → each agent's built-in default; 0 → no time limit.
+   */
+  getMemoryAgentTimeoutMinutes(): number | undefined {
+    return this.memoryAgentTimeoutMinutes;
   }
 
   getPreventSystemSleepEnabled(): boolean {

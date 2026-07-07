@@ -50,6 +50,7 @@ describe('dreamAgentPlanner', () => {
       getSessionId: vi.fn().mockReturnValue('session-1'),
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
+      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
   });

@@ -184,7 +184,7 @@ export async function runManagedRememberByAgent(params: {
     }),
     systemPrompt: buildRememberSystemPrompt(memoryPrompt),
     maxTurns: 6,
-    maxTimeMinutes: 5,
+    maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
     extraHistory: params.contextMode === 'clean' ? [] : undefined,
     preserveEmptyExtraHistory: params.contextMode === 'clean',
     tools: [
