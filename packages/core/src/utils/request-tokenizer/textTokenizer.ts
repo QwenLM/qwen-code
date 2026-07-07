@@ -14,6 +14,27 @@
  * - ASCII characters: 0.25 tokens per char (4 chars = 1 token)
  * - Non-ASCII characters: 1.1 tokens per char (conservative for CJK, emoji, etc.)
  */
+export function estimateTextTokens(text: string): number {
+  if (!text || text.length === 0) {
+    return 0;
+  }
+
+  let asciiChars = 0;
+  let nonAsciiChars = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const charCode = text.charCodeAt(i);
+    if (charCode < 128) {
+      asciiChars++;
+    } else {
+      nonAsciiChars++;
+    }
+  }
+
+  const tokens = asciiChars / 4 + nonAsciiChars * 1.1;
+  return Math.ceil(tokens);
+}
+
 export class TextTokenizer {
   /**
    * Calculate tokens for text content
@@ -36,23 +57,6 @@ export class TextTokenizer {
   }
 
   private calculateTokensSync(text: string): number {
-    if (!text || text.length === 0) {
-      return 0;
-    }
-
-    let asciiChars = 0;
-    let nonAsciiChars = 0;
-
-    for (let i = 0; i < text.length; i++) {
-      const charCode = text.charCodeAt(i);
-      if (charCode < 128) {
-        asciiChars++;
-      } else {
-        nonAsciiChars++;
-      }
-    }
-
-    const tokens = asciiChars / 4 + nonAsciiChars * 1.1;
-    return Math.ceil(tokens);
+    return estimateTextTokens(text);
   }
 }
