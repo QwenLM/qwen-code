@@ -377,7 +377,7 @@ This mode starts one channel worker process owned by `qwen serve`. The worker co
 
 When channels are serve-managed, `qwen channel status` shows the owner as `qwen serve`, and `qwen channel stop` tells you to stop the daemon instead of signaling the worker directly. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
 
-### Webhook-triggered tasks
+## Webhook-triggered tasks
 
 Daemon-managed channels can also accept authenticated webhook events. Qwen receives the event as context, summarizes and decides what matters, and then delivers the final response to the configured chat target. This is not a raw notification relay.
 
@@ -396,15 +396,15 @@ Example channel config:
       "webhooks": {
         "sources": {
           "github-ci": {
-            "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET"
+            "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET",
+            "targets": {
+              "default": {
+                "chatId": "67890",
+                "senderId": "webhook:github-ci",
+                "isGroup": true
+              }
+            }
           }
-        }
-      },
-      "targets": {
-        "default": {
-          "chatId": "67890",
-          "senderId": "webhook:github-ci",
-          "isGroup": true
         }
       }
     }
@@ -421,9 +421,10 @@ curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
   -H "Content-Type: application/json" \
   -d '{
     "eventType": "push",
-    "targetRef": "refs/heads/main",
+    "targetRef": "default",
     "title": "CI pipeline finished",
     "payload": {
+      "targetRef": "refs/heads/main",
       "repository": "qwen-code",
       "status": "success"
     }
