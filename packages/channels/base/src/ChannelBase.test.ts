@@ -8511,6 +8511,114 @@ describe('ChannelBase', () => {
       });
     });
 
+    describe('runWebhookTask', () => {
+      const webhooks: ChannelWebhookConfig = {
+        sources: {
+          'github-ci': {
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+                isGroup: true,
+              },
+            },
+          },
+        },
+      };
+
+      const webhookTask: ChannelWebhookTask = {
+        channelName: 'test-chan',
+        source: 'github-ci',
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: { branch: 'main' },
+      };
+
+      it('runs an unattended prompt and proactively sends the final response', async () => {
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+          'CI failed because lint broke.',
+        );
+        const ch = createChannel({ webhooks });
+        ch.proactiveSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).resolves.toBe(
+          'CI failed because lint broke.',
+        );
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining(
+            '[External event "ci_failed" from github-ci]',
+          ),
+          {},
+        );
+        expect(ch.proactive).toEqual([
+          { chatId: 'group-1', text: 'CI failed because lint broke.' },
+        ]);
+        expect(ch.taskEvents.map((event) => event.type)).toEqual([
+          'started',
+          'completed',
+        ]);
+      });
+
+      it('rejects channels without proactive send support', async () => {
+        const ch = createChannel({ webhooks });
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'Channel does not support proactive webhook messages.',
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      });
+
+      it('rejects prompt approval mode before prompting', async () => {
+        const ch = createChannel({ approvalMode: 'prompt', webhooks });
+        ch.proactiveSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'Webhook tasks require unattended approval mode.',
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      });
+
+      it('serializes webhook tasks for the same target session', async () => {
+        let resolveFirstPrompt: (value: string) => void = () => {};
+        (bridge.prompt as ReturnType<typeof vi.fn>)
+          .mockImplementationOnce(
+            () =>
+              new Promise<string>((resolve) => {
+                resolveFirstPrompt = resolve;
+              }),
+          )
+          .mockResolvedValueOnce('second response');
+        const ch = createChannel({ webhooks });
+        ch.proactiveSupported = true;
+
+        const firstRun = ch.runWebhookTask(webhookTask);
+        await vi.waitFor(() => {
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+
+        const secondRun = ch.runWebhookTask({
+          ...webhookTask,
+          title: 'CI failed again',
+        });
+        await Promise.resolve();
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+        resolveFirstPrompt('first response');
+        await expect(firstRun).resolves.toBe('first response');
+        await expect(secondRun).resolves.toBe('second response');
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(ch.proactive).toEqual([
+          { chatId: 'group-1', text: 'first response' },
+          { chatId: 'group-1', text: 'second response' },
+        ]);
+      });
+    });
+
     it('runs a loop prompt as a follow-up and pushes the result proactively', async () => {
       let resolveFirstPrompt: (value: string) => void = () => {};
       (bridge.prompt as ReturnType<typeof vi.fn>)

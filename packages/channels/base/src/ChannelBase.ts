@@ -38,6 +38,14 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
+import {
+  buildChannelWebhookPrompt,
+  resolveChannelWebhookTarget,
+} from './ChannelWebhookTask.js';
+import type {
+  ChannelWebhookRunOptions,
+  ChannelWebhookTask,
+} from './ChannelWebhookTask.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -766,6 +774,109 @@ export abstract class ChannelBase {
       current.then(() => undefined).catch(() => {}),
     );
     return current;
+  }
+
+  async runWebhookTask(
+    task: ChannelWebhookTask,
+    options: ChannelWebhookRunOptions = {},
+  ): Promise<string | undefined> {
+    if (!this.supportsProactiveSend()) {
+      throw new Error('Channel does not support proactive webhook messages.');
+    }
+    if (task.channelName !== this.name) {
+      throw new Error(
+        `Webhook task belongs to ${task.channelName}, not ${this.name}.`,
+      );
+    }
+    if (this.config.approvalMode === 'prompt') {
+      throw new Error('Webhook tasks require unattended approval mode.');
+    }
+    if (!this.config.webhooks) {
+      throw new Error(`Unknown webhook source "${task.source}".`);
+    }
+
+    const target = resolveChannelWebhookTarget(
+      this.name,
+      this.config.webhooks,
+      task.source,
+      task.targetRef,
+    );
+    if (!this.supportsProactiveTarget(target)) {
+      throw new Error(
+        'Channel does not support proactive webhook messages for this chat target.',
+      );
+    }
+
+    const sessionId = await this.router.resolve(
+      this.name,
+      target.senderId,
+      target.chatId,
+      target.threadId,
+      this.config.cwd,
+      target.isGroup,
+    );
+    const promptText = buildChannelWebhookPrompt(task, target);
+    const taskId = `webhook:${task.source}:${task.eventType}`;
+
+    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const current = prev.then(async (): Promise<string | undefined> => {
+      let doneResolve: () => void = () => {};
+      const done = new Promise<void>((resolve) => {
+        doneResolve = resolve;
+      });
+      const promptState: ActivePrompt = {
+        cancelled: false,
+        done,
+        resolve: doneResolve,
+        chatId: target.chatId,
+        messageId: taskId,
+        senderId: target.senderId,
+        senderName: target.senderId,
+      };
+      this.activePrompts.set(sessionId, promptState);
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(target.chatId, sessionId, taskId),
+        type: 'started',
+      });
+
+      try {
+        const response = await this.runLoopBridgePrompt(
+          this.bridge,
+          sessionId,
+          promptText,
+          promptState,
+          taskId,
+          options.timeoutMs,
+        );
+        if (response) {
+          promptState.deliveryStarted = true;
+          await this.pushProactive(target, response);
+        }
+        this.emitTaskLifecycle({
+          ...this.lifecycleBase(target.chatId, sessionId, taskId),
+          type: 'completed',
+        });
+        return response;
+      } catch (err) {
+        this.emitTaskLifecycle({
+          ...this.lifecycleBase(target.chatId, sessionId, taskId),
+          type: 'failed',
+          error: this.lifecycleError(err),
+          phase: 'agent',
+        });
+        throw err;
+      } finally {
+        if (this.activePrompts.get(sessionId) === promptState) {
+          this.activePrompts.delete(sessionId);
+        }
+        promptState.resolve();
+      }
+    });
+    this.sessionQueues.set(
+      sessionId,
+      current.then(() => undefined).catch(() => undefined),
+    );
+    return await current;
   }
 
   private async runLoopBridgePrompt(
