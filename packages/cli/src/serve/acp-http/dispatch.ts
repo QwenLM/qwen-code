@@ -587,6 +587,7 @@ function toRpcError(err: unknown): {
           errorKind: 'session_limit_exceeded',
           limit: (err as { limit?: unknown }).limit,
           scope: (err as { scope?: unknown }).scope,
+          retryable: true,
         },
       };
     case 'PromptQueueFullError': {

@@ -369,10 +369,17 @@ export function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+      scope: 'workspace',
     });
     return;
   }
   if (err instanceof TotalSessionLimitExceededError) {
+    daemonLog?.warn('total session admission rejected', {
+      ...(ctx?.route ? { route: ctx.route } : {}),
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      limit: err.limit,
+      scope: err.scope,
+    });
     res.set('Retry-After', '5');
     res.status(503).json({
       error: err.message,
