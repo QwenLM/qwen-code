@@ -436,6 +436,8 @@ export default {
   'Manage existing subagents (view, edit, delete).':
     '管理現有子智能體（查看、編輯、刪除）',
   'Create a new subagent with guided setup.': '通過引導式設置創建新的子智能體',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    '從知識源（檔案、URL、對話或文字）建立可重複使用的技能。',
   Agents: '智能體',
   'Choose Action': '選擇操作',
   'Edit {{name}}': '編輯 {{name}}',
