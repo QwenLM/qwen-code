@@ -110,6 +110,7 @@ const {
           prompt: string,
           sessionId: string | null,
         ) => Promise<void>;
+        onCreateViaChat?: () => void;
       } | null,
     },
     sidebarTokens: [] as Array<number | undefined>,
@@ -364,7 +365,11 @@ vi.doMock('./components/SplitView', async () => {
         { 'data-testid': 'split-view-mock' },
         React.createElement(
           'button',
-          { 'data-testid': 'split-back', type: 'button', onClick: props.onExit },
+          {
+            'data-testid': 'split-back',
+            type: 'button',
+            onClick: props.onExit,
+          },
           'back',
         ),
       ),
@@ -1043,7 +1048,9 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     // Split closed; the Session Overview panel is shown instead of the chat.
-    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
     const panel = container.querySelector('[data-testid="inline-panel"]');
     expect(panel).not.toBeNull();
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
@@ -1681,5 +1688,24 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       vi.advanceTimersByTime(30_000);
     });
     expect((err as Error | undefined)?.message).toMatch(/Timed out switching/);
+  });
+
+  it('"create via chat" starts a fresh session instead of using the current one', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onCreateViaChat =
+      testState.latestScheduledTasksProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    await act(async () => {
+      onCreateViaChat();
+      await Promise.resolve();
+    });
+    // Jumps to a NEW session (clearSession is how createNewSession starts one)
+    // rather than piling the task-creation chat onto the current conversation.
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
   });
 });

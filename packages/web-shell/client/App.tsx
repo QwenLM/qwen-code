@@ -657,7 +657,6 @@ function isEditToolPermission(request: PermissionRequest): boolean {
   return request.toolKind === 'edit';
 }
 
-
 function parseRenameArgument(
   raw: string,
 ):
@@ -1210,9 +1209,9 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<
-    'chat' | 'scheduledTasks' | 'split'
-  >('chat');
+  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks' | 'split'>(
+    'chat',
+  );
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
@@ -1231,13 +1230,10 @@ export function App({
   // one closes the other. Without this, opening Scheduled Tasks then Daemon
   // Status left the panel rendered behind the Scheduled Tasks overlay, looking
   // like the button did nothing.
-  const openPanel = useCallback(
-    (panel: 'settings' | 'status' | 'sessions') => {
-      setMainView('chat');
-      setActivePanel(panel);
-    },
-    [],
-  );
+  const openPanel = useCallback((panel: 'settings' | 'status' | 'sessions') => {
+    setMainView('chat');
+    setActivePanel(panel);
+  }, []);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -1253,10 +1249,7 @@ export function App({
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
   // to the Session Overview — the hub the split is launched from.
-  const handleSplitExit = useCallback(
-    () => openPanel('sessions'),
-    [openPanel],
-  );
+  const handleSplitExit = useCallback(() => openPanel('sessions'), [openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -4672,18 +4665,23 @@ export function App({
                     <ScheduledTasksDialog
                       onRunPrompt={runTaskManually}
                       onCreateViaChat={() => {
-                        // Return to chat and prime the composer so the user can
+                        // Start a FRESH session and jump to it so the task-
+                        // creation chat doesn't pile onto the current
+                        // conversation, then prime the composer so the user can
                         // describe the task in natural language; the agent
-                        // creates it via its cron_create tool. Deferred so the
-                        // composer is mounted/visible before we focus it.
+                        // creates it via its cron_create tool. Focus is deferred
+                        // so the new session's composer is mounted/visible first.
                         setMainView('chat');
-                        window.setTimeout(() => {
-                          editorRef.current?.insertText(
-                            t('scheduledTasks.chatStarter'),
-                            { mode: 'replace' },
-                          );
-                          editorRef.current?.focus();
-                        }, 0);
+                        void createNewSession().then((created) => {
+                          if (created) onSessionIdChange?.(undefined);
+                          window.setTimeout(() => {
+                            editorRef.current?.insertText(
+                              t('scheduledTasks.chatStarter'),
+                              { mode: 'replace' },
+                            );
+                            editorRef.current?.focus();
+                          }, 0);
+                        });
                       }}
                       onOpenSession={(sessionId) => {
                         // The task's bound session IS its run history — switch
@@ -4713,10 +4711,7 @@ export function App({
                       data-testid="split-approval-notice"
                     >
                       <span>{t('splitView.outerApprovalPending')}</span>
-                      <button
-                        type="button"
-                        onClick={() => setMainView('chat')}
-                      >
+                      <button type="button" onClick={() => setMainView('chat')}>
                         {t('splitView.goToApproval')}
                       </button>
                     </div>
@@ -4749,7 +4744,9 @@ export function App({
                 // layout and the tab order, and aria-hidden keeps AT out — so no
                 // keyboard/AT can reach the outer composer/toolbar behind the
                 // split. State is preserved (the node stays mounted).
-                aria-hidden={activePanel || mainView !== 'chat' ? true : undefined}
+                aria-hidden={
+                  activePanel || mainView !== 'chat' ? true : undefined
+                }
               >
                 {showMissingSessionState && (
                   <div className={styles.missingSessionState}>
