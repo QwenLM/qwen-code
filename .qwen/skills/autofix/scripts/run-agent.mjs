@@ -100,13 +100,16 @@ function runQwen(options, prompt) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      log.end(() => {
-        resolve({
-          ...result,
-          timedOut,
-          loopDetected: loopDetected || isLoopGuardOutput(outputTail),
-        });
-      });
+      const payload = {
+        ...result,
+        timedOut,
+        loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+      };
+      if (log.destroyed) {
+        resolve(payload);
+      } else {
+        log.end(() => resolve(payload));
+      }
     };
 
     const record = (chunk, stream) => {

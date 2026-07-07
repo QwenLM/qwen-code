@@ -943,6 +943,9 @@ describe('qwen-autofix workflow', () => {
     expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
       "log.on('error', () => {});",
     );
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
+      'if (log.destroyed)',
+    );
   });
 
   it('detects loop guard output before it falls out of the log tail', () => {
