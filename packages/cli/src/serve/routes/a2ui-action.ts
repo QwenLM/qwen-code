@@ -30,10 +30,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import {
-  DEFAULT_INHERITED_ENV_VARS,
-  StdioClientTransport,
-} from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -144,9 +141,8 @@ export function buildTransport(
   return new StdioClientTransport({
     command: cfg.command!,
     args: cfg.args ?? [],
-    // Passing `env` prevents the SDK from reading live process.env. Keep the
-    // SDK's narrow default allowlist, but source those values from the runtime
-    // snapshot before applying explicit server env overrides.
+    // Passing `env` prevents the SDK from reading live process.env while
+    // keeping daemon MCP stdio behavior aligned with the core CLI client.
     env: buildStdioServerEnv(baseEnv, cfg.env),
     cwd: cfg.cwd,
   });
@@ -157,9 +153,12 @@ function buildStdioServerEnv(
   serverEnv: Record<string, string> | undefined,
 ): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const key of DEFAULT_INHERITED_ENV_VARS) {
-    const value = baseEnv[key];
-    if (value !== undefined && !value.startsWith('()')) {
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (
+      value !== undefined &&
+      !key.startsWith('BASH_FUNC_') &&
+      !value.startsWith('()')
+    ) {
       env[key] = value;
     }
   }

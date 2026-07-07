@@ -20,7 +20,7 @@ describe('createTotalSessionAdmissionController', () => {
       operation: 'spawn',
       workspaceCwd: '/work/a',
     });
-    expect(admission.snapshot()).toEqual({ inFlight: 1 });
+    expect(admission.snapshot()).toEqual({ liveCount: 1, inFlight: 1 });
 
     expect(() =>
       admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' }),
@@ -36,8 +36,9 @@ describe('createTotalSessionAdmissionController', () => {
 
     if (!reservation) throw new Error('expected reservation');
     reservation.release();
-    expect(admission.snapshot()).toEqual({ inFlight: 0 });
+    expect(admission.snapshot()).toEqual({ liveCount: 1, inFlight: 0 });
     bridges[1]!.sessionCount = 1;
+    expect(admission.snapshot()).toEqual({ liveCount: 2, inFlight: 0 });
     expect(() =>
       admission.admit({ operation: 'spawn', workspaceCwd: '/work/c' }),
     ).toThrow(TotalSessionLimitExceededError);

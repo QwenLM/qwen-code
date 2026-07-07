@@ -75,6 +75,34 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('uses total admission live count for total session capacity warnings', async () => {
+    const options = makeOptions({
+      totalAdmissionLiveCount: 8,
+      totalAdmissionInFlight: 1,
+      bridgeSnapshot: {
+        ...BASE_BRIDGE_SNAPSHOT,
+        sessionCount: 1,
+      },
+    });
+    options.opts.maxTotalSessions = 10;
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.sessions).toMatchObject({
+      active: 1,
+      admissionInFlight: 1,
+    });
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'total_session_capacity_high',
+          message: 'Total active and in-flight sessions are at 9/10.',
+        }),
+      ]),
+    });
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
@@ -647,6 +675,7 @@ interface MakeOptionsInput {
   activePromptCount?: number;
   pendingPromptTotal?: number;
   lastActivityAt?: number | null;
+  totalAdmissionLiveCount?: number;
   totalAdmissionInFlight?: number;
 }
 
@@ -715,6 +744,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? {}
       : {
           getTotalSessionAdmissionSnapshot: () => ({
+            liveCount:
+              input.totalAdmissionLiveCount ??
+              (input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT).sessionCount,
             inFlight: input.totalAdmissionInFlight!,
           }),
         }),

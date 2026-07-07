@@ -412,13 +412,15 @@ describe('helpers', () => {
     expect(sdkMocks.state.stdioTransports).toHaveLength(0);
   });
 
-  it('buildTransport uses SDK-safe runtime env for stdio transports', () => {
+  it('buildTransport uses the scrubbed runtime env for stdio transports', () => {
     const runtimeEnv = {
       HOME: '/runtime/home',
       PATH: '/runtime/bin',
       RUNTIME_ONLY: 'yes',
       A2UI_TOKEN: 'base',
-      OPENAI_API_KEY: 'must-not-leak',
+      OPENAI_API_KEY: 'runtime-key',
+      BASH_FUNC_bad: '() { ignored; }',
+      SHELL_FUNC: '() { ignored; }',
     };
     buildTransport(
       {
@@ -450,12 +452,14 @@ describe('helpers', () => {
     expect(withEnv.options.env).toMatchObject({
       HOME: '/runtime/home',
       PATH: '/runtime/bin',
+      RUNTIME_ONLY: 'yes',
       A2UI_TOKEN: 'secret',
+      OPENAI_API_KEY: 'runtime-key',
     });
-    expect(withEnv.options.env?.['RUNTIME_ONLY']).toBeUndefined();
-    expect(withEnv.options.env?.['OPENAI_API_KEY']).toBeUndefined();
+    expect(withEnv.options.env?.['BASH_FUNC_bad']).toBeUndefined();
+    expect(withEnv.options.env?.['SHELL_FUNC']).toBeUndefined();
     expect(withoutEnv.options.env?.['PATH']).toBe('/runtime/bin');
-    expect(withoutEnv.options.env?.['A2UI_TOKEN']).toBeUndefined();
+    expect(withoutEnv.options.env?.['A2UI_TOKEN']).toBe('base');
   });
 
   it('callA2uiAction connects, calls the action tool, and closes resources', async () => {

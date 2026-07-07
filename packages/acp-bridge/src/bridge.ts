@@ -1875,6 +1875,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     modelServiceId: string | undefined,
     effectiveScope: 'single' | 'thread',
     requestedClientId?: string,
+    onSessionRegistered?: () => void,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -1953,6 +1954,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         boundWorkspace,
       );
       sessionRegistered = true;
+      onSessionRegistered?.();
       seedSnapshotCaches(entry, newSessionResp);
       const clientId = registerClient(entry, requestedClientId);
       // `defaultEntry` is the single-scope attach target — only sessions
@@ -2878,6 +2880,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             workspaceCwd: workspaceKey,
             sessionId: req.sessionId,
           });
+    let admissionReleased = false;
+    const releaseAdmissionOnce = () => {
+      if (admissionReleased) return;
+      admissionReleased = true;
+      releaseFreshSessionReservation(admission);
+    };
     const promise = (async (): Promise<BridgeRestoredSession> => {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       ci = await ensureChannel();
@@ -3012,6 +3020,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         restoreEvents,
         { drainEarlyEvents: replayUpdates.length === 0 },
       );
+      releaseAdmissionOnce();
       entry.restoreState = state;
       if (replayPartial === true) {
         entry.restoreReplayPartial = true;
@@ -3051,7 +3060,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...replayFieldsFor(entry, action),
       };
     })().finally(async () => {
-      releaseFreshSessionReservation(admission);
+      releaseAdmissionOnce();
       ci?.pendingRestoreIds.delete(req.sessionId);
       // Pair with `markRestoreInFlight`. Once the IIFE settles, either
       // `createSessionEntry` ran (`drainEarlyEvents` already cleared
@@ -3471,7 +3480,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         operation: 'spawn',
         workspaceCwd: workspaceKey,
       });
-      const promise = doSpawn(req.modelServiceId, effectiveScope, req.clientId);
+      let admissionReleased = false;
+      const releaseAdmissionOnce = () => {
+        if (admissionReleased) return;
+        admissionReleased = true;
+        releaseFreshSessionReservation(admission);
+      };
+      const promise = doSpawn(
+        req.modelServiceId,
+        effectiveScope,
+        req.clientId,
+        releaseAdmissionOnce,
+      );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
       // `spawnOrAttach` finds the entry and waits for the same
@@ -3492,7 +3512,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       try {
         return await promise;
       } finally {
-        releaseFreshSessionReservation(admission);
+        releaseAdmissionOnce();
         // Always clear the in-flight slot whether the spawn resolved
         // or rejected — leaving a rejected promise behind would
         // poison every future coalescing-path call for this
@@ -4210,6 +4230,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           workspaceCwd: boundWorkspace,
           sourceSessionId: sessionId,
         });
+        let admissionReleased = false;
+        const releaseAdmissionOnce = () => {
+          if (admissionReleased) return;
+          admissionReleased = true;
+          releaseFreshSessionReservation(admission);
+        };
         try {
           const ci = await ensureChannel();
           const result = (await withTimeout(
@@ -4246,6 +4272,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 skipFreshSessionAdmission: true,
               },
             );
+            releaseAdmissionOnce();
           } catch (restoreErr) {
             writeStderrLine(
               `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
@@ -4289,7 +4316,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             },
           };
         } finally {
-          releaseFreshSessionReservation(admission);
+          releaseAdmissionOnce();
         }
       });
       entry.promptQueue = branchResult.then(

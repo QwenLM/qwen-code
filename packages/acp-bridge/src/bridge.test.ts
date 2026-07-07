@@ -9452,6 +9452,57 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('releases fresh spawn admission once the session is live', async () => {
+      const modelSwitchGate = deferred<unknown>();
+      let releaseCount = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => modelSwitchGate.promise;
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+        freshSessionAdmission: () => ({
+          release: () => {
+            releaseCount++;
+          },
+        }),
+      });
+
+      const spawn = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'qwen3-coder',
+      });
+
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(1);
+        expect(releaseCount).toBe(1);
+      });
+      modelSwitchGate.resolve({});
+      await spawn;
+      expect(releaseCount).toBe(1);
+      await bridge.shutdown();
+    });
+
     it('reports freshSessionAdmission release failures without failing fresh spawns', async () => {
       const diagnostics: Array<{ line: string; level?: string }> = [];
       const bridge = makeBridge({

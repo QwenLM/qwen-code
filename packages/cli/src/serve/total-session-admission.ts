@@ -21,6 +21,7 @@ export interface TotalSessionAdmissionOptions {
 }
 
 export interface TotalSessionAdmissionSnapshot {
+  readonly liveCount: number;
   readonly inFlight: number;
 }
 
@@ -46,11 +47,7 @@ export function createTotalSessionAdmissionController({
       context: BridgeFreshSessionAdmissionContext,
     ): BridgeFreshSessionReservation {
       if (limit !== Number.POSITIVE_INFINITY) {
-        const live = getBridges().reduce(
-          (sum, bridge) => sum + bridge.sessionCount,
-          0,
-        );
-        if (live + inFlight >= limit) {
+        if (getLiveCount(getBridges()) + inFlight >= limit) {
           throw Object.assign(new TotalSessionLimitExceededError(limit), {
             operation: context.operation,
             workspaceCwd: context.workspaceCwd,
@@ -73,7 +70,11 @@ export function createTotalSessionAdmissionController({
       };
     },
     snapshot() {
-      return { inFlight };
+      return { liveCount: getLiveCount(getBridges()), inFlight };
     },
   };
+}
+
+function getLiveCount(bridges: readonly SessionCountSource[]): number {
+  return bridges.reduce((sum, bridge) => sum + bridge.sessionCount, 0);
 }

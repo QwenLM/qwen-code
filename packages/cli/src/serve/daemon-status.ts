@@ -553,7 +553,8 @@ function pushRuntimeIssues(
   const maxTotalSessions = positiveFiniteOrNull(input.opts.maxTotalSessions);
   if (maxTotalSessions !== null) {
     const totalActive =
-      bridgeSnapshot.sessionCount + (totalAdmissionSnapshot?.inFlight ?? 0);
+      (totalAdmissionSnapshot?.liveCount ?? bridgeSnapshot.sessionCount) +
+      (totalAdmissionSnapshot?.inFlight ?? 0);
     if (totalActive / maxTotalSessions >= CAPACITY_WARNING_RATIO) {
       issues.push({
         code: 'total_session_capacity_high',
