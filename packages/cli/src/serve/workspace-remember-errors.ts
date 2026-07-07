@@ -101,7 +101,7 @@ function rawRememberErrorDetails(
 
 function replaceControlChars(details: string): string {
   return details
-    .replace(REMEMBER_ERROR_INVISIBLE_RE, ' ')
+    .replace(REMEMBER_ERROR_INVISIBLE_RE, '')
     .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
 

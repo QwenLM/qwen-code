@@ -3508,7 +3508,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockDebugLogger.error).toHaveBeenCalledWith(
       'Workspace memory remember failed:',
-      'Authorization: <redacted>',
+      {
+        code: 'remember_failed',
+        details: 'Authorization: <redacted>',
+      },
     );
     expect(JSON.stringify(mockDebugLogger.error.mock.calls)).not.toContain(
       'secret-token-value',
@@ -3726,6 +3729,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         message: 'Workspace memory forget timed out',
         data: { errorKind: 'forget_timeout' },
       });
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory forget timed out:',
+        {
+          code: 'forget_timeout',
+          details: 'late abort',
+        },
+      );
     } finally {
       timeoutSpy.mockRestore();
       mockConnectionState.resolve();

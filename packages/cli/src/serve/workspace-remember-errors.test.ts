@@ -121,6 +121,16 @@ describe('extractRememberErrorDetails', () => {
     }
   });
 
+  it('redacts bare tokens split by invisible characters', () => {
+    const details = extractRememberErrorDetails(
+      new Error('OpenAI key sk-AAAAAAAAAA\u2062BBBBBBBBBBBBBBB'),
+    );
+
+    expect(details).toBe('OpenAI key sk-<redacted>');
+    expect(details).not.toContain('AAAAAAAAAA');
+    expect(details).not.toContain('BBBBBBBBBBBBBBB');
+  });
+
   it('normalizes line separators before redacting credentials', () => {
     for (const separator of ['\u2028', '\u2029']) {
       const details = extractRememberErrorDetails(

@@ -23,6 +23,19 @@ import {
 } from './workspace-remember.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
 
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
 interface Deferred<T> {
@@ -921,6 +934,47 @@ describe('workspace memory remember routes', () => {
           message: 'Workspace memory remember timed out.',
         });
       });
+  });
+
+  it('logs sanitized details for task-lane failures', async () => {
+    mockDebugLogger.error.mockClear();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Authorization: Bearer secret-token-value'),
+        ),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'secret' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_failed',
+          message: 'Workspace memory remember failed.',
+          details: 'Authorization: <redacted>',
+        });
+      });
+
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember task failed:',
+      {
+        taskId: post.body.taskId,
+        code: 'remember_failed',
+        details: 'Authorization: <redacted>',
+      },
+    );
+    expect(JSON.stringify(mockDebugLogger.error.mock.calls)).not.toContain(
+      'secret-token-value',
+    );
   });
 
   it('records forget and dream failures with kind-specific error codes', async () => {

@@ -5847,11 +5847,12 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          debugLogger.error(
-            'Workspace memory remember failed:',
-            workspaceMemoryDebugDetails(err),
-          );
+          const details = workspaceMemoryDebugDetails(err);
           if (childSignal.aborted) {
+            debugLogger.error('Workspace memory remember timed out:', {
+              code: 'remember_timeout',
+              details,
+            });
             throw new RequestError(
               -32099,
               'Workspace memory remember timed out',
@@ -5859,6 +5860,10 @@ class QwenAgent implements Agent {
             );
           }
           const code = extractRememberErrorCode(err);
+          debugLogger.error('Workspace memory remember failed:', {
+            code,
+            details,
+          });
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
               -32009,
@@ -5921,11 +5926,12 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          debugLogger.error(
-            'Workspace memory forget failed:',
-            workspaceMemoryDebugDetails(err),
-          );
+          const details = workspaceMemoryDebugDetails(err);
           if (childSignal.aborted) {
+            debugLogger.error('Workspace memory forget timed out:', {
+              code: 'forget_timeout',
+              details,
+            });
             throw new RequestError(
               -32099,
               'Workspace memory forget timed out',
@@ -5935,6 +5941,10 @@ class QwenAgent implements Agent {
             );
           }
           const code = extractRememberErrorCode(err, 'forget_failed');
+          debugLogger.error('Workspace memory forget failed:', {
+            code,
+            details,
+          });
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
               -32009,
@@ -5982,16 +5992,21 @@ class QwenAgent implements Agent {
           if (err instanceof RequestError) {
             throw err;
           }
-          debugLogger.error(
-            'Workspace memory dream failed:',
-            workspaceMemoryDebugDetails(err),
-          );
+          const details = workspaceMemoryDebugDetails(err);
           if (childSignal.aborted) {
+            debugLogger.error('Workspace memory dream timed out:', {
+              code: 'dream_timeout',
+              details,
+            });
             throw new RequestError(-32099, 'Workspace memory dream timed out', {
               errorKind: 'dream_timeout',
             });
           }
           const code = extractRememberErrorCode(err, 'dream_failed');
+          debugLogger.error('Workspace memory dream failed:', {
+            code,
+            details,
+          });
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
               -32009,
