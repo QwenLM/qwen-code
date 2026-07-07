@@ -14231,6 +14231,72 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     expect(locals.workspaceRegistry!.primary.env).toBe(primaryRuntimeEnv);
   });
 
+  it('wires total admission into the internally-created bridge', async () => {
+    type AdmissionContext = {
+      operation: 'spawn';
+      workspaceCwd: string;
+    };
+    let freshSessionAdmission:
+      | ((context: AdmissionContext) => { release(): void })
+      | undefined;
+    vi.resetModules();
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: unknown) => {
+          freshSessionAdmission = (
+            opts as {
+              freshSessionAdmission?: typeof freshSessionAdmission;
+            }
+          ).freshSessionAdmission;
+          return fakeBridge();
+        }),
+      };
+    });
+
+    try {
+      const { createServeApp } = await import('./server.js');
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: WS_BOUND,
+          maxTotalSessions: 1,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+
+      expect(freshSessionAdmission).toBeDefined();
+      const first = freshSessionAdmission!({
+        operation: 'spawn',
+        workspaceCwd: WS_BOUND,
+      });
+      let rejection: unknown;
+      try {
+        freshSessionAdmission!({
+          operation: 'spawn',
+          workspaceCwd: WS_BOUND,
+        });
+      } catch (err) {
+        rejection = err;
+      }
+      expect(rejection).toMatchObject({
+        name: 'TotalSessionLimitExceededError',
+        limit: 1,
+        scope: 'total',
+        operation: 'spawn',
+        workspaceCwd: WS_BOUND,
+      });
+      first.release();
+    } finally {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+    }
+  });
+
   it('uses an injected workspace registry as the primary runtime source', async () => {
     const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
