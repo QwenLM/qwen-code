@@ -40,7 +40,7 @@ const REQUIRED_NODE_MAJOR = 22;
  */
 export function createDaemonStatusProvider(
   options: {
-    env?: Record<string, string | undefined>;
+    env?: Readonly<Record<string, string | undefined>>;
   } = {},
 ): DaemonStatusProvider {
   const readEnv = () => options.env ?? snapshotProcessEnv();
@@ -80,7 +80,7 @@ export function createDaemonStatusProvider(
  */
 async function buildDaemonPreflightCells(
   boundWorkspace: string,
-  env: Record<string, string | undefined>,
+  env: Readonly<Record<string, string | undefined>>,
 ): Promise<ServePreflightCell[]> {
   // Each builder returns (or eventually returns) one cell. We run them via
   // `Promise.allSettled` after wrapping every call in `Promise.resolve().then`

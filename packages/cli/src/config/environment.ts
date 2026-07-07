@@ -308,16 +308,11 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
 
 function setUpCloudShellEnvironmentInEnv(
   env: NodeJS.ProcessEnv,
-  envFilePaths: readonly string[],
+  envFiles: readonly ParsedEnvFile[],
 ): void {
-  for (const envFilePath of envFilePaths) {
-    if (!fs.existsSync(envFilePath)) {
-      continue;
-    }
-    const envFileContent = fs.readFileSync(envFilePath);
-    const parsedEnv = dotenv.parse(envFileContent);
-    if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
-      env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
+  for (const envFile of envFiles) {
+    if (envFile.parsedEnv['GOOGLE_CLOUD_PROJECT']) {
+      env['GOOGLE_CLOUD_PROJECT'] = envFile.parsedEnv['GOOGLE_CLOUD_PROJECT'];
       return;
     }
   }
@@ -325,20 +320,62 @@ function setUpCloudShellEnvironmentInEnv(
   env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
 }
 
-function setUpCloudShellEnvironmentFromFiles(envFilePaths: string[]): void {
+interface ParsedEnvFile {
+  readonly parsedEnv: Record<string, string>;
+  readonly isHomeScopedEnvFile: boolean;
+  readonly isQwenScopedEnvFile: boolean;
+}
+
+interface ParsedEnvFilesResult {
+  readonly files: readonly ParsedEnvFile[];
+  readonly readFailed: boolean;
+}
+
+function parseEnvFiles(
+  envFilePaths: readonly string[],
+  userLevelPaths: ReadonlySet<string>,
+): ParsedEnvFilesResult {
+  const files: ParsedEnvFile[] = [];
+  let readFailed = false;
+
   for (const envFilePath of envFilePaths) {
-    if (!fs.existsSync(envFilePath)) {
-      continue;
-    }
-    const envFileContent = fs.readFileSync(envFilePath);
-    const parsedEnv = dotenv.parse(envFileContent);
-    if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
-      process.env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
-      return;
+    try {
+      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+      const parsedEnv = dotenv.parse(envFileContent);
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isQwenScopedEnvFile =
+        isHomeScopedEnvFile ||
+        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
+
+      files.push({
+        parsedEnv,
+        isHomeScopedEnvFile,
+        isQwenScopedEnvFile,
+      });
+    } catch {
+      readFailed = true;
     }
   }
 
-  process.env['GOOGLE_CLOUD_PROJECT'] = 'cloudshell-gca';
+  return { files, readFailed };
+}
+
+function canApplyParsedEnvKey(
+  envFile: ParsedEnvFile,
+  key: string,
+  excludedVars: readonly string[],
+  options: { readonly reload?: boolean } = {},
+): boolean {
+  if (!Object.hasOwn(envFile.parsedEnv, key)) return false;
+  if (options.reload && RELOAD_EXCLUDED_KEYS.has(key)) return false;
+  if (
+    !envFile.isHomeScopedEnvFile &&
+    PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
+  ) {
+    return false;
+  }
+  return envFile.isQwenScopedEnvFile || !excludedVars.includes(key);
 }
 
 export interface RuntimeEnvironmentSnapshot {
@@ -369,40 +406,19 @@ export function buildRuntimeEnvironment(
 ): RuntimeEnvironmentSnapshot {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
+  const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
   const effectiveEnv: NodeJS.ProcessEnv = { ...baseEnv };
 
   if (baseEnv['CLOUD_SHELL'] === 'true') {
-    setUpCloudShellEnvironmentInEnv(effectiveEnv, envFilePaths);
+    setUpCloudShellEnvironmentInEnv(effectiveEnv, parsedEnvFiles.files);
   }
 
-  for (const envFilePath of envFilePaths) {
-    try {
-      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
-      const parsedEnv = dotenv.parse(envFileContent);
-
-      const excludedVars =
-        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const normalizedEnvFilePath = path.normalize(envFilePath);
-      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
-      const isQwenScopedEnvFile =
-        isHomeScopedEnvFile ||
-        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
-
-      for (const key in parsedEnv) {
-        if (!Object.hasOwn(parsedEnv, key)) continue;
-        if (
-          !isHomeScopedEnvFile &&
-          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
-        ) {
-          continue;
-        }
-        if (!isQwenScopedEnvFile && excludedVars.includes(key)) {
-          continue;
-        }
-        setRuntimeEnvIfUnset(effectiveEnv, key, parsedEnv[key]!);
-      }
-    } catch {
-      // Match loadEnvironment(): dotenv read errors are ignored.
+  for (const envFile of parsedEnvFiles.files) {
+    const excludedVars =
+      settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+    for (const key in envFile.parsedEnv) {
+      if (!canApplyParsedEnvKey(envFile, key, excludedVars)) continue;
+      setRuntimeEnvIfUnset(effectiveEnv, key, envFile.parsedEnv[key]!);
     }
   }
 
@@ -440,59 +456,37 @@ export function loadEnvironment(
 ): void {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
+  const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
 
   // Cloud Shell environment variable handling
   if (process.env['CLOUD_SHELL'] === 'true') {
-    setUpCloudShellEnvironmentFromFiles(envFilePaths);
+    setUpCloudShellEnvironmentInEnv(process.env, parsedEnvFiles.files);
   }
 
   // Step 1: Load from .env files (higher priority than settings.env)
   // Only set if not already present in process.env (no-override mode)
-  for (const envFilePath of envFilePaths) {
-    try {
-      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
-      const parsedEnv = dotenv.parse(envFileContent);
+  for (const envFile of parsedEnvFiles.files) {
+    const excludedVars =
+      settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+    // homeScoped: `.env` lives under the user's home Qwen dir or `~/.env` —
+    //   only these may set QWEN_HOME / QWEN_RUNTIME_DIR.
+    // qwenScoped: any `.env` whose immediate parent is `.qwen` (including
+    //   `<repo>/.qwen/.env`) — exempt from the user `excludedEnvVars` list.
+    for (const key in envFile.parsedEnv) {
+      if (!canApplyParsedEnvKey(envFile, key, excludedVars)) continue;
 
-      const excludedVars =
-        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const normalizedEnvFilePath = path.normalize(envFilePath);
-      // homeScoped: `.env` lives under the user's home Qwen dir or `~/.env` —
-      //   only these may set QWEN_HOME / QWEN_RUNTIME_DIR.
-      // qwenScoped: any `.env` whose immediate parent is `.qwen` (including
-      //   `<repo>/.qwen/.env`) — exempt from the user `excludedEnvVars` list.
-      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
-      const isQwenScopedEnvFile =
-        isHomeScopedEnvFile ||
-        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
-
-      for (const key in parsedEnv) {
-        if (Object.hasOwn(parsedEnv, key)) {
-          if (
-            !isHomeScopedEnvFile &&
-            PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
-          ) {
-            continue;
-          }
-          if (!isQwenScopedEnvFile && excludedVars.includes(key)) {
-            continue;
-          }
-
-          const existingValue = process.env[key];
-          const isEffectivelyUnset =
-            !Object.hasOwn(process.env, key) || existingValue === '';
-          if (isEffectivelyUnset) {
-            process.env[key] = parsedEnv[key];
-            dotEnvSourcedKeys.add(key);
-          }
-          // Seed snapshot with ALL parsed keys (not just written ones)
-          // so child processes can detect deletions on first reload.
-          if (!lastReloadSnapshotSeeded && !lastReloadSnapshot.has(key)) {
-            lastReloadSnapshot.set(key, parsedEnv[key]!);
-          }
-        }
+      const existingValue = process.env[key];
+      const isEffectivelyUnset =
+        !Object.hasOwn(process.env, key) || existingValue === '';
+      if (isEffectivelyUnset) {
+        process.env[key] = envFile.parsedEnv[key];
+        dotEnvSourcedKeys.add(key);
       }
-    } catch (_e) {
-      // Errors are ignored to match the behavior of `dotenv.config({ quiet: true })`.
+      // Seed snapshot with ALL parsed keys (not just written ones)
+      // so child processes can detect deletions on first reload.
+      if (!lastReloadSnapshotSeeded && !lastReloadSnapshot.has(key)) {
+        lastReloadSnapshot.set(key, envFile.parsedEnv[key]!);
+      }
     }
   }
 
@@ -543,44 +537,27 @@ export function reloadEnvironment(
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, workspaceCwd, userLevelPaths);
+  const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
 
   if (process.env['CLOUD_SHELL'] === 'true') {
-    setUpCloudShellEnvironmentFromFiles(envFilePaths);
+    setUpCloudShellEnvironmentInEnv(process.env, parsedEnvFiles.files);
   }
 
   // Build the set of new keys from .env (higher priority) + settings.env
-  let dotEnvReadFailed = false;
+  const dotEnvReadFailed = parsedEnvFiles.readFailed;
   const newDotEnvKeys = new Map<string, string>();
   const newSettingsEnvKeys = new Map<string, string>();
 
-  for (const envFilePath of envFilePaths) {
-    try {
-      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
-      const parsedEnv = dotenv.parse(envFileContent);
-      const excludedVars =
-        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const normalizedEnvFilePath = path.normalize(envFilePath);
-      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
-      const isQwenScopedEnvFile =
-        isHomeScopedEnvFile ||
-        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
-
-      for (const key in parsedEnv) {
-        if (!Object.hasOwn(parsedEnv, key)) continue;
-        if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
-        if (
-          !isHomeScopedEnvFile &&
-          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
-        ) {
-          continue;
-        }
-        if (!isQwenScopedEnvFile && excludedVars.includes(key)) continue;
-        if (!newDotEnvKeys.has(key)) {
-          newDotEnvKeys.set(key, parsedEnv[key]!);
-        }
+  for (const envFile of parsedEnvFiles.files) {
+    const excludedVars =
+      settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+    for (const key in envFile.parsedEnv) {
+      if (!canApplyParsedEnvKey(envFile, key, excludedVars, { reload: true })) {
+        continue;
       }
-    } catch {
-      dotEnvReadFailed = true;
+      if (!newDotEnvKeys.has(key)) {
+        newDotEnvKeys.set(key, envFile.parsedEnv[key]!);
+      }
     }
   }
 

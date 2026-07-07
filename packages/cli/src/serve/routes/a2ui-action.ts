@@ -87,7 +87,7 @@ interface RegisterA2uiActionRoutesOptions {
     cfg: McpServerConfigLike,
     args: A2uiActionArgs,
   ) => Promise<A2uiActionResult>;
-  env?: Record<string, string | undefined>;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 /** Exported for unit testing. */
@@ -133,7 +133,7 @@ export async function findFromSettingsFile(
 /** Build a one-shot transport from the config shape: stdio (command) or streamable HTTP (httpUrl). */
 export function buildTransport(
   cfg: McpServerConfigLike,
-  baseEnv: Record<string, string | undefined> = snapshotProcessEnv(),
+  baseEnv: Readonly<Record<string, string | undefined>> = snapshotProcessEnv(),
 ): Transport {
   if (typeof cfg.httpUrl === 'string') {
     return new StreamableHTTPClientTransport(new URL(cfg.httpUrl));
@@ -193,7 +193,7 @@ export function extractA2uiActionResult(
 export async function callA2uiAction(
   cfg: McpServerConfigLike,
   args: A2uiActionArgs,
-  env?: Record<string, string | undefined>,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<A2uiActionResult> {
   const transport = buildTransport(cfg, env);
   const client = new Client({ name: 'qwen-serve-a2ui', version: '0.0.1' });

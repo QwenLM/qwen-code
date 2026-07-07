@@ -68,7 +68,7 @@ function encodeWav(pcm: Uint8Array): Uint8Array {
 /** Injection seams for unit tests; production uses the reused CLI pipeline. */
 export interface VoiceWsDeps {
   loadContext?: (workspaceCwd: string) => DaemonVoiceContext;
-  env?: Record<string, string | undefined>;
+  env?: Readonly<Record<string, string | undefined>>;
   openStream?: (
     ctx: DaemonVoiceContext,
     callbacks: VoiceStreamCallbacks,

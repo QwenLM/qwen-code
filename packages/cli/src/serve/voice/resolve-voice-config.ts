@@ -47,7 +47,7 @@ function readVoiceModel(settings: LoadedSettings): string | undefined {
  */
 function buildModelsConfig(
   settings: LoadedSettings,
-  env: Record<string, string | undefined>,
+  env: Readonly<Record<string, string | undefined>>,
 ): ModelsConfig {
   const merged = settings.merged;
   const selectedAuthType =
@@ -73,7 +73,7 @@ function buildModelsConfig(
  */
 export function loadDaemonVoiceContext(
   workspaceCwd: string,
-  options: { env?: Record<string, string | undefined> } = {},
+  options: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): DaemonVoiceContext {
   const settings = loadSettings(workspaceCwd);
   const voiceModel = readVoiceModel(settings);
