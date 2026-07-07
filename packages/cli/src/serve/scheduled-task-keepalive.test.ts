@@ -42,6 +42,12 @@ describe('scheduled-task keepalive', () => {
     loadSession: async (req: { sessionId: string }) => {
       loads.push(req.sessionId);
     },
+    spawnOrAttach: async () => {
+      throw new Error('spawnOrAttach not mocked');
+    },
+    updateSessionMetadata: () => {
+      throw new Error('updateSessionMetadata not mocked');
+    },
   };
 
   beforeEach(async () => {
@@ -104,6 +110,12 @@ describe('scheduled-task keepalive', () => {
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
       },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
     };
     const ka = startScheduledTaskKeepalive({
       bridge: guarded,
@@ -140,6 +152,12 @@ describe('scheduled-task keepalive', () => {
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
       },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
     };
     const ka = startScheduledTaskKeepalive({
       bridge: reviving,
@@ -168,6 +186,12 @@ describe('scheduled-task keepalive', () => {
         loads.push(req.sessionId);
         if (req.sessionId === 'sess-1') throw new Error('transcript gone');
       },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
     };
     const ka = startScheduledTaskKeepalive({
       bridge: reviving,
@@ -191,6 +215,12 @@ describe('scheduled-task keepalive', () => {
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
         throw new Error('transcript gone');
+      },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
       },
     };
     const ka = startScheduledTaskKeepalive({
@@ -219,6 +249,12 @@ describe('scheduled-task keepalive', () => {
         await new Promise<void>((resolve) => {
           releaseLoad = resolve;
         });
+      },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
       },
     };
     const ka = startScheduledTaskKeepalive({

@@ -30,9 +30,11 @@
 
 import {
   readCronTasks,
+  updateCronTasks,
   createDebugLogger,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
+import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
 
@@ -62,7 +64,10 @@ function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
 
 /** The slice of the bridge the keepalive needs — narrowed for testability.
  * `recordHeartbeat` keeps a live session resident; `loadSession` revives one
- * the reaper already let go (a re-enabled task's session). */
+ * the reaper already let go (a re-enabled task's session). `spawnOrAttach`
+ * and `updateSessionMetadata` bind unbound durable tasks to dedicated
+ * sessions — the same flow the POST /scheduled-tasks route uses for
+ * UI-created tasks, applied retroactively to cron_create tool tasks. */
 export interface KeepaliveBridge {
   recordHeartbeat(sessionId: string): unknown;
   loadSession(req: {
@@ -70,6 +75,14 @@ export interface KeepaliveBridge {
     workspaceCwd: string;
     historyReplay?: 'stream' | 'response';
   }): Promise<unknown>;
+  spawnOrAttach(req: {
+    workspaceCwd: string;
+    sessionScope?: 'single' | 'thread';
+  }): Promise<{ sessionId: string }>;
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+  ): unknown;
 }
 
 /** Per-session revive-load timeout: a hung reload must not stall the sweep. */
@@ -78,6 +91,51 @@ const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
  * (transcript deleted out-of-band) is retried at most this often rather than
  * every interval forever. */
 const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
+
+/**
+ * Bind unbound durable tasks to dedicated sessions, matching the UI's
+ * "新建定时任务" flow. The cron_create tool (core layer) writes tasks to
+ * disk without a sessionId because it has no access to the session bridge;
+ * this runs in the daemon process where the bridge is available. For each
+ * unbound task: mints a dedicated session (sessionScope: 'thread'), names
+ * it `⏰ prompt`, and writes the sessionId back to disk. Best-effort — a
+ * spawn failure is logged and retried on the next tick.
+ */
+async function bindUnboundTasks(
+  bridge: KeepaliveBridge,
+  boundWorkspace: string,
+  tasks: readonly DurableCronTask[],
+): Promise<void> {
+  const unbound = tasks.filter((t) => !t.sessionId && t.enabled !== false);
+  if (unbound.length === 0) return;
+
+  for (const task of unbound) {
+    try {
+      const { sessionId } = await bridge.spawnOrAttach({
+        workspaceCwd: boundWorkspace,
+        sessionScope: 'thread',
+      });
+      try {
+        bridge.updateSessionMetadata(sessionId, {
+          displayName: scheduledTaskSessionName(task.prompt),
+        });
+      } catch {
+        // naming is non-critical — the session still fires correctly
+      }
+      await updateCronTasks(boundWorkspace, (list) =>
+        list.map((t) => (t.id === task.id ? { ...t, sessionId } : t)),
+      );
+      log.debug(
+        'keepalive: bound task',
+        task.id,
+        'to dedicated session',
+        sessionId,
+      );
+    } catch (err) {
+      log.debug('keepalive: failed to bind task', task.id, err);
+    }
+  }
+}
 
 export interface ScheduledTaskKeepalive {
   /** Stops the periodic heartbeat. Idempotent. */
@@ -187,6 +245,8 @@ export function startScheduledTaskKeepalive(
         if (!live.has(id)) reviveState.delete(id);
       }
     }
+
+    await bindUnboundTasks(bridge, boundWorkspace, tasks);
   };
 
   // In-flight guard: a pass can outlast the interval (each revive awaits up to
