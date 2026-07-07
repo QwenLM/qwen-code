@@ -206,7 +206,9 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
             />
           </div>
         )}
-        <StreamingStatus startedAt={activeTurnStartedAt} />
+        {/* Panes keep the composer status compact: spinner + elapsed time +
+            token count + cancel hint, but no rotating "witty" loading phrase. */}
+        <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
         <ChatEditor
           onSubmit={handleSubmit}
           onCancel={handleCancel}
