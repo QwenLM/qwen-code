@@ -30,8 +30,6 @@ const EMPTY_TOOLBAR: never[] = [];
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
-  /** Marks the pane bound to the window's primary (sidebar-selected) session. */
-  isCurrent?: boolean;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
 }
@@ -43,7 +41,7 @@ export interface ChatPaneProps {
  * state, approvals, and composer, and the browser scopes keyboard focus to the
  * pane the user clicks into — so there is no cross-pane approval arbitration.
  */
-export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) {
+export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
@@ -119,7 +117,9 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
   const handleCancel = useCallback(() => {
     actions
       .cancel()
-      .catch((error: unknown) => reportError(error, 'Failed to cancel request'));
+      .catch((error: unknown) =>
+        reportError(error, 'Failed to cancel request'),
+      );
   }, [actions, reportError]);
 
   const headerLabel =
@@ -127,9 +127,7 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
 
   return (
     <section
-      className={[styles.pane, isCurrent ? styles.paneCurrent : '']
-        .filter(Boolean)
-        .join(' ')}
+      className={styles.pane}
       data-testid="chat-pane"
       aria-label={headerLabel}
     >
@@ -137,11 +135,6 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
         <span className={styles.title} title={headerLabel}>
           {headerLabel}
         </span>
-        {isCurrent && (
-          <span className={styles.currentBadge}>
-            {t('sessionsOverview.current')}
-          </span>
-        )}
         {onClose && (
           <button
             type="button"
