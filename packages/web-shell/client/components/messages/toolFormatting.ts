@@ -4,6 +4,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',

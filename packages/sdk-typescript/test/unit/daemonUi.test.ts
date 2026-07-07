@@ -522,6 +522,39 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ).toMatchObject([{ type: 'user.text.delta', text: 'hello' }]);
   });
 
+  it('preserves user message metadata on transcript blocks', () => {
+    const events = normalizeDaemonEvent({
+      id: 23,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'scheduled prompt' },
+          _meta: { source: 'cron' },
+        },
+      },
+    } as const);
+
+    expect(events).toMatchObject([
+      {
+        type: 'user.text.delta',
+        text: 'scheduled prompt',
+        meta: { source: 'cron' },
+      },
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'scheduled prompt',
+      meta: { source: 'cron' },
+    });
+  });
+
   it('carries user shell command metadata into user shell transcript blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     const commandEvents = normalizeDaemonEvent({
@@ -2253,6 +2286,33 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         enabled: false,
       }),
     ]);
+  });
+
+  it('normalizes settings_reloaded as a settings refresh signal', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_reloaded', {
+        env: { updatedKeys: ['OPENAI_API_KEY'], removedKeys: [] },
+        changedKeys: ['env', 'hooks'],
+        childReloaded: true,
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'settings_reloaded',
+        scope: 'workspace',
+        value: expect.objectContaining({
+          childReloaded: true,
+          sessionsRefreshed: ['session-1'],
+        }) as unknown,
+      }),
+    ]);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'debug' }),
+    );
   });
 
   it('normalizes workspace_initialized actions', () => {

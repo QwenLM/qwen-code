@@ -1046,6 +1046,17 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['settings-a', 'settings-b']);
   });
 
+  it('passes agents.maxParallelAgents from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { maxParallelAgents: 2 } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
+  });
+
   it('should ignore blank settings fallback models', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2928,6 +2939,72 @@ describe('loadCliConfig safe mode', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getDisabledTools().size).toBe(0);
+  });
+
+  it('should pass settings.tools.visible into visibleTools', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch', 'monitor'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
+  });
+
+  it('should default visibleTools to empty when settings.tools.visible is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should normalise settings.tools.visible entries (trim, dedupe, filter)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: [
+          '  web_fetch  ',
+          'web_fetch',
+          '',
+          'monitor',
+        ] as unknown as string[],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
   });
 
   it('should respect safe mode via QWEN_CODE_SAFE_MODE env var', async () => {

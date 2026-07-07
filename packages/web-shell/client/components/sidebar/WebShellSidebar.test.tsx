@@ -112,6 +112,11 @@ function renderSidebar(
     onOpenSettings: () => void;
     onOpenDaemonStatus: () => void;
     onOpenScheduledTasks: () => void;
+    onOpenSessions: () => void;
+    canOpenSessionsOverview: boolean;
+    onOpenSplitView: () => void;
+    canOpenSplitView: boolean;
+    onNewSession: () => Promise<boolean> | boolean;
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
     sessionListReloadToken: number;
@@ -130,6 +135,8 @@ function renderSidebar(
             onOpenSettings={noop}
             onOpenDaemonStatus={noop}
             onOpenScheduledTasks={noop}
+            onOpenSessions={noop}
+            onOpenSplitView={noop}
             onNewSession={() => false}
             onLoadSession={noop}
             onError={noop}
@@ -218,6 +225,24 @@ describe('WebShellSidebar — version footer', () => {
   });
 });
 
+describe('WebShellSidebar — brand logo', () => {
+  it('renders the Qwen brand mark beside the new-chat button when expanded', () => {
+    const { container } = renderSidebar(false);
+    // Filled brand mark (shared with the favicon), not a stroked nav icon.
+    const mark = container.querySelector('svg path[fill="#6D44E8"]');
+    expect(mark).not.toBeNull();
+    // The mark and the new-chat button share the same top row.
+    const topRow = mark!.closest('div');
+    expect(topRow?.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+
+  it('hides the brand mark when collapsed (only the new-chat button remains)', () => {
+    const { container } = renderSidebar(true);
+    expect(container.querySelector('svg path[fill="#6D44E8"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New chat"]')).not.toBeNull();
+  });
+});
+
 describe('WebShellSidebar — daemon status entry', () => {
   it('invokes onOpenDaemonStatus when the footer button is clicked', () => {
     const onOpenDaemonStatus = vi.fn();
@@ -243,6 +268,66 @@ describe('WebShellSidebar — daemon status entry', () => {
       button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar — session overview entry', () => {
+  it('offers the entry point only on large screens', () => {
+    const small = renderSidebar(false, { canOpenSessionsOverview: false });
+    expect(
+      small.container.querySelector('[aria-label="Session Overview"]'),
+    ).toBeNull();
+
+    const large = renderSidebar(false, { canOpenSessionsOverview: true });
+    expect(
+      large.container.querySelector('[aria-label="Session Overview"]'),
+    ).not.toBeNull();
+  });
+
+  it('invokes onOpenSessions when the footer button is clicked', () => {
+    const onOpenSessions = vi.fn();
+    const { container } = renderSidebar(false, {
+      canOpenSessionsOverview: true,
+      onOpenSessions,
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session Overview"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenSessions).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar — split view entry', () => {
+  it('offers the split view entry only on large screens', () => {
+    const small = renderSidebar(false, { canOpenSplitView: false });
+    expect(
+      small.container.querySelector('[aria-label="Split View"]'),
+    ).toBeNull();
+
+    const large = renderSidebar(false, { canOpenSplitView: true });
+    expect(
+      large.container.querySelector('[aria-label="Split View"]'),
+    ).not.toBeNull();
+  });
+
+  it('invokes onOpenSplitView when the footer button is clicked', () => {
+    const onOpenSplitView = vi.fn();
+    const { container } = renderSidebar(false, {
+      canOpenSplitView: true,
+      onOpenSplitView,
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Split View"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenSplitView).toHaveBeenCalledTimes(1);
   });
 });
 

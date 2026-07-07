@@ -104,14 +104,13 @@ const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
     tool.subTools || tool.subContent ? (
       <SubAgentPanel tool={tool} />
     ) : (
-      <ToolLine tool={tool} />
+      <ToolLine tool={tool} forceExpandable hideCollapsedOutput />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
   const { t } = useI18n();
-  const desc = tc.description || '';
   return (
     <div className={chromeStyles.line}>
       <div className={chromeStyles.lineMain}>
@@ -119,9 +118,6 @@ function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
         <span className={chromeStyles.lineName}>
           {localizeToolDisplayName(tc.name, t)}
         </span>
-        {desc && (
-          <span className={chromeStyles.lineArg}>{truncateText(desc, 70)}</span>
-        )}
       </div>
     </div>
   );

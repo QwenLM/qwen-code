@@ -4,8 +4,10 @@ import { pathToFileURL } from 'node:url';
 import type { ChannelBaseOptions } from '@qwen-code/channel-base';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
-const mockProxyAgent = vi.hoisted(() =>
-  vi.fn((url: string) => ({ proxyUrl: url })),
+const mockEnvHttpProxyAgent = vi.hoisted(() =>
+  vi.fn((opts: { httpProxy: string; httpsProxy: string }) => ({
+    proxyUrl: opts.httpProxy,
+  })),
 );
 const mockNormalizeProxyUrl = vi.hoisted(() => vi.fn((url?: string) => url));
 const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
@@ -94,7 +96,7 @@ const mockSessionRouter = vi.hoisted(() =>
 );
 
 vi.mock('undici', () => ({
-  ProxyAgent: mockProxyAgent,
+  EnvHttpProxyAgent: mockEnvHttpProxyAgent,
   setGlobalDispatcher: mockSetGlobalDispatcher,
 }));
 
@@ -223,7 +225,10 @@ describe('resolveProxy', () => {
     );
 
     expect(proxy).toBe('http://cli.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith('http://cli.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://cli.example.com:8080',
+      httpsProxy: 'http://cli.example.com:8080',
+    });
     expect(mockSetGlobalDispatcher).toHaveBeenCalledWith({
       proxyUrl: 'http://cli.example.com:8080',
     });
@@ -235,9 +240,10 @@ describe('resolveProxy', () => {
     const proxy = resolveProxy(undefined, 'http://settings.example.com:8080');
 
     expect(proxy).toBe('http://settings.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith(
-      'http://settings.example.com:8080',
-    );
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://settings.example.com:8080',
+      httpsProxy: 'http://settings.example.com:8080',
+    });
   });
 
   it('falls back to proxy environment variables', () => {
@@ -246,7 +252,10 @@ describe('resolveProxy', () => {
     const proxy = resolveProxy();
 
     expect(proxy).toBe('http://env.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith('http://env.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://env.example.com:8080',
+      httpsProxy: 'http://env.example.com:8080',
+    });
   });
 });
 
@@ -310,8 +319,14 @@ describe('startCommand.handler', () => {
     }
 
     expect(mockLoadSettings).toHaveBeenCalledWith(process.cwd());
-    expect(mockProxyAgent).toHaveBeenCalledWith(settingsProxy);
-    expect(mockProxyAgent).not.toHaveBeenCalledWith(envProxy);
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: settingsProxy,
+      httpsProxy: settingsProxy,
+    });
+    expect(mockEnvHttpProxyAgent).not.toHaveBeenCalledWith({
+      httpProxy: envProxy,
+      httpsProxy: envProxy,
+    });
     expect(mockCreateChannel).toHaveBeenCalledWith(
       'telegram',
       mockParsedChannelConfig,

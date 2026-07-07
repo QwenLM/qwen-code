@@ -698,7 +698,7 @@ export class ToolRegistry {
           includeDeferred ||
           !tool.shouldDefer ||
           tool.alwaysLoad ||
-          this.revealedDeferred.has(tool.name),
+          !this.isDeferredAndHidden(tool.name),
       )
       .sort(ToolRegistry.compareToolsByDeclarationName)
       .map((tool) => tool.schema);
@@ -732,6 +732,25 @@ export class ToolRegistry {
   }
 
   /**
+   * Whether a deferred tool is currently hidden from the model's
+   * function-declaration list. Returns `true` when the tool:
+   * - is deferred (`shouldDefer=true`),
+   * - is not always-loaded,
+   * - has not been revealed this session, AND
+   * - is not in the visibleTools config list.
+   */
+  isDeferredAndHidden(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    return (
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !this.revealedDeferred.has(name) &&
+      !this.config.getVisibleTools().has(name)
+    );
+  }
+
+  /**
    * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
    * with no revealed tools — the same state as any fresh session.
@@ -744,12 +763,17 @@ export class ToolRegistry {
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
    * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools are excluded.
+   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * {@link Config.getVisibleTools} are excluded.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
-      if (tool.shouldDefer && !tool.alwaysLoad) {
+      if (
+        tool.shouldDefer &&
+        !tool.alwaysLoad &&
+        !this.config.getVisibleTools().has(tool.name)
+      ) {
         summary.push({
           name: tool.name,
           description: tool.description,

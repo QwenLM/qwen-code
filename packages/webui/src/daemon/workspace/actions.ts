@@ -242,6 +242,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadUsageDashboard(opts) {
+      const client = requireClient(getClient, 'Load usage dashboard failed');
+      return withActionTimeout(
+        client.usageDashboard(opts),
+        'Load usage dashboard timed out',
+      );
+    },
+
     async loadSkillsStatus() {
       const client = requireClient(getClient, 'Load skills failed');
       return withActionTimeout(
@@ -509,6 +517,27 @@ export function createDaemonWorkspaceActions({
       if (!res.ok) {
         throw new Error(
           await readDaemonError(res, `PATCH /scheduled-tasks/${id}`),
+        );
+      }
+      return (await res.json()) as DaemonScheduledTask;
+    },
+
+    async runScheduledTask(id) {
+      requireClient(getClient, 'Run scheduled task failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/scheduled-tasks/${encodeURIComponent(id)}/run`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+        }),
+        'Run scheduled task timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `POST /scheduled-tasks/${id}/run`),
         );
       }
       return (await res.json()) as DaemonScheduledTask;

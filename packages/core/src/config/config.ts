@@ -412,10 +412,17 @@ export interface ChatCompressionSettings {
   enableScreenshotTrigger?: boolean;
   /**
    * Tool-returned image count at or above which the screenshot trigger
-   * fires (only when `enableScreenshotTrigger`). Default 50.
+   * fires (only when `enableScreenshotTrigger`). Default 20.
    * Env override: `QWEN_COMPACT_SCREENSHOT_THRESHOLD`.
    */
   screenshotTriggerThreshold?: number;
+  /**
+   * Inline image count at or above which historical image payloads are
+   * replaced with text references and only recent images are reattached.
+   * Below this threshold images stay in-place untouched. Default 20.
+   * Env override: `QWEN_IMAGE_PAYLOAD_THRESHOLD`.
+   */
+  imagePayloadThreshold?: number;
 }
 
 export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
@@ -809,6 +816,11 @@ export interface WorktreeSettings {
 }
 
 export interface AgentsCollabSettings {
+  /**
+   * Global maximum number of background sub-agents running concurrently.
+   * When the cap is reached, additional launches wait for a slot.
+   */
+  maxParallelAgents?: number;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
   displayMode?: string;
   /** Arena-specific settings */
@@ -878,6 +890,14 @@ export interface ConfigParameters {
    * next ACP child spawn or `ToolRegistry.refresh()`.
    */
   disabledTools?: string[];
+  /**
+   * Deferred tool names that bypass the `shouldDefer` behaviour and
+   * are made visible in function declarations from session start,
+   * without requiring the model to call `tool_search`.
+   * Sourced from `settings.tools.visible`. Non-existent names are
+   * silently ignored (they don't cause config errors).
+   */
+  visibleTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -1441,7 +1461,7 @@ export class Config {
   private subagentManager!: SubagentManager;
   private memoryPressureConfig?: MemoryPressureConfig;
   private memoryPressureMonitor?: MemoryPressureMonitor;
-  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
+  private readonly backgroundTaskRegistry: BackgroundTaskRegistry;
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
@@ -1502,6 +1522,7 @@ export class Config {
   // captured reference (e.g. by ToolRegistry mid-iteration) remains
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
+  private readonly visibleTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1748,6 +1769,11 @@ export class Config {
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.disabledTools = new Set(params.disabledTools ?? []);
+    this.visibleTools = new Set(
+      (params.visibleTools ?? []).filter(
+        (name): name is string => typeof name === 'string',
+      ),
+    );
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -1907,7 +1933,7 @@ export class Config {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
       terminalHeight: params.shellExecutionConfig?.terminalHeight ?? 24,
       showColor: params.shellExecutionConfig?.showColor ?? false,
-      pager: params.shellExecutionConfig?.pager ?? 'cat',
+      pager: params.shellExecutionConfig?.pager,
       maxBufferedOutputBytes:
         params.shellExecutionConfig?.maxBufferedOutputBytes,
     };
@@ -1930,6 +1956,14 @@ export class Config {
     this.eventEmitter = params.eventEmitter;
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
+    this.backgroundTaskRegistry = new BackgroundTaskRegistry(
+      this.agentsSettings.maxParallelAgents === undefined
+        ? undefined
+        : {
+            maxConcurrentBackgroundAgents:
+              this.agentsSettings.maxParallelAgents,
+          },
+    );
     this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -3992,6 +4026,18 @@ export class Config {
   }
 
   /**
+   * Deferred-tool names that should be visible from session start.
+   * Sourced from `settings.tools.visible`.
+   *
+   * These tools bypass `shouldDefer` in `getFunctionDeclarations()`
+   * and are excluded from `getDeferredToolSummary()` so they appear
+   * as first-class tools to the model.
+   */
+  getVisibleTools(): ReadonlySet<string> {
+    return this.visibleTools;
+  }
+
+  /**
    * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
@@ -5674,7 +5720,10 @@ export class Config {
       terminalHeight:
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
-      pager: config.pager ?? this.shellExecutionConfig.pager,
+      // pager: undefined is a valid explicit clear; ?? would preserve the old value.
+      pager: Object.prototype.hasOwnProperty.call(config, 'pager')
+        ? config.pager
+        : this.shellExecutionConfig.pager,
       maxBufferedOutputBytes:
         config.maxBufferedOutputBytes ??
         this.shellExecutionConfig.maxBufferedOutputBytes,
