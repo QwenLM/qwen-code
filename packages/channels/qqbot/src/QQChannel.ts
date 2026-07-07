@@ -133,9 +133,9 @@ export class QQChannel extends ChannelBase {
   private coldStart: boolean = true;
   /** Track per-group active message permission. */
   private groupActiveMsgEnabled: Map<string, boolean> = new Map();
-  /** Lazy cache for filtered, lowercased keyword triggers.
-   * Never invalidated — keywordTriggers is not modified at runtime. */
-  private _keywordTriggerCache: string[] | null = null;
+  /** Lazy cache for compiled keyword trigger RegExp patterns.
+   * Built lazily on first access; never invalidated — keywordTriggers is not modified at runtime. */
+  private _keywordTriggerCache: RegExp[] | null = null;
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<
@@ -641,6 +641,11 @@ export class QQChannel extends ChannelBase {
     const base = getApiBase(Boolean(this.qqConfig.sandbox));
     const routeType =
       this.chatTypeMap.get(chatId) || this.qqConfig.chatTypes?.[chatId];
+    if (routeType !== 'group' && routeType !== 'c2c') {
+      process.stderr.write(
+        `[QQ:${this.name}] resolveRoute: no chat type for ${sanitizeLogText(chatId, 64)}, defaulting to C2C\n`,
+      );
+    }
     const path =
       routeType === 'group'
         ? `/v2/groups/${chatId}/messages`
@@ -649,6 +654,7 @@ export class QQChannel extends ChannelBase {
   }
 
   disconnect(): void {
+    this._reconnectId++;
     this.disposed = true;
     this._ready = false;
     this.stopHeartbeat();
@@ -1379,6 +1385,7 @@ export class QQChannel extends ChannelBase {
               this.isReconnecting = true;
               this.disconnect();
               this.reconnectTimer = setTimeout(() => {
+                if (this._reconnectId !== tokenReconnectId) return;
                 this.isReconnecting = false;
                 this.disposed = false;
                 // Use reconnectWithRetry instead of bare connect() —
@@ -2105,7 +2112,12 @@ export class QQChannel extends ChannelBase {
     );
   }
   private handleGroupAll(event: QQGroupMessageEvent): void {
-    if (!event.group_openid) return;
+    if (!event.group_openid) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group all-message dropped: missing group_openid\n`,
+      );
+      return;
+    }
     const chatId = event.group_openid;
     const isNewGroup = !this.chatTypeMap.has(chatId);
     this.chatTypeMap.set(chatId, 'group');
@@ -2159,7 +2171,10 @@ export class QQChannel extends ChannelBase {
         if (!this._keywordTriggerCache) {
           this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
             .filter((kw) => kw.length > 0)
-            .map((kw) => kw.toLowerCase().normalize('NFC'));
+            .map((kw) => {
+              const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              return new RegExp(`(?:^|[^\\w])${escaped}(?:[^\\w]|$)`, 'i');
+            });
         }
         if (this._keywordTriggerCache.length === 0) {
           process.stderr.write(
@@ -2172,11 +2187,8 @@ export class QQChannel extends ChannelBase {
           .trim()
           .toLowerCase()
           .normalize('NFC');
-        const matched = this._keywordTriggerCache.some((kw) =>
-          new RegExp(
-            `(?:^|[^\\w])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^\\w]|$)`,
-            'i',
-          ).test(keywordText),
+        const matched = this._keywordTriggerCache.some((re) =>
+          re.test(keywordText),
         );
         if (!matched) {
           process.stderr.write(
@@ -2255,28 +2267,37 @@ export class QQChannel extends ChannelBase {
     // Cancel pending idle-flush timers before deleting entries so
     // setTimeout callbacks don't fire and attempt to send to the
     // removed group.
+    let cleanedStreams = 0;
     for (const [sid, state] of this.streamState) {
       if (state.chatId === groupId) {
         if (state.timer) clearTimeout(state.timer);
         this.streamState.delete(sid);
+        cleanedStreams++;
       }
     }
     // Clean up cron buffers targeting this group (always, regardless of config flag)
+    let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {
       const target = this.router.getTarget(sid);
       if (target?.chatId === groupId) {
         if (entry.timer) clearTimeout(entry.timer);
         this.cronBuffer.delete(sid);
+        cleanedCron++;
       }
     }
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}\n`,
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s) and ${cleanedCron} cron buffer(s)\n`,
     );
   }
 
   private handleGroupMsgReject(event: GroupMsgToggleEvent): void {
-    if (!event.group_openid) return;
+    if (!event.group_openid) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
+      );
+      return;
+    }
     this.groupActiveMsgEnabled.set(event.group_openid, false);
     this.saveQQState();
     process.stderr.write(
@@ -2285,7 +2306,12 @@ export class QQChannel extends ChannelBase {
   }
 
   private handleGroupMsgReceive(event: GroupMsgToggleEvent): void {
-    if (!event.group_openid) return;
+    if (!event.group_openid) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
+      );
+      return;
+    }
     this.groupActiveMsgEnabled.set(event.group_openid, true);
     this.saveQQState();
     process.stderr.write(
