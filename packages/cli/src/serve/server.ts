@@ -72,6 +72,10 @@ import { registerSessionRoutes } from './routes/session.js';
 import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
+  startScheduledTaskKeepalive,
+  rehydrateScheduledTaskSessions,
+} from './scheduled-task-keepalive.js';
+import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceStatusRoutes,
 } from './routes/workspace-status.js';
@@ -170,6 +174,15 @@ function getRuntimeEffectiveEnv(
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Enables resident management of scheduled-task-owned sessions: a periodic
+   * keepalive (so their schedulers aren't idle-reaped) and a boot-time
+   * rehydration (so they re-arm after a restart). Opt-in — only the real
+   * long-running daemon (`runQwenServe`) sets it. Tests and direct embeds
+   * leave it off so `createServeApp` neither spawns sessions on boot nor holds
+   * a heartbeat timer.
+   */
+  manageScheduledTaskSessions?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -315,6 +328,33 @@ export interface ServeAppDeps {
  * a "healthy"-looking daemon whose every spawn fails with cryptic
  * child-process ENOENT.
  */
+// Mirrors the bridge's session-idle reaper default (30 min). Used only to
+// size the scheduled-task keepalive interval when no explicit timeout is set.
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+// Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
+// timeout) and ≤10min (stay well inside the 30-min default reaper window).
+const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
+const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Sizes the keepalive heartbeat interval so a resident task session is beaten
+ * BEFORE the idle reaper closes it. Targets a third of the reaper window, but
+ * never exceeds HALF of it — so at least one heartbeat lands in time even for a
+ * small custom timeout, where the 30s floor would otherwise overshoot the whole
+ * window and let the session be reaped before the first beat. When the reaper is
+ * disabled (idle timeout ≤ 0) sessions are never reaped, so heartbeats aren't
+ * needed — the loop still runs (to revive re-enabled bound sessions) but at the
+ * relaxed max cadence.
+ */
+export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
+  if (idleTimeoutMs <= 0) return KEEPALIVE_MAX_INTERVAL_MS;
+  const target = Math.min(
+    Math.max(KEEPALIVE_MIN_INTERVAL_MS, Math.floor(idleTimeoutMs / 3)),
+    KEEPALIVE_MAX_INTERVAL_MS,
+  );
+  return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
+}
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
@@ -933,15 +973,76 @@ export function createServeApp(
   // Reads/writes the per-project cron file only; firing stays with the
   // session-side scheduler. Non-strict mutate: creating a scheduled prompt
   // is the same capability class as POST /session/:id/prompt.
+  //
+  // The bridge is passed ONLY when resident task-session management is enabled.
+  // Binding a task to a dedicated session is only safe when something keeps that
+  // session resident and reloads it after a restart (the keepalive + rehydration
+  // below); without it, a bound task would fire only inside a session nothing
+  // revives and silently go dormant. So embedders that leave the manager off
+  // get UNBOUND tasks (shared-owner firing) instead.
   registerScheduledTasksRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
+    bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
   // usage only; open GET like /daemon/status, with its own short TTL cache.
   registerUsageStatsRoutes(app);
+
+  // Resident management of scheduled-task-owned sessions — opt-in, so tests and
+  // embeds that call createServeApp neither spawn sessions on boot nor hold a
+  // heartbeat timer (both would read the bound workspace's real tasks file).
+  if (deps.manageScheduledTaskSessions) {
+    // Keepalive: keep task sessions resident so their in-child schedulers keep
+    // ticking rather than being idle-reaped, AND revive a re-enabled bound
+    // session the reaper already let go. The revive loop is needed even when the
+    // reaper is disabled (idle timeout ≤ 0), because archiving a task closes its
+    // session — so this always runs when task sessions are managed, not only
+    // when a reaper is active.
+    const idleTimeoutMs =
+      opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+    const keepalive = startScheduledTaskKeepalive({
+      bridge,
+      boundWorkspace,
+      intervalMs: computeKeepaliveIntervalMs(idleTimeoutMs),
+    });
+    // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
+    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+    // run-qwen-serve.ts can invoke it without threading it back through the
+    // createServeApp return type.
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive = keepalive.stop;
+
+    // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
+    // restart (a bound task fires only in its own session, which nothing else
+    // reloads). Fire-and-forget so it never delays the server coming up; a
+    // no-op when there are no bound tasks. Deliberately not awaited.
+    void rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace,
+      onError: (sessionId, err) => {
+        process.stderr.write(
+          `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      },
+      // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+      // catches readCronTasks failures and per-session load errors internally
+      // (returning { loaded, failed }), so this only guards an unexpected throw
+      // from the function entry itself. Log rather than swallow it — a silent
+      // failure here leaves every bound task dormant with no diagnostic.
+    }).catch((err) => {
+      process.stderr.write(
+        `qwen serve: unexpected scheduled-task rehydration failure: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    });
+  }
 
   registerPermissionRoutes(app, {
     bridge: primaryBridge,
