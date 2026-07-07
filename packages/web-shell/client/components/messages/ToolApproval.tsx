@@ -265,6 +265,7 @@ export function ToolApproval({
           ? `${styles.approval} ${styles.floating}`
           : styles.approval
       }
+      data-web-shell-permission-panel
     >
       <div className={styles.header}>
         <span className={styles.icon}>?</span>
@@ -308,6 +309,8 @@ export function ToolApproval({
               className={`${styles.option} ${getOptionClassName(option)} ${
                 isSelected ? styles.optionActive : ''
               }`}
+              data-web-shell-permission-option
+              data-option-id={option.id}
               onClick={() => confirm(option.id)}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>

@@ -42,6 +42,7 @@ export function ApprovalModeDialog({
       ref={listRef}
       role="listbox"
       aria-label={t('mode.select')}
+      data-web-shell-approval-mode-dialog
     >
       {approvalModes.map((mode) => {
         const selected = mode.id === currentMode;
@@ -52,6 +53,8 @@ export function ApprovalModeDialog({
             role="option"
             aria-selected={selected}
             className={`${styles.row} ${selected ? styles.selected : ''}`}
+            data-web-shell-approval-mode-option
+            data-mode-id={mode.id}
             onClick={() => onSelect(mode.id)}
           >
             <span className={styles.modeIcon}>

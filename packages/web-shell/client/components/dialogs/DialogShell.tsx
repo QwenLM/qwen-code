@@ -40,6 +40,8 @@ export function DialogShell({
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        data-web-shell-dialog
+        data-web-shell-dialog-title={title}
       >
         <header className={styles.header}>
           <div className={styles.titleWrap}>

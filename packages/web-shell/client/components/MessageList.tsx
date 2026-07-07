@@ -444,7 +444,6 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       // assign to `never` here. At runtime (e.g. a newer daemon sending an
       // unknown role) it falls through as not-hideable — kept visible rather
       // than crashing the transcript or vanishing from a collapsed turn.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = item.message;
       return false;
     }
@@ -521,7 +520,6 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
     case 'insight_error':
       return { kind: 'none', timestamp: message.timestamp };
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return { kind: 'none' };
     }
@@ -584,7 +582,6 @@ function timelineDetailSnippetForMessage(message: Message): string {
     case 'insight_error':
       return '';
     default: {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _exhaustive: never = message;
       return '';
     }
@@ -737,7 +734,6 @@ export function getSessionTimelineSignature(
         case 'insight_error':
           return base;
         default: {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const _exhaustive: never = message;
           return base;
         }
@@ -2569,6 +2565,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       <div
         ref={containerRef}
         className={styles.list}
+        data-web-shell-message-list
         onClickCapture={handleDisclosureClickCapture}
       >
         <SessionTimeline
@@ -2590,6 +2587,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               <div
                 key={virtualRow.key}
                 data-index={virtualRow.index}
+                data-web-shell-message-row
                 ref={virtualizer.measureElement}
                 className={getRowClassName(
                   String(virtualRow.key),
@@ -2615,6 +2613,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               <div
                 key={key}
                 data-index={index}
+                data-web-shell-message-row
                 className={getRowClassName(key, item)}
               >
                 {renderVirtualItem(index)}

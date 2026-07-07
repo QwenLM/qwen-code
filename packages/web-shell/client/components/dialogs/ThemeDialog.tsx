@@ -38,6 +38,7 @@ export function ThemeDialog({
       className={dp('resume-picker-list', 'resume-picker-list-compact')}
       ref={listRef}
       role="listbox"
+      data-web-shell-theme-dialog
     >
       {themes.map((theme, index) => {
         const selected = theme.id === currentTheme;
@@ -52,6 +53,8 @@ export function ThemeDialog({
               'resume-picker-session-item',
               index === selectedIdx || selected ? 'selected' : undefined,
             )}
+            data-web-shell-theme-option
+            data-theme-id={theme.id}
             onClick={() => {
               onSelect(theme.id);
               onClose();

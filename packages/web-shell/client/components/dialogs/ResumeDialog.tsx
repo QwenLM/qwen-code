@@ -49,7 +49,10 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   }, []);
 
   return (
-    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
+    <div
+      className={dp('resume-picker', 'resume-picker-in-shell')}
+      data-web-shell-resume-dialog
+    >
       <div className={dp('resume-picker-search')}>
         <span className={dp('resume-picker-search-label')}>
           {t('resume.search')}:{' '}
@@ -95,6 +98,8 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
                   'resume-picker-session-item',
                   isCurrent ? 'resume-picker-item-current' : undefined,
                 )}
+                data-web-shell-resume-session
+                data-session-id={s.sessionId}
                 onClick={() => {
                   onSelect(s.sessionId);
                   onClose();

@@ -101,6 +101,7 @@ const userShellMsg = (
   id,
   role: 'user_shell',
   command: 'npm test',
+  output: '',
 });
 const toolMsg = (id: string): ToolGroupMessage => ({
   id,

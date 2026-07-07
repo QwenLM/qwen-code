@@ -117,7 +117,7 @@ export function ModelDialog({
   }, [selectedIdx]);
 
   return (
-    <div className={styles.layout}>
+    <div className={styles.layout} data-web-shell-model-dialog>
       <div
         className={styles.list}
         ref={listRef}
@@ -143,6 +143,8 @@ export function ModelDialog({
               role="option"
               aria-selected={selected}
               className={`${styles.row} ${selected ? styles.selected : ''}`}
+              data-web-shell-model-option
+              data-model-id={model.id}
               onClick={() => onSelect(getModelSelectId(model, isFastMode))}
             >
               <span className={styles.number}>{index + 1}.</span>

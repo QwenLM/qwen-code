@@ -115,7 +115,9 @@ function makeBackgroundAgentToolGroup(id: string): Message {
   };
 }
 
-function makeMultiToolGroup(id: string): Message {
+function makeMultiToolGroup(
+  id: string,
+): Extract<Message, { role: 'tool_group' }> {
   return {
     id,
     role: 'tool_group',
@@ -126,15 +128,19 @@ function makeMultiToolGroup(id: string): Message {
   };
 }
 
-function makeUserMessage(id: string): Message {
+function makeUserMessage(id: string): Extract<Message, { role: 'user' }> {
   return { id, role: 'user', content: 'hello' };
 }
 
-function makeUserShellMessage(id: string): Message {
-  return { id, role: 'user_shell', command: 'npm test' };
+function makeUserShellMessage(
+  id: string,
+): Extract<Message, { role: 'user_shell' }> {
+  return { id, role: 'user_shell', command: 'npm test', output: '' };
 }
 
-function makeAssistantMessage(id: string): Message {
+function makeAssistantMessage(
+  id: string,
+): Extract<Message, { role: 'assistant' }> {
   return { id, role: 'assistant', content: 'response' };
 }
 
@@ -310,7 +316,9 @@ describe('groupParallelAgents', () => {
 });
 
 describe('getTurnTimelineNode', () => {
-  const item = (message: Message): DisplayItem => ({
+  const item = (
+    message: Message,
+  ): Extract<DisplayItem, { type: 'message' }> => ({
     type: 'message',
     key: message.id,
     message,

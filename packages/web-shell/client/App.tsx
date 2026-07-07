@@ -542,12 +542,6 @@ function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
   );
 }
 
-function logSessionNoticesHook(notices: readonly DaemonSessionNotice[]): void {
-  if (notices.length > 0) {
-    console.info('[web-shell] useSessionNotices()', { notices });
-  }
-}
-
 function shouldToastNotice(notice: DaemonSessionNotice): boolean {
   return (
     notice.category === 'validation' ||
@@ -1362,11 +1356,9 @@ export function App({
     (error: unknown, fallback: string) => {
       if (isAbortError(error)) return;
       if (isDaemonTurnError(error)) {
-        console.debug('[web-shell] turn error rendered in transcript', error);
         return;
       }
       if (isAlreadyDispatched(error)) {
-        console.debug('[web-shell] error already handled by notice', error);
         return;
       }
       const message = formatError(error, fallback);
@@ -1403,13 +1395,10 @@ export function App({
   });
 
   useEffect(() => {
-    logSessionNoticesHook(notices);
     for (const notice of notices) {
       if (shouldToastNotice(notice)) {
         pushToast(toastToneFromNotice(notice), notice.message);
-      } else if (notice.category === 'lifecycle') {
-        console.debug('[web-shell] daemon notice', notice);
-      } else {
+      } else if (notice.category !== 'lifecycle') {
         console.warn('[web-shell] daemon notice', notice);
       }
       dismissNotice(notice.id);
