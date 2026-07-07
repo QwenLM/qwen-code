@@ -696,12 +696,12 @@ export class MonitorTool extends BaseDeclarativeTool<
               'Brief description of what this monitor watches (e.g., "webpack build output"). Truncated to 80 characters in display.',
           },
           max_events: {
-            type: 'number',
+            type: 'integer',
             description:
               'Stop the monitor after this many events. Default 1000. Max 10000.',
           },
           idle_timeout_ms: {
-            type: 'number',
+            type: 'integer',
             description:
               'Stop the monitor if no output for this many milliseconds. Default 300000 (5 min). Max 600000.',
           },

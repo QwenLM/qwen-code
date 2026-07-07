@@ -238,6 +238,17 @@ describe('MonitorTool', () => {
       }
     ).createInvocation(params);
 
+  describe('schema', () => {
+    it('declares monitor limits as integers', () => {
+      const schema = monitorTool.schema.parametersJsonSchema as {
+        properties?: Record<string, { type?: string }>;
+      };
+
+      expect(schema.properties?.['max_events']?.type).toBe('integer');
+      expect(schema.properties?.['idle_timeout_ms']?.type).toBe('integer');
+    });
+  });
+
   describe('confirmation details', () => {
     it('includes command-scoped permission rules for monitor commands', async () => {
       const invocation = createInvocation({
