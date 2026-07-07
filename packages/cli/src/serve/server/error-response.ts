@@ -374,11 +374,25 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof TotalSessionLimitExceededError) {
+    const totalSessionError = err as TotalSessionLimitExceededError & {
+      operation?: string;
+      workspaceCwd?: string;
+      sourceSessionId?: string;
+    };
     daemonLog?.warn('total session admission rejected', {
       ...(ctx?.route ? { route: ctx.route } : {}),
       ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
-      limit: err.limit,
-      scope: err.scope,
+      limit: totalSessionError.limit,
+      scope: totalSessionError.scope,
+      ...(totalSessionError.operation
+        ? { operation: totalSessionError.operation }
+        : {}),
+      ...(totalSessionError.workspaceCwd
+        ? { workspaceCwd: totalSessionError.workspaceCwd }
+        : {}),
+      ...(totalSessionError.sourceSessionId
+        ? { sourceSessionId: totalSessionError.sourceSessionId }
+        : {}),
     });
     res.set('Retry-After', '5');
     res.status(503).json({

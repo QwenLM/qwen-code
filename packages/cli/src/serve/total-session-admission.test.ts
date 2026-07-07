@@ -25,6 +25,14 @@ describe('createTotalSessionAdmissionController', () => {
     expect(() =>
       admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' }),
     ).toThrow(TotalSessionLimitExceededError);
+    try {
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' });
+    } catch (err) {
+      expect(err).toMatchObject({
+        operation: 'spawn',
+        workspaceCwd: '/work/b',
+      });
+    }
 
     if (!reservation) throw new Error('expected reservation');
     reservation.release();

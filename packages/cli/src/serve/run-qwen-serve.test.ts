@@ -1318,9 +1318,20 @@ describe('runQwenServe runtime startup failures', () => {
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
-    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
-      merged: {},
-    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
+        const options = args[1];
+        const isReload =
+          typeof options === 'object' && options?.skipLoadEnvironment === true;
+        return {
+          merged: {
+            env: {
+              QWEN_TEST_RUNTIME_VALUE: isReload ? 'reloaded' : 'boot',
+            },
+          },
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
     vi.spyOn(settingsRuntime, 'reloadEnvironment').mockImplementation(() => {
       process.env['QWEN_TEST_RELOAD_LEAK'] = 'workspace-a';
       return {
@@ -1343,9 +1354,15 @@ describe('runQwenServe runtime startup failures', () => {
           }): Promise<unknown>;
         }
       | undefined;
+    let primaryRuntimeEnv:
+      | {
+          effectiveEnv?: NodeJS.ProcessEnv;
+        }
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         workspace = deps?.workspace as typeof workspace;
+        primaryRuntimeEnv = deps?.primaryRuntimeEnv as typeof primaryRuntimeEnv;
         return express();
       },
     );
@@ -1370,6 +1387,9 @@ describe('runQwenServe runtime startup failures', () => {
     try {
       await handle.runtimeReady;
       expect(workspace).toBeDefined();
+      expect(primaryRuntimeEnv?.effectiveEnv).toBeDefined();
+      const capturedRuntimeEnv = primaryRuntimeEnv!.effectiveEnv!;
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
 
       await workspace!.reload({
         route: 'POST /workspace/reload',
@@ -1379,6 +1399,8 @@ describe('runQwenServe runtime startup failures', () => {
       const reloadBaseEnv = buildRuntimeEnvironment.mock.calls.at(-1)?.[2];
       expect(reloadBaseEnv?.['QWEN_TEST_BOOT_BASE']).toBe('base');
       expect(reloadBaseEnv?.['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
+      expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
@@ -1391,6 +1413,125 @@ describe('runQwenServe runtime startup failures', () => {
         process.env['QWEN_TEST_RELOAD_LEAK'] = originalLeak;
       }
       await handle.close();
+    }
+  });
+
+  it('preserves previous runtime env and marks fallback when reload env rebuild fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-fallback-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
+        const options = args[1];
+        const isReload =
+          typeof options === 'object' && options?.skipLoadEnvironment === true;
+        return {
+          merged: {
+            env: {
+              QWEN_TEST_RUNTIME_VALUE: isReload ? 'reloaded' : 'boot',
+            },
+          },
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
+      updatedKeys: [],
+      removedKeys: [],
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const buildRuntimeEnvironmentActual =
+      environmentRuntime.buildRuntimeEnvironment;
+    let failReloadBuild = false;
+    vi.spyOn(environmentRuntime, 'buildRuntimeEnvironment').mockImplementation(
+      (
+        ...args: Parameters<typeof environmentRuntime.buildRuntimeEnvironment>
+      ) => {
+        if (failReloadBuild) {
+          throw new Error('runtime env rebuild failed');
+        }
+        return buildRuntimeEnvironmentActual(...args);
+      },
+    );
+    let workspace:
+      | {
+          reload(ctx: {
+            route: string;
+            workspaceCwd: string;
+          }): Promise<unknown>;
+        }
+      | undefined;
+    let primaryRuntimeEnv:
+      | {
+          effectiveEnv?: NodeJS.ProcessEnv;
+          fallbackReason?: string;
+        }
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        workspace = deps?.workspace as typeof workspace;
+        primaryRuntimeEnv = deps?.primaryRuntimeEnv as typeof primaryRuntimeEnv;
+        return express();
+      },
+    );
+
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: logBaseDir,
+        resolveOnListen: true,
+      },
+    );
+
+    let closed = false;
+    try {
+      await handle.runtimeReady;
+      expect(workspace).toBeDefined();
+      expect(primaryRuntimeEnv?.effectiveEnv).toBeDefined();
+      const capturedRuntimeEnv = primaryRuntimeEnv!.effectiveEnv!;
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
+
+      failReloadBuild = true;
+      await workspace!.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: tmpDir,
+      });
+
+      expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
+      expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
+      expect(primaryRuntimeEnv!.fallbackReason).toBe(
+        'runtime env rebuild failed',
+      );
+      await handle.close();
+      closed = true;
+      const logPath = path.join(
+        logBaseDir,
+        'daemon',
+        `serve-${process.pid}.log`,
+      );
+      const log = fs.readFileSync(logPath, 'utf8');
+      expect(log).toContain(
+        'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
+      );
+    } finally {
+      if (!closed) {
+        await handle.close();
+      }
     }
   });
 

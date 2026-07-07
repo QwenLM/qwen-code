@@ -2040,7 +2040,7 @@ export async function runQwenServe(
           daemonRuntimeBaseEnv,
         )
       : {
-          effectiveEnv: Object.freeze({ ...daemonRuntimeBaseEnv }),
+          effectiveEnv: { ...daemonRuntimeBaseEnv },
           overlayKeys: Object.freeze([] as string[]),
           envFilePaths: Object.freeze([] as string[]),
           envFileReadFailed: false,

@@ -91,9 +91,12 @@ Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` 
 {
   "error": "Session limit reached (20)",
   "code": "session_limit_exceeded",
-  "limit": 20
+  "limit": 20,
+  "scope": "workspace"
 }
 ```
+
+When `--max-total-sessions` rejects a fresh session, the same response shape is returned with `"scope": "total"`.
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 

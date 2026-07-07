@@ -13,6 +13,7 @@ import {
   buildEnvStatusFromEnv,
   buildEnvStatusFromProcess,
   readProxyVar,
+  snapshotProcessEnv,
 } from './env-snapshot.js';
 
 const TRACKED_ENV = [
@@ -45,6 +46,27 @@ afterEach(() => {
 });
 
 describe('buildEnvStatusFromProcess', () => {
+  it('snapshots process.env into an independent copy', () => {
+    const key = 'QWEN_TEST_ENV_SNAPSHOT_COPY';
+    const previous = process.env[key];
+    delete process.env[key];
+
+    try {
+      const snapshot = snapshotProcessEnv();
+      snapshot[key] = 'mutated';
+      expect(process.env[key]).toBeUndefined();
+
+      process.env[key] = 'from-process';
+      expect(snapshot[key]).toBe('mutated');
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+  });
+
   it('can build a snapshot from an injected runtime env without reading process.env', () => {
     const status = buildEnvStatusFromEnv('/ws', false, {
       DASHSCOPE_API_KEY: 'sk-runtime',

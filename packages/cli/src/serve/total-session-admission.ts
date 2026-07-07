@@ -7,6 +7,7 @@
 import {
   TotalSessionLimitExceededError,
   type BridgeFreshSessionAdmission,
+  type BridgeFreshSessionAdmissionContext,
   type BridgeFreshSessionReservation,
 } from './acp-session-bridge.js';
 
@@ -41,14 +42,23 @@ export function createTotalSessionAdmissionController({
       : maxTotalSessions;
 
   return {
-    admit(): BridgeFreshSessionReservation {
+    admit(
+      context: BridgeFreshSessionAdmissionContext,
+    ): BridgeFreshSessionReservation {
       if (limit !== Number.POSITIVE_INFINITY) {
         const live = getBridges().reduce(
           (sum, bridge) => sum + bridge.sessionCount,
           0,
         );
         if (live + inFlight >= limit) {
-          throw new TotalSessionLimitExceededError(limit);
+          throw Object.assign(new TotalSessionLimitExceededError(limit), {
+            operation: context.operation,
+            workspaceCwd: context.workspaceCwd,
+            ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+            ...(context.sourceSessionId
+              ? { sourceSessionId: context.sourceSessionId }
+              : {}),
+          });
         }
       }
 
