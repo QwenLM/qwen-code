@@ -895,6 +895,25 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('posts a human-handoff marker when review addressing fails', () => {
+    expect(reviewAddressReportStep).toContain(
+      "GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "NEWEST: '${{ steps.prepare.outputs.newest }}'",
+    );
+    expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
+    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/failure.md"');
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Could not address the latest review feedback automatically',
+    );
+    expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
+    expect(reviewAddressReportStep).toContain('human should take over');
+  });
+
   it('preserves agent-written failure details when the qwen subprocess fails', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'candidates.json'), '[]\n');
