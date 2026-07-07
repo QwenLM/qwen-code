@@ -978,6 +978,52 @@ describe('workspace memory remember routes', () => {
     );
   });
 
+  it('falls back when task-lane error code extraction throws', async () => {
+    mockDebugLogger.error.mockClear();
+    mockDebugLogger.warn.mockClear();
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn().mockRejectedValue(err),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'proxy failure' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_failed',
+          message: 'Workspace memory remember failed.',
+        });
+      });
+
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to extract workspace memory error code:',
+      { extractionError: 'code getter failed' },
+    );
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember task failed:',
+      expect.objectContaining({
+        taskId: post.body.taskId,
+        code: 'remember_failed',
+        details: '<details unavailable>',
+      }),
+    );
+  });
+
   it('records forget and dream failures with kind-specific error codes', async () => {
     mockDebugLogger.error.mockClear();
     const bridge = buildBridgeStub({

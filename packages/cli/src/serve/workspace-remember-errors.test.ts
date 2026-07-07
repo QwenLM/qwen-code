@@ -10,6 +10,7 @@ import {
   extractRememberErrorDetails,
   extractRememberErrorStack,
   shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
 } from './workspace-remember-errors.js';
 
@@ -53,6 +54,30 @@ describe('extractRememberErrorCode', () => {
     current['code'] = 'too_deep';
 
     expect(extractRememberErrorCode(root)).toBe('remember_failed');
+  });
+
+  it('falls back when code extraction throws', () => {
+    const extractionErrors: Array<{ target: string; message: string }> = [];
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+
+    expect(
+      workspaceMemoryFailureCode(err, 'dream_failed', (target, cause) =>
+        extractionErrors.push({
+          target,
+          message: cause instanceof Error ? cause.message : String(cause),
+        }),
+      ),
+    ).toBe('dream_failed');
+    expect(extractionErrors).toEqual([
+      { target: 'code', message: 'code getter failed' },
+    ]);
   });
 });
 

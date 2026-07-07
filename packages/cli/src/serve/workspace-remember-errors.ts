@@ -24,7 +24,7 @@ export interface WorkspaceMemoryFailureDiagnostics {
   stack?: string;
 }
 
-type RememberErrorExtractionTarget = 'details' | 'stack';
+type RememberErrorExtractionTarget = 'code' | 'details' | 'stack';
 
 function errorCodeFromRecord(
   record: Record<string, unknown>,
@@ -68,6 +68,22 @@ export function extractRememberErrorCode(
   fallback = 'remember_failed',
 ): string {
   return rawRememberErrorCode(err, new WeakSet<object>(), 0) ?? fallback;
+}
+
+export function workspaceMemoryFailureCode(
+  err: unknown,
+  fallback = 'remember_failed',
+  onExtractionError?: (
+    target: RememberErrorExtractionTarget,
+    err: unknown,
+  ) => void,
+): string {
+  try {
+    return extractRememberErrorCode(err, fallback);
+  } catch (extractionErr) {
+    onExtractionError?.('code', extractionErr);
+    return fallback;
+  }
 }
 
 function detailFromRecord(

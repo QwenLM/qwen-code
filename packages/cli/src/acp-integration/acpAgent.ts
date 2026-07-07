@@ -168,8 +168,8 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import {
-  extractRememberErrorCode,
   shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
 } from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
@@ -5860,7 +5860,11 @@ class QwenAgent implements Agent {
               workspaceMemoryErrorData('remember_timeout', diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err);
+          const code = workspaceMemoryFailureCode(
+            err,
+            'remember_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           debugLogger.error('Workspace memory remember failed:', {
             projectRoot,
             code,
@@ -5947,7 +5951,11 @@ class QwenAgent implements Agent {
               workspaceMemoryErrorData('forget_timeout', diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err, 'forget_failed');
+          const code = workspaceMemoryFailureCode(
+            err,
+            'forget_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           debugLogger.error('Workspace memory forget failed:', {
             projectRoot,
             code,
@@ -6020,7 +6028,11 @@ class QwenAgent implements Agent {
               workspaceMemoryErrorData('dream_timeout', diagnostics),
             );
           }
-          const code = extractRememberErrorCode(err, 'dream_failed');
+          const code = workspaceMemoryFailureCode(
+            err,
+            'dream_failed',
+            logWorkspaceMemoryExtractionError,
+          );
           debugLogger.error('Workspace memory dream failed:', {
             projectRoot,
             code,

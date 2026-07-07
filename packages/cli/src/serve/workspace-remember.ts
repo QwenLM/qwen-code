@@ -18,6 +18,7 @@ import type {
 import {
   extractRememberErrorCode,
   shouldSuppressRememberErrorDetails,
+  workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
 } from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
@@ -357,7 +358,11 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = workspaceMemoryFailureCode(
+          err,
+          'remember_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         const diagnostics = workspaceMemoryFailureDiagnostics(
           err,
           logWorkspaceMemoryExtractionError,
@@ -424,7 +429,11 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'forget_failed');
+        const code = workspaceMemoryFailureCode(
+          err,
+          'forget_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         const diagnostics = workspaceMemoryFailureDiagnostics(
           err,
           logWorkspaceMemoryExtractionError,
@@ -488,7 +497,11 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'dream_failed');
+        const code = workspaceMemoryFailureCode(
+          err,
+          'dream_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         const diagnostics = workspaceMemoryFailureDiagnostics(
           err,
           logWorkspaceMemoryExtractionError,
