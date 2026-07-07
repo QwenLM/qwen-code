@@ -204,28 +204,32 @@ export function buildToolSummary(
 ): string {
   if (toolCalls.length === 0) return '';
 
-  // Group by category and count
-  const counts = new Map<ToolCategory, number>();
+  // Group by category to preserve tool references for description access
+  const toolsByCategory = new Map<ToolCategory, IndividualToolCallDisplay[]>();
 
   for (const tool of toolCalls) {
     const cat = getToolCategory(tool.name);
-    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    const arr = toolsByCategory.get(cat) ?? [];
+    arr.push(tool);
+    toolsByCategory.set(cat, arr);
   }
 
   const parts: string[] = [];
   for (const cat of CATEGORY_ORDER) {
-    const count = counts.get(cat);
-    if (!count) continue;
+    const tools = toolsByCategory.get(cat);
+    if (!tools || tools.length === 0) continue;
 
     const template = CATEGORY_TEMPLATES[cat];
     const verb = isActive ? template.activeVerb : template.pastVerb;
     const lower = parts.length > 0;
     const v = lower ? verb.toLowerCase() : verb;
 
-    if (count === 1) {
+    if (tools.length === 1 && tools[0].description) {
+      parts.push(`${v} ${tools[0].description}`);
+    } else if (tools.length === 1) {
       parts.push(`${v} 1 ${template.singular}`);
     } else {
-      parts.push(`${v} ${count} ${template.plural}`);
+      parts.push(`${v} ${tools.length} ${template.plural}`);
     }
   }
 
