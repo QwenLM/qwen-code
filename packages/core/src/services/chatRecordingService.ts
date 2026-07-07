@@ -588,6 +588,7 @@ export class ChatRecordingService {
         this.currentCustomTitle = info.title;
         this.currentTitleSource = info.source;
         if (info.title) {
+          // Prime the threshold so the first real content write re-anchors.
           this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
         }
       } catch {
