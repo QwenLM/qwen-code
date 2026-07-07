@@ -4673,7 +4673,12 @@ export function App({
                         // so the new session's composer is mounted/visible first.
                         setMainView('chat');
                         void createNewSession().then((created) => {
-                          if (created) onSessionIdChange?.(undefined);
+                          // If the new session couldn't be started,
+                          // createNewSession already surfaced the error — do NOT
+                          // prime the (still-current) session with the task
+                          // starter, which would land in the wrong conversation.
+                          if (!created) return;
+                          onSessionIdChange?.(undefined);
                           window.setTimeout(() => {
                             editorRef.current?.insertText(
                               t('scheduledTasks.chatStarter'),

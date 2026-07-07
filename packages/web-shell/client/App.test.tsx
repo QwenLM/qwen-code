@@ -45,6 +45,7 @@ const {
   editorClear,
   editorCommit,
   editorFocus,
+  editorInsertText,
   settingsReload,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
@@ -118,6 +119,7 @@ const {
     editorClear: vi.fn(),
     editorCommit: vi.fn(),
     editorFocus: vi.fn(),
+    editorInsertText: vi.fn(),
     settingsReload: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -190,7 +192,7 @@ vi.mock('./components/ChatEditor', async () => {
       testState.latestChatEditorProps = props;
       React.useImperativeHandle(ref, () => ({
         clear: editorClear,
-        insertText: vi.fn(),
+        insertText: editorInsertText,
         // The panel focus effect calls editorRef.current?.focus() when a panel
         // closes with no pending approval (e.g. resuming a session).
         focus: editorFocus,
@@ -513,6 +515,7 @@ beforeEach(() => {
   editorClear.mockClear();
   editorCommit.mockClear();
   editorFocus.mockClear();
+  editorInsertText.mockClear();
   settingsReload.mockClear();
   settingsReload.mockResolvedValue(undefined);
   mockFollowup.clear.mockClear();
@@ -1690,7 +1693,7 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect((err as Error | undefined)?.message).toMatch(/Timed out switching/);
   });
 
-  it('"create via chat" starts a fresh session instead of using the current one', async () => {
+  it('"create via chat" starts a fresh session and primes the composer', async () => {
     const { container } = renderApp();
     await flush();
     testState.prompt = '/schedule';
@@ -1700,12 +1703,43 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       testState.latestScheduledTasksProps?.onCreateViaChat;
     if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
     mockSessionActions.clearSession.mockClear();
+    editorInsertText.mockClear();
     await act(async () => {
       onCreateViaChat();
-      await Promise.resolve();
     });
+    await flush();
     // Jumps to a NEW session (clearSession is how createNewSession starts one)
     // rather than piling the task-creation chat onto the current conversation.
     expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    // ...then primes the composer with the task starter (deferred one tick).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(editorInsertText).toHaveBeenCalled();
+  });
+
+  it('"create via chat" does NOT prime the composer when the new session fails', async () => {
+    // If createNewSession() fails, the error is already surfaced — priming the
+    // (still-current) session would drop the task starter into the wrong chat.
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onCreateViaChat =
+      testState.latestScheduledTasksProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('boom'));
+    editorInsertText.mockClear();
+    await act(async () => {
+      onCreateViaChat();
+    });
+    await flush();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1); // attempted
+    expect(editorInsertText).not.toHaveBeenCalled(); // but priming skipped
   });
 });
