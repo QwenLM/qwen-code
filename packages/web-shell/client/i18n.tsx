@@ -1552,6 +1552,7 @@ const EN: Messages = {
     `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
     }`,
+  'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
   'thinking.running': (v) => `Thinking${v?.duration ? ` ${v.duration}` : ''}`,
@@ -1643,7 +1644,7 @@ const ZH: Messages = {
   'toolName.todo_write': '任务清单',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': 'Agent',
-  'toolName.skill': '技能',
+  'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
   'toolName.web_fetch': '网络搜索',
@@ -3118,6 +3119,7 @@ const ZH: Messages = {
     `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
       Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
     }`,
+  'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
   'thinking.running': (v) => `正在思考${v?.duration ? ` ${v.duration}` : ''}`,
