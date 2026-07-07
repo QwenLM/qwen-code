@@ -432,7 +432,6 @@ export class WeComChannel extends ChannelBase {
     );
     let processStarted = false;
     try {
-      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
       if (!(await this.preflightInbound(envelope))) {
         process.stderr.write(
           `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
@@ -460,6 +459,7 @@ export class WeComChannel extends ChannelBase {
           ? '(image)'
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
+      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
       processStarted = true;
       await this.processInbound(envelope);
     } catch (err) {
@@ -904,10 +904,20 @@ export class WeComChannel extends ChannelBase {
         await delay(
           KICK_RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1),
         );
-        if (this.disconnectGeneration !== disconnectGeneration) return;
+        if (this.disconnectGeneration !== disconnectGeneration) {
+          process.stderr.write(
+            `[WeCom:${this.name}] reconnect after ${reconnectReason} abandoned: connection generation changed.\n`,
+          );
+          return;
+        }
         try {
           await this.connect();
-          if (this.disconnectGeneration !== disconnectGeneration) return;
+          if (this.disconnectGeneration !== disconnectGeneration) {
+            process.stderr.write(
+              `[WeCom:${this.name}] reconnect after ${reconnectReason} abandoned: connection generation changed.\n`,
+            );
+            return;
+          }
           this.kickReconnectAttempts = 0;
           this.kickReconnectRetryCycles = 0;
           this.scheduleKickReconnectReset();

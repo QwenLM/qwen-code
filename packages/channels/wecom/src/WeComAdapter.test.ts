@@ -661,6 +661,30 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('logs when kick reconnect is superseded before retrying', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const inspectable = channel as unknown as { disconnectGeneration: number };
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+    inspectable.disconnectGeneration += 1;
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] reconnect after server kick abandoned: connection generation changed.\n',
+      ),
+    );
+    expect(mocks.instances).toHaveLength(1);
+
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
   it('keeps retrying later after kick reconnect attempts are exhausted', async () => {
     vi.useFakeTimers();
     const stderr = vi
@@ -1846,7 +1870,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('deduplicates messages rejected by preflight', async () => {
+  it('allows messages rejected by preflight to be retried', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -1877,12 +1901,62 @@ describe('WeComChannel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     client.emit('message.text', payload);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(channel.preflights).toHaveBeenCalledTimes(1);
-    expect(stderr).toHaveBeenCalledWith(
-      '[WeCom:bot] dropping duplicate message msg-preflight-rejected (already seen).\n',
-    );
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      const rejectLogs = stderr.mock.calls.filter(([message]) =>
+        String(message).includes('preflight rejected'),
+      );
+      expect(rejectLogs).toHaveLength(2);
+    });
     expect(bridge.newSession).not.toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
+  it('allows messages interrupted during attachment download to be retried', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const inspectable = channel as unknown as { disconnectGeneration: number };
+    const client = lastClient();
+    let releaseLookup:
+      | ((value: Array<{ address: string; family: number }>) => void)
+      | undefined;
+    mocks.lookup.mockImplementationOnce(
+      async () =>
+        await new Promise<Array<{ address: string; family: number }>>(
+          (resolve) => {
+            releaseLookup = resolve;
+          },
+        ),
+    );
+    const payload = {
+      msgid: 'msg-download-interrupted',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/image.png', aeskey: 'k1' },
+    };
+
+    client.emit('message.image', payload);
+    await vi.waitFor(() => expect(mocks.lookup).toHaveBeenCalledTimes(1));
+    inspectable.disconnectGeneration += 1;
+    releaseLookup?.([{ address: '93.184.216.34', family: 4 }]);
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] dropping message msg-download-interrupted: connection changed during attachment download.\n',
+      ),
+    );
+    expect(channel.envelopes).toHaveLength(0);
+
+    (
+      channel as unknown as { disconnectClientOnly(err: Error): void }
+    ).disconnectClientOnly(new Error('test reconnect'));
+    await channel.connect();
+    lastClient().emit('message.image', payload);
+    await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(2));
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     stderr.mockRestore();
   });
 
