@@ -121,6 +121,8 @@ type ActivePrompt = {
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
+  threadId?: string;
+  isGroup?: boolean;
   messageId?: string;
   senderId?: string;
   senderName?: string;
@@ -272,8 +274,8 @@ export abstract class ChannelBase {
   async dispatchPermissionRequest(
     event: PermissionRequestEvent,
   ): Promise<void> {
-    const target = this.router.getTarget(event.sessionId);
-    if (!target || target.channelName !== this.name) {
+    const target = this.permissionTargetForEvent(event);
+    if (!target) {
       return;
     }
     this.removePendingPermission(event.requestId);
@@ -306,6 +308,33 @@ export abstract class ChannelBase {
       }
       throw err;
     }
+  }
+
+  private permissionTargetForEvent(
+    event: PermissionRequestEvent,
+  ): SessionTarget | undefined {
+    const routeTarget = this.router.getTarget(event.sessionId);
+    if (!routeTarget || routeTarget.channelName !== this.name) {
+      return undefined;
+    }
+    const active = this.activePrompts.get(event.sessionId);
+    if (!active) {
+      return routeTarget;
+    }
+    const target: SessionTarget = {
+      channelName: routeTarget.channelName,
+      senderId: active.senderId ?? routeTarget.senderId,
+      chatId: active.chatId,
+    };
+    if (active.threadId !== undefined) {
+      target.threadId = active.threadId;
+    }
+    if (active.isGroup !== undefined) {
+      target.isGroup = active.isGroup;
+    } else if (routeTarget.isGroup !== undefined) {
+      target.isGroup = routeTarget.isGroup;
+    }
+    return target;
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
@@ -657,6 +686,8 @@ export abstract class ChannelBase {
         done,
         resolve: doneResolve,
         chatId: job.target.chatId,
+        threadId: job.target.threadId,
+        isGroup: job.target.isGroup,
         messageId: job.id,
         senderId: job.target.senderId,
         senderName: job.createdBy,
@@ -1170,8 +1201,7 @@ export abstract class ChannelBase {
       const explicit = this.pendingPermissions.get(trimmed);
       if (
         explicit &&
-        explicit.target.chatId === envelope.chatId &&
-        explicit.target.threadId === envelope.threadId
+        this.canEnvelopeAnswerPendingPermission(envelope, explicit)
       ) {
         return { kind: 'found', pending: explicit };
       }
@@ -1183,13 +1213,35 @@ export abstract class ChannelBase {
     if (requestIds.length === 0) {
       return { kind: 'none', explicit: false };
     }
-    if (requestIds.length > 1) {
-      return { kind: 'ambiguous', requestIds };
+    const matching = requestIds
+      .map((id) => this.pendingPermissions.get(id))
+      .filter(
+        (pending): pending is PendingPermission =>
+          pending !== undefined &&
+          this.canEnvelopeAnswerPendingPermission(envelope, pending),
+      );
+    if (matching.length === 0) {
+      return { kind: 'none', explicit: false };
     }
-    const pending = this.pendingPermissions.get(requestIds[0]!);
-    return pending
-      ? { kind: 'found', pending }
-      : { kind: 'none', explicit: false };
+    if (matching.length > 1) {
+      return {
+        kind: 'ambiguous',
+        requestIds: matching.map((pending) => pending.requestId),
+      };
+    }
+    return { kind: 'found', pending: matching[0]! };
+  }
+
+  private canEnvelopeAnswerPendingPermission(
+    envelope: Envelope,
+    pending: PendingPermission,
+  ): boolean {
+    return (
+      pending.target.chatId === envelope.chatId &&
+      pending.target.threadId === envelope.threadId &&
+      (this.isSharedSessionTarget(pending.target) ||
+        pending.target.senderId === envelope.senderId)
+    );
   }
 
   private formatPermissionRequest(pending: PendingPermission): string {
@@ -3114,6 +3166,8 @@ export abstract class ChannelBase {
         done,
         resolve: doneResolve,
         chatId: envelope.chatId,
+        threadId: envelope.threadId,
+        isGroup: envelope.isGroup,
         messageId: envelope.messageId,
         senderId: envelope.senderId,
         senderName: envelope.senderName,
