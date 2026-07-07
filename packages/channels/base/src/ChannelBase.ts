@@ -2,6 +2,7 @@ import { basename, join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
+  ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
@@ -27,6 +28,7 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
+  PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
 import type {
   AvailableCommand,
@@ -40,6 +42,10 @@ import type {
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
+import {
+  parseChannelMemoryIntent,
+  type ChannelMemoryIntent,
+} from './channel-memory-intent.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -56,6 +62,9 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
+const CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE = 0.7;
+const CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE =
+  /(记住|记得|记一下|记忆|忘掉|忘记|清空|清除|删除|保存|remember|memory|forget)/iu;
 /** Sentinel message for the loop-prompt timeout rejection; matched by identity below. */
 const LOOP_TIMED_OUT_MESSAGE = 'loop timed out';
 
@@ -63,6 +72,7 @@ export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
   channelMemory?: ChannelMemoryCallbacks;
+  memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   /**
    * Set when a channel owns a supplied router and should consume bridge
    * events directly.
@@ -105,6 +115,7 @@ type PendingPermissionLookup =
   | { kind: 'found'; pending: PendingPermission }
   | { kind: 'none'; explicit: boolean }
   | { kind: 'ambiguous'; requestIds: string[] };
+type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
   cancelled: boolean;
   cancelPending?: boolean;
@@ -190,6 +201,7 @@ export abstract class ChannelBase {
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
+  private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private groupHistory: GroupHistoryStore;
   private readonly loopController?: ChannelLoopController;
   private instructedSessions: Set<string> = new Set();
@@ -203,14 +215,13 @@ export abstract class ChannelBase {
    * so a cleared session can't be resurrected by an already-queued prompt.
    */
   private sessionGenerations: Map<string, number> = new Map();
+  private pendingClears: Map<string, number> = new Map();
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
   /** Per-session message buffer for collect mode. */
-  private collectBuffers: Map<
-    string,
-    Array<{ text: string; envelope: Envelope }>
-  > = new Map();
+  private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
+  private readonly preflightedEnvelopes = new WeakSet<Envelope>();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
   };
@@ -354,6 +365,7 @@ export abstract class ChannelBase {
     this.identity = Object.freeze(this.resolveIdentity(name, config));
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
+    this.memoryIntentClassifier = options?.memoryIntentClassifier;
     this.groupHistory = new GroupHistoryStore(
       options?.groupHistoryPath ??
         join(
@@ -845,6 +857,11 @@ export abstract class ChannelBase {
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          this.notifyPromptBufferDrained(
+            lastEnvelope.chatId,
+            sessionId,
+            buffer,
+          );
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
@@ -854,7 +871,8 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
-          this.handleInbound(syntheticEnvelope).catch((err) => {
+          this.markPreflighted(syntheticEnvelope);
+          this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
@@ -989,10 +1007,47 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.stopActiveStreaming(active, sessionId, reason);
-        this.collectBuffers.delete(sessionId);
+        this.dropCollectBuffer(sessionId);
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  private dropCollectBuffer(sessionId: string): void {
+    const buffer = this.collectBuffers.get(sessionId);
+    if (!buffer) return;
+    this.collectBuffers.delete(sessionId);
+    const chatId = buffer[0]?.envelope.chatId ?? '';
+    const messageIds = this.collectBufferMessageIds(buffer);
+    try {
+      this.onPromptBufferDropped(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDropped threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private notifyPromptBufferDrained(
+    chatId: string,
+    sessionId: string,
+    buffer: CollectBufferEntry[],
+  ): void {
+    const messageIds = this.collectBufferMessageIds(buffer);
+    if (messageIds.length === 0) return;
+    try {
+      this.onPromptBufferDrained(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDrained threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private collectBufferMessageIds(buffer: CollectBufferEntry[]): string[] {
+    return buffer
+      .map((entry) => entry.envelope.messageId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
   private logCancelSessionFailure(sessionId: string, err: unknown): void {
@@ -1053,6 +1108,24 @@ export abstract class ChannelBase {
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
+  ): void {}
+
+  protected onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  protected onPromptBufferDrained(
+    _chatId: string,
+    _sessionId: string,
+    _messageIds: string[],
+  ): void {}
+
+  protected onPromptBufferDropped(
+    _chatId: string,
+    _sessionId: string,
+    _messageIds: string[],
   ): void {}
 
   /**
@@ -1480,7 +1553,7 @@ export abstract class ChannelBase {
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
           const active = this.activePrompts.get(id);
-          this.collectBuffers.delete(id);
+          this.dropCollectBuffer(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
             const settled = await this.cancelAndAwaitActive(active, id);
@@ -1602,6 +1675,53 @@ export abstract class ChannelBase {
       this.handlePermissionResponseCommand(envelope, args, 'deny'),
     );
 
+    this.registerCommand('remember-channel', async (envelope, args) => {
+      const text = args.trim();
+      if (text === '') {
+        await this.sendMessage(
+          envelope.chatId,
+          'Usage: /remember-channel <text>',
+        );
+        return true;
+      }
+      await this.handleChannelMemoryIntent(envelope, {
+        kind: 'remember',
+        text,
+      });
+      return true;
+    });
+
+    this.registerCommand('channel-memory', async (envelope) => {
+      await this.handleChannelMemoryIntent(envelope, { kind: 'list' });
+      return true;
+    });
+
+    this.registerCommand('forget-channel', async (envelope, args) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be changed in group chats.',
+        );
+        return true;
+      }
+      if (args.toLowerCase() !== 'confirm') {
+        await this.sendMessage(
+          envelope.chatId,
+          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
+        );
+        return true;
+      }
+      await this.handleChannelMemoryIntent(
+        envelope,
+        { kind: 'clear_confirm' },
+        { skipPendingClear: true },
+      );
+      return true;
+    });
+
     // Read-only: report the current (possibly group-shared) session and workspace.
     // For a shared session, gate it to authorized senders like /clear — /who
     // leaks the workspace basename, so non-members shouldn't see it either.
@@ -1653,129 +1773,6 @@ export abstract class ChannelBase {
       return true;
     });
 
-    this.registerCommand('remember-channel', async (envelope, args) => {
-      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
-        return true;
-      }
-      if (envelope.isGroup) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Channel memory cannot be changed in group chats.',
-        );
-        return true;
-      }
-      if (args.trim() === '') {
-        await this.sendMessage(
-          envelope.chatId,
-          'Usage: /remember-channel <text>',
-        );
-        return true;
-      }
-      const channelMemory = await this.getChannelMemory(envelope);
-      if (!channelMemory) {
-        return true;
-      }
-      try {
-        await channelMemory.appendChannelMemory(
-          this.channelMemoryTarget(envelope),
-          args.trim(),
-        );
-      } catch (error) {
-        const message = this.channelMemoryErrorMessage(error);
-        this.logChannelMemoryError('save', envelope, message);
-        await this.sendMessage(
-          envelope.chatId,
-          `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
-        );
-        return true;
-      }
-      this.invalidateSessionContext(envelope);
-      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
-      return true;
-    });
-
-    this.registerCommand('channel-memory', async (envelope) => {
-      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
-        return true;
-      }
-      if (envelope.isGroup) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Channel memory cannot be shown in group chats.',
-        );
-        return true;
-      }
-      const channelMemory = await this.getChannelMemory(envelope);
-      if (!channelMemory) {
-        return true;
-      }
-      let text: string;
-      try {
-        text = (
-          await channelMemory.readChannelMemory(
-            this.channelMemoryTarget(envelope),
-          )
-        ).trim();
-      } catch (error) {
-        const message = this.channelMemoryErrorMessage(error);
-        this.logChannelMemoryError('read', envelope, message);
-        await this.sendMessage(
-          envelope.chatId,
-          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
-        );
-        return true;
-      }
-      await this.sendMessage(
-        envelope.chatId,
-        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
-      );
-      return true;
-    });
-
-    this.registerCommand('forget-channel', async (envelope, args) => {
-      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
-        return true;
-      }
-      if (envelope.isGroup) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Channel memory cannot be changed in group chats.',
-        );
-        return true;
-      }
-      if (args.toLowerCase() !== 'confirm') {
-        await this.sendMessage(
-          envelope.chatId,
-          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
-        );
-        return true;
-      }
-      const channelMemory = await this.getChannelMemory(envelope);
-      if (!channelMemory) {
-        return true;
-      }
-      let result: { changed: boolean };
-      try {
-        result = await channelMemory.clearChannelMemory(
-          this.channelMemoryTarget(envelope),
-        );
-      } catch (error) {
-        const message = this.channelMemoryErrorMessage(error);
-        this.logChannelMemoryError('clear', envelope, message);
-        await this.sendMessage(
-          envelope.chatId,
-          `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
-        );
-        return true;
-      }
-      this.invalidateSessionContext(envelope);
-      await this.sendMessage(
-        envelope.chatId,
-        result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
-      );
-      return true;
-    });
-
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
@@ -1802,11 +1799,11 @@ export abstract class ChannelBase {
         'approve',
         'approve-always',
         'deny',
-        'who',
-        'status',
         'remember-channel',
         'channel-memory',
         'forget-channel',
+        'who',
+        'status',
       ]);
       const platformCmds = [...this.commands.keys()].filter(
         (c) => !sharedCmds.has(c),
@@ -2389,6 +2386,187 @@ export abstract class ChannelBase {
     return this.channelMemory;
   }
 
+  private async handleChannelMemoryIntent(
+    envelope: Envelope,
+    intent: ChannelMemoryIntent,
+    options: { skipPendingClear?: boolean } = {},
+  ): Promise<void> {
+    if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+      return;
+    }
+
+    if (envelope.isGroup && intent.kind !== 'list') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Channel memory cannot be changed in group chats.',
+      );
+      return;
+    }
+
+    if (intent.kind === 'clear_request') {
+      this.setPendingClear(this.clearPendingKey(envelope));
+      await this.sendMessage(
+        envelope.chatId,
+        'This clears channel memory for this chat. Say "确认清空记忆" or "confirm clear memory" to proceed.',
+      );
+      return;
+    }
+
+    const channelMemory = await this.getChannelMemory(envelope);
+    if (!channelMemory) {
+      return;
+    }
+
+    if (intent.kind === 'remember') {
+      try {
+        await channelMemory.appendChannelMemory(
+          this.channelMemoryTarget(envelope),
+          intent.text,
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('save', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      return;
+    }
+
+    if (intent.kind === 'list') {
+      let text: string;
+      try {
+        text = (
+          await channelMemory.readChannelMemory(
+            this.channelMemoryTarget(envelope),
+          )
+        ).trim();
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('read', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      await this.sendMessage(
+        envelope.chatId,
+        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
+      );
+      return;
+    }
+
+    if (intent.kind === 'clear_confirm') {
+      if (!options.skipPendingClear) {
+        const pendingKey = this.clearPendingKey(envelope);
+        const expiresAt = this.pendingClears.get(pendingKey);
+        this.pendingClears.delete(pendingKey);
+        if (expiresAt === undefined || expiresAt < Date.now()) {
+          await this.sendMessage(
+            envelope.chatId,
+            'No pending clear request. Say "清空记忆" first.',
+          );
+          return;
+        }
+      }
+
+      let result: { changed: boolean };
+      try {
+        result = await channelMemory.clearChannelMemory(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('clear', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
+      );
+      return;
+    }
+
+    const unhandled: never = intent;
+    throw new Error(
+      `Unhandled channel memory intent: ${JSON.stringify(unhandled)}`,
+    );
+  }
+
+  private shouldClassifyChannelMemoryIntent(text: string): boolean {
+    const normalized = text.replace(PROMPT_UNSAFE_INVISIBLES, '').trim();
+    return (
+      this.channelMemory !== undefined &&
+      this.memoryIntentClassifier !== undefined &&
+      !normalized.startsWith('/') &&
+      CHANNEL_MEMORY_CLASSIFIER_TRIGGER_RE.test(normalized)
+    );
+  }
+
+  private clearPendingKey(envelope: Envelope): string {
+    return `${this.name}:${envelope.chatId}:${envelope.threadId ?? ''}:${
+      envelope.senderId ?? ''
+    }`;
+  }
+
+  private setPendingClear(key: string): void {
+    const now = Date.now();
+    for (const [pendingKey, expiresAt] of this.pendingClears) {
+      if (expiresAt < now) {
+        this.pendingClears.delete(pendingKey);
+      }
+    }
+    this.pendingClears.set(key, now + 60_000);
+  }
+
+  private async classifyChannelMemoryIntent(
+    text: string,
+  ): Promise<ChannelMemoryIntent | null> {
+    if (!this.memoryIntentClassifier) {
+      return null;
+    }
+
+    let classified;
+    try {
+      classified =
+        await this.memoryIntentClassifier.classifyChannelMemoryIntent(text);
+    } catch (error) {
+      process.stderr.write(
+        `[${this.name}] channel memory intent classifier failed: ${sanitizeLogText(
+          this.channelMemoryErrorMessage(error),
+          200,
+        )}\n`,
+      );
+      return null;
+    }
+
+    if (classified.confidence < CHANNEL_MEMORY_CLASSIFIER_MIN_CONFIDENCE) {
+      return null;
+    }
+
+    if (classified.intent === 'remember') {
+      const memory = classified.memory?.trim();
+      return memory ? { kind: 'remember', text: memory } : null;
+    }
+    if (classified.intent === 'list') {
+      return { kind: 'list' };
+    }
+    if (classified.intent === 'clear_all') {
+      return { kind: 'clear_request' };
+    }
+    return null;
+  }
+
   private channelMemoryErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
@@ -2755,22 +2933,71 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
-  async handleInbound(envelope: Envelope): Promise<void> {
-    // 1. Group gate: policy + allowlist + mention gating
+  protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
       if (groupResult.reason === 'mention_required') {
         this.recordPendingGroupHistory(envelope);
       }
-      return; // silently drop — no pairing, no reply
+      return false;
     }
 
-    // 2. Sender gate: allowlist / pairing / open
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
-        await this.onPairingRequired(envelope.chatId, result.pairingCode);
+        return this.onPairingRequired(envelope.chatId, result.pairingCode)
+          .then(() => false)
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[Channel:${this.name}] pairing notification failed: ${sanitizeLogText(
+                err instanceof Error ? err.message : String(err),
+                200,
+              )}\n`,
+            );
+            return false;
+          });
       }
+      return false;
+    }
+
+    this.markPreflighted(envelope);
+    return true;
+  }
+
+  async handleInbound(envelope: Envelope): Promise<void> {
+    const preflight = this.preflightInbound(envelope);
+    if (!(isPromiseLike(preflight) ? await preflight : preflight)) return;
+
+    await this.processInbound(envelope);
+  }
+
+  protected markPreflighted(envelope: Envelope): void {
+    this.preflightedEnvelopes.add(envelope);
+  }
+
+  /**
+   * Process an inbound message after preflight gates have passed.
+   *
+   * This method does not run group gating, sender allowlisting, or pairing
+   * checks. Callers must run preflightInbound() first unless the envelope was
+   * already preflighted, such as during collect-buffer drain.
+   */
+  protected async processInbound(envelope: Envelope): Promise<void> {
+    if (!this.preflightedEnvelopes.delete(envelope)) {
+      throw new Error(
+        'processInbound called without a successful preflightInbound check.',
+      );
+    }
+
+    let memoryIntent = parseChannelMemoryIntent(envelope.text);
+    if (
+      !memoryIntent &&
+      this.shouldClassifyChannelMemoryIntent(envelope.text)
+    ) {
+      memoryIntent = await this.classifyChannelMemoryIntent(envelope.text);
+    }
+    if (memoryIntent) {
+      await this.handleChannelMemoryIntent(envelope, memoryIntent);
       return;
     }
 
@@ -2979,6 +3206,17 @@ export abstract class ChannelBase {
             this.collectBuffers.set(sessionId, buffer);
           }
           buffer.push({ text: promptText, envelope });
+          try {
+            this.onPromptBuffered(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            );
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+          }
           return;
         }
         case 'steer': {
@@ -3357,6 +3595,11 @@ export abstract class ChannelBase {
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          this.notifyPromptBufferDrained(
+            lastEnvelope.chatId,
+            sessionId,
+            buffer,
+          );
           // Re-enter handleInbound with the coalesced message
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
@@ -3369,9 +3612,10 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
+          this.markPreflighted(syntheticEnvelope);
           // Queue the coalesced prompt (don't await to avoid deadlock on the queue).
           // Surface a drain failure instead of silently losing buffered turns.
-          this.handleInbound(syntheticEnvelope).catch((err) => {
+          this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
@@ -3408,6 +3652,14 @@ export abstract class ChannelBase {
 
 function truncateGroupHistoryField(value: string): string {
   return value.slice(0, GROUP_HISTORY_ENTRY_METADATA_LIMIT);
+}
+
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 function truncateLoopLabel(prompt: string): string {

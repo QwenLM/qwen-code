@@ -1,6 +1,20 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfiguredChannels, registerPermissionRelay } from './runtime.js';
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
+}));
+
+vi.mock('../../config/settings.js', () => ({
+  loadSettings: () => ({ merged: {} }),
+}));
+
+vi.mock('../extensions/utils.js', () => ({
+  getExtensionManager: async () => ({
+    getLoadedExtensions: () => [],
+  }),
+}));
 
 vi.mock('./channel-registry.js', () => ({
   getPlugin: async (type: string) =>
@@ -11,6 +25,15 @@ vi.mock('./channel-registry.js', () => ({
 }));
 
 describe('parseConfiguredChannels', () => {
+  beforeEach(() => {
+    delete process.env['TOKEN_LITERAL_VALUE'];
+  });
+
+  afterEach(() => {
+    delete process.env['TEST_CHANNEL_TOKEN'];
+    delete process.env['TOKEN_LITERAL_VALUE'];
+  });
+
   it('throws a clear error when a selected channel is missing config', async () => {
     await expect(
       parseConfiguredChannels({}, ['telegram'], { defaultCwd: '/workspace' }),
@@ -41,6 +64,40 @@ describe('parseConfiguredChannels', () => {
         }),
       }),
     ]);
+  });
+
+  it('rejects unresolved credential env vars', async () => {
+    await expect(
+      parseConfiguredChannels(
+        {
+          telegram: {
+            type: 'telegram',
+            token: '$TOKEN_LITERAL_VALUE',
+          },
+        },
+        ['telegram'],
+        { defaultCwd: '/workspace' },
+      ),
+    ).rejects.toThrow(
+      'Error in channel "telegram": Environment variable TOKEN_LITERAL_VALUE is not set (referenced as $TOKEN_LITERAL_VALUE). Set the variable or remove the $ prefix to use a literal value.',
+    );
+  });
+
+  it('resolves channel credentials from environment loaded after settings', async () => {
+    process.env['TEST_CHANNEL_TOKEN'] = 'token-from-env';
+
+    const parsed = await parseConfiguredChannels(
+      {
+        telegram: {
+          type: 'telegram',
+          token: '$TEST_CHANNEL_TOKEN',
+        },
+      },
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+
+    expect(parsed[0]?.config.token).toBe('token-from-env');
   });
 });
 

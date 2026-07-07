@@ -1,5 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  appendChannelMemory,
+  clearChannelMemory,
+  readChannelMemory,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
@@ -37,6 +42,7 @@ import {
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
+import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 
@@ -342,6 +348,15 @@ export async function runChannelDaemonWorker(
           createChannel(name, config, bridgeFacade, {
             ...(proxy ? { proxy } : {}),
             router: createdRouter,
+            channelMemory: {
+              readChannelMemory,
+              appendChannelMemory,
+              clearChannelMemory,
+            },
+            memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
+              bridgeFacade,
+              config.cwd,
+            ),
           }),
           startupSignal,
         ),

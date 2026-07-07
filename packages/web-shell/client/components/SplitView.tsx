@@ -62,9 +62,8 @@ export function SplitView({
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
   const organizationEnabled =
-    connection.capabilities?.features?.includes(
-      SESSION_ORGANIZATION_FEATURE,
-    ) ?? false;
+    connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
+    false;
   const { sessions, reload } = useSessions({
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
@@ -282,7 +281,6 @@ export function SplitView({
                 >
                   <ChatPane
                     title={titleById.get(sessionId)}
-                    isCurrent={sessionId === currentSessionId}
                     onClose={() => removePane(sessionId)}
                     onError={onError}
                   />
