@@ -353,6 +353,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_reload',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
+  'browser_automation_mcp',
   'voice_transcribe',
 ] as const;
 
@@ -2098,6 +2099,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               cdpTunnelOverWsEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'browser_automation_mcp') {
+          expect(predicate({ browserAutomationMcpAvailable: true })).toBe(true);
+          expect(predicate({ browserAutomationMcpAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              browserAutomationMcpAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

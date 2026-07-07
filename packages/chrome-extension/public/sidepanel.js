@@ -106,13 +106,15 @@ function showWelcome(state, command) {
     els.title.textContent = 'Start qwen serve';
     els.desc.textContent =
       'No local qwen serve daemon is reachable. Run this in a terminal and ' +
-      'leave it running, then this panel connects automatically:';
+      'leave it running, then this panel connects automatically. Set ' +
+      'QWEN_CDP_MCP_COMMAND as well to enable browser automation tools:';
   } else {
     els.title.textContent = 'Allow this extension';
     els.desc.textContent =
       'qwen serve is running but is not allowed to load its UI here. Restart ' +
       'it with the flag below (it names this extension), then this panel ' +
-      'connects automatically:';
+      'connects automatically. Set QWEN_CDP_MCP_COMMAND as well to enable ' +
+      'browser automation tools:';
   }
 }
 

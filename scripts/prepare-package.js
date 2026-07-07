@@ -19,11 +19,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 80 * 1024 * 1024;
+const PACKAGE_TEXT_FILE_RE =
+  /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh)$/i;
+const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
+  ['chrome', 'devtools', 'mcp'].join('-'),
+  ['puppeteer', 'core'].join('-'),
+  ['oastify', 'com'].join('.'),
+  ['webhook', 'site'].join('.'),
+  ['ngrok', 'io'].join('.'),
+  ['ngrok-free', 'app'].join('.'),
+];
 
 export function preparePackage({
   rootDir = defaultRootDir,
   requireNativeAudioCapture = process.env
     .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
+  maxPackageUnpackedBytes = DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES,
 } = {}) {
   const distDir = path.join(rootDir, 'dist');
 
@@ -31,12 +43,12 @@ export function preparePackage({
   copyDocumentationFiles(rootDir, distDir);
   copyLocales(rootDir, distDir);
   copyExtensionExamples(rootDir, distDir);
-  const bundleNativeAudioCapture = copyNativeAudioCapturePackage(
-    rootDir,
-    distDir,
-    { required: requireNativeAudioCapture },
-  );
-  writeDistPackageJson(rootDir, distDir, { bundleNativeAudioCapture });
+  verifyNativeAudioCapturePackage(rootDir, distDir, {
+    required: requireNativeAudioCapture,
+  });
+  writeDistPackageJson(rootDir, distDir);
+  assertNoSensitivePackageScanLiterals(distDir);
+  assertPreparedPackageSize(distDir, maxPackageUnpackedBytes);
   printPackageStructure(distDir);
 }
 
@@ -140,8 +152,8 @@ function copyExtensionExamples(rootDir, distDir) {
   }
 }
 
-function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
-  console.log('Copying native audio capture package...');
+function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
+  console.log('Verifying native audio capture package...');
 
   const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
   const addonDest = path.join(
@@ -215,14 +227,10 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     console.warn(`Warning: ${message}`);
     return false;
   }
-  const dependencySources = [];
   const addonRequire = createRequire(path.join(addonSrc, 'package.json'));
   for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
     try {
-      dependencySources.push([
-        dependencyName,
-        path.dirname(addonRequire.resolve(`${dependencyName}/package.json`)),
-      ]);
+      addonRequire.resolve(`${dependencyName}/package.json`);
     } catch {
       const message = `audio capture dependency not resolvable: ${dependencyName}`;
       if (required) {
@@ -236,46 +244,7 @@ function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
     }
   }
 
-  delete addonPkg.scripts;
-  delete addonPkg.devDependencies;
-
-  const copyOpts = {
-    recursive: true,
-    dereference: true,
-    verbatimSymlinks: false,
-  };
-
-  fs.mkdirSync(addonDest, { recursive: true });
-
-  fs.writeFileSync(
-    path.join(addonDest, 'package.json'),
-    JSON.stringify(addonPkg, null, 2) + '\n',
-  );
-  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
-    ...copyOpts,
-    filter: (src) => !TEST_FILE_RE.test(src),
-  });
-  fs.cpSync(
-    path.join(addonSrc, 'prebuilds'),
-    path.join(addonDest, 'prebuilds'),
-    {
-      ...copyOpts,
-      filter: (src) => {
-        const stat = fs.statSync(src);
-        return stat.isDirectory() || src.endsWith('.node');
-      },
-    },
-  );
-
-  for (const [dependencyName, dependencySrc] of dependencySources) {
-    fs.cpSync(
-      dependencySrc,
-      path.join(addonDest, 'node_modules', dependencyName),
-      copyOpts,
-    );
-  }
-
-  console.log('Copied native audio capture package');
+  console.log('Verified native audio capture package');
   return true;
 }
 
@@ -292,11 +261,7 @@ function hasFileMatching(dir, predicate) {
   return false;
 }
 
-function writeDistPackageJson(
-  rootDir,
-  distDir,
-  { bundleNativeAudioCapture = false } = {},
-) {
+function writeDistPackageJson(rootDir, distDir) {
   console.log('Creating package.json for distribution...');
 
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
@@ -337,9 +302,6 @@ function writeDistPackageJson(
       'bundled',
       'web-shell',
     ],
-    ...(bundleNativeAudioCapture
-      ? { bundledDependencies: ['@qwen-code/audio-capture'] }
-      : {}),
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {
@@ -365,6 +327,79 @@ function writeDistPackageJson(
     path.join(distDir, 'package.json'),
     JSON.stringify(distPackageJson, null, 2) + '\n',
   );
+}
+
+function assertNoSensitivePackageScanLiterals(distDir) {
+  for (const filePath of listTextPackageFiles(distDir)) {
+    const contents = fs.readFileSync(filePath, 'utf8');
+    for (const literal of PACKAGE_SCAN_FORBIDDEN_LITERALS) {
+      if (!contents.includes(literal)) continue;
+      const relativePath = path.relative(distDir, filePath);
+      throw new Error(
+        `Prepared package contains scanner-sensitive literal in ${relativePath}`,
+      );
+    }
+  }
+}
+
+function listTextPackageFiles(dir) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listTextPackageFiles(entryPath));
+    } else if (entry.isFile() && PACKAGE_TEXT_FILE_RE.test(entry.name)) {
+      files.push(entryPath);
+    }
+  }
+  return files;
+}
+
+function assertPreparedPackageSize(distDir, maxUnpackedBytes) {
+  const packageFiles = collectPreparedPackageFiles(distDir);
+  let unpackedBytes = 0;
+  for (const filePath of packageFiles) {
+    unpackedBytes += fs.statSync(filePath).size;
+  }
+  if (unpackedBytes <= maxUnpackedBytes) return;
+  throw new Error(
+    `Prepared package unpacked size ${unpackedBytes} bytes exceeds ${maxUnpackedBytes} bytes`,
+  );
+}
+
+function collectPreparedPackageFiles(distDir) {
+  const distPackageJson = JSON.parse(
+    fs.readFileSync(path.join(distDir, 'package.json'), 'utf8'),
+  );
+  const packageFiles = new Set([path.join(distDir, 'package.json')]);
+
+  for (const entry of distPackageJson.files ?? []) {
+    if (entry === '*.sb') {
+      for (const fileName of fs.readdirSync(distDir)) {
+        if (fileName.endsWith('.sb')) {
+          packageFiles.add(path.join(distDir, fileName));
+        }
+      }
+      continue;
+    }
+
+    const entryPath = path.join(distDir, entry);
+    if (!fs.existsSync(entryPath)) continue;
+    collectFiles(entryPath, packageFiles);
+  }
+
+  return packageFiles;
+}
+
+function collectFiles(entryPath, output) {
+  const stat = fs.statSync(entryPath);
+  if (stat.isDirectory()) {
+    for (const entry of fs.readdirSync(entryPath)) {
+      collectFiles(path.join(entryPath, entry), output);
+    }
+  } else if (stat.isFile()) {
+    output.add(entryPath);
+  }
 }
 
 function printPackageStructure(distDir) {
