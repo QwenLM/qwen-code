@@ -46,6 +46,11 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  /**
+   * Additional directories to include in the workspace context.
+   * Equivalent to CLI's `--include-directories` flag.
+   */
+  includeDirectories?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -503,4 +508,10 @@ export interface QueryOptions {
      */
     streamClose?: number;
   };
+
+  /**
+   * Additional directories to include in the workspace context.
+   * Equivalent to CLI's `--include-directories` flag.
+   */
+  includeDirectories?: string[];
 }

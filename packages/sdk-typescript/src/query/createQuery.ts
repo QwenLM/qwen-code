@@ -67,6 +67,7 @@ export function query({
     excludeTools: options.excludeTools,
     allowedTools: options.allowedTools,
     authType: options.authType,
+    includeDirectories: options.includeDirectories,
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,

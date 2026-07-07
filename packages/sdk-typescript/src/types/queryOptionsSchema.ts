@@ -182,5 +182,6 @@ export const QueryOptionsSchema = z
     resume: z.string().optional(),
     sessionId: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
+    includeDirectories: z.array(z.string()).optional(),
   })
   .strict();
