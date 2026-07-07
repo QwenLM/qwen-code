@@ -7,6 +7,7 @@
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 
 const MAX_REMEMBER_ERROR_DETAILS_CHARS = 1000;
+const MAX_REMEMBER_ERROR_CAUSE_DEPTH = 50;
 
 function errorCodeFromRecord(
   record: Record<string, unknown>,
@@ -43,11 +44,11 @@ export function extractRememberErrorCode(
 function detailFromRecord(
   record: Record<string, unknown>,
   seen: WeakSet<object>,
+  depth: number,
 ): string | undefined {
   // Bridge errors carry the best failure reason in `data`; top-level
   // `message` and `cause` are generic fallbacks.
   const data = record['data'];
-  if (typeof data === 'string' && data.length > 0) return data;
   if (data && typeof data === 'object') {
     const dataRecord = data as Record<string, unknown>;
     const details = dataRecord['details'];
@@ -59,9 +60,11 @@ function detailFromRecord(
   const message = record['message'];
   if (typeof message === 'string' && message.length > 0) return message;
 
+  if (typeof data === 'string' && data.length > 0) return data;
+
   const cause = record['cause'];
-  if (cause && typeof cause === 'object') {
-    return rawRememberErrorDetails(cause, seen);
+  if (cause != null) {
+    return rawRememberErrorDetails(cause, seen, depth + 1);
   }
 
   return undefined;
@@ -70,12 +73,14 @@ function detailFromRecord(
 function rawRememberErrorDetails(
   err: unknown,
   seen: WeakSet<object>,
+  depth: number,
 ): string | undefined {
+  if (depth > MAX_REMEMBER_ERROR_CAUSE_DEPTH) return undefined;
   if (typeof err === 'string' && err.length > 0) return err;
   if (!err || typeof err !== 'object') return undefined;
   if (seen.has(err)) return undefined;
   seen.add(err);
-  return detailFromRecord(err as Record<string, unknown>, seen);
+  return detailFromRecord(err as Record<string, unknown>, seen, depth);
 }
 
 function shouldReplaceControlChar(code: number): boolean {
@@ -84,6 +89,7 @@ function shouldReplaceControlChar(code: number): boolean {
     (code >= 127 && code <= 159) ||
     (code >= 0x200b && code <= 0x200f) ||
     (code >= 0x2028 && code <= 0x202e) ||
+    (code >= 0x2060 && code <= 0x2064) ||
     (code >= 0x2066 && code <= 0x2069) ||
     code === 0xfeff
   );
@@ -119,7 +125,7 @@ function sanitizeRememberErrorDetails(details: string): string | undefined {
 }
 
 export function extractRememberErrorDetails(err: unknown): string | undefined {
-  const raw = rawRememberErrorDetails(err, new WeakSet<object>());
+  const raw = rawRememberErrorDetails(err, new WeakSet<object>(), 0);
   if (!raw) return undefined;
   return sanitizeRememberErrorDetails(raw);
 }

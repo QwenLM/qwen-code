@@ -48,6 +48,12 @@ describe('extractRememberErrorDetails', () => {
     );
     expect(
       extractRememberErrorDetails({
+        data: 'ERR_BRIDGE_INTERNAL',
+        message: 'Connection to memory service refused',
+      }),
+    ).toBe('Connection to memory service refused');
+    expect(
+      extractRememberErrorDetails({
         data: { message: 'provider rejected the request' },
       }),
     ).toBe('provider rejected the request');
@@ -56,6 +62,9 @@ describe('extractRememberErrorDetails', () => {
         cause: new Error('nested failure reason'),
       }),
     ).toBe('nested failure reason');
+    expect(extractRememberErrorDetails({ cause: 'string cause reason' })).toBe(
+      'string cause reason',
+    );
     expect(extractRememberErrorDetails('raw string error')).toBe(
       'raw string error',
     );
@@ -71,12 +80,14 @@ describe('extractRememberErrorDetails', () => {
   });
 
   it('normalizes hidden separators before redacting credentials', () => {
-    const details = extractRememberErrorDetails(
-      new Error('Authorization: Bearer\u200bsecret-token-value'),
-    );
+    for (const separator of ['\u200b', '\u2060', '\u2064']) {
+      const details = extractRememberErrorDetails(
+        new Error(`Authorization: Bearer${separator}secret-token-value`),
+      );
 
-    expect(details).toBe('Authorization: <redacted>');
-    expect(details).not.toContain('secret-token-value');
+      expect(details).toBe('Authorization: <redacted>');
+      expect(details).not.toContain('secret-token-value');
+    }
   });
 
   it('normalizes line separators before redacting credentials', () => {
@@ -101,6 +112,19 @@ describe('extractRememberErrorDetails', () => {
     cyclic['cause'] = cyclic;
 
     expect(extractRememberErrorDetails(cyclic)).toBeUndefined();
+  });
+
+  it('limits cause traversal depth', () => {
+    const root: Record<string, unknown> = {};
+    let current = root;
+    for (let index = 0; index < 60; index += 1) {
+      const next: Record<string, unknown> = {};
+      current['cause'] = next;
+      current = next;
+    }
+    current['message'] = 'too deep';
+
+    expect(extractRememberErrorDetails(root)).toBeUndefined();
   });
 
   it('caps long details', () => {
