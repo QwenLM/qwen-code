@@ -412,10 +412,17 @@ export interface ChatCompressionSettings {
   enableScreenshotTrigger?: boolean;
   /**
    * Tool-returned image count at or above which the screenshot trigger
-   * fires (only when `enableScreenshotTrigger`). Default 50.
+   * fires (only when `enableScreenshotTrigger`). Default 20.
    * Env override: `QWEN_COMPACT_SCREENSHOT_THRESHOLD`.
    */
   screenshotTriggerThreshold?: number;
+  /**
+   * Inline image count at or above which historical image payloads are
+   * replaced with text references and only recent images are reattached.
+   * Below this threshold images stay in-place untouched. Default 20.
+   * Env override: `QWEN_IMAGE_PAYLOAD_THRESHOLD`.
+   */
+  imagePayloadThreshold?: number;
 }
 
 export { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';

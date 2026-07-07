@@ -6,17 +6,21 @@
 
 import { useState, useCallback } from 'react';
 
+type ModelDialogPersistScope = 'workspace' | 'user';
+
 interface UseModelCommandReturn {
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
   isCompactionModelMode: boolean;
+  modelDialogPersistScope: ModelDialogPersistScope | undefined;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
+    persistScope?: ModelDialogPersistScope;
   }) => void;
   closeModelDialog: () => void;
 }
@@ -27,6 +31,9 @@ export const useModelCommand = (): UseModelCommandReturn => {
   const [isVoiceModelMode, setIsVoiceModelMode] = useState(false);
   const [isVisionModelMode, setIsVisionModelMode] = useState(false);
   const [isCompactionModelMode, setIsCompactionModelMode] = useState(false);
+  const [modelDialogPersistScope, setModelDialogPersistScope] = useState<
+    ModelDialogPersistScope | undefined
+  >(undefined);
 
   const openModelDialog = useCallback(
     (options?: {
@@ -34,6 +41,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
       voiceModelMode?: boolean;
       visionModelMode?: boolean;
       compactionModelMode?: boolean;
+      persistScope?: ModelDialogPersistScope;
     }) => {
       const voiceModelMode = options?.voiceModelMode ?? false;
       const visionModelMode = options?.visionModelMode ?? false;
@@ -51,6 +59,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
       );
       setIsVisionModelMode(compactionModelMode ? false : visionModelMode);
       setIsCompactionModelMode(compactionModelMode);
+      setModelDialogPersistScope(options?.persistScope);
       setIsModelDialogOpen(true);
     },
     [],
@@ -62,6 +71,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
     setIsVoiceModelMode(false);
     setIsVisionModelMode(false);
     setIsCompactionModelMode(false);
+    setModelDialogPersistScope(undefined);
   }, []);
 
   return {
@@ -70,6 +80,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
     isVoiceModelMode,
     isVisionModelMode,
     isCompactionModelMode,
+    modelDialogPersistScope,
     openModelDialog,
     closeModelDialog,
   };

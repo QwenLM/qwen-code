@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { modelCommand } from './modelCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { SettingScope } from '../../config/settings.js';
 import {
   AuthType,
   type ContentGeneratorConfig,
@@ -45,7 +46,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
@@ -2019,6 +2020,213 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'error',
         content: expect.stringContaining('voice-model'),
+      });
+    });
+  });
+
+  describe('scope flags', () => {
+    function setupContext() {
+      const mockConfig = createMockConfig({
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      });
+      (
+        mockConfig as Partial<Config> & { [key: string]: unknown }
+      ).getAvailableModelsForAuthType = vi.fn().mockReturnValue([]);
+      (
+        mockConfig as Partial<Config> & { [key: string]: unknown }
+      ).getAllConfiguredModels = vi.fn().mockReturnValue([]);
+      mockContext.services.config = mockConfig as Config;
+      return mockContext;
+    }
+
+    it('should include persistScope in dialog return for /model --project', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--project');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'model',
+        persistScope: 'workspace',
+      });
+    });
+
+    it('should include persistScope in dialog return for /model --global', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--global');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'model',
+        persistScope: 'user',
+      });
+    });
+
+    it('should include persistScope for /model --project --fast dialog', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--project --fast');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'fast-model',
+        persistScope: 'workspace',
+      });
+    });
+
+    it('should include persistScope for /model --global --voice dialog', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--global --voice');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'voice-model',
+        persistScope: 'user',
+      });
+    });
+
+    it('should include persistScope for /model --project --vision dialog', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--project --vision');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'vision-model',
+        persistScope: 'workspace',
+      });
+    });
+
+    it('should parse scope flags in any position', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--fast --project');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'fast-model',
+        persistScope: 'workspace',
+      });
+    });
+
+    it('should show scope suffix in fast model confirmation', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAllConfiguredModels = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen3-coder-flash', voiceOnly: false, fastOnly: true },
+        ]);
+      cfg.setFastModel = vi.fn();
+      const result = await modelCommand.action!(
+        ctx,
+        '--project --fast qwen3-coder-flash',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(this project)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'fastModel',
+        'qwen3-coder-flash',
+      );
+    });
+
+    it('should persist to global scope with --global', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAllConfiguredModels = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen3-coder-flash', voiceOnly: false, fastOnly: true },
+        ]);
+      cfg.setFastModel = vi.fn();
+      const result = await modelCommand.action!(
+        ctx,
+        '--global --fast qwen3-coder-flash',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(global)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'fastModel',
+        'qwen3-coder-flash',
+      );
+    });
+
+    it('should reject --project when workspace is untrusted', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: false,
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const result = await modelCommand.action!(ctx, '--project qwen-max');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('untrusted'),
+      });
+      expect(setValue).not.toHaveBeenCalled();
+    });
+
+    it('should show scope suffix in main model confirmation', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const mockGenerator = {
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen-max',
+      };
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen-max', voiceOnly: false, fastOnly: false },
+        ]);
+      cfg.switchModel = vi.fn().mockResolvedValue(mockGenerator);
+      const result = await modelCommand.action!(ctx, '--project qwen-max');
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(this project)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.name',
+        'qwen-max',
+      );
+    });
+
+    it('should not include persistScope when no scope flag is given', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'model',
       });
     });
   });

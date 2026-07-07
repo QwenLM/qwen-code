@@ -123,6 +123,7 @@ export interface SlashCommandProcessorActions {
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
+    persistScope?: 'workspace' | 'user';
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
@@ -823,16 +824,27 @@ export const useSlashCommandProcessor = (
                       actions.openMemoryDialog();
                       return { type: 'handled' };
                     case 'model':
-                      actions.openModelDialog();
+                      actions.openModelDialog({
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'fast-model':
-                      actions.openModelDialog({ fastModelMode: true });
+                      actions.openModelDialog({
+                        fastModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'voice-model':
-                      actions.openModelDialog({ voiceModelMode: true });
+                      actions.openModelDialog({
+                        voiceModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'vision-model':
-                      actions.openModelDialog({ visionModelMode: true });
+                      actions.openModelDialog({
+                        visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'compaction-model':
                       actions.openModelDialog({ compactionModelMode: true });

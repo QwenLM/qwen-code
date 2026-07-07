@@ -94,10 +94,10 @@ describe('serve command args', () => {
     expect(parsed['channel']).toEqual(['telegram', 'feishu']);
   });
 
-  it('parses a single --workspace value as a string', () => {
+  it('parses a single --workspace value as a single-element array', () => {
     const parsed = buildParser().parseSync('--workspace /tmp/primary');
 
-    expect(parsed['workspace']).toBe('/tmp/primary');
+    expect(parsed['workspace']).toEqual(['/tmp/primary']);
   });
 
   it('parses repeatable --workspace values as an array', () => {
@@ -106,6 +106,35 @@ describe('serve command args', () => {
     );
 
     expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
+
+  it('rejects valueless --workspace forms', () => {
+    for (const input of [
+      '--workspace',
+      '--workspace=',
+      '--workspace /tmp/primary --workspace',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: workspace/,
+      );
+    }
+  });
+
+  it('preserves repeatable --workspace values in command mode', () => {
+    let captured: unknown;
+    yargs([])
+      .exitProcess(false)
+      .fail(false)
+      .locale('en')
+      .command({
+        ...serveCommand,
+        handler: (argv) => {
+          captured = argv.workspace;
+        },
+      })
+      .parseSync('serve --workspace /tmp/primary --workspace /tmp/secondary');
+
+    expect(captured).toEqual(['/tmp/primary', '/tmp/secondary']);
   });
 });
 

@@ -174,6 +174,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('workspace', {
         type: 'string',
+        array: true,
+        requiresArg: true,
         description:
           'Absolute workspace path this daemon binds to. ' +
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
