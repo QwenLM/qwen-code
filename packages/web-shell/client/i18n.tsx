@@ -265,11 +265,15 @@ const EN: Messages = {
   },
   'markdownTable.copyTsv': 'Copy TSV',
   'markdownTable.copyVisible': 'Quick copy',
+  'markdownTable.freezeFirstColumn': 'Freeze first column',
+  'markdownTable.unfreezeFirstColumn': 'Unfreeze first column',
   'markdownTable.hideColumn': 'Hide column',
   'markdownTable.showHiddenColumns': (v) => {
     const count = Number(v?.count ?? 0);
     return `Show ${count} hidden column${count === 1 ? '' : 's'}`;
   },
+  'markdownTable.moveColumn': (v) => `Move ${v?.column ?? ''}`,
+  'markdownTable.resizeColumn': (v) => `Resize ${v?.column ?? ''}`,
   'markdownTable.rowDetails': 'Details',
   'markdownTable.rowDetailsAria': (v) =>
     `View details for row ${v?.index ?? ''}`,
@@ -1910,8 +1914,12 @@ const ZH: Messages = {
   'markdownTable.cellsSelected': (v) => `${v?.count ?? 0} 个单元格已选中`,
   'markdownTable.copyTsv': '复制 TSV',
   'markdownTable.copyVisible': '快捷复制',
+  'markdownTable.freezeFirstColumn': '冻结首列',
+  'markdownTable.unfreezeFirstColumn': '取消冻结首列',
   'markdownTable.hideColumn': '隐藏列',
   'markdownTable.showHiddenColumns': (v) => `显示 ${v?.count ?? 0} 个隐藏列`,
+  'markdownTable.moveColumn': (v) => `移动 ${v?.column ?? ''}`,
+  'markdownTable.resizeColumn': (v) => `调整 ${v?.column ?? ''} 列宽`,
   'markdownTable.rowDetails': '详情',
   'markdownTable.rowDetailsAria': (v) => `查看第 ${v?.index ?? ''} 行详情`,
   'markdownTable.closeRowDetailsAria': (v) => `收起第 ${v?.index ?? ''} 行详情`,
