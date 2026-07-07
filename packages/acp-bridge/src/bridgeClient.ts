@@ -930,7 +930,14 @@ export class BridgeClient implements Client {
         '`payload` must be a JSON-RPC message object',
       );
     }
-    const send = this.clientMcpSender(server);
+    const sessionId = params['sessionId'];
+    if (sessionId !== undefined && typeof sessionId !== 'string') {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must be a string when provided',
+      );
+    }
+    const send = this.clientMcpSender(server, { sessionId });
     if (!send) {
       // The client that hosted this server is gone (WS closed / unregistered).
       throw RequestError.invalidParams(

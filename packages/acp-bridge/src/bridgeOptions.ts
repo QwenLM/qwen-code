@@ -388,6 +388,10 @@ export interface BridgeOptions {
   clientMcpSender?: ClientMcpMessageSender;
 }
 
+export interface ClientMcpSenderContext {
+  sessionId?: string;
+}
+
 /**
  * Looks up the JSON-RPC sender for a client-hosted MCP server by name. Returns
  * `undefined` when no client currently advertises `serverName`. The returned
@@ -398,6 +402,5 @@ export interface BridgeOptions {
  */
 export type ClientMcpMessageSender = (
   serverName: string,
-) =>
-  | ((payload: unknown) => Promise<unknown>)
-  | undefined;
+  context?: ClientMcpSenderContext,
+) => ((payload: unknown) => Promise<unknown>) | undefined;

@@ -54,6 +54,7 @@ import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -1829,12 +1830,15 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
    */
   function makeClientWithRegistrar(
     registrar: ClientMcpRegistrar,
+    onLookup?: (serverName: string, context: unknown) => void,
   ): BridgeClient {
-    const sender: ClientMcpMessageSender = (serverName: string) =>
-      registrar.hasServer(serverName)
+    const sender: ClientMcpMessageSender = (serverName, context) => {
+      onLookup?.(serverName, context);
+      return registrar.hasServer(serverName)
         ? (payload: unknown) =>
             registrar.sendSdkMcpMessage(serverName, payload as JSONRPCMessage)
         : undefined;
+    };
     return new BridgeClient(
       (() => undefined) as never, // resolveEntry: client_mcp/message is sessionless
       (() => undefined) as never, // resolvePendingRestoreEvents
@@ -1905,6 +1909,59 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     });
     expect(outbound).toHaveLength(1);
     expect((result as { payload?: unknown }).payload).toBeDefined();
+  });
+
+  it('passes sessionId context to the client MCP sender lookup', async () => {
+    const outbound: ClientMcpFrame[] = [];
+    const lookups: Array<{ serverName: string; context: unknown }> = [];
+    const registrar = new ClientMcpRegistrar({
+      sendFrame: (frame) => {
+        outbound.push(frame);
+      },
+    });
+    registrar.registerServer('qwen-a2a');
+    const client = makeClientWithRegistrar(registrar, (serverName, context) => {
+      lookups.push({ serverName, context });
+    });
+
+    const callP = client.extMethod(SERVE_CONTROL_EXT_METHODS.clientMcpMessage, {
+      server: 'qwen-a2a',
+      sessionId: 'session-123',
+      payload: { jsonrpc: '2.0', id: 7, method: 'tools/list' },
+    });
+
+    await vi.waitFor(() => expect(outbound).toHaveLength(1));
+    registrar.resolveMessage(outbound[0].id, {
+      jsonrpc: '2.0',
+      id: 7,
+      result: { tools: [] },
+    } as JSONRPCMessage);
+
+    await callP;
+    expect(lookups).toEqual([
+      {
+        serverName: 'qwen-a2a',
+        context: { sessionId: 'session-123' },
+      },
+    ]);
+  });
+
+  it('rejects (invalidParams) when sessionId is not a string', async () => {
+    const registrar = new ClientMcpRegistrar({ sendFrame: () => {} });
+    registrar.registerServer('qwen-a2a');
+    const client = makeClientWithRegistrar(registrar);
+    const err = await client
+      .extMethod(SERVE_CONTROL_EXT_METHODS.clientMcpMessage, {
+        server: 'qwen-a2a',
+        sessionId: 123,
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32602);
+    expect((err as RequestError).message).toContain(
+      '`sessionId` must be a string when provided',
+    );
   });
 
   it('rejects (invalidParams) when the named server is not connected', async () => {
