@@ -43,6 +43,9 @@ describe('extractRememberErrorDetails', () => {
         data: { details: 'agent stopped because max turns exceeded' },
       }),
     ).toBe('agent stopped because max turns exceeded');
+    expect(extractRememberErrorDetails({ data: 'raw data detail' })).toBe(
+      'raw data detail',
+    );
     expect(
       extractRememberErrorDetails({
         data: { message: 'provider rejected the request' },
@@ -53,6 +56,9 @@ describe('extractRememberErrorDetails', () => {
         cause: new Error('nested failure reason'),
       }),
     ).toBe('nested failure reason');
+    expect(extractRememberErrorDetails('raw string error')).toBe(
+      'raw string error',
+    );
   });
 
   it('redacts credentials before exposing details', () => {
@@ -62,6 +68,28 @@ describe('extractRememberErrorDetails', () => {
 
     expect(details).toBe('Authorization: <redacted>');
     expect(details).not.toContain('secret-token-value');
+  });
+
+  it('normalizes hidden separators before redacting credentials', () => {
+    const details = extractRememberErrorDetails(
+      new Error('Authorization: Bearer\u200bsecret-token-value'),
+    );
+
+    expect(details).toBe('Authorization: <redacted>');
+    expect(details).not.toContain('secret-token-value');
+  });
+
+  it('sanitizes control characters', () => {
+    expect(extractRememberErrorDetails(new Error('line1\nline2\ttab'))).toBe(
+      'line1 line2 tab',
+    );
+  });
+
+  it('guards against circular causes', () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic['cause'] = cyclic;
+
+    expect(extractRememberErrorDetails(cyclic)).toBeUndefined();
   });
 
   it('caps long details', () => {

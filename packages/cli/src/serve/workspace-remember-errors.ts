@@ -44,6 +44,8 @@ function detailFromRecord(
   record: Record<string, unknown>,
   seen: WeakSet<object>,
 ): string | undefined {
+  // Bridge errors carry the best failure reason in `data`; top-level
+  // `message` and `cause` are generic fallbacks.
   const data = record['data'];
   if (typeof data === 'string' && data.length > 0) return data;
   if (data && typeof data === 'object') {
@@ -76,15 +78,35 @@ function rawRememberErrorDetails(
   return detailFromRecord(err as Record<string, unknown>, seen);
 }
 
+function shouldReplaceControlChar(code: number): boolean {
+  return (
+    code <= 31 ||
+    (code >= 127 && code <= 159) ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069) ||
+    code === 0xfeff
+  );
+}
+
 function replaceControlChars(details: string): string {
-  return Array.from(details, (char) => {
-    const code = char.charCodeAt(0);
-    return code <= 31 || (code >= 127 && code <= 159) ? ' ' : char;
-  }).join('');
+  let normalized = '';
+  let last = 0;
+  for (let index = 0; index < details.length; ) {
+    const code = details.codePointAt(index);
+    if (code === undefined) break;
+    const width = code > 0xffff ? 2 : 1;
+    if (shouldReplaceControlChar(code)) {
+      normalized += details.slice(last, index) + ' ';
+      last = index + width;
+    }
+    index += width;
+  }
+  return last === 0 ? details : normalized + details.slice(last);
 }
 
 function sanitizeRememberErrorDetails(details: string): string | undefined {
-  const normalized = replaceControlChars(redactLogCredentials(details)).trim();
+  const normalized = redactLogCredentials(replaceControlChars(details)).trim();
   if (!normalized) return undefined;
   if (normalized.length <= MAX_REMEMBER_ERROR_DETAILS_CHARS) {
     return normalized;

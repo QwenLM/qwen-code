@@ -5847,7 +5847,7 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
-              workspaceMemoryErrorData('managed_memory_unavailable', err),
+              { errorKind: 'managed_memory_unavailable' },
             );
           }
           throw new RequestError(
@@ -5919,7 +5919,7 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
-              workspaceMemoryErrorData('managed_memory_unavailable', err),
+              { errorKind: 'managed_memory_unavailable' },
             );
           }
           throw new RequestError(-32099, 'Workspace memory forget failed', {
@@ -5970,7 +5970,7 @@ class QwenAgent implements Agent {
             throw new RequestError(
               -32009,
               'Managed memory is unavailable for this daemon workspace',
-              workspaceMemoryErrorData('managed_memory_unavailable', err),
+              { errorKind: 'managed_memory_unavailable' },
             );
           }
           throw new RequestError(-32099, 'Workspace memory dream failed', {
