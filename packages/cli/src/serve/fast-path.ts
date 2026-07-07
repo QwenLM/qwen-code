@@ -7,7 +7,9 @@
 import type { RunHandle } from './run-qwen-serve.js';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import type { ServeOptions } from './types.js';
+import { getHeadlessYoloSafetyWarning } from '../utils/headlessSafetyWarnings.js';
 
 type McpBudgetMode = NonNullable<ServeOptions['mcpBudgetMode']>;
 
@@ -55,6 +57,8 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['tls-cert', 'tlsCert'],
+  ['tls-key', 'tlsKey'],
 ]);
 
 const BOOLEAN_OPTION_BY_FLAG = new Map<
@@ -201,6 +205,12 @@ export async function waitForServeRuntimeOrExit(
   try {
     await handle.runtimeReady;
   } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message === RUNTIME_STARTUP_CANCELLED_MESSAGE
+    ) {
+      return;
+    }
     writeStderrLine(
       `qwen serve: runtime startup failed after listener was ready: ${
         err instanceof Error ? err.message : String(err)
@@ -339,6 +349,12 @@ export function parseServeFastPathArgs(
       const read = readOptionValue(argv, i, inlineValue);
       if (!read) return { kind: 'fallback' };
       i = read.nextIndex;
+      if (
+        stringTarget === 'workspace' &&
+        (options.workspace !== undefined || read.value === '')
+      ) {
+        return { kind: 'fallback' };
+      }
       setServeOption(options, stringTarget, read.value);
       continue;
     }
@@ -389,31 +405,27 @@ async function maybeOpenWebShellBrowser(
   open: boolean,
 ): Promise<void> {
   if (!open) return;
+  try {
+    await handle.runtimeReady;
+  } catch {
+    return;
+  }
   const { maybeOpenWebShellBrowser: openBrowser } = await import(
     '../commands/serve.js'
   );
   await openBrowser(handle, true);
 }
 
-async function emitHeadlessYoloWarning(
+function emitHeadlessYoloWarning(
   settings: ServeFastPathSettings | undefined,
-) {
+): void {
   if (!settings) return;
-  try {
-    const { HEADLESS_YOLO_NO_SANDBOX_WARNING } = await import(
-      '../utils/headlessSafetyWarnings.js'
-    );
-    const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
-    if (
-      settings.tools?.approvalMode === 'yolo' &&
-      !settings.tools?.sandbox &&
-      !process.env['SANDBOX'] &&
-      !isTruthyEnv(suppress)
-    ) {
-      writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
-    }
-  } catch {
-    // Keep the warning best-effort, matching the yargs serve handler.
+  const warning = getHeadlessYoloSafetyWarning({
+    getApprovalMode: () => settings.tools?.approvalMode,
+    getSandbox: () => settings.tools?.sandbox,
+  });
+  if (warning) {
+    writeStderrLine(warning);
   }
 }
 
@@ -491,8 +503,13 @@ export async function tryRunServeFastPath(
     handle = await runQwenServe(parsed.options, {
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
+      deferRuntimeUntilFirstHealth: !parsed.open,
     });
-    void emitHeadlessYoloWarning(settings);
+    try {
+      emitHeadlessYoloWarning(settings);
+    } catch {
+      // Keep the warning best-effort, matching the yargs serve handler.
+    }
     await maybeOpenWebShellBrowser(handle, parsed.open);
   } catch (err) {
     writeStderrLine(

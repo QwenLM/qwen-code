@@ -21,6 +21,15 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
+  // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
+  // disable TLS certificate verification for all outbound API connections. A
+  // project `.env` must never enable either — that would let an untrusted repo
+  // silently turn off MITM protection. Opt-in stays with the user via the
+  // `--insecure` flag, the shell environment, or a home `.env`. The initial
+  // `.env` load only consults this list, so both keys must be here (not just
+  // RELOAD_EXCLUDED_KEYS, which only applies on reload).
+  'QWEN_TLS_INSECURE',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
 ];
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [

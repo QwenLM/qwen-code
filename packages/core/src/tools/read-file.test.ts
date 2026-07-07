@@ -13,6 +13,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
@@ -22,6 +23,15 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
 }));
+
+vi.mock('../utils/pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/pdf.js')>();
+  return {
+    ...actual,
+    getPDFPageCount: async () => 31,
+    isPdftotextAvailable: async () => true,
+  };
+});
 
 describe('ReadFileTool', () => {
   let tempRootDir: string;
@@ -114,7 +124,7 @@ describe('ReadFileTool', () => {
       expect(typeof result).not.toBe('string');
     });
 
-    it('should allow access to files in OS temp directory', () => {
+    it('should build an invocation for files in the OS temp directory', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
       };
@@ -145,19 +155,51 @@ describe('ReadFileTool', () => {
         offset: -1,
       };
       expect(() => tool.build(params)).toThrow(
-        'Offset must be a non-negative number',
+        'Offset must be a non-negative integer',
       );
     });
 
-    it('should throw error if limit is zero or negative', () => {
+    it('should throw error if offset is fractional', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
-        limit: 0,
+        offset: 1.5,
       };
-      expect(() => tool.build(params)).toThrow(
-        'Limit must be a positive number',
-      );
+      expect(() => tool.build(params)).toThrow('params/offset must be integer');
     });
+
+    it('should allow zero offset', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        offset: 0,
+      };
+      expect(tool.build(params)).toBeDefined();
+    });
+
+    it.each([0, -1])(
+      'should throw error if limit is not positive (%s)',
+      (limit) => {
+        const params: ReadFileToolParams = {
+          file_path: path.join(tempRootDir, 'test.txt'),
+          limit,
+        };
+        expect(() => tool.build(params)).toThrow(
+          'Limit must be a positive integer',
+        );
+      },
+    );
+
+    it.each([0.5, 1.5])(
+      'should throw error if limit is fractional (%s)',
+      (limit) => {
+        const params: ReadFileToolParams = {
+          file_path: path.join(tempRootDir, 'test.txt'),
+          limit,
+        };
+        expect(() => tool.build(params)).toThrow(
+          'params/limit must be integer',
+        );
+      },
+    );
 
     it('should reject offset or limit for notebook files', () => {
       const params: ReadFileToolParams = {
@@ -210,6 +252,37 @@ describe('ReadFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the global qwen temp directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(Storage.getGlobalTempDir(), 'temp-file.txt'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the user extensions directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(
+          Storage.getUserExtensionsDir(),
+          'my-ext',
+          'index.js',
+        ),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths directly under the OS temp directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should return allow for paths within the subagent transcripts dir', async () => {
@@ -648,7 +721,7 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('');
     });
 
-    it('should successfully read files from OS temp directory', async () => {
+    it('should read OS temp files after the invocation is executed', async () => {
       const osTempFile = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'read-file-test-'),
       );
@@ -682,6 +755,37 @@ describe('ReadFileTool', () => {
         >;
         return invocation.execute(abortSignal);
       }
+
+      it('returns a short error when a text-only model reads a large PDF without pages', async () => {
+        const pdfPath = path.join(tempRootDir, 'large.pdf');
+        await fsp.writeFile(pdfPath, Buffer.alloc(2 * 1024 * 1024));
+        const textOnlyConfig = {
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const textOnlyTool = new ReadFileTool(textOnlyConfig);
+
+        const result = await read({ file_path: pdfPath }, textOnlyTool);
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(String(result.llmContent).length).toBeLessThan(1000);
+        expect(result.llmContent).toContain('has 31 pages');
+        expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
 
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
         const filePath = path.join(tempRootDir, 'note.txt');

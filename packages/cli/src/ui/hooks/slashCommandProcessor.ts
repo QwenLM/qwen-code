@@ -55,7 +55,11 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
-import { parseSlashCommand } from '../../utils/commands.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+  MAX_STACKED_SKILLS,
+} from '../../utils/commands.js';
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
@@ -121,10 +125,13 @@ export interface SlashCommandProcessorActions {
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
+    visionModelMode?: boolean;
+    persistScope?: 'workspace' | 'user';
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
+  openEffortDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -696,6 +703,85 @@ export const useSlashCommandProcessor = (
       };
 
       try {
+        // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+        const stackedResult = parseStackedSlashCommands(trimmed, commands);
+        if (stackedResult.skills.length >= 2) {
+          const combinedContent: PartListUnion[] = [];
+          let firstModelOverride: string | undefined;
+          const onCompleteCallbacks: Array<() => Promise<void>> = [];
+
+          for (const skill of stackedResult.skills) {
+            if (!skill.action) continue;
+            const skillContext: CommandContext = {
+              invocation: {
+                raw: `/${skill.name}`,
+                name: skill.name,
+                args: '',
+              },
+              services: { config, settings, logger: null },
+            } as unknown as CommandContext;
+
+            const skillResult = await skill.action(skillContext, '');
+            if (skillResult?.type === 'submit_prompt') {
+              combinedContent.push(skillResult.content);
+              firstModelOverride ??= skillResult.modelOverride;
+              if (skillResult.onComplete) {
+                onCompleteCallbacks.push(skillResult.onComplete);
+              }
+            } else if (
+              skillResult?.type === 'message' &&
+              skillResult.messageType === 'error'
+            ) {
+              addMessage({
+                type: MessageType.ERROR,
+                content: `Skill "/${skill.name}" error: ${skillResult.content}`,
+                timestamp: new Date(),
+              });
+            }
+
+            if (config) {
+              recordSkillInvocation(config, {
+                skillName: getSkillCommandName(skill),
+                success: skillResult?.type === 'submit_prompt',
+              });
+            }
+          }
+
+          // Append user's remaining text after skill tokens
+          if (stackedResult.remainingText) {
+            combinedContent.push([{ text: stackedResult.remainingText }]);
+          }
+
+          if (stackedResult.exceededMax) {
+            addMessage({
+              type: MessageType.WARNING,
+              content: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
+              timestamp: new Date(),
+            });
+          }
+
+          // Mark as sent to model so chat recording and telemetry work correctly
+          invocationSentToModel = true;
+          if (invocationItemId !== undefined) {
+            updateItem(invocationItemId, { sentToModel: true });
+          }
+
+          // Combine all content into a single submit_prompt
+          const mergedContent: PartListUnion = combinedContent.flat();
+          return {
+            type: 'submit_prompt',
+            content: mergedContent,
+            ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+            ...(onCompleteCallbacks.length
+              ? {
+                  onComplete: async () => {
+                    for (const cb of onCompleteCallbacks) await cb();
+                  },
+                }
+              : {}),
+          };
+        }
+
         if (commandToExecute) {
           if (!commandToExecute.hidden) {
             setRecentCommands((previous) => {
@@ -820,13 +906,27 @@ export const useSlashCommandProcessor = (
                       actions.openMemoryDialog();
                       return { type: 'handled' };
                     case 'model':
-                      actions.openModelDialog();
+                      actions.openModelDialog({
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'fast-model':
-                      actions.openModelDialog({ fastModelMode: true });
+                      actions.openModelDialog({
+                        fastModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'voice-model':
-                      actions.openModelDialog({ voiceModelMode: true });
+                      actions.openModelDialog({
+                        voiceModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'vision-model':
+                      actions.openModelDialog({
+                        visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
@@ -854,6 +954,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
+                      return { type: 'handled' };
+                    case 'effort':
+                      actions.openEffortDialog();
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
@@ -959,6 +1062,7 @@ export const useSlashCommandProcessor = (
                     type: 'submit_prompt',
                     content,
                     onComplete: result.onComplete,
+                    modelOverride: result.modelOverride,
                   };
                 }
                 case 'confirm_shell_commands': {
@@ -1147,6 +1251,7 @@ export const useSlashCommandProcessor = (
     },
     [
       config,
+      settings,
       addItem,
       actions,
       commands,

@@ -95,6 +95,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     createDebugLogger: () => debugLogMock,
+    // Stub cron-task exports to avoid loading async-mutex under fake timers
+    readCronTasks: vi.fn(async () => []),
+    updateCronTasks: vi.fn(async () => undefined),
+    removeCronTasks: vi.fn(async () => undefined),
+    getCronFilePath: vi.fn(() => '/tmp/cron-tasks.json'),
+    generateCronTaskId: vi.fn(() => 'test-id'),
   };
 });
 
@@ -680,7 +686,10 @@ describe('useStatusLine', () => {
     });
 
     it('falls back to zero when contextWindowSize is unavailable', () => {
-      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null as never);
+      // Persistent (not Once): the hook reads getContentGeneratorConfig both at
+      // render scope (reasoning-effort trigger key) and inside the data builder,
+      // so simulate "unavailable" for every call rather than just the first.
+      mockConfig.getContentGeneratorConfig.mockReturnValue(null as never);
       setStatusLineConfig({ type: 'command', command: 'cat' });
       renderHook(() => useStatusLine());
 

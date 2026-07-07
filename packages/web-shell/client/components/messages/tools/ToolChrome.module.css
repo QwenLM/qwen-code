@@ -11,19 +11,22 @@
   overflow: hidden;
 }
 
+.chatSummaryGroup {
+  margin: 4px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  gap: 2px;
+}
+
 .line {
   padding: 2px 0;
   min-width: 0;
 }
 
-.chatGroupWrap {
-  margin: 2px 0;
-}
-
 .chatSummary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -39,8 +42,14 @@
 
 .chatSummary:hover,
 .chatSummary:focus-visible {
-  color: var(--muted-foreground);
+  color: var(--primary);
   outline: none;
+}
+
+.chatSummary:hover .chatSummaryTextActive,
+.chatSummary:focus-visible .chatSummaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
 }
 
 .chatSummaryIcon {
@@ -58,8 +67,8 @@
 }
 
 .chatSummaryToolIcon {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   display: block;
 }
 
@@ -102,13 +111,24 @@
 
 .chatChevronRight,
 .chatChevronDown {
-  width: 7px;
-  height: 7px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
+  width: 14px;
+  height: 14px;
+  position: relative;
   flex-shrink: 0;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+
+.chatChevronRight::before,
+.chatChevronRight::after,
+.chatChevronDown::before,
+.chatChevronDown::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
 }
 
 .chatSummary:hover .chatChevronRight,
@@ -119,13 +139,36 @@
 }
 
 .chatChevronRight {
+  transform: none;
+}
+
+.chatChevronRight::before {
+  top: calc(50% - 2px);
+  left: calc(50% - 3px);
+  transform: rotate(45deg);
+}
+
+.chatChevronRight::after {
+  top: calc(50% + 2px);
+  left: calc(50% - 3px);
   transform: rotate(-45deg);
 }
 
 .chatChevronDown {
-  transform: rotate(45deg);
-  margin-top: -3px;
+  transform: none;
   opacity: 1;
+}
+
+.chatChevronDown::before {
+  top: 50%;
+  left: calc(50% - 5px);
+  transform: rotate(45deg);
+}
+
+.chatChevronDown::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  transform: rotate(-45deg);
 }
 
 .chatSummaryContentClip {
@@ -153,37 +196,20 @@
 }
 
 .icon {
+  color: var(--muted-foreground);
   font-size: 13px;
+  font-weight: 400;
   flex-shrink: 0;
-}
-
-.iconDone {
-  color: var(--success-color);
+  white-space: nowrap;
 }
 
 .iconError {
   color: var(--error-color);
 }
 
-.iconPending {
-  color: var(--muted-foreground);
-}
-
-.iconSpin {
-  color: var(--warning-color);
-  display: inline-block;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .lineName {
-  font-weight: 700;
-  color: var(--foreground);
+  font-weight: 400;
+  color: var(--muted-foreground);
   font-size: 13px;
   flex-shrink: 0;
 }
@@ -216,8 +242,10 @@
   cursor: pointer;
 }
 
-.lineExpandable:hover .lineName {
-  color: var(--agent-blue-500);
+.lineExpandable:hover .lineName,
+.lineExpandable:hover .lineArg,
+.lineExpandable:hover .lineElapsed {
+  color: var(--foreground);
 }
 
 .lineOutput {
@@ -229,22 +257,73 @@
   line-height: 1.4;
 }
 
-/* Full, wrapped tool argument shown below the header when the row is expanded
-   (the header drops its single-line ellipsised copy). Aligns with the expanded
-   output block below it. */
-.lineFullArg {
-  margin-left: 16px;
-  margin-top: 2px;
+.expandedCard {
+  margin: 5px 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--secondary);
+}
+
+.expandedCardHeader {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  align-items: stretch;
+  gap: 3px;
+  padding: 8px 12px 8px;
+}
+
+.expandedCardTitle {
+  flex-shrink: 0;
+  color: var(--foreground);
   font-size: 12px;
-  line-height: 1.4;
+  font-weight: 500;
+}
+
+.expandedCardDetail {
+  min-width: 0;
   color: var(--muted-foreground);
   font-family: var(--font-mono);
-  white-space: pre-wrap;
-  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.4;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.expandedCardBody {
+  padding: 6px 12px 8px;
+  min-width: 0;
+}
+
+.expandedAgentCard {
+  background: var(--secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 5px 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.expandedLineOutput {
+  margin-left: 0;
 }
 
 .lineDetail {
+  margin: 5px 0;
+  min-width: 0;
+  overflow: visible;
+}
+
+.markdownLineDetail {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  overflow: visible;
 }
 
 .expandedBash,
@@ -253,20 +332,21 @@
 }
 
 .expandedOutput {
-  padding: 0px 0px 0 16px;
+  margin: 0;
+  padding: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--muted-foreground);
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
-  margin-bottom: 0;
 }
 
 .expandedEdit {
-  margin-top: 2px;
+  margin: 0;
 }
 
 .expandedWrite {
@@ -279,25 +359,6 @@
   color: var(--success-color);
 }
 
-.expandBtn {
-  display: block;
-  width: 100%;
-  padding: 3px 10px;
-  margin-top: 10px;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  background: var(--subtle-bg);
-  border: none;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  text-align: left;
-}
-
-.expandBtn:hover {
-  color: var(--agent-blue-500);
-  background: var(--agent-blue-100);
-}
-
 .todoProgress {
   color: var(--muted-foreground);
   font-size: 12px;
@@ -307,6 +368,10 @@
 
 .todoBody {
   padding: 4px 0 2px 14px;
+}
+
+.expandedCardBody .todoBody {
+  padding: 0;
 }
 
 .compactGroup {

@@ -96,7 +96,7 @@ export function getFloatingTodos(
   let userMessageAfter = false;
 
   for (const message of messages) {
-    if (message.role === 'user') {
+    if (message.role === 'user' || message.role === 'user_shell') {
       userMessageAfter = true;
       continue;
     }
@@ -122,9 +122,7 @@ export function getFloatingTodos(
 
   if (todos.length === 0) return EMPTY_FLOATING_TODOS;
   const allCompleted = !hasActiveTodos(todos);
-  // A finished list stays visible (the "all done" moment) only until the
-  // user sends the next prompt.
-  if (allCompleted && userMessageAfter) return EMPTY_FLOATING_TODOS;
+  if (userMessageAfter) return EMPTY_FLOATING_TODOS;
   return { todos, allCompleted, sourceMessageId, sourceCallId };
 }
 

@@ -104,14 +104,13 @@ const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
     tool.subTools || tool.subContent ? (
       <SubAgentPanel tool={tool} />
     ) : (
-      <ToolLine tool={tool} />
+      <ToolLine tool={tool} forceExpandable hideCollapsedOutput />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
   const { t } = useI18n();
-  const desc = tc.description || '';
   return (
     <div className={chromeStyles.line}>
       <div className={chromeStyles.lineMain}>
@@ -119,9 +118,6 @@ function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
         <span className={chromeStyles.lineName}>
           {localizeToolDisplayName(tc.name, t)}
         </span>
-        {desc && (
-          <span className={chromeStyles.lineArg}>{truncateText(desc, 70)}</span>
-        )}
       </div>
     </div>
   );
@@ -291,7 +287,7 @@ export function SubAgentPanel({
   const tokenCount =
     taskExec?.tokenCount && taskExec.tokenCount > 0
       ? taskExec.tokenCount
-      : taskExec?.executionSummary?.totalTokens;
+      : taskExec?.executionSummary?.outputTokens;
   const tokens = tokenCount ? formatTokenCount(tokenCount) : '';
   const resultText = isComplete ? getAgentResultText(tool) : '';
 

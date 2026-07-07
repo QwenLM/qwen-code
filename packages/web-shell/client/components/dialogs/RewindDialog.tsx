@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonRewindSnapshotInfo,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
 import styles from './RewindDialog.module.css';
+
+const LIST_ID = 'rewind-snapshot-list';
+const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
 
 interface RewindDialogProps {
   blocks: readonly DaemonTranscriptBlock[];
@@ -47,7 +51,15 @@ export function RewindDialog({
   const [rewindingPromptId, setRewindingPromptId] = useState<string | null>(
     null,
   );
+  // `cursorIdx` is the roving keyboard/hover highlight; `selectedPromptId` is
+  // the confirmed target the danger button acts on. They are separate so moving
+  // the highlight with the arrow keys does not change what will be rewound until
+  // the user commits with Enter or a click.
+  const [cursorIdx, setCursorIdx] = useState(0);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  // Inline failure text. The app-level onError toast deduplicates repeats, so
+  // a second identical failure would otherwise be invisible in this dialog.
+  const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -78,57 +90,113 @@ export function RewindDialog({
     [blocks, snapshots],
   );
 
+  // Keep the cursor in range as snapshots load / change.
   useEffect(() => {
-    if (items.length > 0 && !selectedPromptId) {
-      setSelectedPromptId(items[0]!.snapshot.promptId);
+    if (cursorIdx >= items.length && items.length > 0) {
+      setCursorIdx(items.length - 1);
     }
-  }, [items, selectedPromptId]);
+  }, [items.length, cursorIdx]);
 
-  const handleRewind = () => {
-    const promptId = selectedPromptId;
-    if (!promptId) return;
-    if (rewindingPromptId) return;
+  const listRef = useRef<HTMLDivElement>(null);
+  const isRewinding = rewindingPromptId !== null;
+
+  const handleRewind = (promptId: string | null) => {
+    if (!promptId || rewindingPromptId) return;
     setRewindingPromptId(promptId);
+    setMessage(null);
     rewind(promptId)
       .then(() => {
         onClose();
       })
       .catch((error: unknown) => {
         onError(error);
+        setMessage(
+          t('rewind.failed', {
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+        );
         setRewindingPromptId(null);
       });
   };
 
+  // Arrows move the cursor (highlight) only; Enter/click commits the cursor row
+  // as the confirmed target. The irreversible rewind stays behind the danger
+  // button, consistent with the other destructive dialogs (delete / release).
+  const commitRow = (index: number) => {
+    const item = items[index];
+    if (item) {
+      setCursorIdx(index);
+      setSelectedPromptId(item.snapshot.promptId);
+    }
+  };
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: items.length,
+    activeIndex: cursorIdx,
+    onActiveIndexChange: setCursorIdx,
+    onConfirm: commitRow,
+    enabled: !isRewinding,
+  });
+
+  useEffect(() => {
+    const el = listRef.current?.children[cursorIdx] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [cursorIdx]);
+
+  // Snapshots load asynchronously: while loading, nothing in this dialog is
+  // focusable, so DialogShell parks focus on the dialog panel. Once the listbox
+  // mounts, pull focus into it — but only if focus is still parked on the panel
+  // — so screen readers announce the active option via aria-activedescendant
+  // instead of staying silent until the user tabs into the list.
+  useEffect(() => {
+    if (loading || items.length === 0) return;
+    const active = document.activeElement;
+    if (active?.getAttribute('role') === 'dialog') {
+      listRef.current?.focus();
+    }
+  }, [loading, items.length]);
+
   if (loading) {
-    return (
-      <div className={dp('resume-picker-empty')}>{t('rewind.loading')}</div>
-    );
+    return <div className={dp('picker-empty')}>{t('rewind.loading')}</div>;
   }
 
   if (items.length === 0) {
-    return <div className={dp('resume-picker-empty')}>{t('rewind.empty')}</div>;
+    return <div className={dp('picker-empty')}>{t('rewind.empty')}</div>;
   }
 
   return (
     <div className={styles.root}>
-      <div className={styles.list} role="list">
-        {items.map(({ snapshot, promptText }) => {
-          const selected = selectedPromptId === snapshot.promptId;
-          const disabled = rewindingPromptId !== null;
+      <div
+        className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
+        ref={listRef}
+        role="listbox"
+        aria-label={t('rewind.title')}
+        tabIndex={0}
+        aria-activedescendant={
+          items.length > 0 ? optionId(cursorIdx) : undefined
+        }
+      >
+        {items.map(({ snapshot, promptText }, index) => {
+          const isCursor = index === cursorIdx;
+          const isSelected = selectedPromptId === snapshot.promptId;
           const label =
             promptText ||
             t('rewind.promptFallback', {
               id: snapshot.promptId.slice(-8),
             });
           return (
-            <button
+            <div
               key={snapshot.promptId}
-              type="button"
-              className={`${styles.item} ${
-                selected ? styles.itemSelected : ''
-              }`}
-              disabled={disabled}
-              onClick={() => setSelectedPromptId(snapshot.promptId)}
+              id={optionId(index)}
+              role="option"
+              aria-selected={isSelected}
+              aria-disabled={isRewinding || undefined}
+              className={`${styles.item} ${isCursor ? styles.itemCursor : ''} ${
+                isSelected ? styles.itemSelected : ''
+              } ${isRewinding ? styles.itemDisabled : ''}`}
+              onClick={() => {
+                if (!isRewinding) commitRow(index);
+              }}
+              onMouseMove={() => setCursorIdx(index)}
             >
               <div className={styles.prompt} title={label}>
                 <span className={styles.turn}>#{snapshot.turnIndex + 1}</span>{' '}
@@ -137,11 +205,16 @@ export function RewindDialog({
               <div className={styles.time}>
                 {formatSnapshotTime(snapshot.timestamp)}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
       <div className={styles.footer}>
+        {message && (
+          <span className={styles.footerMessage} role="alert">
+            {message}
+          </span>
+        )}
         <button
           type="button"
           className={dp('dialog-inline-button')}
@@ -153,7 +226,7 @@ export function RewindDialog({
         <button
           type="button"
           className={`${dp('dialog-danger-button')} ${styles.dangerButton}`}
-          onClick={handleRewind}
+          onClick={() => handleRewind(selectedPromptId)}
           disabled={!selectedPromptId || rewindingPromptId !== null}
         >
           {rewindingPromptId ? t('rewind.rewinding') : t('rewind.confirm')}

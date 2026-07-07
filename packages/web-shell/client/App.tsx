@@ -10,10 +10,10 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  DAEMON_APPROVAL_MODES,
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
-  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -30,14 +30,16 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
-import type { EditorHandle } from './hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  EditorHandle,
+} from './hooks/useComposerCore';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -62,10 +64,15 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
+import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { SplitView } from './components/SplitView';
+import { useIsLargeScreen } from './hooks/useIsLargeScreen';
+import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
+import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
-import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
-import { isAskUserQuestionToolName } from './components/messages/toolFormatting';
+import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
@@ -73,16 +80,17 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
-import { getLocalCommands } from './constants/localCommands';
+import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
-import deleteIconUrl from './assets/icons/delete.svg';
-import editIconUrl from './assets/icons/edit.svg';
-import insertIconUrl from './assets/icons/insert.svg';
-import queueIconUrl from './assets/icons/queue.svg';
 import {
   I18nProvider,
   getTranslator,
@@ -95,24 +103,25 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { cssUrlVar } from './utils/cssUrlVar';
+import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
+import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
 import {
-  appendOrDeferLocalUserMessage,
-  isCommandPrompt,
-} from './utils/localCommandQueue';
+  decodeVisionModelForPicker,
+  encodeVisionModelForSetting,
+  extractBareModelId,
+} from './utils/modelEncoding';
+import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
+import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
-import {
-  DAEMON_APPROVAL_MODES,
-  type DaemonApprovalMode,
-} from '@qwen-code/webui/daemon-react-sdk';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -130,6 +139,15 @@ import {
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
+import {
+  createAndAttachSessionForPrompt,
+  isDaemonApprovalMode,
+} from './utils/sessionPreparation';
+import {
+  getComposerPlaceholderKey,
+  shouldBlockComposerSubmit,
+  shouldDisableComposerInput,
+} from './utils/composerInputState';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -154,13 +172,18 @@ import {
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
+  type UserMessageContentRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
   type ComposerToolbarEndRenderer,
+  type ComposerToolbarRightRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
+  type MarkdownTableMode,
   type WebShellTaskInfo,
+  type WebShellAtProvider,
+  type WebShellComposerTagIconMap,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -210,11 +233,22 @@ function TodoContextsProvider({
 }
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
-const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
+// Cap on how long a manual "run now" waits for its bound session to become
+// active before giving up, so the scheduled-tasks UI can't stay stuck disabled
+// if the switch never completes.
+const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
+
+/** Maps each ModelDialogMode to its i18n title key — single source of truth. */
+const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
+  main: 'model.select',
+  fast: 'model.setFast',
+  voice: 'model.setVoice',
+  vision: 'model.setVision',
+};
 
 function isVisibleComposerModel(model: { id: string }): boolean {
   return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
@@ -242,13 +276,6 @@ function isGoalClearCommand(text: string): boolean {
   return GOAL_CLEAR_KEYWORDS.has(goalArg);
 }
 
-interface QueuedPrompt {
-  id: number;
-  text: string;
-  images?: PromptImage[];
-  onComplete?: () => void;
-}
-
 interface ActiveGoalStatus {
   condition: string;
   setAt: number;
@@ -258,6 +285,9 @@ interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
   retry?: boolean;
+  clearComposerOnPromptStart?: boolean;
+  commitComposerAccepted?: ComposerSubmitCommit;
+  onAdmitted?: () => void;
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -313,9 +343,19 @@ export interface BugReportInfo {
   systemInfo: Record<string, string>;
 }
 
+export interface WebShellSidebarOptions {
+  enabled?: boolean;
+  defaultCollapsed?: boolean;
+}
+
+export type SessionChangeEvent =
+  | { type: 'rename'; sessionId: string; newName: string }
+  | { type: 'submit'; sessionId: string; prompt: string; queued: boolean }
+  | { type: 'turn_complete'; sessionId: string; error?: Error };
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
-  onSessionIdChange?: (sessionId: string) => void;
+  onSessionIdChange?: (sessionId: string | undefined) => void;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -330,6 +370,8 @@ export interface WebShellProps {
   style?: React.CSSProperties;
   /** Maximum chat content width in regular mode. Defaults to 1000px. */
   chatMaxWidth?: number;
+  /** Optional workspace sidebar. Disabled by default. */
+  sidebar?: boolean | WebShellSidebarOptions;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
@@ -350,22 +392,32 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Additional @ mention categories shown alongside built-in files/extensions. */
+  atProviders?: readonly WebShellAtProvider[];
+  /** Icon URLs for custom composer tag kinds used by @ mention chips. */
+  composerTagIcons?: WebShellComposerTagIconMap;
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
+  renderUserMessageContent?: UserMessageContentRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
+  /** Custom renderer inserted into the composer toolbar's right-side action area. */
+  renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
+  /** Markdown table rendering mode. Defaults to basic. */
+  markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
@@ -386,10 +438,25 @@ export interface WebShellProps {
   composerInput?: WebShellComposerInput;
   /** Replay key for composerInput. */
   composerInputVersion?: number;
+  /** Called when a session-level event occurs (rename, submit, turn complete). */
+  onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called before a prompt is submitted. Return a Promise — the prompt is held
+   * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
+   * `sessionId` is `undefined` when the session has not yet been created (deferred).
+   * Also called for queued prompts (submitted while a turn is streaming).
+   */
+  onSubmitBefore?: (params: {
+    sessionId: string | undefined;
+    prompt: string;
+  }) => Promise<void>;
 }
 
 type SessionActionsWithCreate = {
   createSession: () => Promise<{ sessionId: string }>;
+  attachSession: () => Promise<void>;
+  closeSession: () => Promise<void>;
+  clearSession: () => Promise<void>;
 };
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -406,6 +473,45 @@ type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+
+function resolveSidebarOptions(
+  sidebar: WebShellProps['sidebar'],
+): Required<WebShellSidebarOptions> {
+  if (sidebar === true) {
+    return { enabled: true, defaultCollapsed: false };
+  }
+  if (!sidebar) {
+    return { enabled: false, defaultCollapsed: false };
+  }
+  return {
+    enabled: sidebar.enabled ?? true,
+    defaultCollapsed: sidebar.defaultCollapsed ?? false,
+  };
+}
+
+function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
+  if (typeof window === 'undefined') return defaultCollapsed;
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return defaultCollapsed;
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(
+      SIDEBAR_COLLAPSED_STORAGE_KEY,
+      String(collapsed),
+    );
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
 
 function getDefaultChatWidthMode(): ChatWidthMode {
   return `${DEFAULT_CHAT_MAX_WIDTH}`;
@@ -460,17 +566,6 @@ function assignComposerRef(
     return;
   }
   (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
-}
-
-function replaceSessionUrl(sessionId: string): void {
-  if (typeof window === 'undefined') return;
-  const url = new URL(window.location.href);
-  url.pathname = `/session/${encodeURIComponent(sessionId)}`;
-  if (!import.meta.env.DEV) {
-    url.searchParams.delete('token');
-    url.searchParams.delete('daemon');
-  }
-  window.history.replaceState(null, '', url);
 }
 
 function getInitialLanguage(): WebShellLanguage {
@@ -528,14 +623,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function formatModelAuthType(authType: string): string {
-  const normalized = authType.trim();
-  if (normalized.startsWith('USE_')) {
-    return normalized.slice(4).toLowerCase().replace(/_/g, '-');
-  }
-  return normalized.toLowerCase();
-}
-
 function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
   if (!isRecord(result)) return null;
   const meta = result._meta;
@@ -566,31 +653,11 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 }
 
 function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
-  return (
-    `AuthType: ${formatModelAuthType(summary.authType)}` +
-    `\nUsing ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
-    `\nBase URL: ${summary.baseUrl}` +
-    `\nAPI key: ${summary.apiKey}`
-  );
-}
-
-function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
-  return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
+  return `Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}`;
 }
 
 function isEditToolPermission(request: PermissionRequest): boolean {
   return request.toolKind === 'edit';
-}
-
-function isAskUserPermission(request: PermissionRequest | null): boolean {
-  if (
-    !request?.rawInput?.questions ||
-    !Array.isArray(request.rawInput.questions)
-  ) {
-    return false;
-  }
-  if (!request.toolName) return true;
-  return isAskUserQuestionToolName(request.toolName);
 }
 
 function parseRenameArgument(
@@ -709,102 +776,6 @@ function translateCopyMessage(
   return message;
 }
 
-function QueuedPromptDisplay({
-  prompts,
-  t,
-  onDelete,
-  onInsert,
-  onEdit,
-}: {
-  prompts: readonly QueuedPrompt[];
-  t: ReturnType<typeof getTranslator>;
-  onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
-  onEdit: (id: number) => void;
-}) {
-  if (prompts.length === 0) return null;
-
-  return (
-    <div className={styles.queuedPrompts}>
-      {prompts.map((prompt) => {
-        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
-        const preview =
-          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
-            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
-            : normalizedPreview;
-        const imageCount = prompt.images?.length ?? 0;
-        // A command (/… or !…) can't be inserted into the running turn — insert
-        // injects raw text the model would see literally, never running the
-        // command. Show the action disabled so it stays visible but inert.
-        const isCommand = isCommandPrompt(prompt.text);
-        return (
-          <div key={prompt.id} className={styles.queuedPrompt}>
-            <span className={styles.queuedPromptIcon} aria-hidden="true">
-              <span
-                className={styles.queuedPromptMaskIcon}
-                style={cssUrlVar('--queued-icon-url', queueIconUrl)}
-              />
-            </span>
-            <span className={styles.queuedPromptText}>
-              {preview}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
-            </span>
-            <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={() => onInsert(prompt.id)}
-                  disabled={isCommand}
-                  title={
-                    isCommand ? t('queue.insertCommandDisabled') : undefined
-                  }
-                >
-                  <span
-                    className={styles.queuedPromptActionIcon}
-                    style={cssUrlVar('--queued-icon-url', insertIconUrl)}
-                    aria-hidden="true"
-                  />
-                  {t('queue.insert')}
-                </button>
-              )}
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-                aria-label={t('queue.delete')}
-                title={t('queue.delete')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onEdit(prompt.id)}
-                aria-label={t('queue.edit')}
-                title={t('queue.edit')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', editIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-            </span>
-          </div>
-        );
-      })}
-      <div className={styles.queuedHint}>{t('queue.footer')}</div>
-    </div>
-  );
-}
-
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -819,16 +790,22 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  atProviders,
+  composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  renderUserMessageContent,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
+  renderComposerToolbarRight,
   renderFooter,
   chatMaxWidth,
+  sidebar,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
+  markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
   loadingPhrases,
@@ -838,6 +815,8 @@ export function App({
   onComposerReady,
   composerInput,
   composerInputVersion,
+  onSessionChange,
+  onSubmitBefore,
 }: WebShellProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -848,16 +827,94 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const sidebarOptions = useMemo(
+    () => resolveSidebarOptions(sidebar),
+    [sidebar],
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readSidebarCollapsed(sidebarOptions.defaultCollapsed),
+  );
+  const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
+    string | null
+  >(null);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+  // The Session Overview panel (mission control for managing many sessions at
+  // once) is only offered on large screens; below that there is no room for it
+  // to be useful.
+  const isLargeScreen = useIsLargeScreen();
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 760px)');
+    const handler = (e: MediaQueryListEvent) => {
+      if (!e.matches) setMobileDrawerOpen(false);
+    };
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // A pending tool/permission approval owns Escape (it rejects the call),
+      // so don't let the drawer swallow it while a prompt is visible.
+      if (pendingApprovalRef.current) return;
+      const target = e.target as HTMLElement | null;
+      // Only let an editable element keep Escape for itself when it lives
+      // outside the drawer; the drawer's own search input should still close
+      // the drawer on the first Escape.
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-sidebar-shell]')
+      ) {
+        return;
+      }
+      e.stopPropagation();
+      e.preventDefault();
+      closeMobileDrawer();
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const preventScroll = (e: TouchEvent) => {
+      // Allow native scrolling inside the drawer panel (e.g. the session list).
+      // The dim backdrop also lives under [data-sidebar-shell], so exclude it:
+      // a touchmove starting on the backdrop must still be blocked, otherwise
+      // iOS Safari scrolls the page behind the open drawer.
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.closest('[data-sidebar-shell]') &&
+        !el.closest(`.${styles.mobileBackdrop}`)
+      ) {
+        return;
+      }
+      e.preventDefault();
+    };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener('touchmove', preventScroll);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [mobileDrawerOpen, closeMobileDrawer]);
+  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
+    setSidebarCollapsed(collapsed);
+    writeSidebarCollapsed(collapsed);
+  }, []);
   const customization = useMemo(
     () => ({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
+      renderComposerToolbarRight,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
+      markdownTableMode,
       markdown,
       loadingPhrases,
     }),
@@ -865,11 +922,14 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
+      renderComposerToolbarRight,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
+      markdownTableMode,
       markdown,
       loadingPhrases,
     ],
@@ -916,11 +976,9 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  // Scopes explicit "insert queued message" POST(s) to the current turn.
-  // Aborted when the turn settles so a slow/late insert can't arrive during a
-  // subsequent turn and get injected in the wrong place.
-  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
-  const activeSessionIdRef = useRef(connection.sessionId);
+  const currentSessionIdRef = useRef(connection.sessionId);
+  const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
+  const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
       (message): message is LocalAnchoredMessage => message !== null,
@@ -952,13 +1010,29 @@ export function App({
     [messageBlocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
+  const canActOnPendingApproval = !(
+    connection.catchingUp && sidebarSwitchingSessionId !== null
+  );
   const pendingAskUserApproval = isAskUserPermission(pendingApproval)
-    ? pendingApproval
+    ? canActOnPendingApproval
+      ? pendingApproval
+      : null
     : null;
   const pendingToolApproval =
-    pendingApproval && !pendingAskUserApproval ? pendingApproval : null;
+    pendingApproval && !isAskUserPermission(pendingApproval)
+      ? canActOnPendingApproval
+        ? pendingApproval
+        : null
+      : null;
   const pendingApprovalRef = useRef(pendingApproval);
-  pendingApprovalRef.current = pendingApproval;
+  pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
+  // True exactly when an actionable approval overlay (ToolApproval or
+  // AskUserQuestion) is on screen. Single source of truth for the three places
+  // that must treat the composer as dormant while an approval owns the keyboard:
+  // the panel auto-close, the panel focus-restore guard, and the ChatEditor
+  // dialogOpen prop.
+  const approvalOverlayActive =
+    pendingToolApproval !== null || pendingAskUserApproval !== null;
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -1036,12 +1110,12 @@ export function App({
   const editorRef = useRef<EditorHandle | null>(null);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const footerRef = useRef<HTMLDivElement>(null);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
+    useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
   const previousEmptyStateRef = useRef(false);
   const resumeChatBottomFollow = useCallback(
     (behavior: ScrollBehavior = 'smooth') => {
-      setShowScrollToBottom(false);
       requestAnimationFrame(() => {
         messageListRef.current?.scrollToBottom(behavior);
         requestAnimationFrame(() => {
@@ -1066,6 +1140,9 @@ export function App({
     assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
   }, [composerRef]);
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
+  const [isCreatingMissingSession, setIsCreatingMissingSession] =
+    useState(false);
+  const creatingMissingSessionRef = useRef(false);
   const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
   activeGoalRef.current = activeGoal;
   const {
@@ -1078,34 +1155,6 @@ export function App({
       editorRef.current?.insertText(suggestion);
     },
   });
-  const sendPrompt = useCallback(
-    (
-      text: string,
-      images?: PromptImage[],
-      opts?: { optimisticUserMessage?: boolean; retry?: boolean },
-    ) => {
-      clearFollowup();
-      const isUserPrompt = !text.trimStart().startsWith('/');
-      if (!opts?.retry && isUserPrompt) {
-        lastSubmittedPromptRef.current = text;
-        lastSubmittedImagesRef.current = images;
-        retriedTurnErrorIdRef.current = null;
-      }
-      setShowRetryHint(false);
-      const promptOptions: SendPromptOptionsWithRetry = {
-        images,
-        optimisticUserMessage: opts?.optimisticUserMessage,
-        retry: opts?.retry,
-      };
-      return (
-        sessionActions.sendPrompt as (
-          promptText: string,
-          options?: SendPromptOptionsWithRetry,
-        ) => ReturnType<typeof sessionActions.sendPrompt>
-      )(text, promptOptions);
-    },
-    [clearFollowup, sessionActions],
-  );
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const localStreamingStartedAtRef = useRef(Date.now());
@@ -1162,10 +1211,193 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  // Main content view. The scheduled-tasks page replaces the chat pane inline
+  // (not a modal overlay), mirroring the reference design; creating or opening
+  // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
+  // is one of the activePanel values below.)
+  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks' | 'split'>(
+    'chat',
+  );
+  // Sessions to seed the split view with (e.g. the selection from the overview).
+  const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
-  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  // Settings and Daemon Status are shown as an in-place panel that replaces the
+  // chat view (message list + composer), not as a modal overlay. Only one may be
+  // active at a time; null means the normal chat view is shown.
+  const [activePanel, setActivePanel] = useState<
+    'settings' | 'status' | 'sessions' | null
+  >(null);
+  const closePanel = useCallback(() => setActivePanel(null), []);
+  // The Settings/Status panel (activePanel) and the Scheduled Tasks page
+  // (mainView) are mutually-exclusive full-pane views — the latter is a
+  // position:absolute overlay that would otherwise cover the former — so opening
+  // one closes the other. Without this, opening Scheduled Tasks then Daemon
+  // Status left the panel rendered behind the Scheduled Tasks overlay, looking
+  // like the button did nothing.
+  const openPanel = useCallback((panel: 'settings' | 'status' | 'sessions') => {
+    setMainView('chat');
+    setActivePanel(panel);
+  }, []);
+  const openScheduledTasks = useCallback(() => {
+    setActivePanel(null);
+    setMainView('scheduledTasks');
+  }, []);
+  // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
+  // is the live pane set — SplitView mirrors add/remove back into it via
+  // onPanesChange — so it must be preserved across entries, not blindly reset.
+  const openSplitView = useCallback(
+    (sessionIds?: string[]) => {
+      setActivePanel(null);
+      setSplitSessionIds((prev) => {
+        // An explicit selection (the overview, or a `?split=` URL) replaces the
+        // split with exactly those sessions.
+        const requested = Array.from(
+          new Set((sessionIds ?? []).filter(Boolean)),
+        ).slice(0, MAX_SPLIT_PANES);
+        if (requested.length > 0) return requested;
+        // No selection (the toolbar "Open Split View" button): restore the split
+        // the user already had so switching away and back doesn't clear it; fall
+        // back to the current session when there is nothing to restore.
+        if (prev.length > 0) return prev;
+        return connection.sessionId ? [connection.sessionId] : [];
+      });
+      setMainView('split');
+    },
+    [connection.sessionId],
+  );
+  // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
+  // close) doesn't re-fire on every App re-render. Back from the split returns
+  // to the Session Overview — the hub the split is launched from.
+  const handleSplitExit = useCallback(() => openPanel('sessions'), [openPanel]);
+  // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
+  // view with those sessions on load. Consume the param once so a later reload
+  // or exit doesn't force the split back on.
+  useEffect(() => {
+    const ids = parseSplitSessionIds(window.location.search);
+    if (ids.length === 0) return;
+    openSplitView(ids);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('split');
+    window.history.replaceState(null, '', url);
+  }, [openSplitView]);
+  // If the viewport shrinks below the large-screen breakpoint, close the Session
+  // Overview panel and the split view — both are large-screen-only surfaces
+  // whose entry points are hidden on small screens, so leaving them up would
+  // strand the user in a view they can no longer re-enter.
+  // When a shrink closes the split, its panes unmount and take keyboard focus
+  // with them; flag the composer to be refocused once the chat is shown again.
+  const focusComposerAfterSplitCloseRef = useRef(false);
+  useEffect(() => {
+    if (!isLargeScreen && activePanel === 'sessions') {
+      setActivePanel(null);
+    }
+    if (!isLargeScreen && mainView === 'split') {
+      setMainView('chat');
+      focusComposerAfterSplitCloseRef.current = true;
+    }
+  }, [isLargeScreen, activePanel, mainView]);
+  // Land focus on the composer after a shrink-driven split close so keyboard
+  // users aren't dropped onto <body> — but not when the chat now shows an
+  // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).
+  useEffect(() => {
+    if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
+    focusComposerAfterSplitCloseRef.current = false;
+    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
+  }, [mainView, activePanel, approvalOverlayActive]);
+  // The Settings / Daemon Status panel is a view, not a modal, so it lacks
+  // DialogShell's focus trap/restore. Move focus to the Back button when a panel
+  // opens (or when switching directly between panels) and back to the composer
+  // when it closes, so keyboard users aren't stranded on an element that is
+  // about to be hidden.
+  const panelBackRef = useRef<HTMLButtonElement | null>(null);
+  const prevActivePanelRef = useRef(activePanel);
+  const prevApprovalOverlayRef = useRef(approvalOverlayActive);
+  useEffect(() => {
+    const prev = prevActivePanelRef.current;
+    const wasApprovalActive = prevApprovalOverlayRef.current;
+    prevActivePanelRef.current = activePanel;
+    prevApprovalOverlayRef.current = approvalOverlayActive;
+    if (activePanel) {
+      // Covers null→panel and panel→panel: the Back button lives outside the
+      // keyed panel body so it survives a switch, but refocus explicitly rather
+      // than depending on that DOM coincidence.
+      panelBackRef.current?.focus();
+    } else if (prev) {
+      // Panel just closed. Return focus to the composer — unless an approval
+      // overlay is what forced it closed (see the effect below): that overlay
+      // drives its own keyboard handling and ToolApproval ignores keys from
+      // editable targets, so focusing the composer here would swallow its
+      // shortcuts and leave the user unable to respond by keyboard.
+      if (!approvalOverlayActive) {
+        editorRef.current?.focus();
+      }
+    } else if (wasApprovalActive && !approvalOverlayActive) {
+      // The panel was auto-closed for an approval (prev was consumed to null on
+      // that render, editor focus skipped). Now the approval has resolved with
+      // no panel to return to, so restore the composer here. (useComposerCore's
+      // dialogOpen effect also refocuses on this transition; this keeps the
+      // panel focus effect self-contained instead of relying on that.)
+      editorRef.current?.focus();
+    }
+  }, [activePanel, approvalOverlayActive]);
+  // A pending approval (a gated tool call or an AskUserQuestion) renders its
+  // overlay in the chat footer, which is hidden (display:none) while a panel is
+  // shown. Left alone, the turn would hang behind Settings/Status with no
+  // visible prompt. Close the panel so the approval surfaces. Only actionable
+  // approvals count — pendingToolApproval/pendingAskUserApproval already gate on
+  // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
+  // of Settings by someone else's prompt.
+  useEffect(() => {
+    if (!approvalOverlayActive) return;
+    // The approval overlay renders in the chat footer; dismiss anything layered
+    // over it so it's visible and actionable instead of trapped behind a
+    // backdrop — the panel itself and any DialogShell sub-dialog opened from it
+    // (model picker, approval-mode picker). Leaving the approval-mode picker up
+    // is also a security hole: the user could pick "yolo" and silently
+    // auto-approve a tool call they never saw (handleSetMode auto-approves
+    // pendingApprovalRef.current).
+    if (activePanel) setActivePanel(null);
+    if (modelDialogMode) setModelDialogMode(null);
+    if (showApprovalModeDialog) setShowApprovalModeDialog(false);
+    // The Scheduled Tasks page is a full-pane overlay (position:absolute) that
+    // covers the chat footer too, so dismiss it for the same reason. The split
+    // view is deliberately NOT dismissed: each pane owns and renders its own
+    // session's approval, so an approval on the (outer) main session must not
+    // yank the user out of the panes they are working in.
+    if (mainView === 'scheduledTasks') setMainView('chat');
+  }, [
+    approvalOverlayActive,
+    activePanel,
+    modelDialogMode,
+    showApprovalModeDialog,
+    mainView,
+  ]);
+  // Once the effect above uncovers the approval, the overlay is the topmost
+  // surface but the just-unmounted panel Back button dropped focus to <body>.
+  // Move focus onto the overlay when it becomes visible so keyboard/AT users
+  // land on it. Only for ToolApproval: it drives keyboard entirely through a
+  // window listener, so focusing its (tabindex=-1) wrapper is safe and gives AT
+  // a landing spot without confirming (Enter arms first, confirms second — a
+  // focused button would confirm on the first press). AskUserQuestion instead
+  // manages its own focus across its options/input, so stealing focus to the
+  // wrapper would break its arrow-key navigation.
+  const approvalOverlayRef = useRef<HTMLDivElement | null>(null);
+  const toolApprovalOverlayVisible =
+    pendingToolApproval !== null &&
+    !activePanel &&
+    modelDialogMode === null &&
+    !showApprovalModeDialog &&
+    mainView === 'chat';
+  const prevToolApprovalOverlayVisibleRef = useRef(toolApprovalOverlayVisible);
+  useEffect(() => {
+    const wasVisible = prevToolApprovalOverlayVisibleRef.current;
+    prevToolApprovalOverlayVisibleRef.current = toolApprovalOverlayVisible;
+    if (toolApprovalOverlayVisible && !wasVisible) {
+      approvalOverlayRef.current?.focus();
+    }
+  }, [toolApprovalOverlayVisible]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
@@ -1242,7 +1474,11 @@ export function App({
   const [agentsDialogMode, setAgentsDialogMode] =
     useState<AgentsInitialMode | null>(null);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
-  const escPressCountRef = useRef(0);
+  // Whether the first Esc has armed a stream cancellation; the composer's send
+  // button shows an "Esc again to stop" affordance while true.
+  const [cancelArmed, setCancelArmed] = useState(false);
+  // Which action the pending second Esc would perform, or null when idle.
+  const escArmedActionRef = useRef<'cancel' | 'clear' | null>(null);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
@@ -1252,14 +1488,180 @@ export function App({
   const [currentModel, setCurrentModel] = useState('');
   const currentModelRef = useRef(currentModel);
   currentModelRef.current = currentModel;
+  const setPendingModel = useCallback((modelId: string) => {
+    currentModelRef.current = modelId;
+    setCurrentModel(modelId);
+  }, []);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const requireActiveSessionForLocalCommand = useCallback((): boolean => {
+    if (connectionRef.current.sessionId) return true;
+    pushToast('info', t('localCommand.noSession'));
+    return false;
+  }, [pushToast, t]);
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
+  const currentModeRef = useRef(currentMode);
+  currentModeRef.current = currentMode;
+  const setPendingMode = useCallback((modeId: string) => {
+    currentModeRef.current = modeId;
+    setCurrentMode(modeId);
+  }, []);
+  const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
+  const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  useEffect(() => {
+    if (connection.sessionId) {
+      createSessionPromiseRef.current = null;
+    }
+  }, [connection.sessionId]);
+  const ensureSessionForPrompt = useCallback(() => {
+    if (connectionRef.current.sessionId) return Promise.resolve();
+    if (!createSessionPromiseRef.current) {
+      createSessionPromiseRef.current = (async () => {
+        const modelId =
+          currentModelRef.current || connectionRef.current.currentModel;
+        const modeId =
+          currentModeRef.current || connectionRef.current.currentMode;
+        await createAndAttachSessionForPrompt({
+          sessionActions: sessionActions as typeof sessionActions &
+            SessionActionsWithCreate,
+          modelId,
+          modeId,
+        });
+      })().catch((error: unknown) => {
+        createSessionPromiseRef.current = null;
+        throw error;
+      });
+    }
+    return createSessionPromiseRef.current;
+  }, [sessionActions]);
+  const onSubmitBeforeRef = useRef(onSubmitBefore);
+  onSubmitBeforeRef.current = onSubmitBefore;
+  const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
+  const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(
+    () => () => {
+      if (delayedReloadTimerRef.current !== null) {
+        clearTimeout(delayedReloadTimerRef.current);
+      }
+    },
+    [],
+  );
+  const dispatchSessionChange = useCallback(
+    (event: SessionChangeEvent) => {
+      onSessionChange?.(event);
+      setSessionListReloadToken((n) => n + 1);
+    },
+    [onSessionChange],
+  );
+  // Ref-stable handle so that useCallback hooks (sendPrompt, enqueuePrompt,
+  // turn_complete effect) don't need dispatchSessionChange in their dep arrays.
+  // Without this, an unstable onSessionChange prop would cause those callbacks
+  // to be recreated on every render, cascading into downstream effect chains.
+  const dispatchSessionChangeRef = useRef(dispatchSessionChange);
+  dispatchSessionChangeRef.current = dispatchSessionChange;
+  const sendPrompt = useCallback(
+    async (
+      text: string,
+      images?: PromptImage[],
+      opts?: {
+        optimisticUserMessage?: boolean;
+        retry?: boolean;
+        clearComposerOnPromptStart?: boolean;
+        commitComposerAccepted?: ComposerSubmitCommit;
+        onAdmitted?: () => void;
+      },
+    ) => {
+      const isUserPrompt = !text.trimStart().startsWith('/');
+      const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
+      const previousLastSubmittedImages = lastSubmittedImagesRef.current;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
+      if (!opts?.retry && isUserPrompt) {
+        lastSubmittedPromptRef.current = text;
+        lastSubmittedImagesRef.current = images;
+        retriedTurnErrorIdRef.current = null;
+      }
+      setShowRetryHint(false);
+      const shouldShowPreparing = !connectionRef.current.sessionId;
+      if (onSubmitBeforeRef.current) {
+        setIsPreparingPrompt(true);
+        try {
+          await onSubmitBeforeRef.current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          });
+        } catch (err) {
+          console.warn(
+            '[web-shell] onSubmitBefore rejected, prompt cancelled',
+            err,
+          );
+          setIsPreparingPrompt(false);
+          // Restore retry-critical refs so Ctrl+Y doesn't resend the
+          // cancelled prompt.
+          lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
+          lastSubmittedImagesRef.current = previousLastSubmittedImages;
+          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+          setShowRetryHint(previousShowRetryHint);
+          return;
+        }
+        // Only reset if session already exists; otherwise keep true and let
+        // ensureSessionForPrompt's finally block handle it.
+        if (!shouldShowPreparing) {
+          setIsPreparingPrompt(false);
+        }
+      }
+      if (!onSubmitBeforeRef.current && shouldShowPreparing) {
+        setIsPreparingPrompt(true);
+      }
+      clearFollowup();
+      try {
+        await ensureSessionForPrompt();
+      } finally {
+        if (shouldShowPreparing) {
+          setIsPreparingPrompt(false);
+        }
+      }
+      const promptOptions: SendPromptOptionsWithRetry = {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+        retry: opts?.retry,
+        ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
+      };
+      if (opts?.commitComposerAccepted) {
+        opts.commitComposerAccepted();
+      } else if (opts?.clearComposerOnPromptStart) {
+        editorRef.current?.clear();
+      }
+      const sessionIdAfterEnsure = connectionRef.current.sessionId;
+      if (sessionIdAfterEnsure && text.trim()) {
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId: sessionIdAfterEnsure,
+          prompt: text,
+          queued: false,
+        });
+        // Schedule an additional delayed reload to account for daemon-side
+        // session registration lag — the immediate reload above may return
+        // a list that doesn't yet include the newly created session.
+        if (delayedReloadTimerRef.current !== null) {
+          clearTimeout(delayedReloadTimerRef.current);
+        }
+        delayedReloadTimerRef.current = setTimeout(() => {
+          setSessionListReloadToken((n) => n + 1);
+        }, 2000);
+      }
+      const result = await (
+        sessionActions.sendPrompt as (
+          promptText: string,
+          options?: SendPromptOptionsWithRetry,
+        ) => ReturnType<typeof sessionActions.sendPrompt>
+      )(text, promptOptions);
+      return result;
+    },
+    [clearFollowup, ensureSessionForPrompt, sessionActions],
   );
   const availableModels = useMemo(
     () =>
@@ -1269,9 +1671,6 @@ export function App({
       })),
     [connection.models],
   );
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const nextQueuedPromptIdRef = useRef(1);
-  const drainingQueueRef = useRef(false);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -1286,10 +1685,18 @@ export function App({
     tasksDialogMessage !== null ||
     mcpDialogMessage !== null ||
     agentsDialogMode !== null ||
-    showSettingsDialog ||
     showMemoryDialog ||
-    showAuthDialog;
-  const interactionBlocked = dialogOpen;
+    showAuthDialog ||
+    // The Settings / Daemon Status panel replaces the chat surface, so — like a
+    // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
+    // Shift+Tab mode cycle, the btw hotkey). Escape is intercepted earlier and
+    // returns to the chat instead of falling through to those handlers.
+    activePanel !== null;
+  // Block chat interaction (composer, chat keyboard shortcuts) both when a modal
+  // is open (dialogOpen, which already includes the Settings/Status panel) and
+  // while a full-pane view (the Scheduled Tasks page) covers the chat, so
+  // keystrokes/Escape can't reach the hidden composer underneath.
+  const interactionBlocked = dialogOpen || mainView !== 'chat';
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1307,6 +1714,87 @@ export function App({
       pushToast('error', message);
     },
     [pushToast],
+  );
+  const notifySuccess = useCallback(
+    (message: string) => pushToast('success', message),
+    [pushToast],
+  );
+
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt: rawEnqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
+
+  const enqueuePrompt = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      onComplete?: () => void,
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
+      if (onSubmitBeforeRef.current) {
+        onSubmitBeforeRef
+          .current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          })
+          .then(() => {
+            const result = rawEnqueuePrompt(text, images, onComplete);
+            if (result !== false) {
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
+            }
+            const sessionId = connectionRef.current.sessionId;
+            if (sessionId && text.trim()) {
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId,
+                prompt: text,
+                queued: true,
+              });
+            }
+          })
+          .catch((err: unknown) => {
+            console.warn(
+              '[web-shell] onSubmitBefore rejected queued prompt, cancelled',
+              err,
+            );
+          });
+        return false;
+      }
+      const result = rawEnqueuePrompt(text, images, onComplete);
+      const sessionId = connectionRef.current.sessionId;
+      if (sessionId && text.trim()) {
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId,
+          prompt: text,
+          queued: true,
+        });
+      }
+      return result;
+    },
+    [rawEnqueuePrompt],
   );
 
   useEffect(() => {
@@ -1327,7 +1815,7 @@ export function App({
   onBugReportRef.current = onBugReport;
 
   useEffect(() => {
-    activeSessionIdRef.current = connection.sessionId;
+    currentSessionIdRef.current = connection.sessionId;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1337,6 +1825,7 @@ export function App({
   }, [connection.sessionId]);
 
   const runVisibleRecap = useCallback(() => {
+    if (!requireActiveSessionForLocalCommand()) return;
     const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
     const anchorIndex = messages.length;
     const anchorAfterId = messages.at(-1)?.id;
@@ -1347,14 +1836,14 @@ export function App({
       message: {
         id: messageId,
         role: 'system',
-        content: `※ recap: ${t('recap.loading')}`,
+        content: `※ ${t('recap.label')}: ${t('recap.loading')}`,
         variant: 'info',
         source: 'recap',
       },
     });
     sessionActions.recapSession().then(
       (result) => {
-        if (activeSessionIdRef.current !== sessionId) return;
+        if (currentSessionIdRef.current !== sessionId) return;
         setRecapMessage({
           anchorAfterId,
           anchorIndex,
@@ -1362,7 +1851,7 @@ export function App({
             id: messageId,
             role: 'system',
             content: result.recap
-              ? `※ recap: ${result.recap}`
+              ? `※ ${t('recap.label')}: ${result.recap}`
               : t('recap.empty'),
             variant: 'info',
             source: 'recap',
@@ -1370,14 +1859,20 @@ export function App({
         });
       },
       (error: unknown) => {
-        if (activeSessionIdRef.current !== sessionId) return;
+        if (currentSessionIdRef.current !== sessionId) return;
         setRecapMessage(null);
         if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           console.warn('[web-shell] unhandled recap failure', error);
         }
       },
     );
-  }, [connection.sessionId, messages, sessionActions, t]);
+  }, [
+    connection.sessionId,
+    messages,
+    requireActiveSessionForLocalCommand,
+    sessionActions,
+    t,
+  ]);
 
   const runVisibleBtw = useCallback(
     (rawQuestion: string) => {
@@ -1386,6 +1881,7 @@ export function App({
         pushToast('error', t('btw.empty'));
         return;
       }
+      if (!requireActiveSessionForLocalCommand()) return;
 
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
@@ -1404,7 +1900,7 @@ export function App({
         .btwSession(question, { signal: abortController.signal })
         .then(
           (result) => {
-            if (activeSessionIdRef.current !== sessionId) return;
+            if (currentSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
             setBtwMessage({
@@ -1416,7 +1912,7 @@ export function App({
             });
           },
           (error: unknown) => {
-            if (activeSessionIdRef.current !== sessionId) return;
+            if (currentSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
             setBtwMessage(null);
@@ -1426,7 +1922,13 @@ export function App({
           },
         );
     },
-    [connection.sessionId, pushToast, sessionActions, t],
+    [
+      connection.sessionId,
+      pushToast,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      t,
+    ],
   );
 
   const dismissBtwMessage = useCallback(() => {
@@ -1478,30 +1980,9 @@ export function App({
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
   }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
-  useEffect(() => {
-    queuedPromptsRef.current = queuedPrompts;
-  }, [queuedPrompts]);
-
-  const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
-      const trimmed = text.trim();
-      if (!trimmed) return true;
-      const nextPrompt: QueuedPrompt = {
-        id: nextQueuedPromptIdRef.current++,
-        text: trimmed,
-        images: images ? [...images] : undefined,
-        onComplete,
-      };
-      queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
-      setQueuedPrompts(queuedPromptsRef.current);
-      return true;
-    },
-    [],
-  );
-
-  // Echo a local command into the transcript, or defer it to the queue when a
-  // turn is streaming so the injected user row can't split the active turn (see
-  // appendOrDeferLocalUserMessage). Returns true when deferred — callers must
+  // Echo a local command into the transcript, or suppress it while a turn is
+  // streaming so the injected user row can't split the active turn (see
+  // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
   // then stop and not run the command's inline side effects.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
@@ -1511,171 +1992,15 @@ export function App({
         images,
         {
           append: (value: string) => store.appendLocalUserMessage(value),
-          enqueue: enqueuePrompt,
         },
       ),
-    [enqueuePrompt, store],
+    [store],
   );
 
-  // When the turn settles, abort any still-in-flight explicit insert so it can't
-  // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
-  // message remains in queuedPrompts.
-  useEffect(() => {
-    if (streamingState !== 'idle') return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    // A controller exists ⇒ at least one mid-turn push was issued this turn.
-    // Cancel it so a still-in-flight push can't land in the next turn (a
-    // completed one makes this a no-op). Debug-only, mirrors the server-side
-    // mid-turn observability.
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
-
-  const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
-    const [nextPrompt, ...rest] = queuedPromptsRef.current;
-    if (!nextPrompt) return null;
-    queuedPromptsRef.current = rest;
-    setQueuedPrompts(rest);
-    return nextPrompt;
-  }, []);
-
-  const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
-    const current = queuedPromptsRef.current;
-    if (current.length === 0) return null;
-    const index =
-      id === undefined
-        ? current.length - 1
-        : current.findIndex((prompt) => prompt.id === id);
-    if (index < 0) return null;
-    const prompt = current[index];
-    const next = current.filter((_, i) => i !== index);
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-    return prompt?.text ?? null;
-  }, []);
-
-  const removeQueuedPrompt = useCallback((id: number) => {
-    const next = queuedPromptsRef.current.filter((prompt) => prompt.id !== id);
-    if (next.length === queuedPromptsRef.current.length) return;
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-  }, []);
-
-  const insertQueuedPrompt = useCallback(
-    async (id: number) => {
-      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
-      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
-      // Commands can't be inserted into the running turn (the model would see
-      // the raw text and never run them); they re-dispatch on drain instead.
-      if (isCommandPrompt(prompt.text)) return;
-      let abort = midTurnEnqueueAbortRef.current;
-      if (!abort) {
-        abort = new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
-      }
-      let result: Awaited<
-        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
-      >;
-      try {
-        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
-          signal: abort.signal,
-        });
-      } catch (error) {
-        reportError(error, t('queue.insertFailed'));
-        return;
-      }
-      if (!result.accepted) return;
-      const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    },
-    [reportError, sessionActions, t],
-  );
-
-  const editQueuedPrompt = useCallback(
-    (id: number) => {
-      const queuedText = popQueuedPromptForEdit(id);
-      if (!queuedText) return;
-      const current = editorRef.current?.getText() ?? '';
-      const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
-      editorRef.current?.setText(next);
-      editorRef.current?.focus();
-    },
-    [popQueuedPromptForEdit],
-  );
-
-  const popLastQueuedPromptText = useCallback(
-    () => popQueuedPromptForEdit(),
-    [popQueuedPromptForEdit],
-  );
-
-  const clearQueuedPrompts = useCallback((): boolean => {
-    if (queuedPromptsRef.current.length === 0) return false;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
-    return true;
-  }, [store, t]);
-
-  // When the daemon drains queued messages into the running turn it emits
-  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
-  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
-  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
-  // newest — a multi-batch turn can publish several frames back-to-back, and the
-  // first must not be lost before this runs. The frames arrive in-order ahead of
-  // the turn-complete frame that flips streamingState to idle, so this runs
-  // before that resend fires; `consume()` then clears the reconciled batches.
-  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
-    useDaemonMidTurnInjected();
-  useEffect(() => {
-    const sessionId = connection.sessionId;
-    if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    // Pass OUR client id so only batches the daemon stamped with it (or
-    // anonymous ones) are deduped. The daemon stamps every drained frame with
-    // the originator's client id, and the web-shell always sends one, so
-    // omitting this would skip every batch — leaving our own messages in the
-    // queue to be resent next turn (double delivery). A peer on the same
-    // session keeps its own coincidentally-equal entry.
-    if (
-      connection.clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      // Edge: stamped batches but no client id yet (older daemon / reconnect
-      // timing). Dedupe skips them, so they may be resent next turn — make it
-      // diagnosable rather than a silent double-delivery.
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
-    const next = removeInjectedFromQueue(
-      queuedPromptsRef.current,
-      midTurnInjectedBatches,
-      sessionId,
-      connection.clientId,
-    );
-    if (next) {
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    }
-    // Consume ONLY this session's batches. The reconcile above is session-
-    // scoped, so a batch for another session (a late frame after an in-place
-    // session switch) must NOT be cleared here — it was never reconciled and
-    // would otherwise be lost on switch-back (resent next turn = double
-    // delivery). Identity-removal also leaves any frame that arrived after this
-    // render's snapshot for the next effect run.
-    consumeMidTurnInjected(
-      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
-    );
-  }, [
-    midTurnInjectedBatches,
-    connection.sessionId,
-    connection.clientId,
-    consumeMidTurnInjected,
-  ]);
+  const blockLocalCommandDuringTurn = useCallback((): false => {
+    pushToast('error', t('queue.commandBlocked'));
+    return false;
+  }, [pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1720,7 +2045,19 @@ export function App({
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
-  const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
+  const currentVisionModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'visionModel',
+    )?.values.effective;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
+  })();
+  const currentFastModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'fastModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
@@ -1763,10 +2100,11 @@ export function App({
         ]);
       };
       if (streamingStateRef.current !== 'idle') {
-        enqueuePrompt(command, undefined, refreshSettings);
+        handleLanguageChange(previousLanguage);
+        blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(command)
+      sendPrompt(command, undefined)
         .then(refreshSettings)
         .catch((error: unknown) => {
           handleLanguageChange(previousLanguage);
@@ -1774,7 +2112,7 @@ export function App({
         });
     },
     [
-      enqueuePrompt,
+      blockLocalCommandDuringTurn,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -1813,6 +2151,10 @@ export function App({
         );
         return;
       }
+      if (!connectionRef.current.sessionId) {
+        setPendingMode(modeId);
+        return;
+      }
       sessionActions
         .setApprovalMode(modeId)
         .then((result) => {
@@ -1847,7 +2189,7 @@ export function App({
           reportError(error, t('local.approvalMode'));
         });
     },
-    [sessionActions, reportError, store, t],
+    [sessionActions, reportError, store, t, setPendingMode],
   );
 
   useEffect(() => {
@@ -1878,6 +2220,35 @@ export function App({
     onStreamingStateChange?.(streamingState);
   }, [streamingState, onStreamingStateChange]);
 
+  // Reads retryableTurnErrorIdRef which is set by the blocks effect above.
+  // Declaration order matters: this effect must run after the blocks effect
+  // so that within the same render, the ref is already updated before we read it.
+  const prevStreamingForTurnCompleteRef = useRef(streamingState);
+  const streamingSessionIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevStreamingForTurnCompleteRef.current;
+    prevStreamingForTurnCompleteRef.current = streamingState;
+    if (streamingState !== 'idle') {
+      streamingSessionIdRef.current = connectionRef.current.sessionId;
+    }
+    if (prev !== 'idle' && streamingState === 'idle') {
+      const sessionId = connectionRef.current.sessionId;
+      // Only fire if the session that was streaming is still the active one.
+      // Session switches reset streamingState to idle, which must not produce
+      // a spurious turn_complete for the new session.
+      if (!sessionId || sessionId !== streamingSessionIdRef.current) return;
+      const turnError =
+        retryableTurnErrorIdRef.current != null
+          ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
+          : undefined;
+      dispatchSessionChangeRef.current?.({
+        type: 'turn_complete',
+        sessionId,
+        error: turnError,
+      });
+    }
+  }, [streamingState]);
+
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
@@ -1902,14 +2273,44 @@ export function App({
   }, [connection.currentMode, connection.sessionId]);
 
   useEffect(() => {
-    if (connection.sessionId) {
+    const previousGoalSessionId = lastGoalSessionIdRef.current;
+    if (
+      connection.sessionId &&
+      connection.sessionId !== previousGoalSessionId
+    ) {
       setActiveGoal(null);
-      onSessionIdChange?.(connection.sessionId);
-      if (!onSessionIdChange) {
-        replaceSessionUrl(connection.sessionId);
-      }
     }
-  }, [connection.sessionId, onSessionIdChange]);
+    lastGoalSessionIdRef.current = connection.sessionId;
+    if (!connection.sessionId && connection.missingSession) {
+      // Keep the dead-session route visible until the user explicitly starts a
+      // new chat; clearing it here would immediately hide the recovery state.
+      lastNotifiedSessionIdRef.current = connection.sessionId;
+      return;
+    }
+    if (lastNotifiedSessionIdRef.current === connection.sessionId) return;
+    lastNotifiedSessionIdRef.current = connection.sessionId;
+    onSessionIdChange?.(connection.sessionId);
+  }, [connection.missingSession, connection.sessionId, onSessionIdChange]);
+
+  const lastRenameSessionRef = useRef<string | undefined>(undefined);
+  const lastRenameNameRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    const displayName = connection.displayName;
+    if (!sessionId || !displayName) return;
+    if (sessionId !== lastRenameSessionRef.current) {
+      lastRenameSessionRef.current = sessionId;
+      lastRenameNameRef.current = displayName;
+      return;
+    }
+    if (displayName === lastRenameNameRef.current) return;
+    lastRenameNameRef.current = displayName;
+    dispatchSessionChangeRef.current?.({
+      type: 'rename',
+      sessionId,
+      newName: displayName,
+    });
+  }, [connection.sessionId, connection.displayName]);
 
   useEffect(() => {
     const nextGoal = getLatestActiveGoalFromBlocks(blocks);
@@ -1980,7 +2381,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                text: `※ recap: ${result.recap}`,
+                text: `※ ${t('recap.label')}: ${result.recap}`,
                 source: 'recap',
               },
             ]);
@@ -1994,7 +2395,7 @@ export function App({
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [connection.sessionId, sessionActions, store]);
+  }, [connection.sessionId, sessionActions, store, t]);
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
@@ -2012,6 +2413,7 @@ export function App({
     (commandText: string, detail: boolean) => {
       // Self-guard so every entry point (keyboard, status-bar button, in-chat
       // "context detail" click) defers mid-turn instead of splitting the turn.
+      if (!requireActiveSessionForLocalCommand()) return;
       if (echoOrDeferLocalCommand(commandText)) return;
       sessionActions
         .getContextUsage({ detail })
@@ -2031,6 +2433,7 @@ export function App({
     [
       echoOrDeferLocalCommand,
       store,
+      requireActiveSessionForLocalCommand,
       sessionActions,
       reportError,
       resumeChatBottomFollow,
@@ -2045,6 +2448,7 @@ export function App({
 
   const branchCurrentSession = useCallback(
     (name?: string) => {
+      if (!requireActiveSessionForLocalCommand()) return;
       sessionActions
         .branchSession(name || undefined)
         .then((result) => {
@@ -2061,28 +2465,246 @@ export function App({
           reportError(error, t('branch.failed'));
         });
     },
-    [reportError, sessionActions, store, t],
+    [
+      reportError,
+      requireActiveSessionForLocalCommand,
+      sessionActions,
+      store,
+      t,
+    ],
   );
   const handleBranchCurrentSession = useCallback(() => {
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(() => {
-    (sessionActions as typeof sessionActions & SessionActionsWithCreate)
-      .createSession()
-      .then((session) => {
-        if (onSessionIdChange) {
-          onSessionIdChange(session.sessionId);
-          return;
-        }
-        return sessionActions.loadSession(session.sessionId);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to create a new session');
+  const createNewSession = useCallback(async () => {
+    // Close the drawer before awaiting so a failed createSession() doesn't leave
+    // it stuck open with the page scroll still locked, matching loadSidebarSession.
+    closeMobileDrawer();
+    // Starting a new chat means the user wants to see it — leave any open
+    // Settings/Status panel so the fresh chat is visible (no-op when closed).
+    closePanel();
+    try {
+      await (
+        sessionActions as typeof sessionActions & SessionActionsWithCreate
+      ).clearSession();
+      return true;
+    } catch (error) {
+      reportError(error, 'Failed to start a new chat');
+      return false;
+    }
+  }, [closeMobileDrawer, closePanel, reportError, sessionActions]);
+  const handleMissingSessionNewSession = useCallback(async () => {
+    if (creatingMissingSessionRef.current) return;
+    creatingMissingSessionRef.current = true;
+    setIsCreatingMissingSession(true);
+    setMainView('chat');
+    try {
+      const success = await createNewSession();
+      if (success) {
+        onSessionIdChange?.(undefined);
+      }
+    } finally {
+      creatingMissingSessionRef.current = false;
+      setIsCreatingMissingSession(false);
+    }
+  }, [createNewSession, onSessionIdChange]);
+
+  const loadSidebarSession = useCallback(
+    async (sessionId: string) => {
+      setSidebarSwitchingSessionId(sessionId);
+      // Close the drawer before awaiting the load; the transcript clears
+      // immediately and shows its loading skeleton for the selected session.
+      closeMobileDrawer();
+      // Loading another session should reveal its chat, not stay on the
+      // Settings/Status panel (no-op when the panel is closed).
+      closePanel();
+      try {
+        await sessionActions.loadSession(sessionId);
+      } catch (error) {
+        setSidebarSwitchingSessionId((current) =>
+          current === sessionId ? null : current,
+        );
+        throw error;
+      }
+    },
+    [closeMobileDrawer, closePanel, sessionActions],
+  );
+
+  // Clicking a card in the Session Overview panel switches the current window
+  // to that session. loadSidebarSession already closes the panel, so this just
+  // returns to the chat view and reports load failures.
+  const handleOpenSessionFromOverview = useCallback(
+    (sessionId: string) => {
+      setMainView('chat');
+      void loadSidebarSession(sessionId).catch((error: unknown) => {
+        reportError(error, 'Failed to open session');
       });
-  }, [onSessionIdChange, reportError, sessionActions]);
+    },
+    [loadSidebarSession, reportError],
+  );
+
+  useEffect(() => {
+    if (
+      sidebarSwitchingSessionId !== null &&
+      connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.loadingTranscript &&
+      !connection.catchingUp
+    ) {
+      setSidebarSwitchingSessionId(null);
+    }
+  }, [
+    connection.catchingUp,
+    connection.loadingTranscript,
+    connection.sessionId,
+    sidebarSwitchingSessionId,
+  ]);
+
+  // Manual "run now" from the scheduled-tasks page. A bound task runs in its
+  // own session (so manual and scheduled runs share one transcript); an unbound
+  // task runs in the current session. Switching sessions is async, so a latch
+  // holds the prompt until the target session is fully active before sending.
+  //
+  // Returns a promise that resolves once the prompt is actually ENQUEUED and
+  // rejects if the bound session can't be opened (archived/deleted), supersedes,
+  // or times out — so the caller only records the run after it truly happened,
+  // never on a failed session switch. Only one bound run waits at a time.
+  const pendingBoundRunRef = useRef<{
+    sessionId: string;
+    prompt: string;
+    resolve: () => void;
+    reject: (err: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  const clearPendingBoundRun = useCallback((sessionId: string) => {
+    const cur = pendingBoundRunRef.current;
+    if (cur && cur.sessionId === sessionId) {
+      clearTimeout(cur.timer);
+      pendingBoundRunRef.current = null;
+    }
+  }, []);
+  // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
+  // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
+  // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
+  // permission-blocked run, or a closed tab, would execute in the session but
+  // never get recorded. `onAdmitted` fires at submitPrompt acceptance.
+  //
+  // Deliberately NO pre-admission timeout here. `sendPrompt` isn't abortable, so
+  // a timer that rejected while the send was still in flight could let a LATE
+  // admission execute the prompt in the session AFTER the caller had already
+  // handled the rejection and skipped recording — an unrecorded run the user
+  // could retry into a duplicate. Staying tied to admission guarantees any
+  // accepted prompt is recorded, and the run controls stay busy (not free to
+  // re-fire) until the send admits or settles. The earlier "session never becomes
+  // active" phase is still bounded by the switch timeout in runTaskManually. If
+  // the send settles WITHOUT admitting (onSubmitBefore cancel) or throws before
+  // admission, reject so the caller skips recording a run that never reached the
+  // session.
+  const enqueueManualRun = useCallback(
+    (prompt: string): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        let admitted = false;
+        const admit = () => {
+          if (admitted) return;
+          admitted = true;
+          resolve();
+        };
+        sendPrompt(prompt, undefined, { onAdmitted: admit }).then(
+          () => {
+            if (!admitted) {
+              reject(new Error('Run was cancelled before it started'));
+            }
+          },
+          (error: unknown) => {
+            if (!admitted) reject(error);
+          },
+        );
+      }),
+    [sendPrompt],
+  );
+  // Enqueue the pending bound run once its session is the current, fully-loaded
+  // one — driven both by the effect below (when the session switch changes a
+  // dep) AND directly after loadSidebarSession resolves (when the session was
+  // ALREADY active, so no dep changes and the effect never re-runs — otherwise
+  // the run would hang until the switch timeout and falsely report a failure).
+  // Whoever fires first nulls the latch, so it runs exactly once.
+  const tryFireBoundRun = useCallback(() => {
+    const pending = pendingBoundRunRef.current;
+    const conn = connectionRef.current;
+    if (
+      !pending ||
+      conn.sessionId !== pending.sessionId ||
+      conn.loadingTranscript ||
+      conn.catchingUp
+    ) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    pendingBoundRunRef.current = null;
+    // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
+    // cleared above, so a long turn can't trip it. Recording happens in the
+    // dialog once this resolves.
+    enqueueManualRun(pending.prompt).then(
+      () => pending.resolve(),
+      (error: unknown) => pending.reject(error),
+    );
+  }, [enqueueManualRun]);
+  const runTaskManually = useCallback(
+    (prompt: string, sessionId: string | null): Promise<void> => {
+      setMainView('chat');
+      if (!sessionId) {
+        // Unbound: runs in the current session — resolves at admission.
+        return enqueueManualRun(prompt);
+      }
+      // A newer bound run supersedes an older one still waiting on the latch;
+      // reject the old promise so its caller doesn't record a dropped run.
+      const prev = pendingBoundRunRef.current;
+      if (prev) {
+        clearTimeout(prev.timer);
+        pendingBoundRunRef.current = null;
+        prev.reject(new Error('superseded by another run'));
+      }
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          clearPendingBoundRun(sessionId);
+          reject(new Error('Timed out switching to the task session'));
+        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
+        pendingBoundRunRef.current = {
+          sessionId,
+          prompt,
+          resolve,
+          reject,
+          timer,
+        };
+        loadSidebarSession(sessionId)
+          // Fire immediately when the session was already active (no dep change
+          // to trigger the effect); a no-op if the load is still settling, in
+          // which case the effect picks it up.
+          .then(() => tryFireBoundRun())
+          .catch((error: unknown) => {
+            clearPendingBoundRun(sessionId);
+            reject(error);
+          });
+      });
+    },
+    [
+      enqueueManualRun,
+      loadSidebarSession,
+      clearPendingBoundRun,
+      tryFireBoundRun,
+    ],
+  );
+  useEffect(() => {
+    tryFireBoundRun();
+  }, [
+    connection.sessionId,
+    connection.loadingTranscript,
+    connection.catchingUp,
+    tryFireBoundRun,
+  ]);
 
   const openTasksPanel = useCallback(() => {
+    if (!requireActiveSessionForLocalCommand()) return;
     sessionActions
       .getTasks()
       .then((snapshot) => {
@@ -2091,7 +2713,7 @@ export function App({
       .catch((error: unknown) => {
         reportError(error, 'Failed to load tasks');
       });
-  }, [reportError, sessionActions]);
+  }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
 
   const dispatchGoalSet = useCallback(
     (condition: string, setAt: number) => {
@@ -2130,13 +2752,14 @@ export function App({
 
   const handleBusyGoalClear = useCallback(
     (text: string) => {
+      if (!requireActiveSessionForLocalCommand()) return false;
       store.appendLocalUserMessage(text);
       sessionActions.clearGoal().catch((error: unknown) => {
         reportError(error, 'Failed to clear /goal');
       });
       return true;
     },
-    [reportError, sessionActions, store],
+    [reportError, requireActiveSessionForLocalCommand, sessionActions, store],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -2165,11 +2788,28 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      opts?: { sendToDaemon?: boolean },
+      opts?: {
+        sendToDaemon?: boolean;
+        commitComposerAccepted?: ComposerSubmitCommit;
+      },
     ) => {
       const goalArg = text.replace(/^\/goal\b/i, '').trim();
       const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
+      const sendGoalPrompt = () => {
+        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId || deferComposerCommit;
+        sendPrompt(text, images, {
+          clearComposerOnPromptStart,
+          commitComposerAccepted: deferComposerCommit
+            ? opts?.commitComposerAccepted
+            : undefined,
+        }).catch((error: unknown) => {
+          reportError(error, 'Failed to send /goal command');
+        });
+        return clearComposerOnPromptStart ? false : true;
+      };
 
       if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
         if (!sendToDaemon) {
@@ -2179,26 +2819,18 @@ export function App({
         }
         return handleBusyGoalClear(text);
       } else if (goalArg) {
-        store.appendLocalUserMessage(text);
         if (!sendToDaemon) {
+          store.appendLocalUserMessage(text);
           dispatchGoalSet(goalArg, Date.now());
           return true;
         }
-        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
-          (error: unknown) => {
-            reportError(error, 'Failed to send /goal command');
-          },
-        );
-        return true;
+        return sendGoalPrompt();
       }
 
-      store.appendLocalUserMessage(text);
       if (sendToDaemon) {
-        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
-          (error: unknown) =>
-            reportError(error, 'Failed to send /goal command'),
-        );
+        return sendGoalPrompt();
       }
+      store.appendLocalUserMessage(text);
       return true;
     },
     [
@@ -2208,6 +2840,7 @@ export function App({
       reportError,
       sendPrompt,
       store,
+      connectionRef,
     ],
   );
 
@@ -2221,18 +2854,60 @@ export function App({
   const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
+    (
+      text: string,
+      images?: PromptImage[],
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
+      if (connectionRef.current.loadingTranscript) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return false;
+      }
+      if (
+        shouldBlockComposerSubmit({
+          connectionStatus: connectionRef.current.status,
+        })
+      ) {
+        pushToast('warning', t('editor.connectionDisconnected'));
+        return false;
+      }
       const promptBlocked = streamingStateRef.current !== 'idle';
+      const submitPromptFromEditor = (
+        promptText: string,
+        promptImages: PromptImage[] | undefined,
+        errorMessage: string,
+        opts?: { optimisticUserMessage?: boolean; retry?: boolean },
+      ) => {
+        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId || deferComposerCommit;
+        sendPrompt(promptText, promptImages, {
+          ...opts,
+          clearComposerOnPromptStart,
+          commitComposerAccepted: deferComposerCommit
+            ? commitComposerAccepted
+            : undefined,
+        }).catch((error: unknown) => reportError(error, errorMessage));
+        return clearComposerOnPromptStart ? false : true;
+      };
       if (text.startsWith('/')) {
         const match = text.match(/^\/([\w-]+)/);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
-            sendPrompt(text, images).catch((error: unknown) =>
-              reportError(error, 'Failed to send hidden slash command'),
+            if (promptBlocked) {
+              return enqueuePrompt(
+                text,
+                images,
+                undefined,
+                commitComposerAccepted,
+              );
+            }
+            return submitPromptFromEditor(
+              text,
+              images,
+              'Failed to send hidden slash command',
             );
-            return true;
           }
           if (cmd === 'help') {
             setShowHelpDialog(true);
@@ -2247,9 +2922,11 @@ export function App({
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
               }
-              return enqueuePrompt(text, images);
+              return blockLocalCommandDuringTurn();
             }
-            return handleGoalSlashCommand(text, images);
+            return handleGoalSlashCommand(text, images, {
+              commitComposerAccepted,
+            });
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -2311,11 +2988,20 @@ export function App({
               const nextLanguage = normalizeLanguage(languageArg);
               handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
-                sendPrompt(`/language ui ${nextLanguage}`)
+                const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+                const clearComposerOnPromptStart =
+                  !connectionRef.current.sessionId || deferComposerCommit;
+                sendPrompt(`/language ui ${nextLanguage}`, undefined, {
+                  clearComposerOnPromptStart,
+                  commitComposerAccepted: deferComposerCommit
+                    ? commitComposerAccepted
+                    : undefined,
+                })
                   .then(() => sessionActions.refreshCommands())
                   .catch((error: unknown) => {
                     reportError(error, 'Failed to sync /language command');
                   });
+                return clearComposerOnPromptStart ? false : true;
               }
               return true;
             }
@@ -2345,17 +3031,19 @@ export function App({
             return true;
           }
           if (cmd === 'rewind') {
+            if (!requireActiveSessionForLocalCommand()) return false;
             setShowRewindDialog(true);
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (!requireActiveSessionForLocalCommand()) return false;
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2392,11 +3080,19 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /model --fast'),
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /model --fast',
               );
-              return true;
             }
             if (modelArg === '--voice') {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -2412,17 +3108,40 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /model --voice'),
+              const voiceModelId = modelArg.replace(/^--voice\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'voiceModel',
+                voiceModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVoice')),
+              );
+              return true;
+            }
+            if (modelArg === '--vision') {
+              setModelDialogMode('vision');
+              return true;
+            }
+            if (modelArg.startsWith('--vision ')) {
+              const visionModelId = modelArg.replace(/^--vision\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'visionModel',
+                visionModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVision')),
               );
               return true;
             }
             if (modelArg) {
+              if (!connectionRef.current.sessionId) {
+                setPendingModel(modelArg);
+                return true;
+              }
               sessionActions
                 .setModel(modelArg)
                 .then(() => {
-                  setCurrentModel(modelArg);
+                  setPendingModel(modelArg);
                 })
                 .catch((error: unknown) => {
                   reportError(error, t('model.switch'));
@@ -2433,22 +3152,39 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const prompt = text.slice(match[0].length).trim();
+            if (!connectionRef.current.sessionId) {
+              setPendingMode('plan');
+              if (prompt) {
+                return submitPromptFromEditor(
+                  prompt,
+                  images,
+                  'Failed to send plan prompt',
+                );
+              }
+              return true;
+            }
+            if (prompt) setIsPreparingPrompt(true);
             sessionActions
               .setApprovalMode('plan')
               .then(() => {
-                setCurrentMode('plan');
+                setPendingMode('plan');
                 if (prompt) {
-                  sendPrompt(prompt, images).catch((error: unknown) =>
+                  return sendPrompt(prompt, images, {
+                    clearComposerOnPromptStart: true,
+                  }).catch((error: unknown) =>
                     reportError(error, 'Failed to send plan prompt'),
                   );
                 }
               })
               .catch((error: unknown) => {
                 reportError(error, t('mode.plan'));
+              })
+              .finally(() => {
+                if (prompt) setIsPreparingPrompt(false);
               });
-            return true;
+            return prompt ? false : true;
           }
           if (cmd === 'approval-mode') {
             const modeArg = text.slice(match[0].length).trim();
@@ -2519,9 +3255,18 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /skills command'),
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /skills command',
               );
             } else {
               if (echoOrDeferLocalCommand(text, images)) return true;
@@ -2588,7 +3333,11 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
-            setShowSettingsDialog(true);
+            openPanel('settings');
+            return true;
+          }
+          if (cmd === 'schedule') {
+            openScheduledTasks();
             return true;
           }
           if (cmd === 'context') {
@@ -2651,9 +3400,8 @@ export function App({
             }
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
-              // do too); defer the whole command mid-turn so it can't split the
-              // active turn. It re-dispatches here once the turn settles.
-              if (promptBlocked) return enqueuePrompt(text, images);
+              // do too); block it mid-turn so it can't split the active turn.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -2714,13 +3462,7 @@ export function App({
               }
               const clientId = connectionRef.current.clientId;
               if (!clientId) {
-                store.appendLocalUserMessage(text);
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text: t('extensions.install.waitForSession'),
-                  },
-                ]);
+                pushToast('warning', t('extensions.install.waitForSession'));
                 return true;
               }
               store.appendLocalUserMessage(text);
@@ -2770,17 +3512,26 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
-              sendPrompt(text, images).catch((error: unknown) =>
-                reportError(error, 'Failed to send /rename command'),
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
+              return submitPromptFromEditor(
+                text,
+                images,
+                'Failed to send /rename command',
               );
-              return true;
             }
             const displayName = renameArg.displayName;
             if (!displayName) {
               pushToast('error', t('rename.empty'));
               return true;
             }
+            if (!requireActiveSessionForLocalCommand()) return false;
             sessionActions
               .renameSession(displayName)
               .then(() => {
@@ -2799,10 +3550,16 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
+              closeMobileDrawer();
+              // Resuming a session means the user wants to see that chat, so
+              // close any open Settings/Status panel (no-op when already closed),
+              // consistent with createNewSession / loadSidebarSession.
+              closePanel();
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
+              closeMobileDrawer();
               setShowResumeDialog(true);
             }
             return true;
@@ -2820,6 +3577,7 @@ export function App({
             let statsView: StatsView = 'overview';
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
+            if (!requireActiveSessionForLocalCommand()) return false;
             if (echoOrDeferLocalCommand(text, images)) return true;
             sessionActions
               .getStats()
@@ -2954,25 +3712,27 @@ export function App({
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) return enqueuePrompt(text, images);
-        sendPrompt(text, images).catch((error: unknown) =>
-          reportError(error, 'Failed to send command'),
-        );
-        return true;
+        if (promptBlocked) {
+          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+        }
+        return submitPromptFromEditor(text, images, 'Failed to send command');
       } else if (text.startsWith('!')) {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          pushToast('error', t('queue.shellBlocked'));
+          return false;
+        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
+        if (!requireActiveSessionForLocalCommand()) return false;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
           reportError(error, 'Failed to execute shell command');
         });
         return true;
       } else {
-        if (promptBlocked) return enqueuePrompt(text, images);
-        sendPrompt(text, images).catch((error: unknown) =>
-          reportError(error, 'Failed to send message'),
-        );
-        return true;
+        if (promptBlocked) {
+          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+        }
+        return submitPromptFromEditor(text, images, 'Failed to send message');
       }
     },
     [
@@ -2982,20 +3742,29 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       branchCurrentSession,
+      closeMobileDrawer,
+      closePanel,
+      openPanel,
+      openScheduledTasks,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
+      blockLocalCommandDuringTurn,
       openTasksPanel,
       hiddenCommands,
       pushToast,
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      requireActiveSessionForLocalCommand,
       resumeChatBottomFollow,
       selectedLanguage,
+      setPendingModel,
+      setPendingMode,
+      setWorkspaceSetting,
       showContextUsage,
       t,
       workspaceActions,
@@ -3003,8 +3772,12 @@ export function App({
   );
 
   const handleEditorSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
-      const accepted = handleSubmit(text, images);
+    (
+      text: string,
+      images?: PromptImage[],
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
+      const accepted = handleSubmit(text, images, commitComposerAccepted);
       if (accepted !== false) {
         resumeChatBottomFollow('smooth');
       }
@@ -3012,50 +3785,6 @@ export function App({
     },
     [handleSubmit, resumeChatBottomFollow],
   );
-
-  useEffect(() => {
-    if (drainingQueueRef.current) return;
-    if (!connected) return;
-    if (streamingState !== 'idle') return;
-    if (interactionBlocked) return;
-    if (pendingApproval) return;
-    if (queuedPrompts.length === 0) return;
-
-    const nextPrompt = popNextQueuedPrompt();
-    if (!nextPrompt) return;
-
-    drainingQueueRef.current = true;
-    let sent = false;
-    const timer = window.setTimeout(() => {
-      sent = true;
-      try {
-        handleSubmit(nextPrompt.text, nextPrompt.images);
-        nextPrompt.onComplete?.();
-      } finally {
-        drainingQueueRef.current = false;
-      }
-    }, 0);
-    return () => {
-      if (!sent) {
-        // Cleanup ran before timeout fired — put the prompt back at the
-        // front of the queue so it's not lost. This can happen when any
-        // dependency (e.g. handleSubmit, streamingState) changes between
-        // popNextQueuedPrompt() and the setTimeout firing.
-        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-        setQueuedPrompts(queuedPromptsRef.current);
-      }
-      window.clearTimeout(timer);
-      drainingQueueRef.current = false;
-    };
-  }, [
-    connected,
-    interactionBlocked,
-    handleSubmit,
-    pendingApproval,
-    popNextQueuedPrompt,
-    queuedPrompts,
-    streamingState,
-  ]);
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
@@ -3086,9 +3815,12 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-  const handleFollowStateChange = useCallback((isFollowing: boolean) => {
-    setShowScrollToBottom(!isFollowing);
-  }, []);
+  const handleCanScrollToBottomChange = useCallback(
+    (canScrollToBottom: boolean) => {
+      setCanScrollMessageListToBottom(canScrollToBottom);
+    },
+    [],
+  );
 
   const handleRetry = useCallback(() => {
     if (
@@ -3145,91 +3877,147 @@ export function App({
     t,
   ]);
 
+  const resetEscapeState = useCallback(() => {
+    escArmedActionRef.current = null;
+    setEscapeHintVisible(false);
+    setCancelArmed(false);
+    if (escapeTimerRef.current) {
+      clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = null;
+    }
+  }, []);
+
+  // The Esc handler reads live state, but its global keydown listener must mount
+  // ONCE: streamingState flips among 'waiting'/'responding'/'thinking' mid-turn,
+  // and if it were an effect dep each flip would tear the listener down and run
+  // resetEscapeState(), wiping a half-armed two-press cancel. Read live values
+  // through a ref so the listener stays put across re-renders.
+  const escLiveRef = useRef({
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    activePanel,
+    closePanel,
+    handleCancel,
+    handleCycleMode,
+  });
+  escLiveRef.current = {
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    activePanel,
+    closePanel,
+    handleCancel,
+    handleCycleMode,
+  };
+
+  // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
+  // relevant action (cancel vs clear) changes with it, so a leftover arm is now
+  // stale. Keyed on the boolean, so intra-turn sub-state flips don't reset it.
+  const escStreamingBoundary = streamingState !== 'idle';
   useEffect(() => {
-    const resetEscapeState = () => {
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+    resetEscapeState();
+  }, [escStreamingBoundary, resetEscapeState]);
+
+  useEffect(() => {
+    // Arm a two-press action: the first Esc shows the affordance and starts a
+    // confirm window; a second Esc within it confirms, any other key resets it.
+    const ESC_CANCEL_CONFIRM_WINDOW_MS = 2000;
+    const ESC_CLEAR_CONFIRM_WINDOW_MS = 500;
+    const armEscape = (action: 'cancel' | 'clear', windowMs: number) => {
+      escArmedActionRef.current = action;
+      if (action === 'cancel') setCancelArmed(true);
+      else setEscapeHintVisible(true);
+      if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = setTimeout(resetEscapeState, windowMs);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return;
+      const live = escLiveRef.current;
+
+      // A full-view panel (Settings / Daemon Status) replaces the chat rather
+      // than overlaying it; Escape returns to the chat. Any modal opened on top
+      // of the panel is a DialogShell, whose own handler stops Escape from
+      // reaching this window listener, so this only fires when the panel itself
+      // is the topmost surface.
+      if (e.key === 'Escape' && live.activePanel) {
+        // The sidebar stays usable beside the panel and its search input clears
+        // on Escape without stopping the event; don't also close the panel when
+        // Escape is being handled inside the sidebar. Scope the panel close to
+        // Escape originating outside the sidebar drawer.
+        const target = e.target as HTMLElement | null;
+        if (!target?.closest('[data-sidebar-shell]')) {
+          e.preventDefault();
+          live.closePanel();
+        }
+        return;
+      }
 
       if (e.key !== 'Escape') {
-        if (escPressCountRef.current > 0) {
+        if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !interactionBlocked) {
+        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
           e.preventDefault();
-          handleCycleMode();
+          live.handleCycleMode();
         }
         return;
       }
 
-      if (pendingApproval || interactionBlocked) return;
-
-      if (clearQueuedPrompts()) {
-        e.preventDefault();
-        resetEscapeState();
-        return;
-      }
-
-      if (editorRef.current?.hasInput()) {
-        e.preventDefault();
-        if (escPressCountRef.current === 0) {
-          escPressCountRef.current = 1;
-          setEscapeHintVisible(true);
-          if (escapeTimerRef.current) {
-            clearTimeout(escapeTimerRef.current);
-          }
-          escapeTimerRef.current = setTimeout(() => {
-            resetEscapeState();
-          }, 500);
-        } else {
+      // Streaming takes priority over clearing text (queued prompts stay intact
+      // and drain after the turn settles); see decideEscapeIntent for the rules.
+      const intent = decideEscapeIntent({
+        blocked: !!live.pendingApproval || live.interactionBlocked,
+        streaming: live.streamingState !== 'idle',
+        hasInput: !!editorRef.current?.hasInput(),
+        armed: escArmedActionRef.current,
+      });
+      if (intent.kind === 'ignore') return;
+      e.preventDefault();
+      switch (intent.kind) {
+        case 'cancel':
+          live.handleCancel();
+          resetEscapeState();
+          break;
+        case 'clear':
           editorRef.current?.clear();
           resetEscapeState();
-        }
-        return;
-      }
-
-      if (streamingState !== 'idle') {
-        e.preventDefault();
-        handleCancel();
-        resetEscapeState();
-        return;
+          break;
+        case 'arm':
+          armEscape(
+            intent.action,
+            intent.action === 'cancel'
+              ? ESC_CANCEL_CONFIRM_WINDOW_MS
+              : ESC_CLEAR_CONFIRM_WINDOW_MS,
+          );
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+      resetEscapeState();
     };
-  }, [
-    streamingState,
-    handleCancel,
-    handleCycleMode,
-    pendingApproval,
-    interactionBlocked,
-    clearQueuedPrompts,
-  ]);
+  }, [resetEscapeState]);
 
-  const isDisabled = !connected || connection.catchingUp;
+  const isDisabled = shouldDisableComposerInput({
+    catchingUp: Boolean(connection.catchingUp),
+    pendingApproval: pendingApproval !== null,
+    isPreparingPrompt,
+  });
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
+      if (!connectionRef.current.sessionId) {
+        setPendingModel(modelId);
+        return;
+      }
       sessionActions
         .setModel(modelId)
         .then((result) => {
           const summary = getModelSwitchSummary(result);
-          setCurrentModel(summary?.modelId ?? modelId);
+          setPendingModel(summary?.modelId ?? modelId);
           if (summary) {
             store.dispatch({
               type: 'debug',
@@ -3243,51 +4031,106 @@ export function App({
           reportError(error, t('model.switch'));
         });
     },
-    [sessionActions, store, reportError, t],
+    [sessionActions, store, reportError, t, setPendingModel],
   );
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --fast ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
-        reportError(error, 'Failed to switch fast model');
-      });
+      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
+      // ACP format. The model picker strips the (authType) suffix before
+      // calling this handler.
+      //
+      // Close the panel before sending: unlike the vision/voice pickers (silent
+      // setWorkspaceSetting), `/model --fast` runs a real turn whose response
+      // lands in the message list. With the panel open the chat is hidden, so
+      // that response would pile up behind it and surprise the user on close.
+      // Closing first returns them to the chat to see it in context (matching
+      // the pre-panel modal behavior).
+      closePanel();
+      sendPrompt(`/model --fast ${modelId}`)
+        .then(() => {
+          // sendPrompt resolves only after the `/model --fast` turn *completes*
+          // (actions.ts → waitForAcceptedPromptCompletion), so the change is
+          // already applied here — this reload reads the new value, not a stale
+          // one. It keeps the workspace-settings state fresh for the next time
+          // Settings is opened (the command path, unlike setWorkspaceSetting,
+          // doesn't bump the settingsVersion signal). Guard its own rejection —
+          // the .catch below only covers sendPrompt — and log it so a failed
+          // reload (leaving stale settings on next open) leaves a trace.
+          reloadWorkspaceSettings().catch((err: unknown) => {
+            console.warn(
+              '[web-shell] failed to reload workspace settings after fast-model switch',
+              err,
+            );
+          });
+        })
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to switch fast model');
+        });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError],
+    [
+      blockLocalCommandDuringTurn,
+      closePanel,
+      sendPrompt,
+      streamingState,
+      reportError,
+      reloadWorkspaceSettings,
+    ],
   );
 
-  // Persist via the prompt channel (like `/model --fast`): the daemon's command
-  // processor writes `voiceModel` to settings. The `/workspace/settings` route
-  // is token-gated, but browser voice runs on loopback-no-token — so this is
-  // the path that actually works there. The daemon's /voice/stream reads it back.
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --voice ${modelId}`);
-        return;
-      }
-      sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
-        reportError(error, t('model.setVoice'));
-      });
+      // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
+      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      const bareModelId = extractBareModelId(modelId);
+      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
+        (error: unknown) => reportError(error, t('model.setVoice')),
+      );
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
+    [reportError, setWorkspaceSetting, t],
   );
+
+  const handleVisionModelSelect = useCallback(
+    (modelId: string) => {
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveVisionModelSelection() expects `authType:modelId`.
+      const encoded = encodeVisionModelForSetting(modelId);
+      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
+        (error: unknown) => reportError(error, t('model.setVision')),
+      );
+    },
+    [reportError, setWorkspaceSetting, t],
+  );
+
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
+    main: handleModelSelect,
+    fast: handleFastModelSelect,
+    voice: handleVoiceModelSelect,
+    vision: handleVisionModelSelect,
+  };
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    )
       .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
+        const skillKey = skillDescriptionKey(command.name);
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: command.description || t('skills.run'),
+          description: skillKey
+            ? t(skillKey)
+            : command.description || t('skills.run'),
         };
       });
   }, [connection.commands, connection.skills, hiddenCommands, t]);
@@ -3323,10 +4166,17 @@ export function App({
     [renderWelcomeFooter, welcomeHeaderProps],
   );
   const isChatEmptyState =
+    !connection.sessionId &&
     displayMessages.length === 0 &&
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const missingSession =
+    connection.status !== 'connecting' &&
+    !connection.sessionId &&
+    connection.missingSession === true;
+  const showMissingSessionState =
+    missingSession && !activePanel && mainView === 'chat';
   const effectiveChatWidthMode: ChatWidthMode = isChatEmptyState
     ? getDefaultChatWidthMode()
     : chatWidthMode;
@@ -3336,6 +4186,7 @@ export function App({
     styles.app,
     styles.appChat,
     isChatEmptyState ? styles.appChatEmpty : undefined,
+    sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
@@ -3395,6 +4246,8 @@ export function App({
             >
               <ResumeDialog
                 onSelect={(sessionId) => {
+                  closeMobileDrawer();
+                  closePanel();
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
@@ -3407,13 +4260,7 @@ export function App({
           )}
           {modelDialogMode && (
             <DialogShell
-              title={
-                modelDialogMode === 'fast'
-                  ? t('model.setFast')
-                  : modelDialogMode === 'voice'
-                    ? t('model.setVoice')
-                    : t('model.select')
-              }
+              title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
@@ -3421,15 +4268,17 @@ export function App({
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
                 currentModelId={
-                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                  modelDialogMode === 'voice'
+                    ? currentVoiceModel
+                    : modelDialogMode === 'vision'
+                      ? currentVisionModel
+                      : modelDialogMode === 'fast'
+                        ? currentFastModel
+                        : undefined
                 }
                 onSelect={(modelId) => {
-                  if (modelDialogMode === 'fast') {
-                    handleFastModelSelect(modelId);
-                  } else if (modelDialogMode === 'voice') {
-                    handleVoiceModelSelect(modelId);
-                  } else {
-                    handleModelSelect(modelId);
+                  if (modelDialogMode) {
+                    modelHandlers[modelDialogMode](modelId);
                   }
                   setModelDialogMode(null);
                 }}
@@ -3512,28 +4361,6 @@ export function App({
                 embedded
                 onMessage={(text) => store.dispatch([{ type: 'status', text }])}
                 onClose={() => setAgentsDialogMode(null)}
-              />
-            </DialogShell>
-          )}
-          {showSettingsDialog && (
-            <DialogShell
-              title={t('settings.title')}
-              size="lg"
-              onClose={() => setShowSettingsDialog(false)}
-            >
-              <SettingsMessage
-                settingsState={workspaceSettingsState}
-                embedded
-                onLanguageChange={handleSettingsLanguageChange}
-                onThemeChange={handleThemeChange}
-                chatWidthMode={chatWidthMode}
-                onChatWidthModeChange={handleChatWidthModeChange}
-                onSubDialog={(key) => {
-                  setShowSettingsDialog(false);
-                  if (key === 'fastModel') setModelDialogMode('fast');
-                  else if (key === 'tools.approvalMode')
-                    setShowApprovalModeDialog(true);
-                }}
               />
             </DialogShell>
           )}
@@ -3665,210 +4492,573 @@ export function App({
             </DialogShell>
           )}
 
-          <WebShellCustomizationProvider value={customization}>
-            <CompactModeContext.Provider value={compactMode}>
-              <TodoContextsProvider
-                timeline={todoTimeline}
-                details={todoDetails}
+          <div className={styles.appShell}>
+            {sidebarOptions.enabled && (
+              <div
+                data-sidebar-shell=""
+                {...(mobileDrawerOpen
+                  ? { role: 'dialog', 'aria-modal': 'true' as const }
+                  : {})}
+                aria-label={t('sidebar.label')}
+                className={[
+                  styles.mobileDrawer,
+                  mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
               >
                 <div
-                  className={[
-                    styles.content,
-                    showFloatingTodos ||
-                    displayMessages.length > 0 ||
-                    pendingApproval
-                      ? styles.contentHasMessages
-                      : undefined,
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                >
-                  <MessageList
-                    ref={messageListRef}
-                    messages={displayMessages}
-                    pendingApproval={pendingToolApproval}
-                    onShowContextDetail={handleShowContextDetail}
-                    catchingUp={connection.catchingUp}
-                    isResponding={streamingState !== 'idle'}
-                    activeTurnStartedAt={activeTurnStartedAt}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    shellOutputMaxLines={shellOutputMaxLines}
-                    showRetryHint={showRetryHint}
-                    onRetryClick={handleRetry}
-                    onBranchSession={handleBranchCurrentSession}
-                    welcomeHeader={isChatEmptyState ? welcomeHeader : undefined}
-                    tailContent={undefined}
-                    tailKey={undefined}
-                    onFollowStateChange={handleFollowStateChange}
-                    virtualScrollThreshold={virtualScrollThreshold}
-                  />
-                  {btwMessage?.role === 'btw' && (
-                    <div className={styles.btwPanel}>
-                      <BtwMessage
-                        question={btwMessage.question}
-                        answer={btwMessage.answer}
-                        isPending={btwMessage.isPending}
-                      />
-                    </div>
-                  )}
-                </div>
-              </TodoContextsProvider>
-            </CompactModeContext.Provider>
-
-            <div ref={footerRef} className={styles.footer}>
-              {showScrollToBottom && (
-                <div
-                  className={
-                    showFloatingTodos
-                      ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
-                      : styles.scrollToBottomLayer
-                  }
-                >
-                  <button
-                    type="button"
-                    className={styles.scrollToBottomButton}
-                    aria-label={t('chat.scrollToBottom')}
-                    onClick={() => resumeChatBottomFollow('smooth')}
-                  >
-                    <svg
-                      className={styles.scrollToBottomIcon}
-                      viewBox="0 0 24 24"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              )}
-              {showFloatingTodos && (
-                <div className={styles.bottomPanels}>
-                  <TodoPanel todos={floatingTodos} />
-                </div>
-              )}
-              {pendingToolApproval && (
-                <div className={styles.approvalOverlay}>
-                  <ToolApproval
-                    request={pendingToolApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              {pendingAskUserApproval && (
-                <div className={styles.approvalOverlay}>
-                  <AskUserQuestion
-                    request={pendingAskUserApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              <div className={styles.composer}>
-                <StreamingStatus startedAt={activeTurnStartedAt} />
-                <QueuedPromptDisplay
-                  prompts={queuedPrompts}
-                  t={t}
-                  onDelete={removeQueuedPrompt}
-                  onInsert={insertQueuedPrompt}
-                  onEdit={editQueuedPrompt}
+                  className={styles.mobileBackdrop}
+                  onClick={closeMobileDrawer}
+                  aria-hidden="true"
                 />
-                <ChatEditor
-                  ref={setEditorHandle}
-                  onSubmit={handleEditorSubmit}
-                  onCycleMode={handleCycleMode}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  onCancel={handleCancel}
-                  isRunning={streamingState !== 'idle'}
-                  disabled={isDisabled || pendingApproval !== null}
-                  commands={commands}
-                  skills={loadedSkills}
-                  slashCommandCategoryOrder={slashCommandCategoryOrder}
-                  queuedMessages={queuedTexts}
-                  onFocusFooter={handleFocusTaskPill}
-                  onPopQueuedMessages={popLastQueuedPromptText}
-                  onClearQueuedMessages={clearQueuedPrompts}
-                  currentMode={currentMode}
-                  currentModel={currentModel}
-                  chatWidthMode={chatWidthMode}
-                  showChatWidthToggle={!isChatEmptyState}
-                  chatWidthToggleMin={chatWidthToggleMin}
-                  visibleToolbarActions={composerToolbarActions}
-                  availableModels={availableModels}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                  onChatWidthModeChange={handleChatWidthModeChange}
-                  sessionName={sessionDisplayName}
-                  dialogOpen={interactionBlocked}
-                  followupState={followupState}
-                  onAcceptFollowup={onAcceptFollowup}
-                  onDismissFollowup={onDismissFollowup}
-                  composerInput={composerInput}
-                  composerInputVersion={composerInputVersion}
-                  placeholderText={
-                    !connected || connection.catchingUp
-                      ? t('common.loading')
-                      : streamingState !== 'idle'
-                        ? t('editor.processing')
-                        : t('editor.placeholder')
-                  }
+                <WebShellSidebar
+                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  onCollapsedChange={handleSidebarCollapsedChange}
+                  onOpenSettings={() => {
+                    closeMobileDrawer();
+                    openPanel('settings');
+                  }}
+                  onOpenDaemonStatus={() => {
+                    closeMobileDrawer();
+                    openPanel('status');
+                  }}
+                  onOpenScheduledTasks={() => {
+                    closeMobileDrawer();
+                    openScheduledTasks();
+                  }}
+                  onOpenSessions={() => {
+                    closeMobileDrawer();
+                    openPanel('sessions');
+                  }}
+                  canOpenSessionsOverview={isLargeScreen}
+                  onOpenSplitView={() => {
+                    closeMobileDrawer();
+                    openSplitView();
+                  }}
+                  canOpenSplitView={isLargeScreen}
+                  onNewSession={() => {
+                    setMainView('chat');
+                    return createNewSession();
+                  }}
+                  onLoadSession={(sessionId) => {
+                    setMainView('chat');
+                    return loadSidebarSession(sessionId);
+                  }}
+                  onError={reportError}
+                  mobileOpen={mobileDrawerOpen}
+                  sessionListReloadToken={sessionListReloadToken}
                 />
               </div>
-              {CustomFooter ? (
-                <CustomFooter
-                  connected={connected}
-                  mode={currentMode}
-                  model={currentModel}
-                  streamingState={streamingState}
-                  contextUsageRatio={
-                    (connection.contextWindow ?? 0) > 0
-                      ? (connection.tokenCount ?? 0) /
-                        (connection.contextWindow ?? 0)
-                      : 0
+            )}
+            <div
+              className={
+                mainView !== 'chat'
+                  ? `${styles.chatPane} ${styles.chatPaneShowingPage}`
+                  : styles.chatPane
+              }
+            >
+              {sidebarOptions.enabled &&
+                !activePanel &&
+                mainView === 'chat' && (
+                  <button
+                    type="button"
+                    className={[
+                      styles.hamburgerButton,
+                      isChatEmptyState
+                        ? styles.hamburgerButtonFloating
+                        : undefined,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    onClick={() => setMobileDrawerOpen((open) => !open)}
+                    aria-label={t('sidebar.toggleMenu')}
+                    aria-expanded={mobileDrawerOpen}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <line x1="3" y1="6" x2="21" y2="6" />
+                      <line x1="3" y1="12" x2="21" y2="12" />
+                      <line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
+              {activePanel && (
+                <section
+                  className={styles.panelHost}
+                  role="region"
+                  data-testid="inline-panel"
+                  aria-label={
+                    activePanel === 'settings'
+                      ? t('settings.title')
+                      : activePanel === 'status'
+                        ? t('daemon.title')
+                        : t('sessionsOverview.title')
                   }
-                  activeGoal={activeGoal}
-                  tasks={footerTasks}
-                  availableModes={MODES_CYCLE}
-                  availableModels={(connection.models ?? [])
-                    .filter(isVisibleComposerModel)
-                    .map((m) => ({
-                      id: m.id,
-                      label: getModelDisplayName(m.label || m.id),
-                      contextWindow: m.contextWindow,
-                    }))}
-                  skills={loadedSkills}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                />
-              ) : (
-                <StatusBar
-                  escapeHint={escapeHintVisible}
-                  onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
-                  onSelectModel={() =>
-                    setModelDialogMode((v) => (v ? null : 'main'))
+                >
+                  <div className={styles.panelHeader}>
+                    <button
+                      ref={panelBackRef}
+                      type="button"
+                      className={styles.panelBack}
+                      data-testid="panel-back"
+                      onClick={closePanel}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M15 5l-7 7 7 7"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                    <div className={styles.panelTitle}>
+                      {activePanel === 'settings'
+                        ? t('settings.title')
+                        : activePanel === 'status'
+                          ? t('daemon.title')
+                          : t('sessionsOverview.title')}
+                    </div>
+                  </div>
+                  <div className={styles.panelBody} key={activePanel}>
+                    {activePanel === 'settings' ? (
+                      <SettingsMessage
+                        settingsState={workspaceSettingsState}
+                        embedded
+                        onLanguageChange={handleSettingsLanguageChange}
+                        onThemeChange={handleThemeChange}
+                        chatWidthMode={chatWidthMode}
+                        onChatWidthModeChange={handleChatWidthModeChange}
+                        onSubDialog={(key) => {
+                          if (key === 'fastModel') setModelDialogMode('fast');
+                          else if (key === 'visionModel')
+                            setModelDialogMode('vision');
+                          else if (key === 'tools.approvalMode')
+                            setShowApprovalModeDialog(true);
+                        }}
+                      />
+                    ) : activePanel === 'status' ? (
+                      <DaemonStatusDialog />
+                    ) : (
+                      <SessionOverviewPanel
+                        onOpenSession={handleOpenSessionFromOverview}
+                        onOpenSplit={openSplitView}
+                      />
+                    )}
+                  </div>
+                </section>
+              )}
+              {mainView === 'scheduledTasks' && (
+                <div
+                  className={styles.fullPage}
+                  data-testid="scheduled-tasks-page"
+                >
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('scheduledTasks.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <ScheduledTasksDialog
+                      onRunPrompt={runTaskManually}
+                      onCreateViaChat={() => {
+                        // Start a FRESH session and jump to it so the task-
+                        // creation chat doesn't pile onto the current
+                        // conversation, then prime the composer so the user can
+                        // describe the task in natural language; the agent
+                        // creates it via its cron_create tool. Focus is deferred
+                        // so the new session's composer is mounted/visible first.
+                        setMainView('chat');
+                        void createNewSession().then((created) => {
+                          // If the new session couldn't be started,
+                          // createNewSession already surfaced the error — do NOT
+                          // prime the (still-current) session with the task
+                          // starter, which would land in the wrong conversation.
+                          if (!created) return;
+                          onSessionIdChange?.(undefined);
+                          window.setTimeout(() => {
+                            editorRef.current?.insertText(
+                              t('scheduledTasks.chatStarter'),
+                              { mode: 'replace' },
+                            );
+                            editorRef.current?.focus();
+                          }, 0);
+                        });
+                      }}
+                      onOpenSession={(sessionId) => {
+                        // The task's bound session IS its run history — switch
+                        // to the chat view and load that session's transcript.
+                        setMainView('chat');
+                        loadSidebarSession(sessionId).catch(
+                          (error: unknown) => {
+                            reportError(error, 'Failed to open session');
+                          },
+                        );
+                      }}
+                      onError={reportError}
+                    />
+                  </div>
+                </div>
+              )}
+              {mainView === 'split' && (
+                <div className={styles.fullPage} data-testid="split-view-page">
+                  {/* The outer session's approval overlay is suppressed under the
+                      split (it would own ghost keyboard shortcuts). If that
+                      session isn't one of the panes, the approval would be
+                      invisible — surface a notice with a way back to it. */}
+                  {approvalOverlayActive && (
+                    <div
+                      className={styles.splitApprovalNotice}
+                      role="status"
+                      data-testid="split-approval-notice"
+                    >
+                      <span>{t('splitView.outerApprovalPending')}</span>
+                      <button type="button" onClick={() => setMainView('chat')}>
+                        {t('splitView.goToApproval')}
+                      </button>
+                    </div>
+                  )}
+                  {/* Share the app-level customization + compact-mode contexts so
+                      split panes render markdown/tool-headers/thinking the same
+                      way the single-session chat does (todo contexts stay chat-
+                      only — they belong to the outer session, not the panes). */}
+                  <WebShellCustomizationProvider value={customization}>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <SplitView
+                        initialSessionIds={splitSessionIds}
+                        // Mirror live pane add/remove back up so switching away
+                        // and re-entering restores the same panes. Pass the
+                        // setter directly — a fresh arrow each render would loop
+                        // SplitView's reporting effect.
+                        onPanesChange={setSplitSessionIds}
+                        // Refresh the "add pane" picker when the session list
+                        // changes elsewhere, matching the sidebar.
+                        sessionListReloadToken={sessionListReloadToken}
+                        // Back returns to the Session Overview (the hub the split
+                        // is launched from), not the single-session chat.
+                        onExit={handleSplitExit}
+                        onError={reportError}
+                      />
+                    </CompactModeContext.Provider>
+                  </WebShellCustomizationProvider>
+                </div>
+              )}
+              <div
+                className={
+                  activePanel || mainView !== 'chat'
+                    ? `${styles.chatViewWrap} ${styles.chatViewHidden}`
+                    : styles.chatViewWrap
+                }
+                // Hide the outer chat whenever a panel or a full-page view (split
+                // / scheduled tasks) is up. `display:none` drops the subtree from
+                // layout and the tab order, and aria-hidden keeps AT out — so no
+                // keyboard/AT can reach the outer composer/toolbar behind the
+                // split. State is preserved (the node stays mounted).
+                aria-hidden={
+                  activePanel || mainView !== 'chat' ? true : undefined
+                }
+              >
+                {showMissingSessionState && (
+                  <div className={styles.missingSessionState}>
+                    <div className={styles.missingSessionMessage}>
+                      {t('session.missing')}
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.missingSessionButton}
+                      disabled={isCreatingMissingSession}
+                      onClick={handleMissingSessionNewSession}
+                    >
+                      {t('session.new')}
+                    </button>
+                  </div>
+                )}
+                <div
+                  className={
+                    showMissingSessionState
+                      ? styles.chatSubtreeHidden
+                      : styles.chatSubtree
                   }
-                  onShowContext={() => showContextUsage('/context', false)}
-                  onOpenSettings={() => setShowSettingsDialog(true)}
-                  ref={statusBarRef}
-                  onOpenTasks={() => openTasksPanel()}
-                  onReturnToInput={handleReturnToEditor}
-                  tasks={backgroundTasks}
-                  activeGoal={activeGoal}
-                  hideSettings={hideSettings}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  compact={true}
-                />
-              )}
-              {isChatEmptyState && welcomeFooter && (
-                <div className={styles.emptyWelcomeFooter}>{welcomeFooter}</div>
-              )}
+                >
+                  <WebShellCustomizationProvider value={customization}>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <TodoContextsProvider
+                        timeline={todoTimeline}
+                        details={todoDetails}
+                      >
+                        <div
+                          className={[
+                            styles.content,
+                            showFloatingTodos ||
+                            displayMessages.length > 0 ||
+                            pendingApproval
+                              ? styles.contentHasMessages
+                              : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
+                        >
+                          <MessageList
+                            ref={messageListRef}
+                            messages={displayMessages}
+                            pendingApproval={pendingToolApproval}
+                            onShowContextDetail={handleShowContextDetail}
+                            loadingTranscript={connection.loadingTranscript}
+                            catchingUp={connection.catchingUp}
+                            isResponding={streamingState !== 'idle'}
+                            activeTurnStartedAt={activeTurnStartedAt}
+                            workspaceCwd={connection.workspaceCwd || ''}
+                            hideSessionTimeline={
+                              effectiveChatWidthMode === 'wide'
+                            }
+                            showRetryHint={showRetryHint}
+                            onRetryClick={handleRetry}
+                            onBranchSession={handleBranchCurrentSession}
+                            welcomeHeader={
+                              isChatEmptyState ? welcomeHeader : undefined
+                            }
+                            tailContent={undefined}
+                            tailKey={undefined}
+                            onCanScrollToBottomChange={
+                              handleCanScrollToBottomChange
+                            }
+                            virtualScrollThreshold={virtualScrollThreshold}
+                          />
+                          {btwMessage?.role === 'btw' && (
+                            <div className={styles.btwPanel}>
+                              <BtwMessage
+                                question={btwMessage.question}
+                                answer={btwMessage.answer}
+                                isPending={btwMessage.isPending}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </TodoContextsProvider>
+                    </CompactModeContext.Provider>
+
+                    <div ref={footerRef} className={styles.footer}>
+                      {canScrollMessageListToBottom && (
+                        <div
+                          className={
+                            showFloatingTodos
+                              ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                              : styles.scrollToBottomLayer
+                          }
+                        >
+                          <button
+                            type="button"
+                            className={styles.scrollToBottomButton}
+                            aria-label={t('chat.scrollToBottom')}
+                            onClick={() => resumeChatBottomFollow('smooth')}
+                          >
+                            <svg
+                              className={styles.scrollToBottomIcon}
+                              viewBox="0 0 24 24"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                      )}
+                      {showFloatingTodos && (
+                        <div className={styles.bottomPanels}>
+                          <TodoPanel todos={floatingTodos} />
+                        </div>
+                      )}
+                      {/* Only render the outer session's approval on the chat
+                          view. Under a full-page view (split / scheduled tasks)
+                          it would sit hidden yet still own global keyboard
+                          shortcuts — a keypress could confirm an unseen
+                          approval. Each split pane surfaces its own approval. */}
+                      {pendingToolApproval && mainView === 'chat' && (
+                        <div
+                          ref={approvalOverlayRef}
+                          tabIndex={-1}
+                          data-testid="approval-overlay"
+                          className={styles.approvalOverlay}
+                        >
+                          <ToolApproval
+                            request={pendingToolApproval}
+                            onConfirm={handleConfirm}
+                            variant="floating"
+                          />
+                        </div>
+                      )}
+                      {pendingAskUserApproval && mainView === 'chat' && (
+                        <div
+                          ref={approvalOverlayRef}
+                          tabIndex={-1}
+                          data-testid="approval-overlay"
+                          className={styles.approvalOverlay}
+                        >
+                          <AskUserQuestion
+                            request={pendingAskUserApproval}
+                            onConfirm={handleConfirm}
+                            variant="floating"
+                          />
+                        </div>
+                      )}
+                      <div className={styles.composer}>
+                        <StreamingStatus startedAt={activeTurnStartedAt} />
+                        {escapeHintVisible && streamingState === 'idle' && (
+                          <div className={styles.escClearStatus} role="status">
+                            {t('editor.escClearHint')}
+                          </div>
+                        )}
+                        <QueuedPromptDisplay
+                          prompts={queuedPrompts}
+                          t={t}
+                          onDelete={removeQueuedPrompt}
+                          onInsert={insertQueuedPrompt}
+                          onEdit={editQueuedPrompt}
+                        />
+                        <ChatEditor
+                          ref={setEditorHandle}
+                          onSubmit={handleEditorSubmit}
+                          onCycleMode={handleCycleMode}
+                          onToggleShortcuts={handleToggleShortcuts}
+                          onCancel={handleCancel}
+                          isRunning={streamingState !== 'idle'}
+                          isPreparing={isPreparingPrompt}
+                          cancelArmed={cancelArmed}
+                          disabled={isDisabled}
+                          commands={commands}
+                          skills={loadedSkills}
+                          slashCommandCategoryOrder={slashCommandCategoryOrder}
+                          atProviders={atProviders}
+                          composerTagIcons={composerTagIcons}
+                          queuedMessages={queuedTexts}
+                          onFocusFooter={handleFocusTaskPill}
+                          onPopQueuedMessages={editLastQueuedPrompt}
+                          onClearQueuedMessages={clearQueuedPrompts}
+                          currentMode={currentMode}
+                          currentModel={currentModel}
+                          chatWidthMode={chatWidthMode}
+                          showChatWidthToggle={!isChatEmptyState}
+                          chatWidthToggleMin={chatWidthToggleMin}
+                          visibleToolbarActions={composerToolbarActions}
+                          availableModels={availableModels}
+                          onSelectMode={handleSetMode}
+                          onSelectModel={handleModelSelect}
+                          onChatWidthModeChange={handleChatWidthModeChange}
+                          sessionName={sessionDisplayName}
+                          dialogOpen={
+                            interactionBlocked || approvalOverlayActive
+                          }
+                          followupState={followupState}
+                          onAcceptFollowup={onAcceptFollowup}
+                          onDismissFollowup={onDismissFollowup}
+                          composerInput={composerInput}
+                          composerInputVersion={composerInputVersion}
+                          placeholderText={t(
+                            getComposerPlaceholderKey({
+                              catchingUp: Boolean(connection.catchingUp),
+                              isPreparingPrompt,
+                              isStreaming: streamingState !== 'idle',
+                            }),
+                          )}
+                        />
+                      </div>
+                      {CustomFooter ? (
+                        <CustomFooter
+                          connected={connected}
+                          mode={currentMode}
+                          model={currentModel}
+                          streamingState={streamingState}
+                          contextUsageRatio={
+                            (connection.contextWindow ?? 0) > 0
+                              ? (connection.tokenCount ?? 0) /
+                                (connection.contextWindow ?? 0)
+                              : 0
+                          }
+                          activeGoal={activeGoal}
+                          tasks={footerTasks}
+                          availableModes={MODES_CYCLE}
+                          availableModels={(connection.models ?? [])
+                            .filter(isVisibleComposerModel)
+                            .map((m) => ({
+                              id: m.id,
+                              label: getModelDisplayName(m.label || m.id),
+                              contextWindow: m.contextWindow,
+                            }))}
+                          skills={loadedSkills}
+                          onSelectMode={handleSetMode}
+                          onSelectModel={handleModelSelect}
+                        />
+                      ) : (
+                        <StatusBar
+                          onSelectMode={() =>
+                            setShowApprovalModeDialog((v) => !v)
+                          }
+                          onSelectModel={() =>
+                            setModelDialogMode((v) => (v ? null : 'main'))
+                          }
+                          onShowContext={() =>
+                            showContextUsage('/context', false)
+                          }
+                          onOpenSettings={() => openPanel('settings')}
+                          ref={statusBarRef}
+                          onOpenTasks={() => openTasksPanel()}
+                          onReturnToInput={handleReturnToEditor}
+                          tasks={backgroundTasks}
+                          activeGoal={activeGoal}
+                          hideSettings={hideSettings}
+                          onToggleShortcuts={handleToggleShortcuts}
+                          compact={true}
+                        />
+                      )}
+                      {isChatEmptyState && welcomeFooter && (
+                        <div className={styles.emptyWelcomeFooter}>
+                          {welcomeFooter}
+                        </div>
+                      )}
+                    </div>
+                  </WebShellCustomizationProvider>
+                </div>
+              </div>
             </div>
-          </WebShellCustomizationProvider>
+          </div>
         </div>
       </I18nProvider>
     </ThemeProvider>

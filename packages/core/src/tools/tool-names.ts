@@ -44,6 +44,7 @@ export const ToolNames = {
   TASK_LIST: 'task_list',
   TEAM_CREATE: 'team_create',
   TEAM_DELETE: 'team_delete',
+  TEAM_PLAN_APPROVAL: 'team_plan_approval',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
@@ -60,6 +61,7 @@ export const ToolNames = {
   // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
+  RECORD_ARTIFACT: 'record_artifact',
 } as const;
 
 /**
@@ -94,6 +96,7 @@ export const ToolDisplayNames = {
   TASK_LIST: 'TaskList',
   TEAM_CREATE: 'TeamCreate',
   TEAM_DELETE: 'TeamDelete',
+  TEAM_PLAN_APPROVAL: 'TeamPlanApproval',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
@@ -105,6 +108,7 @@ export const ToolDisplayNames = {
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
+  RECORD_ARTIFACT: 'RecordArtifact',
 } as const;
 
 // Migration from old tool names to new tool names

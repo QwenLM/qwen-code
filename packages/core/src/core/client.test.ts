@@ -51,11 +51,31 @@ import {
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 
+type MockSessionStartProfiler = {
+  time: Mock;
+  timeSync: Mock;
+  finish: Mock;
+};
+
+const sessionStartProfilerMocks = vi.hoisted(() => ({
+  createSessionStartProfiler: vi.fn(),
+  profilers: [] as MockSessionStartProfiler[],
+}));
+
+vi.mock('./session-start-profiler.js', () => ({
+  createSessionStartProfiler:
+    sessionStartProfilerMocks.createSessionStartProfiler,
+}));
+
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
   isUnattendedMode: vi.fn(() => false),
 }));
-import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
+import {
+  getCoreSystemPrompt,
+  getCustomSystemPrompt,
+  getPlanModeSystemReminder,
+} from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -63,7 +83,9 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
-  buildAddedMcpToolsReminder,
+  buildChangedAgentsReminder,
+  buildChangedMcpToolsReminder,
+  buildChangedSkillsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
@@ -75,6 +97,7 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -193,10 +216,32 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
       ],
       [],
     ]),
-    buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
-      tools.length === 0
-        ? null
-        : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
+    buildChangedMcpToolsReminder: vi.fn(
+      (
+        tools: Array<{ name: string }>,
+        removedToolNames: string[],
+      ): string | null =>
+        tools.length === 0 && removedToolNames.length === 0
+          ? null
+          : `<system-reminder>\nchanged mcp: added=${tools.map((tool) => tool.name).join(', ')} removed=${removedToolNames.join(', ')}\n</system-reminder>`,
+    ),
+    buildChangedSkillsReminder: vi.fn(
+      (
+        entries: Array<{ name: string }>,
+        removedNames: string[],
+      ): string | null =>
+        entries.length === 0 && removedNames.length === 0
+          ? null
+          : `<system-reminder>\nchanged skills: added=${entries.map((entry) => entry.name).join(', ')} removed=${removedNames.join(', ')}\n</system-reminder>`,
+    ),
+    buildChangedAgentsReminder: vi.fn(
+      (
+        addedAgents: Array<{ name: string }>,
+        removedAgentNames: string[],
+      ): string | null =>
+        addedAgents.length === 0 && removedAgentNames.length === 0
+          ? null
+          : `<system-reminder>\nchanged agents: added=${addedAgents.map((agent) => agent.name).join(', ')} removed=${removedAgentNames.join(', ')}\n</system-reminder>`,
     ),
     getStartupContextLength: vi.fn((history) => {
       const first = history?.[0];
@@ -385,6 +430,20 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    sessionStartProfilerMocks.profilers.length = 0;
+    sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
+      () => {
+        const profiler: MockSessionStartProfiler = {
+          time: vi.fn(async (_stage: string, fn: () => Promise<unknown>) =>
+            fn(),
+          ),
+          timeSync: vi.fn((_stage: string, fn: () => unknown) => fn()),
+          finish: vi.fn(),
+        };
+        sessionStartProfilerMocks.profilers.push(profiler);
+        return profiler;
+      },
+    );
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
     // Default: createContentGenerator rejects (simulates test env without auth).
@@ -481,6 +540,7 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getSdkMode: vi.fn().mockReturnValue(false),
       getIdeModeFeature: vi.fn().mockReturnValue(false),
       getIdeMode: vi.fn().mockReturnValue(true),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -506,6 +566,9 @@ describe('Gemini Client (client.ts)', () => {
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      // Mimics the resolved Config getter: always a number (Infinity keeps
+      // the cap out of the way of unrelated streaming tests).
+      getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -526,6 +589,9 @@ describe('Gemini Client (client.ts)', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getSkillManager: vi.fn().mockReturnValue(undefined),
+      getSubagentManager: vi.fn().mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([]),
+      }),
       consumeInlineAnnouncedSkillKeys: vi
         .fn()
         .mockReturnValue(new Set<string>()),
@@ -860,6 +926,247 @@ describe('Gemini Client (client.ts)', () => {
       ).resolves.toBeUndefined();
       expect(debugLogger.warn).toHaveBeenCalledWith(
         'SessionStart hook failed: Error: hook failed',
+      );
+    });
+  });
+
+  describe('startChat — session start profiling', () => {
+    beforeEach(() => {
+      sessionStartProfilerMocks.createSessionStartProfiler.mockClear();
+      sessionStartProfilerMocks.profilers.length = 0;
+    });
+
+    it('passes startup, resume, and clear sources to the profiler', async () => {
+      await client.startChat();
+      await client.startChat([{ role: 'user', parts: [{ text: 'hi' }] }]);
+      await client.startChat(undefined, SessionStartSource.Clear);
+
+      expect(
+        sessionStartProfilerMocks.createSessionStartProfiler.mock.calls.map(
+          ([source]) => source,
+        ),
+      ).toEqual([
+        SessionStartSource.Startup,
+        SessionStartSource.Resume,
+        SessionStartSource.Clear,
+      ]);
+      expect(
+        sessionStartProfilerMocks.profilers[1].finish,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ extraHistoryLength: 1 }),
+      );
+      for (const profiler of sessionStartProfilerMocks.profilers) {
+        expect(profiler.finish).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('finalizes successful startChat profiles with bounded counts', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'hook output',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat(undefined, SessionStartSource.Clear);
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: true,
+          extraHistoryLength: 0,
+          historyLength: 1,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+      expect(profiler.time.mock.calls.map(([stage]) => stage)).toEqual([
+        'tool_registry_warm',
+        'initial_chat_history',
+        'agent_reminder_seed',
+        'session_start_hook',
+        'set_tools',
+      ]);
+      expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).toEqual([
+        'resume_deferred_tool_reveal',
+        'deferred_reminder_setup',
+        'skill_reminder_seed',
+        'system_instruction',
+        'gemini_chat_construct',
+        'orphan_tool_use_repair',
+        'session_start_context_apply',
+      ]);
+    });
+
+    it('records non-zero snapshot and deferred reminder counts', async () => {
+      const toolRegistry = vi.mocked(
+        mockConfig.getToolRegistry,
+      )() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      toolRegistry.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      toolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [
+          {
+            role: 'user',
+            parts: [{ text: '<system-reminder>context</system-reminder>' }],
+          },
+        ],
+        [
+          { name: 'skill-one', description: 'first skill' },
+          { name: 'skill-two', description: 'second skill' },
+        ],
+      ]);
+
+      await client.startChat();
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: true,
+          snapshotEntryCount: 2,
+          deferredReminderCount: 1,
+        }),
+      );
+    });
+
+    it('does not record context apply stage without SessionStart context', async () => {
+      await client.startChat();
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(
+        profiler.timeSync.mock.calls.map(([stage]) => stage),
+      ).not.toContain('session_start_context_apply');
+    });
+
+    it('finalizes failed startChat profiles without changing the thrown error', async () => {
+      vi.mocked(getInitialChatHistory).mockRejectedValueOnce(
+        new Error('history failed'),
+      );
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: history failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 0,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+    });
+
+    it('finalizes failed startChat profiles for first-stage warm errors', async () => {
+      const toolRegistry = vi.mocked(
+        mockConfig.getToolRegistry,
+      )() as unknown as {
+        warmAll: ReturnType<typeof vi.fn>;
+      };
+      toolRegistry.warmAll.mockRejectedValueOnce(new Error('warm failed'));
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: warm failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.time.mock.calls.map(([stage]) => stage)).toContain(
+        'tool_registry_warm',
+      );
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 0,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+    });
+
+    it('finalizes failed startChat profiles for sync stage errors', async () => {
+      vi.spyOn(
+        client as unknown as { getMainSessionSystemInstruction: () => string },
+        'getMainSessionSystemInstruction',
+      ).mockImplementationOnce(() => {
+        throw new Error('system instruction failed');
+      });
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: system instruction failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).toContain(
+        'system_instruction',
+      );
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 1,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+    });
+
+    it('finalizes failed startChat profiles with partial counts', async () => {
+      const toolRegistry = vi.mocked(
+        mockConfig.getToolRegistry,
+      )() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      toolRegistry.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      toolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [
+          {
+            role: 'user',
+            parts: [{ text: '<system-reminder>context</system-reminder>' }],
+          },
+        ],
+        [{ name: 'skill-one', description: 'first skill' }],
+      ]);
+      vi.spyOn(client, 'setTools').mockRejectedValueOnce(
+        new Error('set tools failed'),
+      );
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: set tools failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 1,
+          snapshotEntryCount: 1,
+          deferredReminderCount: 1,
+        }),
       );
     });
   });
@@ -1346,26 +1653,53 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(setSystemInstructionSpy).not.toHaveBeenCalled();
       expect(vi.mocked(getCoreSystemPrompt)).not.toHaveBeenCalled();
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        {
-          name: 'mcp__addition-server__add',
-          description: 'Add two numbers',
-          serverName: 'addition-server',
-        },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [
+          {
+            name: 'mcp__addition-server__add',
+            description: 'Add two numbers',
+            serverName: 'addition-server',
+          },
+        ],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledWith({
         role: 'user',
         parts: [
           {
-            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+            text: '<system-reminder>\nchanged mcp: added=mcp__addition-server__add removed=\n</system-reminder>',
           },
         ],
       });
+    });
+
+    it('does not announce MCP removal before an added tool was drained', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__flaky__do',
+        description: 'd',
+        serverName: 'flaky',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      await client.setTools();
+
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
     it('omits already-revealed deferred tools from added reminders', async () => {
@@ -1390,9 +1724,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [{ name: 'mcp__server__beta', description: 'b', serverName: 'server' }],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledTimes(1);
     });
 
@@ -1412,12 +1747,12 @@ describe('Gemini Client (client.ts)', () => {
       reg.getDeferredToolSummary.mockReturnValue([tool]);
       await client.setTools();
       await runTurn();
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith([tool], []);
 
       // Server disconnects: removeMcpToolsByServer() drops it from the
       // deferred set. queueAddedMcpToolsReminder must prune the stale
       // announced name here.
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
       reg.getDeferredToolSummary.mockReturnValue([]);
       await client.setTools();
       await runTurn();
@@ -1425,11 +1760,68 @@ describe('Gemini Client (client.ts)', () => {
       // Server reconnects with the same tool. Without the prune the name
       // would still be in announcedDeferredToolNames and be skipped, so
       // the user would never get a "new tools available" reminder.
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
       reg.getDeferredToolSummary.mockReturnValue([tool]);
       await client.setTools();
       await runTurn();
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith([tool], []);
+    });
+
+    it('announces removed MCP deferred tools after disconnect', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__gone__do',
+        description: 'd',
+        serverName: 'gone',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      await runTurn();
+
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      addHistorySpy.mockClear();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__gone__do'],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged mcp: added= removed=mcp__gone__do\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('keeps queued MCP changes when the reminder builder returns null', () => {
+      const priv = client as unknown as {
+        pendingAddedMcpTools: Map<
+          string,
+          { name: string; description: string; serverName: string }
+        >;
+        pendingRemovedMcpToolNames: Set<string>;
+        drainPendingAddedMcpToolsReminder(): void;
+      };
+      priv.pendingRemovedMcpToolNames = new Set(['mcp__gone__do']);
+      vi.mocked(buildChangedMcpToolsReminder).mockReturnValueOnce(null);
+
+      priv.drainPendingAddedMcpToolsReminder();
+
+      expect(priv.pendingRemovedMcpToolNames).toEqual(
+        new Set(['mcp__gone__do']),
+      );
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1482,12 +1874,12 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
       await runTurn();
       addHistorySpy.mockClear();
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
 
       await client.setTools();
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
@@ -1510,26 +1902,53 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
       await runTurn(SendMessageType.ToolResult);
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        {
-          name: 'mcp__addition-server__add',
-          description: 'Add two numbers',
-          serverName: 'addition-server',
-        },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [
+          {
+            name: 'mcp__addition-server__add',
+            description: 'Add two numbers',
+            serverName: 'addition-server',
+          },
+        ],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledWith({
         role: 'user',
         parts: [
           {
-            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+            text: '<system-reminder>\nchanged mcp: added=mcp__addition-server__add removed=\n</system-reminder>',
           },
         ],
       });
+    });
+
+    it('keeps draining later capability reminders when MCP drain fails', async () => {
+      const priv = client as unknown as {
+        drainPendingAddedMcpToolsReminder(): void;
+        drainSkillAndCommandReminders(): Promise<void>;
+        drainAgentReminders(): Promise<void>;
+      };
+      vi.spyOn(priv, 'drainPendingAddedMcpToolsReminder').mockImplementation(
+        () => {
+          throw new Error('mcp drain failed');
+        },
+      );
+      const skillDrainSpy = vi
+        .spyOn(priv, 'drainSkillAndCommandReminders')
+        .mockResolvedValue();
+      const agentDrainSpy = vi
+        .spyOn(priv, 'drainAgentReminders')
+        .mockResolvedValue();
+
+      await runTurn();
+
+      expect(skillDrainSpy).toHaveBeenCalled();
+      expect(agentDrainSpy).toHaveBeenCalled();
     });
 
     it('preserves SessionStart additionalContext because setTools does not rewrite the system instruction', async () => {
@@ -1926,6 +2345,42 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
       expect(cacheClear).toHaveBeenCalled();
+    });
+
+    it('restores stripped retry entries when session token limit skips send', async () => {
+      const retryEntry: Content = {
+        role: 'user',
+        parts: [{ text: 'retry me' }],
+      };
+      const addHistory = vi.fn();
+      client['chat'] = {
+        addHistory,
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(1),
+        // Send is skipped, so the push counter never advances → restore.
+        getUserContentPushCount: vi.fn().mockReturnValue(0),
+        stripOrphanedUserEntriesFromHistory: vi
+          .fn()
+          .mockReturnValue([retryEntry]),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        101,
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'retry me' }],
+          new AbortController().signal,
+          'prompt-retry-limit',
+          { type: SendMessageType.Retry },
+        ),
+      );
+
+      expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(addHistory).toHaveBeenCalledWith(retryEntry);
     });
   });
 
@@ -3058,14 +3513,14 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag for `customInstructions` plumbing;
-      // omitted here means undefined which is the correct contract.
+      // 5th arg is the `options` bag — always includes reservedOutputTokens
+      // now; no customInstructions when omitted by the caller.
       expect(tryCompress).toHaveBeenCalledWith(
         'p1',
         'the-model',
         true,
         signal,
-        undefined,
+        { reservedOutputTokens: expect.any(Number) },
       );
     });
 
@@ -3088,7 +3543,10 @@ describe('Gemini Client (client.ts)', () => {
         'the-model',
         true,
         undefined,
-        { customInstructions: 'focus on auth bug' },
+        {
+          customInstructions: 'focus on auth bug',
+          reservedOutputTokens: expect.any(Number),
+        },
       );
     });
 
@@ -4664,6 +5122,89 @@ hello
         ],
         expect.any(AbortSignal),
       );
+    });
+
+    it('uses the subagent plan reminder when a subagent inherits PLAN mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>return plan to caller</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await runWithAgentContext('agent-1', async () => {
+        const stream = client.sendMessageStream(
+          [{ text: 'Plan this change' }],
+          new AbortController().signal,
+          'prompt-id-subagent-plan-reminder',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+      });
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+    });
+
+    it('uses the subagent plan reminder when SDK mode is active', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(true);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>return plan to caller</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Plan this change' }],
+        new AbortController().signal,
+        'prompt-id-sdk-plan-reminder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+    });
+
+    it('uses the main-session plan reminder outside subagent and SDK mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>call exit_plan_mode</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Plan this change' }],
+        new AbortController().signal,
+        'prompt-id-main-plan-reminder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false);
     });
 
     it('should not inject duplicate date on the same day', async () => {
@@ -6504,6 +7045,163 @@ Other open files:
         ).toHaveBeenCalledOnce();
       });
 
+      it('restores stripped retry entries when the retry stream throws before its first event', async () => {
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          // Send throws before the push, so the counter never advances → restore.
+          getUserContentPushCount: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-pre-event-failure',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed before first event');
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      });
+
+      it('does not re-add stripped retry entries when the chat already pushed them before failing', async () => {
+        // Regression (I1): a Retry that fails AFTER chat.sendMessageStream has
+        // pushed the re-submitted user content but BEFORE any event streamed
+        // must not restore the stripped entries on top of the content the chat
+        // already holds — that would duplicate history. The push-counter guard
+        // suppresses the re-add because the push advanced the counter.
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        // Mirror GeminiChat's user-content push counter; the mocked turn bumps
+        // it when it simulates the pre-API push.
+        let pushCount = 0;
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          getUserContentPushCount: vi.fn(() => pushCount),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            // Simulate the real chat pushing the re-submitted user content into
+            // history before the API call, then failing pre-event.
+            pushCount++;
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed after push, before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-post-push-failure',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed after push, before first event');
+
+        // The push counter advanced past the post-strip snapshot, so the
+        // restore must be suppressed — no duplicate addHistory.
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+      });
+
+      it('does not re-add stripped retry entries when auto-compression shrank history below the pre-send length after the push', async () => {
+        // Regression (IDX 4/8): auto-compression inside chat.sendMessageStream
+        // runs BEFORE the re-submitted user content is pushed, so history can
+        // end up SHORTER than it was right after the strip even though the push
+        // landed. A history-length guard would read "history didn't grow" and
+        // wrongly restore the stripped entries, duplicating the prompt. The
+        // push-counter guard is invariant under compression and must suppress
+        // the restore.
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        // Live history shrinks below the post-strip baseline via compression.
+        const historyRef: Content[] = [
+          { role: 'user', parts: [{ text: 'old-1' }] },
+          { role: 'model', parts: [{ text: 'old-2' }] },
+          { role: 'user', parts: [{ text: 'old-3' }] },
+        ];
+        let pushCount = 0;
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn(() => historyRef),
+          getHistoryLength: vi.fn(() => historyRef.length),
+          getUserContentPushCount: vi.fn(() => pushCount),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            // Compression collapses the old turns into one summary, THEN the
+            // user content is pushed (counter bumps): net length (2) < the
+            // post-strip baseline (3).
+            historyRef.length = 0;
+            historyRef.push({ role: 'user', parts: [{ text: 'summary' }] });
+            historyRef.push(orphanedPrompt);
+            pushCount++;
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error(
+              'failed after compression+push, before first event',
+            );
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-compression-shrink',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('failed after compression+push, before first event');
+
+        // History length (2) is below the post-strip baseline (3) — a length
+        // guard would restore here — but the push counter advanced, so the
+        // counter guard must suppress the re-add.
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+      });
+
       it('should not increment sessionTurnCount for retry', async () => {
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
@@ -6900,6 +7598,76 @@ Other open files:
           value:
             'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
+      });
+
+      it('gives a blocking Stop hook continuation a fresh per-turn tool-call budget', async () => {
+        // First Stop check blocks (like a /goal "not met" verdict); the
+        // second allows the loop to end.
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        // Cap of 4: each turn's 3 tool calls fit, but 6 accumulated across
+        // the continuation boundary would not.
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as GeminiChat;
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            for (let i = 0; i < 3; i++) {
+              yield {
+                type: GeminiEventType.ToolCallRequest,
+                value: {
+                  callId: `call-${turnNo}-${i}`,
+                  name: 'test_tool',
+                  args: { turnNo, i },
+                  isClientInitiated: false,
+                  prompt_id: 'prompt-stop-hook-budget',
+                },
+              };
+            }
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })();
+        });
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-hook-budget',
+          ),
+        );
+
+        // The hook continuation turn actually ran...
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        // ...and 3+3 tool calls under a cap of 4 never tripped the cap: the
+        // continuation started a fresh budget instead of inheriting the
+        // first turn's accumulated count.
+        expect(events).not.toContainEqual(
+          expect.objectContaining({ type: GeminiEventType.LoopDetected }),
+        );
       });
 
       it('emits one active_goal null when the blocking cap aborts an active goal', async () => {
@@ -7844,8 +8612,16 @@ Other open files:
       setHistory: vi.fn(),
     };
 
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const priv = () => client as any;
+    const priv = () =>
+      client as unknown as {
+        chat: typeof mockChat;
+        announcedSkillReminderKeys: Set<string>;
+        skillRemindersInitialized: boolean;
+        drainSkillAndCommandReminders(): Promise<void>;
+        seedSkillReminderDedupFromSnapshot(
+          entries: AvailableSkillEntry[],
+        ): void;
+      };
 
     async function drain() {
       await priv().drainSkillAndCommandReminders();
@@ -7860,7 +8636,7 @@ Other open files:
       );
       const toolReg = mockConfig.getToolRegistry();
       vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
-        name === ToolNames.SKILL ? ({} as any) : undefined,
+        name === ToolNames.SKILL ? ({} as never) : undefined,
       );
       priv().chat = mockChat;
       priv().announcedSkillReminderKeys = new Set();
@@ -7972,6 +8748,30 @@ Other open files:
       expect(mockChat.addHistory).toHaveBeenCalled();
       const addedContent = mockChat.addHistory.mock.calls[0][0];
       expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('removed skill emits a reminder', async () => {
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+      vi.mocked(buildChangedSkillsReminder).mockClear();
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      await drain();
+
+      expect(buildChangedSkillsReminder).toHaveBeenCalledWith([], ['skill-a']);
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged skills: added= removed=skill-a\n</system-reminder>',
+          },
+        ],
+      });
     });
 
     it('path-activated skill is announced by drain (no suppression based on shared activation set)', async () => {
@@ -8197,7 +8997,6 @@ Other open files:
       expect(addedContent.parts[0].text).toContain('skill-new');
       expect(addedContent.parts[0].text).not.toContain('desc-skill-inline');
     });
-    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 
   describe('#5147 shutdown gate', () => {
@@ -8273,6 +9072,198 @@ Other open files:
       expect(() => client.requestShutdown()).not.toThrow();
       // Should not throw on third call
       expect(() => client.requestShutdown()).not.toThrow();
+    });
+  });
+
+  describe('drainAgentReminders', () => {
+    const priv = () =>
+      client as unknown as {
+        announcedAgentReminderNames: Set<string>;
+        agentRemindersInitialized: boolean;
+        drainAgentReminders(): Promise<void>;
+      };
+
+    beforeEach(() => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
+        name === ToolNames.AGENT ? ({} as never) : undefined,
+      );
+      priv().announcedAgentReminderNames = new Set(['old-agent']);
+      priv().agentRemindersInitialized = true;
+      vi.mocked(buildChangedAgentsReminder).mockClear();
+    });
+
+    it('returns early when the Agent tool is not registered', async () => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockReturnValue(undefined);
+      const listSubagents = vi.fn().mockResolvedValue([]);
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents,
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(listSubagents).not.toHaveBeenCalled();
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('seeds current agents on first drain without emitting a reminder', async () => {
+      priv().announcedAgentReminderNames = new Set();
+      priv().agentRemindersInitialized = false;
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'seed-agent',
+            description: 'Seed agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(priv().agentRemindersInitialized).toBe(true);
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['seed-agent']),
+      );
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('returns early when listing agents fails', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi
+          .fn()
+          .mockRejectedValue(new Error('agent list failed')),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent']),
+      );
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('emits no reminder when agents are unchanged', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'old-agent',
+            description: 'Old agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith([], []);
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('announces added-only agents', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'old-agent',
+            description: 'Old agent',
+          },
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [{ name: 'new-agent', description: 'New agent' }],
+        [],
+      );
+      expect(addHistorySpy).toHaveBeenCalled();
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent', 'new-agent']),
+      );
+    });
+
+    it('announces removed-only agents', async () => {
+      priv().announcedAgentReminderNames = new Set(['old-agent', 'stay-agent']);
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'stay-agent',
+            description: 'Stay agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [],
+        ['old-agent'],
+      );
+      expect(addHistorySpy).toHaveBeenCalled();
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['stay-agent']),
+      );
+    });
+
+    it('announces added and removed agents', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      vi.mocked(buildChangedAgentsReminder).mockClear();
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [{ name: 'new-agent', description: 'New agent' }],
+        ['old-agent'],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged agents: added=new-agent removed=old-agent\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('keeps agent reminder state unchanged if history append fails', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      vi.spyOn(client.getChat(), 'addHistory').mockImplementation(() => {
+        throw new Error('history failed');
+      });
+
+      await expect(priv().drainAgentReminders()).rejects.toThrow(
+        'history failed',
+      );
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent']),
+      );
     });
   });
 });

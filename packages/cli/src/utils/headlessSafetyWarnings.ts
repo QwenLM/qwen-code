@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
-
 export const HEADLESS_YOLO_NO_SANDBOX_WARNING =
   'Warning: running headless with --yolo / approval-mode=yolo and no sandbox. ' +
   "All tool calls (shell, write, edit) auto-execute at this process's privilege level. " +
@@ -26,10 +24,14 @@ export const HEADLESS_YOLO_NO_SANDBOX_WARNING =
  * fall through to `process.env`.
  */
 export function getHeadlessYoloSafetyWarning(
-  config: Pick<Config, 'getApprovalMode' | 'getSandbox'>,
+  config: {
+    getApprovalMode(): string | undefined;
+    getSandbox(): unknown;
+  },
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
-  if (config.getApprovalMode() !== ApprovalMode.YOLO) return null;
+  // Keep this literal in sync with ApprovalMode.YOLO without importing core at runtime.
+  if (config.getApprovalMode() !== 'yolo') return null;
   if (config.getSandbox()) return null;
   // `SANDBOX` is set by the sandbox transport itself: macOS seatbelt sets
   // it to `sandbox-exec`, Docker/Podman to the container name (e.g.

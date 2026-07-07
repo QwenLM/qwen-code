@@ -16,19 +16,62 @@ import type {
   FileSystemService,
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  getErrorMessage,
+  isSubpath,
+} from '@qwen-code/qwen-code-core';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
 
 const RESOURCE_NOT_FOUND_CODE = -32002;
+const PATH_OUTSIDE_WORKSPACE_KIND = 'path_outside_workspace';
+const SYMLINK_ESCAPE_KIND = 'symlink_escape';
+const LOCAL_READ_FALLBACK_ERROR_KINDS = new Set([
+  PATH_OUTSIDE_WORKSPACE_KIND,
+  SYMLINK_ESCAPE_KIND,
+]);
+const debugLogger = createDebugLogger('ACP_FILE_SYSTEM');
+
+interface AcpFileSystemServiceOptions {
+  localReadRoots?: readonly string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function getErrorCode(error: unknown): unknown {
   if (error instanceof RequestError) {
     return error.code;
   }
 
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    return (error as { code?: unknown }).code;
+  if (isRecord(error)) {
+    return error['code'];
   }
 
   return undefined;
+}
+
+function getErrorData(error: unknown): Record<string, unknown> | undefined {
+  const data = isRecord(error) ? error['data'] : undefined;
+  return isRecord(data) ? data : undefined;
+}
+
+function getErrorKind(error: unknown): string | undefined {
+  const data = getErrorData(error);
+  if (data && typeof data['errorKind'] === 'string') {
+    return data['errorKind'];
+  }
+  return undefined;
+}
+
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) return error;
+
+  return new Error(getErrorMessage(error), {
+    cause: error,
+  });
 }
 
 function createEnoentError(filePath: string): NodeJS.ErrnoException {
@@ -39,12 +82,36 @@ function createEnoentError(filePath: string): NodeJS.ErrnoException {
   return err;
 }
 
+function isLocalReadFallbackErrorKind(errorKind: unknown): boolean {
+  return (
+    typeof errorKind === 'string' &&
+    LOCAL_READ_FALLBACK_ERROR_KINDS.has(errorKind)
+  );
+}
+
+async function resolveRealPath(value: string): Promise<string | undefined> {
+  if (!value.trim()) return undefined;
+
+  try {
+    return await realpath(path.resolve(value));
+  } catch (error) {
+    if (getErrorCode(error) !== 'ENOENT') {
+      debugLogger.warn('realpath failed during ACP local read fallback check', {
+        path: value,
+        error: getErrorMessage(error),
+      });
+    }
+    return undefined;
+  }
+}
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
     private readonly connection: AgentSideConnection,
     private readonly sessionId: string,
     private readonly capabilities: FileSystemCapability,
     private readonly fallback: FileSystemService,
+    private readonly options: AcpFileSystemServiceOptions = {},
   ) {}
 
   async readTextFile(
@@ -67,7 +134,50 @@ export class AcpFileSystemService implements FileSystemService {
         throw createEnoentError(params.path);
       }
 
-      throw error;
+      const errorKind = getErrorKind(error);
+      const shouldTryLocalReadFallback =
+        isLocalReadFallbackErrorKind(errorKind);
+      const fallbackPath = shouldTryLocalReadFallback
+        ? await this.getLocalReadFallbackPath(params.path)
+        : undefined;
+      if (shouldTryLocalReadFallback && !fallbackPath) {
+        debugLogger.debug('Local read fallback skipped - no safe local path', {
+          path: params.path,
+          errorKind,
+        });
+      }
+      if (shouldTryLocalReadFallback && fallbackPath) {
+        debugLogger.debug('Falling back to local read after ACP error', {
+          path: params.path,
+          resolvedPath: fallbackPath,
+          errorKind,
+          error: getErrorMessage(error),
+        });
+        try {
+          return await this.fallback.readTextFile({
+            ...params,
+            path: fallbackPath,
+          });
+        } catch (fallbackError) {
+          if (getErrorCode(fallbackError) === 'ENOENT') {
+            throw fallbackError;
+          }
+
+          debugLogger.warn('Local read fallback failed after ACP error', {
+            path: params.path,
+            resolvedPath: fallbackPath,
+            errorKind,
+            originalError: getErrorMessage(error),
+            fallbackError: getErrorMessage(fallbackError),
+          });
+          throw new Error(
+            `Local fallback read failed for ${params.path}: ${getErrorMessage(fallbackError)} (original ACP error: ${getErrorMessage(error)})`,
+            { cause: { fallbackError, acpError: error } },
+          );
+        }
+      }
+
+      throw normalizeError(error);
     }
 
     return response;
@@ -85,16 +195,45 @@ export class AcpFileSystemService implements FileSystemService {
         ? '\uFEFF' + params.content
         : params.content;
 
-    await this.connection.writeTextFile({
-      ...params,
-      content: finalContent,
-      sessionId: this.sessionId,
-    });
+    try {
+      await this.connection.writeTextFile({
+        ...params,
+        content: finalContent,
+        sessionId: this.sessionId,
+      });
+    } catch (error) {
+      if (getErrorCode(error) === RESOURCE_NOT_FOUND_CODE) {
+        throw createEnoentError(params.path);
+      }
+      throw normalizeError(error);
+    }
 
     return { _meta: params._meta };
   }
 
   findFiles(fileName: string, searchPaths: readonly string[]): string[] {
     return this.fallback.findFiles(fileName, searchPaths);
+  }
+
+  private async getResolvedLocalReadRoots(): Promise<string[]> {
+    const roots = await Promise.all(
+      (this.options.localReadRoots ?? []).map(resolveRealPath),
+    );
+    return roots.filter((root): root is string => Boolean(root));
+  }
+
+  private async getLocalReadFallbackPath(
+    filePath: string,
+  ): Promise<string | undefined> {
+    const normalizedFilePath = path.resolve(filePath);
+    const realFilePath = await resolveRealPath(normalizedFilePath);
+    if (!realFilePath) return undefined;
+
+    for (const realRoot of await this.getResolvedLocalReadRoots()) {
+      if (isSubpath(realRoot, realFilePath)) {
+        return realFilePath;
+      }
+    }
+    return undefined;
   }
 }

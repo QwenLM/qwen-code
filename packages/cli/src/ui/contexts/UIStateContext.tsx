@@ -68,10 +68,13 @@ export interface UIState {
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isVoiceModelMode: boolean;
+  isVisionModelMode: boolean;
+  modelDialogPersistScope: 'workspace' | 'user' | undefined;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
+  isEffortDialogOpen: boolean;
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;

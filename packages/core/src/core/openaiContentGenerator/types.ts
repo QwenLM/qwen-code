@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentParameters } from '@google/genai';
+import type { GenerateContentParameters, Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
@@ -63,6 +63,22 @@ export interface RequestContext {
    * channel are deduplicated correctly.
    */
   reasoningDeltaState?: StreamingTextDeltaState;
+  /**
+   * Tracks whether tagged-thinking parsing has emitted a thought part in the
+   * current stream. Once true, separate reasoning_content deltas are considered
+   * duplicate reasoning and are suppressed.
+   */
+  hasTaggedThinkingThought?: boolean;
+  /**
+   * Buffered reasoning_content for tagged-thinking streams until we know
+   * whether visible content will emit tagged thought parts.
+   */
+  pendingReasoningText?: string;
+  /**
+   * Visible content buffered behind pending reasoning_content so it can be
+   * emitted after the reasoning thought if no tagged thought appears.
+   */
+  pendingContentParts?: Part[];
 }
 
 export interface ErrorHandler {

@@ -143,11 +143,7 @@ export async function collectContextData(
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
-    if (
-      tool.shouldDefer &&
-      !tool.alwaysLoad &&
-      !toolRegistry?.isDeferredToolRevealed(tool.name)
-    ) {
+    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);
@@ -207,7 +203,10 @@ export async function collectContextData(
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
-  const thresholds = computeThresholds(contextWindowSize);
+  const thresholds = computeThresholds(
+    contextWindowSize,
+    config.getAutoCompactThreshold(),
+  );
   // Keep the `(window - auto)` buffer for the legacy three-segment progress
   // bar in ContextUsage.tsx — it visualizes the headroom between the auto
   // threshold and the window edge, which is exactly `contextWindowSize -

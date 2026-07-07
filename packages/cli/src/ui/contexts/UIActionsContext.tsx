@@ -10,7 +10,11 @@ import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
-import { type EditorType, type ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  type EditorType,
+  type ApprovalMode,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
@@ -37,6 +41,7 @@ export interface UIActions {
     mode: ApprovalMode | undefined,
     scope: SettingScope,
   ) => void;
+  handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
   auth: AuthController['actions'];
   handleEditorSelect: (
     editorType: EditorType | undefined,
@@ -51,6 +56,7 @@ export interface UIActions {
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
+    visionModelMode?: boolean;
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;

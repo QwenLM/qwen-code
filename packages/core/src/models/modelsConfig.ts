@@ -13,6 +13,7 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -34,6 +35,8 @@ export {
   CREDENTIAL_FIELDS,
   PROVIDER_SOURCED_FIELDS,
 };
+
+const debugLogger = createDebugLogger('ModelsConfig');
 
 /**
  * Callback for when the model changes.
@@ -315,8 +318,9 @@ export class ModelsConfig {
   getResolvedModel(
     authType: AuthType,
     modelId: string,
+    baseUrl?: string,
   ): ResolvedModelConfig | undefined {
-    return this.modelRegistry.getModel(authType, modelId);
+    return this.modelRegistry.getModel(authType, modelId, baseUrl);
   }
 
   /**
@@ -356,6 +360,10 @@ export class ModelsConfig {
         kind: 'programmatic',
         detail: metadata?.reason || 'setModel',
       };
+      // Refresh model-derived defaults (modalities, context window) for the new
+      // model — otherwise the previous model's modalities linger and the vision
+      // bridge gate misreads whether the current model accepts images.
+      this.applyRawModelDerivedDefaults(newModel);
 
       // Notify Config to update contentGeneratorConfig
       if (this.onModelChange) {
@@ -841,6 +849,12 @@ export class ModelsConfig {
             detail: 'envKey',
           },
         };
+      } else {
+        debugLogger.debug(
+          `No API key found for model "${model.id}": ` +
+            `process.env["${model.envKey}"] is ${apiKey === '' ? 'empty string' : 'not set'}. ` +
+            `Run /auth or set ${model.envKey} in your environment.`,
+        );
       }
       this._generationConfig.apiKeyEnvKey = model.envKey;
       this.generationConfigSources['apiKeyEnvKey'] = {

@@ -5,10 +5,16 @@
  */
 
 import express from 'express';
-import type { Application, Request, Response } from 'express';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import type { Application } from 'express';
+import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
-import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type {
+  DaemonMetricsBucket,
+  DaemonPerfSnapshot,
+  DaemonStartupSnapshot,
+} from './daemon-status.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -17,34 +23,27 @@ import {
   hostAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
-import {
+import type {
+  DeviceFlowProvider,
   DeviceFlowRegistry,
-  setDeviceFlowRegistry,
-  type DeviceFlowEventSink,
-  type DeviceFlowProvider,
-  type DeviceFlowProviderId,
 } from './auth/device-flow.js';
-import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { QwenOAuthDeviceFlowProvider } from './auth/qwen-device-flow-provider.js';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
-import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
-import { loadSettings } from '../config/settings.js';
+import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
+import {
+  ClientMcpSenderRegistry,
+  createClientMcpServerProvider,
+} from './acp-http/client-mcp-sender-registry.js';
+import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import {
-  getAdvertisedServeFeatures,
-  getServeProtocolVersions,
-} from './capabilities.js';
-import {
-  CAPABILITIES_SCHEMA_VERSION,
-  type CapabilitiesEnvelope,
   type ServeAuthProviderInstallRequest,
   type ServeAuthProviderInstallResult,
   type ServeOptions,
@@ -54,6 +53,10 @@ import {
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from './workspace-remember.js';
 import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
@@ -66,6 +69,12 @@ import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-git
 import { registerWorkspaceTrustRoutes } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { registerScheduledTasksRoutes } from './routes/scheduled-tasks.js';
+import { registerUsageStatsRoutes } from './routes/usage-stats.js';
+import {
+  startScheduledTaskKeepalive,
+  rehydrateScheduledTaskSessions,
+} from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceStatusRoutes,
@@ -74,6 +83,7 @@ import {
   createDaemonWorkspaceService,
   type DaemonWorkspaceService,
 } from './workspace-service/index.js';
+import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import { registerWorkspacePermissionsRoutes } from './routes/workspace-permissions.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
 import {
@@ -84,13 +94,8 @@ import {
   registerWorkspaceVoiceRoutes,
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
-import { hasConfiguredBatchVoiceTranscriptionModel } from '../services/voice-service.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
-import {
-  createRateLimiter,
-  setRateLimiter,
-  type RateLimiterInstance,
-} from './rate-limit.js';
+import { setRateLimiter } from './rate-limit.js';
 import {
   sendBridgeError as sendBridgeErrorResponse,
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
@@ -99,18 +104,32 @@ import {
 import { resolveBridgeFsFactory } from './server/fs-factory.js';
 import {
   createBuildWorkspaceCtx,
-  MAX_SERVER_NAME_LENGTH,
-  MAX_TOOL_NAME_LENGTH,
   parseAndValidateWorkspaceClientId,
   parseClientIdHeader,
   safeBody,
-  sendJsonBodyParserError,
-  validateMcpRuntimeServerName,
 } from './server/request-helpers.js';
 import { daemonTelemetryMiddleware } from './server/telemetry.js';
+import { installAccessLogMiddleware } from './server/access-log.js';
+import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
+import {
+  installFinalErrorHandler,
+  installJsonBodyParser,
+} from './server/error-handlers.js';
+import { installRateLimiter } from './server/rate-limiter-setup.js';
+import { createServeFeatures } from './server/serve-features.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { installSelfOriginStripMiddleware } from './server/self-origin.js';
+import {
+  createSingleWorkspaceRegistry,
+  type WorkspaceRegistry,
+} from './workspace-registry.js';
+import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
+import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
+import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
 
 export {
   createDefaultFsAuditEmit,
+  resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
 export {
@@ -128,23 +147,6 @@ export type {
 } from './server/session-list.js';
 export { getActiveSseCount } from './routes/sse-events.js';
 
-function isWorkspaceVoiceTranscriptionAvailable(
-  boundWorkspace: string,
-): boolean {
-  try {
-    return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace),
-    );
-  } catch (err) {
-    writeStderrLine(
-      `qwen serve: workspace voice transcription capability check failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return false;
-  }
-}
-
 /**
  * Module-scoped once-per-process guard for the `createServeApp`
  * default-trust stderr warning. Without this, tests calling
@@ -152,9 +154,27 @@ function isWorkspaceVoiceTranscriptionAvailable(
  */
 let warnedDefaultTrust = false;
 
+function describeRegistryPrimaryForConflict(
+  registry: WorkspaceRegistry,
+): string {
+  return (
+    `registry primary cwd=${JSON.stringify(registry.primary.workspaceCwd)}, ` +
+    `workspaceId=${JSON.stringify(registry.primary.workspaceId)}`
+  );
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Enables resident management of scheduled-task-owned sessions: a periodic
+   * keepalive (so their schedulers aren't idle-reaped) and a boot-time
+   * rehydration (so they re-arm after a restart). Opt-in — only the real
+   * long-running daemon (`runQwenServe`) sets it. Tests and direct embeds
+   * leave it off so `createServeApp` neither spawns sessions on boot nor holds
+   * a heartbeat timer.
+   */
+  manageScheduledTaskSessions?: boolean;
   /**
    * Directory of the built Web Shell SPA (`index.html` + `assets/`). When
    * set (and `opts.serveWebShell !== false`), `createServeApp` mounts the
@@ -199,6 +219,7 @@ export interface ServeAppDeps {
    * and a stderr audit sink.
    */
   deviceFlowRegistry?: DeviceFlowRegistry;
+  maxExtensionOperationHistory?: number;
   /**
    * Extra device-flow providers for tests / future extensions.
    * Production builds register only `QwenOAuthDeviceFlowProvider`;
@@ -222,6 +243,15 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
+  /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  /**
+   * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
+   * the metrics ring can bucket request rate and latency for the charts.
+   */
+  recordDaemonRequest?: (durationMs: number, statusCode: number) => void;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -244,18 +274,20 @@ export interface ServeAppDeps {
       value: unknown;
     }>,
   ) => Promise<void>;
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
+   * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+   * child's `client_mcp/message` ext-method. `runQwenServe` constructs ONE and
+   * passes the SAME instance here AND to its `createAcpSessionBridge` call (as
+   * `clientMcpSender: registry.lookup`) so the bridge that answers the child
+   * and the WS provider that registers senders agree. When omitted (the
+   * standalone `createServeApp` path with no injected bridge), `createServeApp`
+   * builds its own registry and wires it into the bridge it creates.
+   */
+  clientMcpSenderRegistry?: ClientMcpSenderRegistry;
+  workspaceRegistry?: WorkspaceRegistry;
+  primaryWorkspaceTrusted?: boolean;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
-}
-
-// Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
-const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
-
-function advertisedMaxPendingPromptsPerSession(
-  value: number | undefined,
-): number | null {
-  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
-  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
-  return value;
 }
 
 /**
@@ -267,31 +299,9 @@ function advertisedMaxPendingPromptsPerSession(
  * resolves. Defaults to `opts.port` for callers (e.g. tests) that pin a port
  * up front.
  *
- * Supported routes:
- *   - `GET  /health`
- *   - `GET  /daemon/status`
- *   - `GET  /capabilities`
- *   - `GET  /workspace/mcp`
- *   - `GET  /workspace/skills`
- *   - `GET  /workspace/providers`
- *   - `GET  /workspace/env`
- *   - `GET  /workspace/preflight`
- *   - `POST /session`
- *   - `POST /session/:id/load`
- *   - `POST /session/:id/resume`
- *   - `GET  /workspace/:id/sessions`
- *   - `GET  /session/:id/status`
- *   - `GET  /session/:id/context`
- *   - `GET  /session/:id/supported-commands`
- *   - `GET  /session/:id/tasks`
- *   - `GET  /session/:id/lsp`
- *   - `POST /session/:id/prompt`
- *   - `POST /session/:id/cancel`
- *   - `POST /session/:id/heartbeat`
- *   - `POST /session/:id/model`
- *   - `GET  /session/:id/events` (SSE)
- *   - `POST /session/:id/permission/:requestId`
- *   - `POST /permission/:requestId`
+ * Route modules are registered below in middleware order. Keep this file as
+ * the assembly point so auth/rate-limit/body-parser/REST/ACP/Web Shell order
+ * stays reviewable in one place.
  *
  * **Workspace validation contract.** `createServeApp` itself does NOT
  * verify that `opts.workspace` exists or is a directory — it
@@ -309,6 +319,33 @@ function advertisedMaxPendingPromptsPerSession(
  * a "healthy"-looking daemon whose every spawn fails with cryptic
  * child-process ENOENT.
  */
+// Mirrors the bridge's session-idle reaper default (30 min). Used only to
+// size the scheduled-task keepalive interval when no explicit timeout is set.
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+// Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
+// timeout) and ≤10min (stay well inside the 30-min default reaper window).
+const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
+const KEEPALIVE_MAX_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Sizes the keepalive heartbeat interval so a resident task session is beaten
+ * BEFORE the idle reaper closes it. Targets a third of the reaper window, but
+ * never exceeds HALF of it — so at least one heartbeat lands in time even for a
+ * small custom timeout, where the 30s floor would otherwise overshoot the whole
+ * window and let the session be reaped before the first beat. When the reaper is
+ * disabled (idle timeout ≤ 0) sessions are never reaped, so heartbeats aren't
+ * needed — the loop still runs (to revive re-enabled bound sessions) but at the
+ * relaxed max cadence.
+ */
+export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
+  if (idleTimeoutMs <= 0) return KEEPALIVE_MAX_INTERVAL_MS;
+  const target = Math.min(
+    Math.max(KEEPALIVE_MIN_INTERVAL_MS, Math.floor(idleTimeoutMs / 3)),
+    KEEPALIVE_MAX_INTERVAL_MS,
+  );
+  return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
+}
+
 export function createServeApp(
   opts: ServeOptions,
   getPort: () => number = () => opts.port,
@@ -326,15 +363,71 @@ export function createServeApp(
   // AND passed into the bridge must be the SAME canonical form.
   // `deps.boundWorkspace` is the pre-canonicalized fast-path from
   // `runQwenServe`; when omitted we canonicalize ourselves.
+  const injectedWorkspaceRegistry = deps.workspaceRegistry;
   const boundWorkspace =
+    injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (injectedWorkspaceRegistry) {
+    const primary = injectedWorkspaceRegistry.primary;
+    const registryConflictCandidates = [
+      {
+        depName: 'deps.boundWorkspace',
+        depValue: deps.boundWorkspace,
+        registryValue: primary.workspaceCwd,
+        detail: `deps.boundWorkspace=${JSON.stringify(deps.boundWorkspace)}`,
+      },
+      {
+        depName: 'deps.bridge',
+        depValue: deps.bridge,
+        registryValue: primary.bridge,
+        detail: 'deps.bridge is a different object',
+      },
+      {
+        depName: 'deps.workspace',
+        depValue: deps.workspace,
+        registryValue: primary.workspaceService,
+        detail: 'deps.workspace is a different object',
+      },
+      {
+        depName: 'deps.fsFactory',
+        depValue: deps.fsFactory,
+        registryValue: primary.routeFileSystemFactory,
+        detail: 'deps.fsFactory is a different object',
+      },
+      {
+        depName: 'deps.clientMcpSenderRegistry',
+        depValue: deps.clientMcpSenderRegistry,
+        registryValue: primary.clientMcpSenderRegistry,
+        detail: 'deps.clientMcpSenderRegistry is a different object',
+      },
+    ];
+    for (const candidate of registryConflictCandidates) {
+      if (
+        candidate.depValue === undefined ||
+        candidate.depValue === candidate.registryValue
+      ) {
+        continue;
+      }
+      throw new Error(
+        'createServeApp: workspaceRegistry conflicts with ' +
+          `${candidate.depName}: ${describeRegistryPrimaryForConflict(
+            injectedWorkspaceRegistry,
+          )}; ${candidate.detail}.`,
+      );
+    }
+  }
   // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
   // through `BridgeFileSystem` for ACP-side writeTextFile/readTextFile.
   // Default trust is `false` (test-safe). Embeds without `deps.fsFactory`
   // or `deps.bridge` will see agent writes rejected with
   // `untrusted_workspace` — warn once so the asymmetry is visible.
-  if (!deps.fsFactory && !deps.bridge && !warnedDefaultTrust) {
+  if (
+    !injectedWorkspaceRegistry &&
+    !deps.fsFactory &&
+    !deps.bridge &&
+    !warnedDefaultTrust
+  ) {
     warnedDefaultTrust = true;
     process.stderr.write(
       'qwen serve: createServeApp default fsFactory uses trusted=false ' +
@@ -342,26 +435,62 @@ export function createServeApp(
         'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
     );
   }
-  const fsFactory = resolveBridgeFsFactory({
-    boundWorkspace,
-    injected: deps.fsFactory,
-    trusted: false,
-  });
-  let cachedVoiceTranscriptionAvailable: boolean | undefined;
-  const invalidateServeFeaturesCache = () => {
-    cachedVoiceTranscriptionAvailable = undefined;
-  };
-  const getCachedVoiceTranscriptionAvailable = () => {
-    cachedVoiceTranscriptionAvailable ??=
-      isWorkspaceVoiceTranscriptionAvailable(boundWorkspace);
-    return cachedVoiceTranscriptionAvailable;
-  };
+  const fsFactory =
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory ??
+    resolveBridgeFsFactory({
+      boundWorkspaces: [boundWorkspace],
+      injected: deps.fsFactory,
+      trusted: false,
+    });
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
     opts.enableSessionShell === true && tokenConfigured;
+  // Reverse tool channel (issue #5626, Phase 2). Process-scoped registry that
+  // bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
+  // child's `client_mcp/message` ext-method. Prefer the registry `runQwenServe`
+  // already wired into its injected bridge (`deps.clientMcpSenderRegistry`) so
+  // the bridge that answers the child and the WS provider share ONE map.
+  // Standalone `createServeApp` (no injected bridge) builds its own and wires
+  // it into the bridge it creates below. Inert until a WS client sends
+  // `mcp_register` (gated by `clientMcpOverWs`).
+  // Guard the split-brain case: an injected `deps.bridge` was already wired to
+  // its own sender, so building a fresh registry here would leave the bridge
+  // and this registry pointing at different maps. A caller injecting the bridge
+  // must inject the matching registry too. Only enforced when `clientMcpOverWs`
+  // is active — that's the only path that processes `mcp_*` frames, so without
+  // it the registry is inert and a mismatch can't manifest (and the vast
+  // majority of tests inject a fake bridge without ever touching client-MCP).
+  if (
+    opts.clientMcpOverWs === true &&
+    deps.bridge &&
+    !injectedWorkspaceRegistry &&
+    !deps.clientMcpSenderRegistry
+  ) {
+    throw new Error(
+      'createServeApp: deps.bridge requires deps.clientMcpSenderRegistry ' +
+        'when clientMcpOverWs is enabled (the bridge is already wired to its ' +
+        'own sender; a fresh registry here would be an orphan).',
+    );
+  }
+  const clientMcpSenderRegistry =
+    injectedWorkspaceRegistry?.primary.clientMcpSenderRegistry ??
+    deps.clientMcpSenderRegistry ??
+    new ClientMcpSenderRegistry();
+  const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
+    createServeFeatures({
+      opts,
+      boundWorkspace,
+      persistSettingAvailable: deps.persistSetting !== undefined,
+      // Registry injection supplies the primary workspace service through the
+      // runtime, so it has the same reload surface as legacy deps.workspace.
+      reloadAvailable:
+        deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
+      sessionShellCommandEnabled,
+    });
   const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
   const bridge =
+    injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
@@ -376,36 +505,13 @@ export function createServeApp(
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      // Reverse tool channel: answer the child's `client_mcp/message`
+      // ext-method by reaching the WS connection that hosts the named server.
+      clientMcpSender: clientMcpSenderRegistry.lookup,
     });
+  const archiveCoordinator = new SessionArchiveCoordinator();
 
-  // Allow same-origin requests from the demo page. Browsers send an
-  // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
-  // below would reject them. This middleware strips `Origin` when it
-  // matches the daemon's own address so the demo page's API calls pass
-  // through. Only loopback origins are matched — non-loopback deployments
-  // require the operator to front the daemon with a reverse proxy for
-  // browser access anyway (per the threat-model docs).
-  let cachedStripPort = -1;
-  let cachedSelfOrigins: Set<string> = new Set();
-  app.use((req: import('express').Request, _res, next) => {
-    const origin = req.headers.origin;
-    if (origin) {
-      const port = getPort();
-      if (port !== cachedStripPort) {
-        cachedStripPort = port;
-        cachedSelfOrigins = new Set([
-          `http://127.0.0.1:${port}`,
-          `http://localhost:${port}`,
-          `http://[::1]:${port}`,
-          `http://host.docker.internal:${port}`,
-        ]);
-      }
-      if (cachedSelfOrigins.has(origin)) {
-        delete req.headers.origin;
-      }
-    }
-    next();
-  });
+  installSelfOriginStripMiddleware(app, getPort);
 
   // Park the factory on `app.locals` so route handlers can pick it up
   // via `req.app.locals.fsFactory` without re-threading the value
@@ -416,69 +522,13 @@ export function createServeApp(
   // compute workspace-relative response paths without re-resolving.
   (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
 
-  // Wire the device-flow registry. Default builds a single Qwen
-  // provider; tests inject `deps.deviceFlowRegistry` or
-  // `deps.deviceFlowProviders` to stub the OAuth client only.
-  const deviceFlowProviderMap = new Map<
-    DeviceFlowProviderId,
-    DeviceFlowProvider
-  >();
-  for (const provider of deps.deviceFlowProviders ?? []) {
-    deviceFlowProviderMap.set(provider.providerId, provider);
-  }
-  if (!deviceFlowProviderMap.has('qwen-oauth')) {
-    deviceFlowProviderMap.set('qwen-oauth', new QwenOAuthDeviceFlowProvider());
-  }
-  const deviceFlowEventSink: DeviceFlowEventSink = {
-    publish(emission, originatorClientId) {
-      bridge.publishWorkspaceEvent({
-        type: `auth_device_flow_${emission.type}`,
-        data: emission.data,
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-    },
-  };
-  const deviceFlowRegistry =
-    deps.deviceFlowRegistry ??
-    new DeviceFlowRegistry({
-      events: deviceFlowEventSink,
-      audit: {
-        record(line) {
-          // Structured stderr breadcrumb; deviceFlowId truncated to first
-          // 8 chars so log
-          // skimmers can follow a flow without retaining full uuids.
-          const id = line.deviceFlowId.slice(0, 8);
-          const parts = [
-            `[serve] auth.device-flow:`,
-            `provider=${line.providerId}`,
-            `deviceFlowId=${id}...`,
-            line.clientId ? `clientId=${line.clientId}` : 'clientId=-',
-            `status=${line.status}`,
-          ];
-          if (line.errorKind) parts.push(`errorKind=${line.errorKind}`);
-          if (line.expiresInMs !== undefined) {
-            parts.push(`expiresInMs=${Math.max(0, line.expiresInMs)}`);
-          }
-          // Include `line.hint` for operator-only breadcrumbs that
-          // aren't surfaced over SSE. Bound at 1 KiB.
-          if (line.hint) {
-            const STDERR_HINT_MAX = 1_024;
-            const hint =
-              line.hint.length > STDERR_HINT_MAX
-                ? `${line.hint.slice(0, STDERR_HINT_MAX)}…[+${line.hint.length - STDERR_HINT_MAX} bytes truncated]`
-                : line.hint;
-            // Quote the hint so multi-word values stay parseable.
-            parts.push(`hint=${JSON.stringify(hint)}`);
-          }
-          writeStderrLine(parts.join(' '));
-        },
-      },
-      resolveProvider: (providerId) => deviceFlowProviderMap.get(providerId),
+  const { deviceFlowRegistry, getSupportedDeviceFlowProviders } =
+    setupDeviceFlowRegistry({
+      app,
+      bridge,
+      registry: deps.deviceFlowRegistry,
+      providers: deps.deviceFlowProviders,
     });
-  // Park the registry on `app.locals` so request handlers can reach it.
-  // Typed accessor prevents a string-key typo from silently detaching
-  // `runQwenServe`'s shutdown dispose call.
-  setDeviceFlowRegistry(app, deviceFlowRegistry);
 
   const { daemonLog } = deps;
 
@@ -491,6 +541,7 @@ export function createServeApp(
   ) => sendPermissionVoteErrorResponse(res, err, ctx, daemonLog);
 
   const workspace: DaemonWorkspaceService =
+    injectedWorkspaceRegistry?.primary.workspaceService ??
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
@@ -498,6 +549,7 @@ export function createServeApp(
       statusProvider,
       workspaceProvidersStatusProvider:
         createWorkspaceProvidersStatusProvider(),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -526,7 +578,26 @@ export function createServeApp(
         bridge.publishWorkspaceEvent(event);
       },
     });
-  let rateLimiter: RateLimiterInstance | undefined;
+  const workspaceRegistry =
+    injectedWorkspaceRegistry ??
+    createSingleWorkspaceRegistry({
+      workspaceId: hashDaemonWorkspace(boundWorkspace),
+      workspaceCwd: boundWorkspace,
+      primary: true,
+      trusted: deps.primaryWorkspaceTrusted ?? false,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge,
+      workspaceService: workspace,
+      routeFileSystemFactory: fsFactory,
+      clientMcpSenderRegistry,
+    });
+  (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
+    workspaceRegistry;
+  const primaryRuntime = workspaceRegistry.primary;
+  const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
+  const primaryBridge = primaryRuntime.bridge;
+  const primaryWorkspace = primaryRuntime.workspaceService;
+  const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -560,7 +631,7 @@ export function createServeApp(
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
     getPort,
-    bridge,
+    bridge: primaryBridge,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
@@ -568,58 +639,7 @@ export function createServeApp(
     healthDemoRoutes.register(app);
   }
 
-  // Access-log middleware. Registered BEFORE bearerAuth and JSON parser
-  // so auth rejections (401) and malformed-body errors (400) are also
-  // captured in the daemon log. Excluded:
-  //  - GET /health (high-frequency probe, would drown signal)
-  //  - Successful SSE streams (GET .../events with 200) — logged inline
-  //    at open/close; failed SSE handshakes (4xx) are still recorded.
-  if (daemonLog) {
-    const SESSION_ID_RE = /\/session\/([^/]+)/;
-    app.use((req, res, next) => {
-      const { method, path: reqPath } = req;
-      if (
-        (method === 'GET' && reqPath === '/health') ||
-        (method === 'POST' && reqPath.endsWith('/heartbeat'))
-      ) {
-        return next();
-      }
-      const startMs = Date.now();
-      res.on('finish', () => {
-        try {
-          const status = res.statusCode;
-          if (
-            method === 'GET' &&
-            reqPath.endsWith('/events') &&
-            status === 200
-          ) {
-            return;
-          }
-          const durationMs = Date.now() - startMs;
-          const sessionMatch = reqPath.match(SESSION_ID_RE);
-          const sessionId = sessionMatch?.[1];
-          const clientId = req.headers['x-qwen-client-id'] as
-            | string
-            | undefined;
-          const ctx = {
-            route: `${method} ${reqPath}`,
-            ...(sessionId ? { sessionId } : {}),
-            ...(clientId ? { clientId } : {}),
-            status,
-            durationMs,
-          };
-          if (status >= 400) {
-            daemonLog.warn('request completed', ctx);
-          } else {
-            daemonLog.info('request completed', ctx);
-          }
-        } catch {
-          // Logging failure must not affect the request.
-        }
-      });
-      next();
-    });
-  }
+  installAccessLogMiddleware(app, daemonLog);
 
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
@@ -633,55 +653,28 @@ export function createServeApp(
   // opts.serveWebShell=false to opt out.
   const webShellDir =
     opts.serveWebShell !== false ? deps.webShellDir : undefined;
+  // Extension origins (chrome-extension://…) explicitly allowed via
+  // --allow-origin may frame the Web Shell so the extension can host the UI in
+  // a Chrome side panel (issue #5626). All other origins still get
+  // frame-ancestors 'none' + X-Frame-Options: DENY.
+  const webShellFrameAncestors =
+    opts.allowOrigins && opts.allowOrigins.length > 0
+      ? [...parseAllowOriginPatterns(opts.allowOrigins).origins].filter(
+          (o) =>
+            o.startsWith('chrome-extension://') ||
+            o.startsWith('moz-extension://'),
+        )
+      : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir);
+    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
   app.use(bearerAuth(opts.token));
 
   // Rate limiter: after auth (only count authenticated requests),
   // before body parser (reject early without burning JSON.parse CPU).
-  if (opts.rateLimit) {
-    const windowMs = opts.rateLimitWindowMs ?? 60_000;
-    rateLimiter = createRateLimiter({
-      tiers: {
-        prompt: { windowMs, max: opts.rateLimitPrompt ?? 10 },
-        mutation: { windowMs, max: opts.rateLimitMutation ?? 30 },
-        read: { windowMs, max: opts.rateLimitRead ?? 120 },
-      },
-      hostname: opts.hostname,
-      onLimitReached: daemonLog
-        ? (tier, key, suppressed) => {
-            daemonLog.warn(
-              `rate limit hit${suppressed > 0 ? ` (${suppressed} suppressed)` : ''}`,
-              { tier, key: key.slice(0, 64) },
-            );
-          }
-        : undefined,
-      onError: daemonLog
-        ? (err, path) => {
-            daemonLog.warn(
-              `rate limiter error (fail-open): ${err instanceof Error ? err.message : String(err)}`,
-              { path },
-            );
-          }
-        : undefined,
-    });
-    app.use(rateLimiter.middleware);
-  }
-
-  app.use(express.json({ limit: '10mb' }));
-  app.use(
-    (
-      err: unknown,
-      _req: import('express').Request,
-      res: import('express').Response,
-      next: import('express').NextFunction,
-    ) => {
-      if (sendJsonBodyParserError(res, err)) return;
-      next(err);
-    },
-  );
+  const rateLimiter = installRateLimiter(app, opts, daemonLog);
+  installJsonBodyParser(app);
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -699,41 +692,29 @@ export function createServeApp(
     requireAuth: opts.requireAuth === true,
   });
 
-  app.use(daemonTelemetryMiddleware(boundWorkspace));
+  app.use(
+    daemonTelemetryMiddleware(
+      () => primaryBoundWorkspace,
+      deps.recordDaemonRequest,
+    ),
+  );
 
-  const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
+  const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
 
-  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
-  const currentServeFeatures = () =>
-    getAdvertisedServeFeatures(undefined, {
-      requireAuth: opts.requireAuth === true,
-      mcpPoolActive: opts.mcpPoolActive !== false,
-      allowOriginActive:
-        opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
-      ...(opts.promptDeadlineMs !== undefined
-        ? { promptDeadlineMs: opts.promptDeadlineMs }
-        : {}),
-      ...(opts.writerIdleTimeoutMs !== undefined
-        ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
-        : {}),
-      persistSettingAvailable: deps.persistSetting !== undefined,
-      sessionShellCommandEnabled,
-      rateLimit: opts.rateLimit === true,
-      reloadAvailable: deps.workspace !== undefined,
-      voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
-      // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
-      // on). A configured token no longer suppresses it — the browser carries
-      // the bearer token via the WS subprotocol, which the upgrade listener
-      // verifies (acp-http/index.ts).
-      voiceWsAvailable: process.env['QWEN_SERVE_ACP_HTTP'] !== '0',
-    });
   const acpHandleRef: { current?: AcpHttpHandle } = {};
+  const workspaceRememberLane = new WorkspaceRememberTaskLane(primaryBridge);
+
+  // Plan C CDP tunnel (issue #5626): process-scoped registry pairing the
+  // extension `/acp` connection with the `/cdp` puppeteer endpoint. Inert until
+  // both ends connect (gated by `cdpTunnelOverWs`).
+  const cdpTunnelRegistry =
+    opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
   registerDaemonStatusRoutes(app, {
     opts,
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
     daemonLog,
     startup: deps.startup,
     qwenCodeVersion: deps.qwenCodeVersion,
@@ -741,80 +722,71 @@ export function createServeApp(
     getRateLimiter: () => rateLimiter,
     getRestSseActive: getActiveSseCount,
     currentServeFeatures,
-    getSupportedDeviceFlowProviders: () =>
-      Array.from(deviceFlowProviderMap.keys()),
+    getSupportedDeviceFlowProviders,
     deviceFlowRegistry,
     sessionShellCommandEnabled,
+    getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getPerfSnapshot: deps.getPerfSnapshot,
+    getMetricsSeries: deps.getMetricsSeries,
   });
 
-  app.get('/capabilities', (_req, res) => {
-    const envelope: CapabilitiesEnvelope = {
-      v: CAPABILITIES_SCHEMA_VERSION,
-      protocolVersions: getServeProtocolVersions(),
-      ...(deps.qwenCodeVersion
-        ? { qwenCodeVersion: deps.qwenCodeVersion }
-        : {}),
-      mode: opts.mode,
-      features: currentServeFeatures(),
-      modelServices: [],
-      // Surface the bound workspace so clients can detect mismatch
-      // pre-flight and omit `cwd` on `POST /session`.
-      workspaceCwd: boundWorkspace,
-      // Advertise supported transport families so SDK clients can
-      // auto-negotiate the best available transport via
-      // `negotiateTransport()`. REST is always available; future PRs
-      // will add 'acp-http' / 'acp-ws' entries when the corresponding
-      // routes are wired.
-      transports: ['rest'],
-      // Active mediation policy under the `policy` namespace.
-      policy: { permission: bridge.permissionPolicy },
-      limits: {
-        maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
-          opts.maxPendingPromptsPerSession,
-        ),
-      },
-      supportedLanguages: LANGUAGE_CODES,
-    };
-    res.status(200).json(envelope);
+  registerCapabilitiesRoutes(app, {
+    qwenCodeVersion: deps.qwenCodeVersion,
+    mode: opts.mode,
+    currentServeFeatures,
+    boundWorkspace: primaryBoundWorkspace,
+    permissionPolicy: primaryBridge.permissionPolicy,
+    maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
+    languageCodes,
   });
 
   registerWorkspaceStatusRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
     sendBridgeError,
   });
 
   // Workspace memory + agents CRUD routes.
   mountWorkspaceMemoryRoutes(app, {
-    bridge,
-    boundWorkspace,
+    bridge: primaryBridge,
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceMemoryRememberRoutes(app, {
+    bridge: primaryBridge,
+    lane: workspaceRememberLane,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   mountWorkspaceAgentsRoutes(app, {
-    bridge,
-    boundWorkspace,
+    bridge: primaryBridge,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
 
   registerWorkspaceDiagnosticStatusRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
     sendBridgeError,
   });
 
   registerWorkspaceExtensionRoutes(app, {
-    boundWorkspace,
-    bridge,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     sendBridgeError,
+    ...(deps.maxExtensionOperationHistory === undefined
+      ? {}
+      : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
   });
 
   // Workspace file routes (read-only + mutation).
@@ -822,25 +794,25 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
   });
   registerWorkspaceFileWriteRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   registerWorkspaceSetupGithubRoutes(app, {
-    boundWorkspace,
-    bridge,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
   });
   registerWorkspaceTrustRoutes(app, {
-    boundWorkspace,
-    workspace,
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
     mutate,
     safeBody,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
 
   const broadcastSettingsChanged = (
@@ -850,7 +822,7 @@ export function createServeApp(
     clientId: string | undefined,
   ) => {
     invalidateServeFeaturesCache();
-    bridge.publishWorkspaceEvent({
+    primaryBridge.publishWorkspaceEvent({
       type: 'settings_changed',
       data: { key, value, scope },
       ...(clientId ? { originatorClientId: clientId } : {}),
@@ -860,7 +832,7 @@ export function createServeApp(
   if (deps.persistSetting) {
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
-      boundWorkspace,
+      boundWorkspace: primaryBoundWorkspace,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -868,19 +840,19 @@ export function createServeApp(
       },
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
-        parseAndValidateWorkspaceClientId(req, res, bridge),
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
     });
   }
   registerWorkspacePermissionsRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
-    workspace,
+    workspace: primaryWorkspace,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceVoiceRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
     persistSetting: deps.persistSetting,
@@ -888,21 +860,21 @@ export function createServeApp(
     transcribe: deps.voiceTranscriber,
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
-      parseAndValidateWorkspaceClientId(req, res, bridge),
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
 
   // A2UI action inbound (the upstream half of A2UI-over-MCP): user
   // interactions from web clients are proxied to the UI MCP server's
   // standard `action` tool.
   registerA2uiActionRoutes(app, {
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
     getMcpServers: async () => {
       const ctx = buildWorkspaceCtx('POST /session/:id/a2ui-action');
-      const status = await workspace.getWorkspaceMcpStatus(ctx);
+      const status = await primaryWorkspace.getWorkspaceMcpStatus(ctx);
       return (status.servers ?? []) as Array<{
         name: string;
         mcpStatus?: string;
@@ -914,331 +886,138 @@ export function createServeApp(
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
-    getSupportedDeviceFlowProviders: () =>
-      Array.from(deviceFlowProviderMap.keys()),
+    getSupportedDeviceFlowProviders,
     sendBridgeError,
-    boundWorkspace,
+    boundWorkspace: primaryBoundWorkspace,
     allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
     installAuthProvider: deps.installAuthProvider,
   });
 
   registerSessionRoutes(app, {
-    boundWorkspace,
-    bridge,
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    archiveCoordinator,
     mutate,
     sendBridgeError,
     daemonLog,
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
-    languageCodes: LANGUAGE_CODES,
+    languageCodes,
   });
 
-  app.post(
-    '/workspace/mcp/:server/restart',
-    mutate({ strict: true }),
-    async (req, res) => {
-      // Single-server MCP restart with budget pre-check. Soft refusals
-      // are 200 OK with `{restarted:false, skipped:true, reason}`.
-      const serverName = req.params['server'];
-      if (!serverName || typeof serverName !== 'string') {
-        res.status(400).json({
-          error: 'Server name path parameter is required',
-          code: 'invalid_server_name',
-        });
-        return;
-      }
-      // Cap server name length to prevent unbounded path-parameter input.
-      if (serverName.length > MAX_SERVER_NAME_LENGTH) {
-        res.status(400).json({
-          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-          code: 'invalid_server_name',
-        });
-        return;
-      }
-      // Validate `X-Qwen-Client-Id` against known client ids.
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      // Parse `?entryIndex=` for pool-mode targeted restarts. Accepts
-      // a non-negative integer or `*` / omitted (restart all).
-      let entryIndex: number | undefined;
-      const rawEntryIndex = req.query['entryIndex'];
-      if (rawEntryIndex !== undefined && rawEntryIndex !== '*') {
-        const candidate =
-          typeof rawEntryIndex === 'string' ? rawEntryIndex : undefined;
-        const parsed =
-          candidate !== undefined ? Number.parseInt(candidate, 10) : NaN;
-        if (
-          !Number.isInteger(parsed) ||
-          parsed < 0 ||
-          String(parsed) !== candidate
-        ) {
-          res.status(400).json({
-            error:
-              '`entryIndex` query parameter must be a non-negative integer or "*"',
-            code: 'invalid_entry_index',
-          });
-          return;
-        }
-        entryIndex = parsed;
-      }
-      try {
-        const ctx = buildWorkspaceCtx(
-          'POST /workspace/mcp/:server/restart',
-          clientId,
-        );
-        const result = await workspace.restartMcpServer(
-          ctx,
-          serverName,
-          entryIndex !== undefined ? { entryIndex } : undefined,
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/mcp/:server/restart',
-        });
-      }
-    },
-  );
+  registerWorkspaceMcpControlRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    bridge: primaryBridge,
+    workspace: primaryWorkspace,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceLifecycleRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    invalidateServeFeaturesCache,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
+  registerWorkspaceToolsRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspace: primaryWorkspace,
+    mutate,
+    safeBody,
+    sendBridgeError,
+    parseAndValidateClientId: (req, res) =>
+      parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+  });
 
-  for (const [routeAction, bridgeAction] of [
-    ['enable', 'enable'],
-    ['disable', 'disable'],
-    ['authenticate', 'authenticate'],
-    ['clear-auth', 'clear-auth'],
-  ] as const) {
-    app.post(
-      `/workspace/mcp/:server/${routeAction}`,
-      mutate({ strict: true }),
-      async (req, res) => {
-        const serverName = req.params['server'];
-        if (!serverName || typeof serverName !== 'string') {
-          res.status(400).json({
-            error: 'Server name path parameter is required',
-            code: 'invalid_server_name',
-          });
-          return;
-        }
-        if (serverName.length > MAX_SERVER_NAME_LENGTH) {
-          res.status(400).json({
-            error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-            code: 'invalid_server_name',
-          });
-          return;
-        }
-        const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-        if (clientId === null) return;
-        try {
-          const result = await bridge.manageMcpServer(
-            serverName,
-            bridgeAction,
-            clientId,
-          );
-          res.status(200).json(result);
-        } catch (err) {
-          sendBridgeError(res, err, {
-            route: `POST /workspace/mcp/:server/${routeAction}`,
-          });
-        }
+  // Durable scheduled-tasks CRUD (the Web Shell "Scheduled tasks" page).
+  // Reads/writes the per-project cron file only; firing stays with the
+  // session-side scheduler. Non-strict mutate: creating a scheduled prompt
+  // is the same capability class as POST /session/:id/prompt.
+  //
+  // The bridge is passed ONLY when resident task-session management is enabled.
+  // Binding a task to a dedicated session is only safe when something keeps that
+  // session resident and reloads it after a restart (the keepalive + rehydration
+  // below); without it, a bound task would fire only inside a session nothing
+  // revives and silently go dormant. So embedders that leave the manager off
+  // get UNBOUND tasks (shared-owner firing) instead.
+  registerScheduledTasksRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    safeBody,
+    bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+  });
+
+  // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
+  // usage only; open GET like /daemon/status, with its own short TTL cache.
+  registerUsageStatsRoutes(app);
+
+  // Resident management of scheduled-task-owned sessions — opt-in, so tests and
+  // embeds that call createServeApp neither spawn sessions on boot nor hold a
+  // heartbeat timer (both would read the bound workspace's real tasks file).
+  if (deps.manageScheduledTaskSessions) {
+    // Keepalive: keep task sessions resident so their in-child schedulers keep
+    // ticking rather than being idle-reaped, AND revive a re-enabled bound
+    // session the reaper already let go. The revive loop is needed even when the
+    // reaper is disabled (idle timeout ≤ 0), because archiving a task closes its
+    // session — so this always runs when task sessions are managed, not only
+    // when a reaper is active.
+    const idleTimeoutMs =
+      opts.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+    const keepalive = startScheduledTaskKeepalive({
+      bridge,
+      boundWorkspace,
+      intervalMs: computeKeepaliveIntervalMs(idleTimeoutMs),
+    });
+    // Park the stop fn on `app.locals` (same pattern as `fsFactory` /
+    // `boundWorkspace` / `acpHandle` above) so the shutdown sequence in
+    // run-qwen-serve.ts can invoke it without threading it back through the
+    // createServeApp return type.
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive = keepalive.stop;
+
+    // Rehydrate task-owned sessions on boot so their schedulers re-arm after a
+    // restart (a bound task fires only in its own session, which nothing else
+    // reloads). Fire-and-forget so it never delays the server coming up; a
+    // no-op when there are no bound tasks. Deliberately not awaited.
+    void rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace,
+      onError: (sessionId, err) => {
+        process.stderr.write(
+          `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
       },
-    );
+      // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+      // catches readCronTasks failures and per-session load errors internally
+      // (returning { loaded, failed }), so this only guards an unexpected throw
+      // from the function entry itself. Log rather than swallow it — a silent
+      // failure here leaves every bound task dormant with no diagnostic.
+    }).catch((err) => {
+      process.stderr.write(
+        `qwen serve: unexpected scheduled-task rehydration failure: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    });
   }
 
-  // Add a runtime MCP server.
-  app.post(
-    '/workspace/mcp/servers',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const body = safeBody(req);
-      const name = body['name'];
-      if (!validateMcpRuntimeServerName(name, res)) return;
-      // Validate config: must be a non-null object
-      const config = body['config'];
-      if (
-        typeof config !== 'object' ||
-        config === null ||
-        Array.isArray(config)
-      ) {
-        res.status(400).json({
-          error: '`config` must be a non-null object',
-          code: 'missing_required_field',
-          field: 'config',
-        });
-        return;
-      }
-      // Validate client identity (required for runtime MCP mutation)
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      if (!clientId) {
-        res.status(400).json({
-          error:
-            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
-          code: 'missing_client_id',
-        });
-        return;
-      }
-      try {
-        const result = await bridge.addRuntimeMcpServer(
-          name,
-          config as Record<string, unknown>,
-          clientId,
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/mcp/servers',
-        });
-      }
-    },
-  );
-
-  // Remove a runtime MCP server. Idempotent.
-  app.delete(
-    '/workspace/mcp/servers/:name',
-    mutate({ strict: true }),
-    async (req, res) => {
-      const name = req.params['name'] ?? '';
-      if (!validateMcpRuntimeServerName(name, res)) return;
-      // Validate client identity (required for runtime MCP mutation)
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      if (!clientId) {
-        res.status(400).json({
-          error:
-            '`X-Qwen-Client-Id` header is required for runtime MCP mutation',
-          code: 'missing_client_id',
-        });
-        return;
-      }
-      try {
-        const result = await bridge.removeRuntimeMcpServer(name, clientId);
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'DELETE /workspace/mcp/servers/:name',
-        });
-      }
-    },
-  );
-
-  app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
-    // #4175 Wave 4 PR 17. Scaffold-only init: the workspace service
-    // writes an empty QWEN.md without invoking the LLM. Default refuses
-    // overwrite (409); body `{force: true}` overrides.
-    const body = safeBody(req);
-    const force = body['force'];
-    if (force !== undefined && typeof force !== 'boolean') {
-      res.status(400).json({
-        error: '`force` must be a boolean when provided',
-        code: 'invalid_force_flag',
-      });
-      return;
-    }
-    // Validate against known client ids.
-    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-    if (clientId === null) return;
-    try {
-      const ctx = buildWorkspaceCtx('POST /workspace/init', clientId);
-      const result = await workspace.initWorkspace(ctx, {
-        force: force === true,
-      });
-      res.status(200).json(result);
-    } catch (err) {
-      sendBridgeError(res, err, { route: 'POST /workspace/init' });
-    }
-  });
-
-  app.post(
-    '/workspace/reload',
-    mutate({ strict: true }),
-    async (req: Request, res: Response) => {
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      try {
-        const ctx = buildWorkspaceCtx('POST /workspace/reload', clientId);
-        const result = await workspace.reload(ctx);
-        invalidateServeFeaturesCache();
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, { route: 'POST /workspace/reload' });
-      }
-    },
-  );
-
-  app.post(
-    '/workspace/tools/:name/enable',
-    mutate({ strict: true }),
-    async (req, res) => {
-      // Toggles a tool name in the workspace `tools.disabled` settings
-      // list. Strict-gated alongside other
-      // mutation routes; bridge writes the file directly (no
-      // ACP roundtrip) and fan-outs `tool_toggled` to every live
-      // session SSE bus. Already-registered tools in live sessions
-      // are NOT retroactively unregistered — toggling takes effect on
-      // the next ACP child spawn or session refresh.
-      const rawToolName = req.params['name'];
-      if (!rawToolName || typeof rawToolName !== 'string') {
-        res.status(400).json({
-          error: 'Tool name path parameter is required',
-          code: 'invalid_tool_name',
-        });
-        return;
-      }
-      // Trim before persistence so the write path matches the read path.
-      const toolName = rawToolName.trim();
-      if (toolName.length === 0) {
-        res.status(400).json({
-          error: 'Tool name path parameter is required',
-          code: 'invalid_tool_name',
-        });
-        return;
-      }
-      // Cap tool name length to prevent settings file bloat.
-      if (toolName.length > MAX_TOOL_NAME_LENGTH) {
-        res.status(400).json({
-          error: `Tool name exceeds ${MAX_TOOL_NAME_LENGTH}-character limit`,
-          code: 'invalid_tool_name',
-        });
-        return;
-      }
-      const body = safeBody(req);
-      const enabled = body['enabled'];
-      if (typeof enabled !== 'boolean') {
-        res.status(400).json({
-          error: '`enabled` is required and must be a boolean',
-          code: 'invalid_enabled_flag',
-        });
-        return;
-      }
-      // Validate against known client ids.
-      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
-      if (clientId === null) return;
-      try {
-        const ctx = buildWorkspaceCtx(
-          'POST /workspace/tools/:name/enable',
-          clientId,
-        );
-        const result = await workspace.setWorkspaceToolEnabled(
-          ctx,
-          toolName,
-          enabled,
-        );
-        res.status(200).json(result);
-      } catch (err) {
-        sendBridgeError(res, err, {
-          route: 'POST /workspace/tools/:name/enable',
-        });
-      }
-    },
-  );
-
   registerPermissionRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
     mutate,
     sendPermissionVoteError,
   });
 
   registerSseEventsRoutes(app, {
-    bridge,
+    bridge: primaryBridge,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
@@ -1251,21 +1030,51 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  acpHandleRef.current = mountAcpHttp(app, bridge, {
-    boundWorkspace,
-    workspace,
-    fsFactory,
+  acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
+    boundWorkspace: primaryBoundWorkspace,
+    archiveCoordinator,
+    workspace: primaryWorkspace,
+    fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,
     token: opts.token,
+    // Mirror the REST CORS allowlist onto the WS CSRF wall so an
+    // explicitly permitted origin (e.g. the extension's
+    // `chrome-extension://<id>`) can open the reverse tool channel.
+    allowedOrigins:
+      opts.allowOrigins && opts.allowOrigins.length > 0
+        ? parseAllowOriginPatterns(opts.allowOrigins)
+        : undefined,
+    hostname: opts.hostname,
     sessionShellCommandEnabled,
+    workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,
+    clientMcpOverWs: opts.clientMcpOverWs === true,
+    // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
+    // on `mcp_register` it records the WS registrar's sender in the shared
+    // registry and adds an SDK-type runtime MCP server in the ACP child
+    // (originator = the connection id). Only meaningful when
+    // `clientMcpOverWs` is on; the WS layer never builds a provider otherwise.
+    ...(opts.clientMcpOverWs === true
+      ? {
+          clientMcpProviderFactory: (connectionId: string) =>
+            createClientMcpServerProvider(
+              primaryRuntime.clientMcpSenderRegistry,
+              primaryBridge,
+              connectionId,
+            ),
+        }
+      : {}),
+    // Plan C CDP tunnel (issue #5626): the `/cdp` branch + `cdp_*` routing
+    // activate only when the flag is on and a registry is supplied.
+    cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
+    ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
     extraWsRoutes: [
       {
         path: '/voice/stream',
-        onConnection: createVoiceWsConnectionHandler(boundWorkspace),
+        onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace),
       },
     ],
   });
@@ -1279,32 +1088,10 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir);
+    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
   }
 
-  // Final error handler. `express.json()` throws `SyntaxError` (with
-  // `status: 400`) on malformed body — without this 4-arg middleware
-  // Express renders an HTML error page, which trips SDK clients that
-  // expect a JSON body on every response. Anything else bubbling out
-  // is a programmer error; log it and return a JSON 500 (matches the
-  // route-level `sendBridgeError` shape so clients have one error
-  // contract to parse).
-  app.use(
-    (
-      err: unknown,
-      _req: import('express').Request,
-      res: import('express').Response,
-      _next: import('express').NextFunction,
-    ) => {
-      if (sendJsonBodyParserError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-      );
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    },
-  );
+  installFinalErrorHandler(app);
 
   if (rateLimiter) {
     setRateLimiter(app, rateLimiter);

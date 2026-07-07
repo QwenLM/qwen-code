@@ -17,7 +17,11 @@ import OpenAI from 'openai';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import {
+  DEFAULT_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -171,6 +175,18 @@ describe('DefaultOpenAICompatibleProvider', () => {
       );
     });
 
+    it('should disable the timeout when configured to 0', () => {
+      mockContentGeneratorConfig.timeout = 0;
+
+      provider.buildClient();
+
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: DISABLED_REQUEST_TIMEOUT_MS,
+        }),
+      );
+    });
+
     it('should include custom headers from buildHeaders', () => {
       provider.buildClient();
 
@@ -206,7 +222,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result).not.toBe(originalRequest); // Should be a new object
     });
 
-    it('should set conservative max_tokens default when not configured', () => {
+    it('should set model max_tokens default when not configured', () => {
       const requestWithoutMaxTokens: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'gpt-4',
         messages: [{ role: 'user', content: 'Hello' }],
@@ -217,9 +233,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
         'prompt-id',
       );
 
-      // Should set capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS)
-      // GPT-4 has 16K output limit, so min(16K, 8K) = 8K
-      expect(result.max_tokens).toBe(8000);
+      expect(result.max_tokens).toBe(16384);
     });
 
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
@@ -233,7 +247,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
         const result = provider.buildRequest(request, 'prompt-id');
 
-        expect(result.max_tokens).toBe(8000);
+        expect(result.max_tokens).toBe(16384);
       }
     });
 
@@ -263,8 +277,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result.max_tokens).toBe(100000);
     });
 
-    it('should use capped default for unknown models when max_tokens not configured', () => {
-      // Unknown models without user config: use CAPPED_DEFAULT_MAX_TOKENS
+    it('should use default output limit for unknown models when max_tokens not configured', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'custom-deployment-alias',
         messages: [{ role: 'user', content: 'Hello' }],
@@ -272,8 +285,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'prompt-id');
 
-      // Uses capped default (8K)
-      expect(result.max_tokens).toBe(8000);
+      expect(result.max_tokens).toBe(32000);
     });
 
     it('should cap max_tokens for known models to avoid API errors', () => {
@@ -299,8 +311,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'prompt-id');
 
-      // GPT-4 has 16K output limit, capped default is 8K: min(16K, 8K) = 8K
-      expect(result.max_tokens).toBe(8000);
+      expect(result.max_tokens).toBe(16384);
     });
 
     it('should preserve all sampling parameters', () => {
@@ -340,10 +351,9 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(minimalRequest, 'prompt-id');
 
-      // Should set conservative max_tokens default
       expect(result.model).toBe('gpt-4');
       expect(result.messages).toEqual(minimalRequest.messages);
-      expect(result.max_tokens).toBe(8000); // GPT-4 has 16K limit, min(16K, 8K) = 8K
+      expect(result.max_tokens).toBe(16384);
     });
 
     it('should not inject max_tokens when samplingParams is set without it (e.g. GPT-5 / o-series)', () => {
@@ -395,11 +405,10 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(streamingRequest, 'prompt-id');
 
-      // Should set conservative max_tokens default while preserving stream
       expect(result.model).toBe('gpt-4');
       expect(result.messages).toEqual(streamingRequest.messages);
       expect(result.stream).toBe(true);
-      expect(result.max_tokens).toBe(8000); // GPT-4 has 16K limit, min(16K, 8K) = 8K
+      expect(result.max_tokens).toBe(16384);
     });
 
     it('should not modify the original request object', () => {
@@ -443,7 +452,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       expect(result).toEqual({
         ...originalRequest,
-        max_tokens: 8000, // GPT-4 has 16K limit, min(16K, 8K) = 8K
+        max_tokens: 16384,
         custom_param: 'custom_value',
         nested: { key: 'value' },
       });
@@ -458,11 +467,10 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(originalRequest, 'prompt-id');
 
-      // Should preserve original params and set conservative max_tokens default
       expect(result.model).toBe('gpt-4');
       expect(result.messages).toEqual(originalRequest.messages);
       expect(result.temperature).toBe(0.7);
-      expect(result.max_tokens).toBe(8000); // GPT-4 has 16K limit, min(16K, 8K) = 8K
+      expect(result.max_tokens).toBe(16384);
       expect(result).not.toHaveProperty('custom_param');
     });
 

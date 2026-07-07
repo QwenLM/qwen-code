@@ -268,6 +268,19 @@ export function isAutoModeProtectedWritePath(filePath: string): boolean {
 }
 
 /**
+ * Returns true when `classifyAllShell` is enabled and the tool is a
+ * shell-like tool (Bash/Monitor). Used to force all shell commands
+ * through the classifier even when their default permission is 'allow'.
+ */
+export function shouldClassifyAllShellForAutoMode(
+  toolName: string,
+  config: Config,
+): boolean {
+  if (!SHELL_LIKE_TOOL_NAMES.has(toolName)) return false;
+  return config.getAutoModeSettings()?.classifyAllShell === true;
+}
+
+/**
  * Returns true when an L4 `allow` verdict must still pass through the AUTO
  * classifier because it writes protected configuration or instruction paths.
  */

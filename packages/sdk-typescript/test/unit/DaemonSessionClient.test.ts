@@ -440,6 +440,77 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards artifact helpers through DaemonClient with the bound clientId', async () => {
+    const listEnvelope = {
+      v: 1 as const,
+      sessionId: 's-1',
+      artifacts: [],
+      generatedAt: '2026-07-01T00:00:00.000Z',
+      limits: { maxArtifacts: 200 },
+    };
+    const mutationResult = {
+      v: 1 as const,
+      sessionId: 's-1',
+      changes: [],
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (
+        req.method === 'GET' &&
+        req.url === 'http://daemon/session/s-1/artifacts'
+      ) {
+        return jsonResponse(200, listEnvelope);
+      }
+      if (
+        req.method === 'POST' &&
+        req.url === 'http://daemon/session/s-1/artifacts'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      if (
+        req.method === 'DELETE' &&
+        req.url === 'http://daemon/session/s-1/artifacts/artifact-1'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      return jsonResponse(500, {
+        error: `unexpected ${req.method} ${req.url}`,
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.artifacts()).resolves.toEqual(listEnvelope);
+    await expect(
+      session.addArtifact({
+        title: 'Client report',
+        url: 'https://example.com/report',
+      }),
+    ).resolves.toEqual(mutationResult);
+    await expect(session.removeArtifact('artifact-1')).resolves.toEqual(
+      mutationResult,
+    );
+
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+    ]);
+    expect(calls[1]?.body).toBe(
+      JSON.stringify({
+        title: 'Client report',
+        url: 'https://example.com/report',
+      }),
+    );
+  });
+
   it('forwards recap through DaemonClient with the bound clientId and signal', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {
@@ -467,6 +538,94 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.method).toBe('POST');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     expect(calls[0]?.signal).toBe(ctrl.signal);
+  });
+
+  it('forwards pending prompt list requests with encoded session id and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'hello',
+            state: 'queued',
+            queuedAt: 1_700_000_000_000,
+          },
+        ],
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getPendingPrompts()).resolves.toEqual({
+      pendingPrompts: [
+        {
+          promptId: 'prompt-1',
+          text: 'hello',
+          state: 'queued',
+          queuedAt: 1_700_000_000_000,
+        },
+      ],
+    });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/pending-prompts',
+    );
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards pending prompt removals with encoded ids and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { removed: false }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.removePendingPrompt('prompt with/slash'),
+    ).resolves.toEqual({ removed: false });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/pending-prompts/prompt%20with%2Fslash',
+    );
+    expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('maps pending prompt HTTP failures through DaemonClient errors', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(404, { error: 'not found' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    await expect(session.getPendingPrompts()).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(session.removePendingPrompt('p-1')).rejects.toMatchObject({
+      status: 404,
+    });
   });
 
   it('forwards session-scoped operations through DaemonClient', async () => {

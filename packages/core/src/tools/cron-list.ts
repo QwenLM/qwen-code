@@ -22,6 +22,12 @@ interface ListedJob {
   recurring: boolean;
   durable: boolean;
   fireAtMs?: number;
+  /** Optional display name (durable tasks created via the management UI). */
+  name?: string;
+  /** Absent (session-only jobs) or true = active; false = kept on disk but
+   * skipped by the scheduler. Surfaced so the agent can tell a disabled task
+   * apart from an active one. */
+  enabled?: boolean;
 }
 
 function truncatePrompt(prompt: string): string {
@@ -77,6 +83,8 @@ class CronListInvocation extends BaseToolInvocation<
         prompt: task.prompt,
         recurring: task.recurring,
         durable: true,
+        ...(task.name ? { name: task.name } : {}),
+        enabled: task.enabled !== false,
       })),
       ...scheduler
         .list()
@@ -99,19 +107,23 @@ class CronListInvocation extends BaseToolInvocation<
     const llmLines = jobs.map((job) => {
       const type = job.recurring ? 'recurring' : 'one-shot';
       const durability = job.durable ? 'durable' : 'session-only';
+      // A disabled durable task stays on disk but never fires — mark it so the
+      // agent doesn't assume it is active.
+      const status = job.enabled === false ? ', disabled' : '';
       const schedule =
         job.cron === '@wakeup'
           ? displaySchedule(job.cron, job.fireAtMs)
           : job.cron;
       const prompt =
         job.cron === '@wakeup' ? truncatePrompt(job.prompt) : job.prompt;
-      return `${job.id} — ${schedule} (${type}) [${durability}]: ${prompt}`;
+      const label = job.name ? `${job.name}: ` : '';
+      return `${job.id} — ${schedule} (${type}) [${durability}${status}]: ${label}${prompt}`;
     });
     const llmContent = llmLines.join('\n');
 
     const displayLines = jobs.map(
       (job) =>
-        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}]`,
+        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}]${job.name ? `: ${job.name}` : ''}`,
     );
     const returnDisplay = displayLines.join('\n');
 
@@ -142,7 +154,7 @@ export class CronListTool extends BaseDeclarativeTool<
       false, // canUpdateOutput
       true, // shouldDefer — low-frequency inspection tool
       false, // alwaysLoad
-      'cron list scheduled jobs',
+      'cron list show active scheduled tasks loop jobs wakeups',
     );
   }
 

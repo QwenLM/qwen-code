@@ -37,8 +37,10 @@ import {
   AppContainer,
   dedupeNewestFirst,
   getNextRenderMode,
+  isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
+  shouldDrainMessageQueue,
 } from './AppContainer.js';
 import {
   formatSessionWindowTitle,
@@ -65,6 +67,7 @@ import {
 import {
   type HistoryItem,
   type HistoryItemWithoutId,
+  StreamingState,
   ToolCallStatus,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
@@ -821,6 +824,48 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('keeps input active while compression is processing', () => {
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: true,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(true);
+
+      expect(
+        isInputActiveForState({
+          initError: null,
+          isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('does not drain queued messages while compression is processing', () => {
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: true,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(false);
+
+      expect(
+        shouldDrainMessageQueue({
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          messageQueueLength: 1,
+        }),
+      ).toBe(true);
     });
 
     it('submits /btw immediately instead of queueing while responding', () => {
@@ -3274,6 +3319,67 @@ describe('AppContainer State Management', () => {
       expect(abortSpy).toHaveBeenCalledTimes(1);
       const reason = abortSpy.mock.calls[0][0];
       expect(reason).toEqual({ kind: 'background' });
+    });
+
+    it('Ctrl+B does NOT promote when multiple foreground shell tool calls are executing', () => {
+      const promoteAc1 = new AbortController();
+      const promoteAc2 = new AbortController();
+      const abortSpy1 = vi.spyOn(promoteAc1, 'abort');
+      const abortSpy2 = vi.spyOn(promoteAc2, 'abort');
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [
+          {
+            status: 'executing',
+            request: { callId: 'call-shell-1', name: 'run_shell_command' },
+            promoteAbortController: promoteAc1,
+          },
+          {
+            status: 'executing',
+            request: { callId: 'call-shell-2', name: 'run_shell_command' },
+            promoteAbortController: promoteAc2,
+          },
+        ],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('PROMOTE_SHELL_TO_BACKGROUND'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!({
+        name: 'b',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x02',
+      });
+
+      expect(abortSpy1).not.toHaveBeenCalled();
+      expect(abortSpy2).not.toHaveBeenCalled();
     });
 
     it('Ctrl+B is a no-op when no foreground shell is currently executing', () => {

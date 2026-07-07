@@ -30,6 +30,12 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getLeaderOnlyToolUnavailableMessage,
+  getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
+  isPlanLifecycleToolUnavailableInSubagent,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -50,6 +56,56 @@ const SCORE_HINT_BUILTIN = 4;
 const SCORE_DESC_BUILTIN = 2;
 const SCORE_NAME_EXACT_MCP = 12;
 const SCORE_NAME_SUBSTR_MCP = 6;
+const SCORE_ACTION_ALIAS_BUILTIN = 6;
+
+const TOOL_SEARCH_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'at',
+  'be',
+  'can',
+  'could',
+  'did',
+  'do',
+  'does',
+  'for',
+  'from',
+  'how',
+  'i',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'of',
+  'on',
+  'or',
+  'please',
+  'should',
+  'that',
+  'the',
+  'these',
+  'this',
+  'those',
+  'to',
+  'was',
+  'were',
+  'what',
+  'which',
+  'with',
+  'would',
+  'you',
+]);
+
+const ACTION_TERM_ALIASES = new Map<string, string[]>([
+  ['cancel', ['cancel', 'delete', 'remove', 'stop', 'clear']],
+  ['clear', ['clear', 'delete', 'remove', 'cancel', 'stop']],
+  ['delete', ['delete', 'remove', 'cancel', 'stop', 'clear']],
+  ['remove', ['remove', 'delete', 'cancel', 'stop', 'clear']],
+  ['stop', ['stop', 'cancel', 'delete', 'remove', 'clear']],
+]);
 
 interface ScoredTool {
   tool: AnyDeclarativeTool;
@@ -192,12 +248,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const registry = this.config.getToolRegistry();
     return registry
       .getAllTools()
-      .filter(
-        (t) =>
-          t.shouldDefer &&
-          !t.alwaysLoad &&
-          !registry.isDeferredToolRevealed(t.name),
-      );
+      .filter((t) => registry.isDeferredAndHidden(t.name));
   }
 
   private async loadAndReturnSchemas(
@@ -215,6 +266,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const registry = this.config.getToolRegistry();
     const loaded: AnyDeclarativeTool[] = [];
     const missing: string[] = [];
+    const blocked: string[] = [];
 
     // Case-insensitive lookup across all known names (instance names + factory
     // names). Preserve the user-supplied casing in the error list so the
@@ -232,6 +284,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const canonical = lowerIndex.get(requested.toLowerCase());
       if (!canonical) {
         missing.push(requested);
+        continue;
+      }
+      if (
+        isPlanLifecycleToolUnavailableInSubagent(canonical) ||
+        isLeaderOnlyToolUnavailableInSubagent(canonical)
+      ) {
+        blocked.push(canonical);
         continue;
       }
       // Treat ensureTool throws the same as a null return: log + report
@@ -268,7 +327,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // list) and pulling them through setTools() would risk a spurious
       // "GeminiClient not initialised" failure for what is just a
       // schema-inspection call.
-      const isLoadable = tool.shouldDefer && !tool.alwaysLoad;
+      const isLoadable = registry.isDeferredAndHidden(canonical);
       if (isLoadable) {
         const wasRevealed = registry.isDeferredToolRevealed(canonical);
         registry.revealDeferredTool(canonical);
@@ -311,22 +370,6 @@ class ToolSearchInvocation extends BaseToolInvocation<
           process.stderr.write(
             `[ToolSearch] setTools() failed while revealing deferred tools: ${setToolsError}\n`,
           );
-        }
-
-        if (!setToolsError) {
-          try {
-            await geminiClient.refreshStartupContextReminder();
-          } catch (err) {
-            const refreshError =
-              err instanceof Error ? err.message : String(err);
-            debugLogger.warn(
-              'refreshStartupContextReminder() failed after revealing deferred tools:',
-              err,
-            );
-            process.stderr.write(
-              `[ToolSearch] refreshStartupContextReminder() failed after revealing deferred tools: ${refreshError}\n`,
-            );
-          }
         }
       }
 
@@ -376,6 +419,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Not found: ${missing.join(', ')}`;
     }
+    let blockedErrorMessage: string | undefined;
+    if (blocked.length > 0) {
+      const blockedMessages = blocked.map((name) =>
+        isLeaderOnlyToolUnavailableInSubagent(name)
+          ? getLeaderOnlyToolUnavailableMessage(name)
+          : getSubagentPlanToolUnavailableMessage(name),
+      );
+      blockedErrorMessage = blockedMessages.join('\n');
+      const header = llmContent ? '\n\n' : '';
+      llmContent += `${header}Unavailable: ${blockedErrorMessage}`;
+    }
     if (truncated.length > 0) {
       // Surface the dropped names so the model knows it must re-issue
       // another ToolSearch for them — without this, the model would
@@ -388,11 +442,16 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const displayParts: string[] = [];
     if (loaded.length > 0) displayParts.push(`Loaded ${loaded.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
+    if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (truncated.length > 0)
       displayParts.push(`${truncated.length} truncated`);
     const returnDisplay = displayParts.join(', ') || 'No tools loaded';
 
-    return { llmContent, returnDisplay };
+    const result: ToolResult = { llmContent, returnDisplay };
+    if (blockedErrorMessage && loaded.length === 0) {
+      result.error = { message: blockedErrorMessage };
+    }
+    return result;
   }
 }
 
@@ -453,8 +512,23 @@ export function tokenize(query: string): string[] {
   return query
     .toLowerCase()
     .split(/\s+/g)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
+    .map(normalizeSearchTerm)
+    .filter((t): t is string => t !== null);
+}
+
+function normalizeSearchTerm(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const required = trimmed.startsWith('+');
+  const body = required ? trimmed.slice(1) : trimmed;
+  const normalized = body.replace(
+    /^[^\p{L}\p{N}_.+#-]+|[^\p{L}\p{N}_.+#-]+$/gu,
+    '',
+  );
+  if (normalized.length < 2 || TOOL_SEARCH_STOP_WORDS.has(normalized)) {
+    return null;
+  }
+  return required ? `+${normalized}` : normalized;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -485,7 +559,9 @@ function candidateMatchesRequired(
 ): boolean {
   if (requiredTerms.length === 0) return true;
   const nameLower = tool.name.toLowerCase();
-  return requiredTerms.every((t) => nameLower.includes(t));
+  return requiredTerms.every((t) =>
+    getSearchTermVariants(t).some((variant) => nameLower.includes(variant)),
+  );
 }
 
 /**
@@ -502,22 +578,48 @@ export function scoreTool(tool: AnyDeclarativeTool, terms: string[]): number {
   let total = 0;
   for (const term of terms) {
     if (term.length === 0) continue;
-    if (
-      nameLower === term ||
-      nameLower.endsWith('_' + term) ||
-      nameLower.endsWith('.' + term)
-    ) {
-      total += isMcp ? SCORE_NAME_EXACT_MCP : SCORE_NAME_EXACT_BUILTIN;
-    } else if (nameLower.includes(term)) {
-      total += isMcp ? SCORE_NAME_SUBSTR_MCP : SCORE_NAME_SUBSTR_BUILTIN;
+    const variants = getSearchTermVariants(term);
+    let nameScore = 0;
+    for (const variant of variants) {
+      if (
+        nameLower === variant ||
+        nameLower.endsWith('_' + variant) ||
+        nameLower.endsWith('.' + variant)
+      ) {
+        nameScore = Math.max(
+          nameScore,
+          isMcp ? SCORE_NAME_EXACT_MCP : SCORE_NAME_EXACT_BUILTIN,
+        );
+      } else if (nameLower.includes(variant)) {
+        nameScore = Math.max(
+          nameScore,
+          isMcp ? SCORE_NAME_SUBSTR_MCP : SCORE_NAME_SUBSTR_BUILTIN,
+        );
+      }
     }
+    total += nameScore;
     // Hint matches are per-word, mirroring Claude's "word boundary" rule.
-    if (hintParts.some((p) => p === term)) {
+    if (hintParts.some((p) => variants.includes(p))) {
       total += SCORE_HINT_BUILTIN;
     }
-    if (descLower.includes(term)) {
+    if (variants.some((variant) => descLower.includes(variant))) {
       total += SCORE_DESC_BUILTIN;
+    }
+    if (
+      ACTION_TERM_ALIASES.has(term) &&
+      variants
+        .filter((variant) => variant !== term)
+        .some(
+          (variant) =>
+            nameLower.includes(variant) || hintParts.some((p) => p === variant),
+        )
+    ) {
+      total += SCORE_ACTION_ALIAS_BUILTIN;
     }
   }
   return total;
+}
+
+function getSearchTermVariants(term: string): string[] {
+  return ACTION_TERM_ALIASES.get(term) ?? [term];
 }
