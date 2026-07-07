@@ -113,6 +113,7 @@ export class HistoryReplayer {
               await this.messageEmitter.emitUserMessage(
                 displayText,
                 record.timestamp,
+                record.subtype === 'cron' ? { source: 'cron' } : undefined,
               );
             }
             break;

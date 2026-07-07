@@ -20,6 +20,7 @@
 ## Task 1: Add Channel Metadata And Lifecycle Types
 
 **Files:**
+
 - Modify: `packages/channels/base/src/types.ts`
 - Test: `packages/channels/base/src/ChannelBase.test.ts`
 
@@ -199,8 +200,8 @@ Add private fields after `protected name: string;`:
 Set them in the constructor after `this.proxy = options?.proxy;`:
 
 ```ts
-    this.identity = this.resolveIdentity(name, config);
-    this.memoryScope = this.resolveMemoryScope(name, config);
+this.identity = this.resolveIdentity(name, config);
+this.memoryScope = this.resolveMemoryScope(name, config);
 ```
 
 Add methods near other protected hooks:
@@ -247,15 +248,15 @@ Add methods near other protected hooks:
 Emit `started` after `this.activePrompts.set(sessionId, promptState);`:
 
 ```ts
-      this.emitTaskLifecycle({
-        type: 'started',
-        channelName: this.name,
-        chatId: envelope.chatId,
-        sessionId,
-        messageId: envelope.messageId,
-        identity: this.identity,
-        memoryScope: this.memoryScope,
-      });
+this.emitTaskLifecycle({
+  type: 'started',
+  channelName: this.name,
+  chatId: envelope.chatId,
+  sessionId,
+  messageId: envelope.messageId,
+  identity: this.identity,
+  memoryScope: this.memoryScope,
+});
 ```
 
 - [ ] **Step 5: Run test to verify Task 1 passes**
@@ -272,6 +273,7 @@ Expected: both new metadata tests pass; existing tests still pass.
 ## Task 2: Add Prompt Boundary And Status Visibility
 
 **Files:**
+
 - Modify: `packages/channels/base/src/ChannelBase.ts`
 - Test: `packages/channels/base/src/ChannelBase.test.ts`
 
@@ -301,13 +303,13 @@ it('prepends channel boundary metadata before custom instructions once per sessi
   expect(prompt).toContain('Channel identity:');
   expect(prompt).toContain('- id: ops-agent');
   expect(prompt).toContain('- display name: Ops Agent');
-  expect(prompt).toContain(
-    '- description: Coordinates repository operations.',
-  );
+  expect(prompt).toContain('- description: Coordinates repository operations.');
   expect(prompt).toContain('Memory scope:');
   expect(prompt).toContain('- namespace: qwen-tag:ops');
   expect(prompt).toContain('- mode: metadata-only');
-  expect(prompt).toContain('- storage isolation: not enforced by this version.');
+  expect(prompt).toContain(
+    '- storage isolation: not enforced by this version.',
+  );
   expect(prompt.indexOf('Channel identity:')).toBeLessThan(
     prompt.indexOf('Be concise.'),
   );
@@ -378,25 +380,25 @@ Add private method near metadata resolvers:
 Replace the existing instruction block:
 
 ```ts
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
-      this.instructedSessions.add(sessionId);
-    }
+if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
+  promptText = `${this.config.instructions}\n\n${promptText}`;
+  this.instructedSessions.add(sessionId);
+}
 ```
 
 with:
 
 ```ts
-    if (
-      this.shouldPrependChannelBoundaryPrompt() &&
-      !this.instructedSessions.has(sessionId)
-    ) {
-      const prefix = this.config.instructions
-        ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
-        : this.channelBoundaryPrompt();
-      promptText = `${prefix}\n\n${promptText}`;
-      this.instructedSessions.add(sessionId);
-    }
+if (
+  this.shouldPrependChannelBoundaryPrompt() &&
+  !this.instructedSessions.has(sessionId)
+) {
+  const prefix = this.config.instructions
+    ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
+    : this.channelBoundaryPrompt();
+  promptText = `${prefix}\n\n${promptText}`;
+  this.instructedSessions.add(sessionId);
+}
 ```
 
 - [ ] **Step 4: Add status lines**
@@ -429,6 +431,7 @@ Expected: prompt boundary and status tests pass; existing instruction tests are 
 ## Task 3: Emit Full Task Lifecycle Events
 
 **Files:**
+
 - Modify: `packages/channels/base/src/ChannelBase.ts`
 - Test: `packages/channels/base/src/ChannelBase.test.ts`
 
@@ -538,25 +541,25 @@ Update `started` to spread `this.lifecycleBase(...)`.
 In `bridgeToolCallListener`, after `this.onToolCall(target.chatId, event);`, add:
 
 ```ts
-      this.emitTaskLifecycle({
-        type: 'tool_call',
-        channelName: this.name,
-        chatId: target.chatId,
-        sessionId: event.sessionId,
-        toolCall: event,
-        identity: this.identity,
-        memoryScope: this.memoryScope,
-      });
+this.emitTaskLifecycle({
+  type: 'tool_call',
+  channelName: this.name,
+  chatId: target.chatId,
+  sessionId: event.sessionId,
+  toolCall: event,
+  identity: this.identity,
+  memoryScope: this.memoryScope,
+});
 ```
 
 In `onChunk`, after `this.onResponseChunk(...)`, add:
 
 ```ts
-          this.emitTaskLifecycle({
-            type: 'text_chunk',
-            ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
-            chunk,
-          });
+this.emitTaskLifecycle({
+  type: 'text_chunk',
+  ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
+  chunk,
+});
 ```
 
 - [ ] **Step 5: Emit cancellation events**
@@ -564,31 +567,31 @@ In `onChunk`, after `this.onResponseChunk(...)`, add:
 In `/cancel`, after `active.cancelled = true;`, add:
 
 ```ts
-      this.emitTaskLifecycle({
-        type: 'cancelled',
-        ...this.lifecycleBase(active.chatId, activeSessionId, active.messageId),
-        reason: 'cancel_command',
-      });
+this.emitTaskLifecycle({
+  type: 'cancelled',
+  ...this.lifecycleBase(active.chatId, activeSessionId, active.messageId),
+  reason: 'cancel_command',
+});
 ```
 
 In `/clear`, when `active` exists before waiting, add:
 
 ```ts
-            this.emitTaskLifecycle({
-              type: 'cancelled',
-              ...this.lifecycleBase(active.chatId, id, active.messageId),
-              reason: 'clear',
-            });
+this.emitTaskLifecycle({
+  type: 'cancelled',
+  ...this.lifecycleBase(active.chatId, id, active.messageId),
+  reason: 'clear',
+});
 ```
 
 In `steer`, after `active.cancelled = true;`, add:
 
 ```ts
-          this.emitTaskLifecycle({
-            type: 'cancelled',
-            ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
-            reason: 'steer',
-          });
+this.emitTaskLifecycle({
+  type: 'cancelled',
+  ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
+  reason: 'steer',
+});
 ```
 
 - [ ] **Step 6: Emit completed and failed events**
@@ -596,10 +599,10 @@ In `steer`, after `active.cancelled = true;`, add:
 In the prompt `try` block, after response delivery finishes and only when `!promptState.cancelled`, add:
 
 ```ts
-          this.emitTaskLifecycle({
-            type: 'completed',
-            ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
-          });
+this.emitTaskLifecycle({
+  type: 'completed',
+  ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
+});
 ```
 
 Convert the `try/finally` into `try/catch/finally`:
@@ -629,6 +632,7 @@ Expected: all `ChannelBase` tests pass.
 ## Task 4: Config Parsing, Exports, And Verification
 
 **Files:**
+
 - Modify: `packages/cli/src/commands/channel/config-utils.ts`
 - Modify: `packages/cli/src/commands/channel/config-utils.test.ts`
 - Modify: `packages/channels/base/src/index.ts`

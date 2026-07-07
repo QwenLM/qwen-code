@@ -14,7 +14,7 @@ PR [#4842][p4842] shipped the fields with an end-to-end runtime path at the
 time. PR [#4870][p4870] then replaced the YAML parser to support block
 scalars. This follow-up PR builds on both: it replaces the YAML
 **stringifier** (PR #4870 left it hand-rolled — see
-`docs/yaml-parser-replacement.md`), surfaces `mcpServers` + `hooks` on
+`docs/design/yaml-parser-replacement.md`), surfaces `mcpServers` + `hooks` on
 `SubagentConfig`, and wires them to the runtime so per-agent MCP servers
 and hooks actually fire when a subagent runs.
 
