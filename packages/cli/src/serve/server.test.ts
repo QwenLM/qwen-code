@@ -12116,6 +12116,99 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /channels/:channelName/webhooks/:source', () => {
+    it('is only mounted when enqueueChannelWebhookTask is available', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const tempHome = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-'),
+      );
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-channel-webhooks-workspace-'),
+      );
+      try {
+        process.env['QWEN_HOME'] = tempHome;
+        await fsp.writeFile(
+          path.join(tempHome, 'settings.json'),
+          JSON.stringify({
+            channels: {
+              'dingtalk-main': {
+                type: 'dingtalk',
+                webhooks: {
+                  sources: {
+                    'github-ci': {
+                      secret: 'secret-value',
+                      targets: {
+                        default: {
+                          chatId: 'group-1',
+                          senderId: 'webhook:github-ci',
+                          isGroup: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+          'utf8',
+        );
+        resetHomeEnvBootstrapForTesting();
+
+        const withoutEnqueue = createServeApp(
+          { ...baseOpts, workspace },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const notMounted = await request(withoutEnqueue)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(notMounted.status).toBe(404);
+
+        const enqueueChannelWebhookTask = vi.fn(async () => ({
+          accepted: true as const,
+        }));
+        const withEnqueue = createServeApp(
+          { ...baseOpts, workspace },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const mounted = await request(withEnqueue)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+
+        expect(mounted.status).toBe(202);
+        expect(mounted.body).toEqual({ accepted: true });
+        expect(enqueueChannelWebhookTask).toHaveBeenCalledWith({
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          payload: {},
+        });
+      } finally {
+        await fsp.rm(tempHome, { recursive: true, force: true });
+        await fsp.rm(workspace, { recursive: true, force: true });
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+  });
+
   describe('session limit (chiga0 Rec 3 — --max-sessions)', () => {
     it('503 + Retry-After + structured error when bridge throws SessionLimitExceededError', async () => {
       const bridge = fakeBridge({

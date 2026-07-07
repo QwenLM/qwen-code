@@ -14,7 +14,10 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
-import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type {
+  ChannelWorkerSnapshot,
+  ChannelWorkerSupervisor,
+} from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -126,6 +129,9 @@ import {
 import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
+import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import { parseChannelWebhookConfig } from '../commands/channel/config-utils.js';
+import { loadChannelsConfig } from '../commands/channel/runtime.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -153,6 +159,31 @@ export { getActiveSseCount } from './routes/sse-events.js';
  * `createServeApp` repeatedly would flood stderr with identical lines.
  */
 let warnedDefaultTrust = false;
+
+function loadServeChannelWebhookConfigs(
+  workspace: string,
+): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
+  const channelsConfig = loadChannelsConfig(workspace);
+  const parsed: Record<
+    string,
+    { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }
+  > = {};
+
+  for (const [channelName, rawConfig] of Object.entries(channelsConfig)) {
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      continue;
+    }
+    const webhooks = parseChannelWebhookConfig(
+      channelName,
+      rawConfig as Record<string, unknown>,
+    );
+    if (webhooks) {
+      parsed[channelName] = { webhooks };
+    }
+  }
+
+  return parsed;
+}
 
 function describeRegistryPrimaryForConflict(
   registry: WorkspaceRegistry,
@@ -244,6 +275,7 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -675,6 +707,14 @@ export function createServeApp(
   // before body parser (reject early without burning JSON.parse CPU).
   const rateLimiter = installRateLimiter(app, opts, daemonLog);
   installJsonBodyParser(app);
+
+  if (deps.enqueueChannelWebhookTask) {
+    registerChannelWebhookRoutes(app, {
+      channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
+      safeBody,
+      enqueueWebhookTask: deps.enqueueChannelWebhookTask,
+    });
+  }
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register

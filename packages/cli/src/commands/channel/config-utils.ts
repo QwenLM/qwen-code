@@ -241,6 +241,13 @@ function parseWebhookConfig(
   return { sources };
 }
 
+export function parseChannelWebhookConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelWebhookConfig | undefined {
+  return parseWebhookConfig(channelName, rawConfig);
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,

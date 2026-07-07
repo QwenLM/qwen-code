@@ -2542,6 +2542,8 @@ export async function runQwenServe(
       primaryWorkspaceTrusted: trustedWorkspace,
       daemonLog,
       getChannelWorkerSnapshot,
+      enqueueChannelWebhookTask: (task) =>
+        channelWorker.enqueueWebhookTask(task),
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {
