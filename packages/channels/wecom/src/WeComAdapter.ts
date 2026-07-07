@@ -343,7 +343,6 @@ export class WeComChannel extends ChannelBase {
     if (mediaErrors.length > 0) {
       const message = `[WeCom:${this.name}] ${mediaErrors.length} media send(s) failed (markdown text may already be delivered): ${mediaErrors.join('; ')}`;
       process.stderr.write(`${message}\n`);
-      throw new Error(message);
     }
   }
 
@@ -359,9 +358,10 @@ export class WeComChannel extends ChannelBase {
       return;
     }
 
-    const messageId = getString(body, 'msgid') || undefined;
-    const logMessageId = sanitizeLogText(messageId || '(no id)', 100);
-    if (messageId && this.seenMessages.has(messageId)) {
+    const rawMessageId = getString(body, 'msgid') || undefined;
+    const messageId = rawMessageId ?? `synthetic-${randomUUID()}`;
+    const logMessageId = sanitizeLogText(rawMessageId || '(no id)', 100);
+    if (rawMessageId && this.seenMessages.has(rawMessageId)) {
       process.stderr.write(
         `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already seen).\n`,
       );
@@ -382,14 +382,14 @@ export class WeComChannel extends ChannelBase {
       );
       return;
     }
-    if (messageId) {
-      if (this.inFlightMessages.has(messageId)) {
+    if (rawMessageId) {
+      if (this.inFlightMessages.has(rawMessageId)) {
         process.stderr.write(
           `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already in flight).\n`,
         );
         return;
       }
-      this.inFlightMessages.add(messageId);
+      this.inFlightMessages.add(rawMessageId);
     }
 
     const text = extractText(body);
@@ -401,7 +401,7 @@ export class WeComChannel extends ChannelBase {
       senderName,
       chatId,
       text,
-      messageId,
+      messageId: rawMessageId ?? messageId,
       isGroup,
       isMentioned: !isGroup || (explicitMention ?? false),
       isReplyToBot:
@@ -435,7 +435,7 @@ export class WeComChannel extends ChannelBase {
         );
         return;
       }
-      if (messageId) this.seenMessages.set(messageId, Date.now());
+      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
       if (attachments.length) {
         envelope.attachments = attachments;
       }
@@ -447,25 +447,22 @@ export class WeComChannel extends ChannelBase {
       processStarted = true;
       await this.processInbound(envelope);
     } catch (err) {
-      if (messageId && !processStarted) {
-        this.seenMessages.delete(messageId);
-      } else if (messageId) {
+      if (rawMessageId && !processStarted) {
+        this.seenMessages.delete(rawMessageId);
+      } else if (rawMessageId) {
         process.stderr.write(
           `[WeCom:${this.name}] message ${logMessageId} failed after processing started; dedup entry retained.\n`,
         );
       }
       throw err;
     } finally {
-      if (messageId) this.inFlightMessages.delete(messageId);
+      if (rawMessageId) this.inFlightMessages.delete(rawMessageId);
       if (
         messageId &&
         !this.bufferedAttachmentMessages.has(messageId) &&
         this.attachmentDirsByMessage.has(messageId)
       ) {
         this.cleanupAttachmentDirsForMessage(messageId);
-      }
-      if (!messageId) {
-        this.cleanupAttachmentDirsWithoutMessage(attachmentRouteKey);
       }
     }
   }
@@ -692,13 +689,6 @@ export class WeComChannel extends ChannelBase {
     this.attachmentDirsWithoutMessageByRoute.delete(routeKey);
   }
 
-  private cleanupAttachmentDirsWithoutMessage(routeKey: string): void {
-    const dirs = this.attachmentDirsWithoutMessageByRoute.get(routeKey);
-    if (!dirs || dirs.length === 0) return;
-    this.attachmentDirsWithoutMessageByRoute.delete(routeKey);
-    cleanupAttachmentDirs(dirs);
-  }
-
   private removeAttachmentDirsFromSessions(dirs: string[]): void {
     const removed = new Set(dirs);
     for (const [sessionId, sessionDirs] of this.attachmentDirsBySession) {
@@ -841,6 +831,7 @@ export class WeComChannel extends ChannelBase {
     if (this.kickReconnectRetry) {
       clearTimeout(this.kickReconnectRetry);
       this.kickReconnectRetry = undefined;
+      this.kickReconnectAttempts = 0;
     }
     this.reconnectingAfterKick = true;
     const previousConnecting = this.connecting;
@@ -963,6 +954,14 @@ export class WeComChannel extends ChannelBase {
             200,
           )}\n`,
         );
+        if (this.kickReconnectRetry === undefined) {
+          this.scheduleKickReconnectRetry(
+            reason,
+            this.disconnectGeneration,
+            KICK_RECONNECT_LONG_RETRY_MS,
+            reconnectReason,
+          );
+        }
       },
     );
   }

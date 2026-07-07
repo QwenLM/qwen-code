@@ -667,6 +667,57 @@ describe('WeComChannel', () => {
     setTimeoutSpy.mockRestore();
   });
 
+  it('resets exhausted kick attempts when a fresh kick cancels a delayed retry', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const retry = setTimeout(() => {}, 60_000);
+    const inspectable = channel as unknown as {
+      kickReconnectAttempts: number;
+      kickReconnectRetry?: ReturnType<typeof setTimeout>;
+    };
+    inspectable.kickReconnectAttempts = 3;
+    inspectable.kickReconnectRetry = retry;
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    expect(inspectable.kickReconnectAttempts).toBe(0);
+
+    channel.disconnect();
+  });
+
+  it('schedules a long retry when kick reconnect fails unexpectedly', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    const inspectable = channel as unknown as {
+      reconnectAfterKick(
+        reason: unknown,
+        reconnectReason?: string,
+      ): Promise<void>;
+      startKickReconnect(reason: unknown, reconnectReason?: string): void;
+      kickReconnectRetry?: ReturnType<typeof setTimeout>;
+    };
+    inspectable.reconnectAfterKick = vi.fn(async () => {
+      throw new Error('state corrupt');
+    });
+
+    inspectable.startKickReconnect('kicked', 'server kick');
+
+    await vi.waitFor(() =>
+      expect(inspectable.kickReconnectRetry).toBeDefined(),
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] kick-reconnect failed: state corrupt\n',
+    );
+
+    stderr.mockRestore();
+  });
+
   it('does not keep the SDK disconnect fallback reconnect alive', () => {
     const unref = vi.fn();
     const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
@@ -3490,6 +3541,50 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 
+  it('tracks attachment dirs for messages without msgid by synthetic message id', async () => {
+    const bridge = makeBridge();
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise<string>(() => {}),
+    );
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+
+    lastClient().emit('message.file', {
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'no-id.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as string;
+    const filePath = prompt.match(/saved to: (.*no-id\.txt)/)?.[1];
+    expect(filePath).toBeDefined();
+    expect(existsSync(filePath!)).toBe(true);
+    expect(
+      Array.from(
+        (
+          channel as unknown as {
+            attachmentDirsByMessage: Map<string, string[]>;
+          }
+        ).attachmentDirsByMessage.keys(),
+      ).some((messageId) => messageId.startsWith('synthetic-')),
+    ).toBe(true);
+    expect(
+      (
+        channel as unknown as {
+          attachmentDirsWithoutMessageByRoute: Map<string, string[]>;
+        }
+      ).attachmentDirsWithoutMessageByRoute.size,
+    ).toBe(0);
+
+    channel.disconnect();
+  });
+
   it('sends markdown text and local media through the SDK', async () => {
     const parent = join(tmpdir(), 'channel-files');
     mkdirSync(parent, { recursive: true });
@@ -3729,7 +3824,7 @@ describe('WeComChannel', () => {
     );
   });
 
-  it('throws after sending later media when one upload returns no media id', async () => {
+  it('logs and sends later media when one upload returns no media id', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -3756,9 +3851,10 @@ describe('WeComChannel', () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ media_id: 'media-2' });
 
-    await expect(
-      channel.sendMessage('chat-1', '[IMAGE: first.png]\n[IMAGE: second.png]'),
-    ).rejects.toThrow('1 media send(s) failed');
+    await channel.sendMessage(
+      'chat-1',
+      '[IMAGE: first.png]\n[IMAGE: second.png]',
+    );
 
     expect(client.uploadMedia).toHaveBeenCalledTimes(2);
     expect(client.sendMediaMessage).toHaveBeenCalledTimes(1);
@@ -3773,7 +3869,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('throws after sending later media when one media send fails', async () => {
+  it('logs and sends later media when one media send fails', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -3807,10 +3903,9 @@ describe('WeComChannel', () => {
       })
       .mockResolvedValueOnce({ headers: { req_id: 'media-req-2' } });
 
-    await expect(
-      channel.sendMessage('chat-1', '[IMAGE: first.png]\n[IMAGE: second.png]'),
-    ).rejects.toThrow(
-      '1 media send(s) failed (markdown text may already be delivered): image: errcode=45009 errmsg=api freq out of limit',
+    await channel.sendMessage(
+      'chat-1',
+      '[IMAGE: first.png]\n[IMAGE: second.png]',
     );
 
     expect(client.uploadMedia).toHaveBeenCalledTimes(2);
@@ -3871,9 +3966,7 @@ describe('WeComChannel', () => {
     await channel.connect();
     const client = lastClient();
 
-    await expect(
-      channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`),
-    ).rejects.toThrow('1 media send(s) failed');
+    await channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`);
 
     expect(client.uploadMedia).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
@@ -3902,9 +3995,7 @@ describe('WeComChannel', () => {
     await channel.connect();
     const client = lastClient();
 
-    await expect(
-      channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`),
-    ).rejects.toThrow('1 media send(s) failed');
+    await channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`);
 
     expect(client.uploadMedia).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
@@ -3932,9 +4023,7 @@ describe('WeComChannel', () => {
     const client = lastClient();
 
     try {
-      await expect(
-        channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`),
-      ).rejects.toThrow('1 media send(s) failed');
+      await channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`);
 
       expect(client.uploadMedia).not.toHaveBeenCalled();
       expect(stderr).toHaveBeenCalledWith(
