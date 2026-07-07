@@ -25,6 +25,19 @@ export interface WorkspaceMemoryFailureDiagnostics {
 }
 
 type RememberErrorExtractionTarget = 'code' | 'details' | 'stack';
+type WorkspaceMemoryExtractionLogger = {
+  warn(message: string, context: { extractionError: string }): void;
+};
+
+export function createWorkspaceMemoryExtractionErrorLogger(
+  logger: WorkspaceMemoryExtractionLogger,
+): (target: RememberErrorExtractionTarget, err: unknown) => void {
+  return (target, err) => {
+    logger.warn(`Failed to extract workspace memory error ${target}:`, {
+      extractionError: err instanceof Error ? err.message : String(err),
+    });
+  };
+}
 
 function errorCodeFromRecord(
   record: Record<string, unknown>,

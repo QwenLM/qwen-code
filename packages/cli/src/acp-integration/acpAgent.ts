@@ -168,6 +168,7 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import {
+  createWorkspaceMemoryExtractionErrorLogger,
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
@@ -285,11 +286,8 @@ function workspaceMemoryErrorData(
   };
 }
 
-function logWorkspaceMemoryExtractionError(target: string, err: unknown): void {
-  debugLogger.warn(`Failed to extract workspace memory error ${target}:`, {
-    extractionError: err instanceof Error ? err.message : String(err),
-  });
-}
+const logWorkspaceMemoryExtractionError =
+  createWorkspaceMemoryExtractionErrorLogger(debugLogger);
 
 function parseAcpLocalReadRootsEnv(
   raw = process.env[QWEN_ACP_LOCAL_READ_ROOTS_ENV],

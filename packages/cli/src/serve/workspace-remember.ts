@@ -16,6 +16,7 @@ import type {
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
 import {
+  createWorkspaceMemoryExtractionErrorLogger,
   extractRememberErrorCode,
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
@@ -200,11 +201,8 @@ function createTaskError(
   };
 }
 
-function logWorkspaceMemoryExtractionError(target: string, err: unknown): void {
-  debugLogger.warn(`Failed to extract workspace memory error ${target}:`, {
-    extractionError: err instanceof Error ? err.message : String(err),
-  });
-}
+const logWorkspaceMemoryExtractionError =
+  createWorkspaceMemoryExtractionErrorLogger(debugLogger);
 
 export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
