@@ -77,7 +77,7 @@ const NON_SSE_BODY_PREFIX_LIMIT = 512;
  */
 function isSSECompatibleContentType(contentType: string | null): boolean {
   if (!contentType) return true; // absence → assume SSE (SDK default)
-  const mediaType = contentType.split(';')[0]!.trim().toLowerCase();
+  const mediaType = (contentType.split(';')[0] ?? '').trim().toLowerCase();
   return (
     mediaType === 'text/event-stream' ||
     mediaType === 'application/json' ||
