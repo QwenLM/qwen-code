@@ -87,6 +87,34 @@
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
 }
+/* Non-blocking banner shown at the top of the split when the outer (main)
+   session is waiting on an approval that's hidden behind the split view. */
+.splitApprovalNotice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--warning-bg);
+  border-bottom: 1px solid var(--warning-border);
+  color: var(--warning-color);
+  font-size: 13px;
+}
+.splitApprovalNotice button {
+  appearance: none;
+  margin-left: auto;
+  border: 1px solid var(--warning-border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 3px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.splitApprovalNotice button:hover {
+  background: var(--warning-border);
+}
 .fullPageBack {
   appearance: none;
   border: none;
