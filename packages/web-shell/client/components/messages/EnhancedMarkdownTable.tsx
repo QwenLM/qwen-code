@@ -118,6 +118,11 @@ const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
+const DEFAULT_COLUMN_STYLE: CSSProperties = {
+  width: DEFAULT_COLUMN_WIDTH,
+  minWidth: DEFAULT_COLUMN_WIDTH,
+  maxWidth: DEFAULT_COLUMN_WIDTH,
+};
 
 function clampColumnWidth(width: number): number {
   return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
@@ -296,7 +301,7 @@ function compareCellText(a: string, b: string): number {
   });
 }
 
-function getSelectionBounds(range: SelectionRange) {
+function getSelectionRowBounds(range: SelectionRange) {
   return {
     minRow: Math.min(range.anchorRow, range.focusRow),
     maxRow: Math.max(range.anchorRow, range.focusRow),
@@ -330,7 +335,7 @@ function getSelectionText(
   visibleColumnIndexes: number[],
 ): string {
   if (!range) return '';
-  const { minRow, maxRow } = getSelectionBounds(range);
+  const { minRow, maxRow } = getSelectionRowBounds(range);
   const selectedColumns = getSelectedColumnIndexes(range, visibleColumnIndexes);
   if (selectedColumns.length === 0) return '';
 
@@ -377,7 +382,7 @@ function selectionSize(
   visibleColumnIndexes: number[],
 ): number {
   if (!range) return 0;
-  const { minRow, maxRow } = getSelectionBounds(range);
+  const { minRow, maxRow } = getSelectionRowBounds(range);
   const selectedColumnCount = getSelectedColumnIndexes(
     range,
     visibleColumnIndexes,
@@ -1417,10 +1422,20 @@ export function EnhancedTable({
       const nextWidth = clampColumnWidth(
         resizingColumn.startWidth + event.clientX - resizingColumn.startX,
       );
-      setColumnWidths((current) => ({
-        ...current,
-        [resizingColumn.columnIndex]: nextWidth,
-      }));
+      setColumnWidths((current) => {
+        const currentWidth =
+          current[resizingColumn.columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+        if (currentWidth === nextWidth) return current;
+        if (nextWidth === DEFAULT_COLUMN_WIDTH) {
+          const next = { ...current };
+          delete next[resizingColumn.columnIndex];
+          return next;
+        }
+        return {
+          ...current,
+          [resizingColumn.columnIndex]: nextWidth,
+        };
+      });
     };
     const stopResize = () => setResizingColumn(null);
     window.addEventListener('mousemove', resizeColumn);
@@ -1545,8 +1560,8 @@ export function EnhancedTable({
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
   };
 
-  const selectionBounds = useMemo(
-    () => (selection ? getSelectionBounds(selection) : null),
+  const selectionRowBounds = useMemo(
+    () => (selection ? getSelectionRowBounds(selection) : null),
     [selection],
   );
   const selectedColumnIndexSet = useMemo(
@@ -1556,8 +1571,8 @@ export function EnhancedTable({
   );
 
   const isCellSelected = (rowIndex: number, columnIndex: number): boolean => {
-    if (!selectionBounds) return false;
-    const { minRow, maxRow } = selectionBounds;
+    if (!selectionRowBounds) return false;
+    const { minRow, maxRow } = selectionRowBounds;
     return (
       rowIndex >= minRow &&
       rowIndex <= maxRow &&
@@ -1569,7 +1584,12 @@ export function EnhancedTable({
     columnIndex: number,
     extra?: CSSProperties,
   ): CSSProperties => {
-    const width = columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+    const width = columnWidths[columnIndex];
+    if (width === undefined) {
+      return extra
+        ? { ...DEFAULT_COLUMN_STYLE, ...extra }
+        : DEFAULT_COLUMN_STYLE;
+    }
     return {
       width,
       minWidth: width,
@@ -1608,9 +1628,16 @@ export function EnhancedTable({
     event.stopPropagation();
     setColumnWidths((current) => {
       const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+      const nextWidth = clampColumnWidth(width + delta);
+      if (width === nextWidth) return current;
+      if (nextWidth === DEFAULT_COLUMN_WIDTH) {
+        const next = { ...current };
+        delete next[columnIndex];
+        return next;
+      }
       return {
         ...current,
-        [columnIndex]: clampColumnWidth(width + delta),
+        [columnIndex]: nextWidth,
       };
     });
   };

@@ -787,6 +787,58 @@ describe('EnhancedMarkdownTable', () => {
     expect(dataCell(container, 0, 0).style.width).toBe('220px');
   });
 
+  it('clamps resized columns to the minimum width', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 0 }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '80px',
+    );
+    expect(dataCell(container, 0, 0).style.width).toBe('80px');
+  });
+
+  it('clamps resized columns to the maximum width', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 900 }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '640px',
+    );
+    expect(dataCell(container, 0, 0).style.width).toBe('640px');
+  });
+
   it('stops resizing a column when the window blurs', () => {
     const container = renderTable();
     const resize = button(container, 'Resize Team');
