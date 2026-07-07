@@ -73,6 +73,11 @@ import {
   isPendingPromptEvent,
   publishPendingPromptEvent,
 } from '../pendingPromptVersion.js';
+import {
+  MISSING_SESSION_HTTP_STATUSES,
+  isMissingSessionHttpStatus,
+  resolveConnectionErrorStatus,
+} from './status.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -148,7 +153,29 @@ const DaemonSessionNoticesContext = createContext<
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
-const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+/**
+ * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
+ * failures** (vs session-not-found 404/410). Auth failures should NOT enter
+ * the reconnect loop even when `autoReconnect: true` — retrying with the
+ * same bad token loops forever, hammering the server with bad credentials
+ * and risking transcript wipes if reconnect later attaches a different
+ * session and hits the sessionId-change `store.reset()` branch.
+ *
+ * 404/410 (session-not-found) leave the requested session disconnected instead
+ * of silently creating a replacement empty session.
+ */
+const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
+const TERMINAL_SESSION_HTTP_STATUSES = new Set([
+  ...AUTH_FAILURE_HTTP_STATUSES,
+  ...MISSING_SESSION_HTTP_STATUSES,
+]);
+
+interface HeartbeatFailureState {
+  sessionId?: string;
+  consecutiveFailures: number;
+  lastHttpError?: { status: number; message: string };
+}
+
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
 // normalization still rebuilds from retained blocks today, so this high default
@@ -167,18 +194,6 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   authVersion: 0,
 };
 
-/**
- * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
- * failures** (vs session-not-found 404/410). Auth failures should NOT enter
- * the reconnect loop even when `autoReconnect: true` — retrying with the
- * same bad token loops forever, hammering the server with bad credentials
- * and risking transcript wipes if reconnect later attaches a different
- * session and hits the sessionId-change `store.reset()` branch.
- *
- * 404/410 (session-not-found) leave the requested session disconnected instead
- * of silently creating a replacement empty session.
- */
-const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const UNHANDLED_SESSION = Symbol('unhandled session');
 
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
@@ -242,6 +257,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
+    consecutiveFailures: 0,
+  });
   const manualSessionClearRef = useRef(false);
   const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
     undefined,
@@ -347,6 +365,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
+        let loadingRequestedSession = false;
         try {
           // ── SSE Reconnection Strategy ────────────────────────────────
           //
@@ -399,6 +418,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
             const getWorkspaceCapabilities =
               workspaceGetCapabilitiesRef.current;
@@ -484,6 +507,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const requestClientId = clientId
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
+            loadingRequestedSession = Boolean(restoreSessionId);
+            if (targetSessionId) {
+              setConnection((current) => ({
+                ...current,
+                sessionId: targetSessionId,
+                error: undefined,
+                errorStatus: undefined,
+                missingSession: false,
+                loadingTranscript: true,
+              }));
+            }
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
@@ -513,6 +547,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     },
                     requestClientId,
                   );
+            loadingRequestedSession = false;
             if (!clientId && nextSession.clientId) {
               clientIdRef.current = nextSession.clientId;
               persistStableClientId(
@@ -616,124 +651,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
-          const canReuseSessionMetadata =
-            attachedExistingSession &&
-            connectionRef.current.commands !== undefined &&
-            connectionRef.current.skills !== undefined &&
-            connectionRef.current.supportedCommands !== undefined &&
-            connectionRef.current.context !== undefined;
-          const [providerResult, commandResult, contextResult] =
-            canReuseSessionMetadata
-              ? [undefined, undefined, undefined]
-              : await Promise.allSettled([
-                  client.workspaceProviders(),
-                  activeSession.supportedCommands(),
-                  activeSession.context(),
-                ]);
-          const providers =
-            providerResult?.status === 'fulfilled'
-              ? providerResult.value
-              : undefined;
-          const supportedCommands =
-            commandResult?.status === 'fulfilled'
-              ? commandResult.value
-              : undefined;
-          const context =
-            contextResult?.status === 'fulfilled'
-              ? contextResult.value
-              : undefined;
-          const loadWarningTexts = [
-            providerResult?.status === 'rejected'
-              ? loadWarningsRef.current?.models
-              : undefined,
-            commandResult?.status === 'rejected'
-              ? loadWarningsRef.current?.commands
-              : undefined,
-            contextResult?.status === 'rejected'
-              ? loadWarningsRef.current?.context
-              : undefined,
-          ].filter((warning): warning is string => Boolean(warning));
-          const providerModelStatus = mapProviderStatus(providers);
-          const contextModelStatus = mapSessionContextModels(context);
-          const sessionModels =
-            contextModelStatus && contextModelStatus.models.length > 0
-              ? contextModelStatus.models
-              : providerModelStatus.models;
-          const sessionCurrentModel =
-            contextModelStatus?.currentModel ??
-            providerModelStatus.currentModel;
-          const providerContextWindow =
-            sessionCurrentModel === providerModelStatus.currentModel
-              ? providerModelStatus.contextWindow
-              : providerModelStatus.models.find(
-                  (model) => model.id === sessionCurrentModel,
-                )?.contextWindow;
-          const sessionContextWindow =
-            contextModelStatus?.contextWindow ??
-            sessionModels.find((model) => model.id === sessionCurrentModel)
-              ?.contextWindow ??
-            providerContextWindow;
-          const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode =
-            getCurrentMode(context) ?? providerModelStatus.currentMode;
-
-          setConnection((current) => ({
-            status: 'connected',
-            sessionId: activeSession.sessionId,
-            // Surface the bound client id so consumers can recognize their own
-            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
-            ...(activeSession.clientId
-              ? { clientId: activeSession.clientId }
-              : {}),
-            workspaceCwd: activeSession.workspaceCwd,
-            commands: commands.length > 0 ? commands : current.commands,
-            skills: skills.length > 0 ? skills : current.skills,
-            models: sessionModels.length > 0 ? sessionModels : current.models,
-            currentModel: sessionCurrentModel ?? current.currentModel,
-            currentMode: currentMode ?? current.currentMode,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              (current.sessionId === activeSession.sessionId
-                ? current.displayName
-                : undefined),
-            tokenUsage:
-              // Keep token usage in sync with tokenCount: replay usage
-              // supersedes in-memory state, same-session reconnect keeps it,
-              // and a different session without replay usage starts empty.
-              replayTokenUsage !== undefined
-                ? replayTokenUsage
-                : current.sessionId === activeSession.sessionId
-                  ? current.tokenUsage
-                  : undefined,
-            tokenCount:
-              // A freshly loaded snapshot covers everything up to the SSE
-              // resume point, so its usage supersedes the in-memory count;
-              // without one (or with a usage-less replay) keep the
-              // same-session value and start anything else at 0.
-              replayTokenCount !== undefined
-                ? replayTokenCount
-                : current.sessionId === activeSession.sessionId
-                  ? (current.tokenCount ?? 0)
-                  : 0,
-            contextWindow: sessionContextWindow ?? current.contextWindow,
-            providers: providers ?? current.providers,
-            supportedCommands: supportedCommands ?? current.supportedCommands,
-            context: context ?? current.context,
-            capabilities: capabilities ?? current.capabilities,
-            catchingUp:
-              isSameSessionReconnect ||
-              activeSession.lastEventId != null ||
-              undefined,
-          }));
-          if (loadWarningTexts.length > 0) {
-            store.dispatch(
-              loadWarningTexts.map((text) => ({
-                type: 'status' as const,
-                text,
-              })),
-            );
-          }
-
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
             pendingLoad?.sessionId === activeSession.sessionId
@@ -744,20 +661,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // the store before starting the SSE loop. The SSE stream begins
           // from lastEventId, so only post-snapshot events are delivered.
           //
+          // This runs before the providers/commands/context fetches below:
+          // the snapshot is already in hand, so the transcript paints one
+          // metadata round-trip earlier (visible on high-latency mobile).
+          //
           // The deferred store.reset() runs here — in the same synchronous
           // block as store.dispatch() — so the queueMicrotask notification
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          if (
-            needsStoreReset &&
-            !(shouldInjectReplaySnapshot && replayEvents.length > 0)
-          ) {
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
             store.reset();
           }
-          if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
+          if (replayInjected) {
             const replayOpts = {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
@@ -830,6 +750,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
+          setConnection((current) => ({
+            ...current,
+            status: 'connected',
+            sessionId: activeSession.sessionId,
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
+            workspaceCwd: activeSession.workspaceCwd,
+            displayName:
+              getSessionDisplayName(activeSession.state) ??
+              (current.sessionId === activeSession.sessionId
+                ? current.displayName
+                : undefined),
+            tokenUsage:
+              replayTokenUsage !== undefined
+                ? replayTokenUsage
+                : current.sessionId === activeSession.sessionId
+                  ? current.tokenUsage
+                  : undefined,
+            tokenCount:
+              replayTokenCount !== undefined
+                ? replayTokenCount
+                : current.sessionId === activeSession.sessionId
+                  ? (current.tokenCount ?? 0)
+                  : 0,
+            loadingTranscript: undefined,
+            catchingUp: replayInjected
+              ? current.catchingUp
+              : isSameSessionReconnect ||
+                activeSession.lastEventId != null ||
+                undefined,
+          }));
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoadToResolve.timeout);
@@ -840,6 +792,120 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               skipNextCleanupDetachSessionIdRef.current = undefined;
             }
             pendingLoadToResolve.resolve();
+          }
+
+          const canReuseSessionMetadata =
+            attachedExistingSession &&
+            connectionRef.current.commands !== undefined &&
+            connectionRef.current.skills !== undefined &&
+            connectionRef.current.supportedCommands !== undefined &&
+            connectionRef.current.context !== undefined;
+          const [providerResult, commandResult, contextResult] =
+            canReuseSessionMetadata
+              ? [undefined, undefined, undefined]
+              : await Promise.allSettled([
+                  client.workspaceProviders(),
+                  activeSession.supportedCommands(),
+                  activeSession.context(),
+                ]);
+          const providers =
+            providerResult?.status === 'fulfilled'
+              ? providerResult.value
+              : undefined;
+          const supportedCommands =
+            commandResult?.status === 'fulfilled'
+              ? commandResult.value
+              : undefined;
+          const context =
+            contextResult?.status === 'fulfilled'
+              ? contextResult.value
+              : undefined;
+          const loadWarningTexts = [
+            providerResult?.status === 'rejected'
+              ? loadWarningsRef.current?.models
+              : undefined,
+            commandResult?.status === 'rejected'
+              ? loadWarningsRef.current?.commands
+              : undefined,
+            contextResult?.status === 'rejected'
+              ? loadWarningsRef.current?.context
+              : undefined,
+          ].filter((warning): warning is string => Boolean(warning));
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
+          const { commands, skills } = mapSupportedCommands(supportedCommands);
+          const currentMode =
+            getCurrentMode(context) ?? providerModelStatus.currentMode;
+
+          setConnection((current) => {
+            if (current.sessionId !== activeSession.sessionId) return current;
+            return {
+              ...current,
+              status: 'connected',
+              sessionId: activeSession.sessionId,
+              // Surface the bound client id so consumers can recognize their own
+              // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+              ...(activeSession.clientId
+                ? { clientId: activeSession.clientId }
+                : {}),
+              workspaceCwd: activeSession.workspaceCwd,
+              // A fulfilled supported-commands fetch is authoritative even when
+              // it returns an empty list: fall back to the preserved
+              // `current.commands` only when the fetch was skipped or failed
+              // (supportedCommands === undefined). Keying on length instead
+              // would let a genuinely-empty snapshot leave a stale command list
+              // in place (see getConnectionAfterSessionClear, which now
+              // preserves commands across a clear).
+              commands:
+                supportedCommands !== undefined ? commands : current.commands,
+              skills: supportedCommands !== undefined ? skills : current.skills,
+              models: sessionModels.length > 0 ? sessionModels : current.models,
+              currentModel: sessionCurrentModel ?? current.currentModel,
+              currentMode: currentMode ?? current.currentMode,
+              displayName:
+                getSessionDisplayName(activeSession.state) ??
+                current.displayName,
+              contextWindow: sessionContextWindow ?? current.contextWindow,
+              providers: providers ?? current.providers,
+              supportedCommands: supportedCommands ?? current.supportedCommands,
+              context: context ?? current.context,
+              capabilities: capabilities ?? current.capabilities,
+              loadingTranscript: undefined,
+              catchingUp:
+                // Replay already injected above — keep the cleared flag rather
+                // than re-arming it (nothing before SSE would clear it again).
+                replayInjected
+                  ? current.catchingUp
+                  : isSameSessionReconnect ||
+                    activeSession.lastEventId != null ||
+                    undefined,
+            };
+          });
+          if (loadWarningTexts.length > 0) {
+            store.dispatch(
+              loadWarningTexts.map((text) => ({
+                type: 'status' as const,
+                text,
+              })),
+            );
           }
           let sawEvent = false;
           let resyncRequested = false;
@@ -869,6 +935,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
           };
           for await (const event of activeSession.events({
@@ -1085,6 +1155,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ...current,
                     status: 'connecting',
                     error: undefined,
+                    errorStatus: resolveConnectionErrorStatus(
+                      undefined,
+                      current.errorStatus,
+                    ),
                   }));
                   break;
                 }
@@ -1143,6 +1217,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: undefined,
+              errorStatus: undefined,
+              missingSession: false,
             }));
             return;
           }
@@ -1173,14 +1249,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((current) => ({
               ...current,
-              status: 'disconnected',
-              error: undefined,
+              status: current.status === 'error' ? 'error' : 'disconnected',
+              error: current.status === 'error' ? current.error : undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
           const message =
             error instanceof Error ? error.message : String(error);
+          const errorStatus = extractHttpStatus(error);
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -1219,14 +1300,46 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
-              setConnection({ status: 'error', error: message });
+              setConnection((current) => ({
+                ...current,
+                status: 'error',
+                sessionId: undefined,
+                error: message,
+                errorStatus: resolveConnectionErrorStatus(
+                  errorStatus,
+                  current.errorStatus,
+                ),
+                missingSession: false,
+                capabilities: capabilities ?? current.capabilities,
+                loadingTranscript: undefined,
+                catchingUp: undefined,
+              }));
               return;
             }
+            const missingLoadedSession =
+              loadingRequestedSession &&
+              isMissingSessionHttpStatus(errorStatus);
+            console.warn(
+              '[DaemonSessionProvider] terminal session error (sessionId=%s, status=%d, message=%s)',
+              failedSessionId,
+              errorStatus,
+              message,
+            );
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
               sessionId: undefined,
               error: message,
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+              // SSE errors should not create the missing-session empty state,
+              // but they also must not clear one confirmed by load/heartbeat.
+              missingSession:
+                missingLoadedSession || current.missingSession === true,
+              capabilities: capabilities ?? current.capabilities,
+              loadingTranscript: undefined,
               catchingUp: undefined,
             }));
             return;
@@ -1246,16 +1359,28 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (!autoReconnect) {
             session = undefined;
             sessionRef.current = undefined;
-            setConnection({
+            setConnection((current) => ({
+              ...current,
               status: 'error',
               error: message,
-            });
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+              missingSession: false,
+            }));
             return;
           }
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
             error: message,
+            errorStatus: resolveConnectionErrorStatus(
+              errorStatus,
+              current.errorStatus,
+            ),
+            missingSession: false,
+            loadingTranscript: undefined,
           }));
         }
 
@@ -1264,6 +1389,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            loadingTranscript: undefined,
             catchingUp: undefined,
           }));
           return;
@@ -1351,8 +1477,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return undefined;
     }
+    if (heartbeatFailureStateRef.current.sessionId !== connection.sessionId) {
+      heartbeatFailureStateRef.current = {
+        sessionId: connection.sessionId,
+        consecutiveFailures: 0,
+      };
+    }
+    const heartbeatFailureState = heartbeatFailureStateRef.current;
     let disposed = false;
-    let consecutiveFailures = 0;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
@@ -1360,24 +1492,100 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         .heartbeat()
         .then(() => {
           if (disposed) return;
-          if (consecutiveFailures >= heartbeatFailureThreshold) {
+          if (
+            heartbeatFailureState.consecutiveFailures >=
+            heartbeatFailureThreshold
+          ) {
             setConnection((current) =>
               current.sessionId === session.sessionId
-                ? { ...current, status: 'connected', error: undefined }
+                ? {
+                    ...current,
+                    status: 'connected',
+                    error: undefined,
+                    errorStatus: undefined,
+                  }
                 : current,
             );
           }
-          consecutiveFailures = 0;
+          heartbeatFailureState.consecutiveFailures = 0;
+          heartbeatFailureState.lastHttpError = undefined;
         })
         .catch((error: unknown) => {
           if (disposed) return;
-          consecutiveFailures += 1;
-          if (consecutiveFailures < heartbeatFailureThreshold) return;
+          heartbeatFailureState.consecutiveFailures += 1;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
+          const thisErrorStatus = extractHttpStatus(error);
+          if (thisErrorStatus !== undefined) {
+            const lastStatus = heartbeatFailureState.lastHttpError?.status;
+            heartbeatFailureState.lastHttpError = {
+              status:
+                resolveConnectionErrorStatus(thisErrorStatus, lastStatus) ??
+                thisErrorStatus,
+              message: isMissingSessionHttpStatus(lastStatus)
+                ? (heartbeatFailureState.lastHttpError?.message ?? message)
+                : message,
+            };
+          }
+          if (
+            heartbeatFailureState.consecutiveFailures <
+            heartbeatFailureThreshold
+          ) {
+            return;
+          }
+          const errorStatus = heartbeatFailureState.lastHttpError?.status;
+          const effectiveMessage =
+            heartbeatFailureState.lastHttpError?.message ?? message;
+          const authFailure =
+            errorStatus !== undefined &&
+            AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
+          const missingSession = isMissingSessionHttpStatus(errorStatus);
+          if (authFailure || missingSession) {
+            const deadSessionId = session.sessionId;
+            if (missingSession) {
+              console.warn(
+                '[DaemonSessionProvider] heartbeat detected missing session (sessionId=%s, status=%d)',
+                deadSessionId,
+                errorStatus,
+              );
+            } else {
+              console.warn(
+                '[DaemonSessionProvider] heartbeat auth failure (sessionId=%s, status=%d)',
+                deadSessionId,
+                errorStatus,
+              );
+            }
+            const active = activePromptsRef.current.get(deadSessionId);
+            active?.controller.abort();
+            activePromptsRef.current.delete(deadSessionId);
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
+            if (sessionRef.current?.sessionId === deadSessionId) {
+              if (missingSession) {
+                manualSessionClearRef.current = true;
+              }
+              sessionRef.current = undefined;
+            }
+          }
           setConnection((current) =>
             current.sessionId === session.sessionId
-              ? { ...current, status: 'disconnected', error: message }
+              ? {
+                  ...current,
+                  status: authFailure ? 'error' : 'disconnected',
+                  error: effectiveMessage,
+                  errorStatus: resolveConnectionErrorStatus(
+                    errorStatus,
+                    current.errorStatus,
+                  ),
+                  missingSession,
+                  ...(authFailure || missingSession
+                    ? {
+                        sessionId: undefined,
+                        loadingTranscript: undefined,
+                        catchingUp: undefined,
+                      }
+                    : {}),
+                }
               : current,
           );
         });
@@ -1463,7 +1671,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (sessionId === currentSessionId) return;
 
     const request = sessionId
-      ? actions.loadSession(sessionId, { deferTranscriptReset: true })
+      ? actions.loadSession(sessionId)
       : currentSessionId
         ? actions.clearSession()
         : undefined;
@@ -1566,6 +1774,7 @@ function normalizeAndFilterEvent(
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
   behavior: { updateConnection?: boolean } = {},
 ): DaemonUiEvent[] {
+  logSettingsReloadEvent(event);
   if (behavior.updateConnection !== false) {
     updateConnectionFromDaemonEvent(event, setConnection);
   }
@@ -1579,6 +1788,53 @@ function normalizeAndFilterEvent(
     return goalStatusEvent ? [goalStatusEvent] : [];
   }
   return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
+}
+
+function logSettingsReloadEvent(event: DaemonEvent): void {
+  if (event.type !== 'settings_reloaded') return;
+  console.debug(
+    '[DaemonSessionProvider] settings reloaded:',
+    getSettingsReloadLogData(event),
+  );
+}
+
+function getSettingsReloadLogData(event: DaemonEvent): Record<string, unknown> {
+  const log: Record<string, unknown> = {};
+  if (event.id !== undefined) log['eventId'] = event.id;
+  if (!isRecord(event.data)) {
+    log['payload'] = 'non-object';
+    return log;
+  }
+
+  const env = getSettingsReloadEnvLog(event.data['env']);
+  const changedKeys = getStringArray(event.data['changedKeys']);
+  const sessionsRefreshed = getStringArray(event.data['sessionsRefreshed']);
+  const sessionsSkipped = getStringArray(event.data['sessionsSkipped']);
+  const childReloaded = event.data['childReloaded'];
+  const childError = getString(event.data, 'childError');
+
+  if (env) log['env'] = env;
+  if (changedKeys) log['changedKeys'] = changedKeys;
+  if (typeof childReloaded === 'boolean') log['childReloaded'] = childReloaded;
+  if (sessionsRefreshed) log['sessionsRefreshed'] = sessionsRefreshed;
+  if (sessionsSkipped) log['sessionsSkipped'] = sessionsSkipped;
+  if (childError) log['childError'] = childError;
+  return log;
+}
+
+function getSettingsReloadEnvLog(
+  value: unknown,
+): { updatedKeys: string[]; removedKeys: string[] } | undefined {
+  if (!isRecord(value)) return undefined;
+  return {
+    updatedKeys: getStringArray(value['updatedKeys']) ?? [],
+    removedKeys: getStringArray(value['removedKeys']) ?? [],
+  };
+}
+
+function getStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 function filterDaemonUiEventsForTranscript(

@@ -17,6 +17,7 @@ import type {
 import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { getToolResultCallId } from '../../utils/chat-record-tool-call-id.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -112,6 +113,7 @@ export class HistoryReplayer {
               await this.messageEmitter.emitUserMessage(
                 displayText,
                 record.timestamp,
+                record.subtype === 'cron' ? { source: 'cron' } : undefined,
               );
             }
             break;
@@ -250,7 +252,7 @@ export class HistoryReplayer {
     }
 
     const result = record.toolCallResult;
-    const callId = this.getToolResultCallId(record);
+    const callId = getToolResultCallId(record);
     this.pendingReplayToolCalls.delete(callId);
 
     // Extract tool name from the function response in message if available
@@ -377,29 +379,6 @@ export class HistoryReplayer {
       }
     }
     return '';
-  }
-
-  private getToolResultCallId(record: ChatRecord): string {
-    const resultCallId = record.toolCallResult?.callId;
-    if (typeof resultCallId === 'string' && resultCallId.length > 0) {
-      return resultCallId;
-    }
-    return this.extractFunctionResponseIdFromRecord(record) ?? record.uuid;
-  }
-
-  private extractFunctionResponseIdFromRecord(
-    record: ChatRecord,
-  ): string | undefined {
-    if (record.message?.parts) {
-      for (const part of record.message.parts) {
-        const id =
-          'functionResponse' in part ? part.functionResponse?.id : undefined;
-        if (typeof id === 'string' && id.length > 0) {
-          return id;
-        }
-      }
-    }
-    return undefined;
   }
 
   private setActiveRecordId(recordId: string | null, timestamp?: string): void {

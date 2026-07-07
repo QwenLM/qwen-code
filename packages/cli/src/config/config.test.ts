@@ -874,6 +874,72 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.bare).toBe(true);
   });
+
+  describe('--fallback-model flag', () => {
+    it('parses a single fallback model', async () => {
+      process.argv = ['node', 'script.js', '--fallback-model', 'qwen-plus'];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus']);
+    });
+
+    it('parses repeated --fallback-model flags', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus',
+        '--fallback-model',
+        'qwen-turbo',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('splits comma-separated values in a single flag', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus,qwen-turbo',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('combines repeated flags with comma-separated values', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus,qwen-turbo',
+        '--fallback-model',
+        'qwen-max',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual([
+        'qwen-plus',
+        'qwen-turbo',
+        'qwen-max',
+      ]);
+    });
+
+    it('trims whitespace around comma-separated values', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        ' qwen-plus , qwen-turbo ',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('defaults to undefined when not provided', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toBeUndefined();
+    });
+  });
 });
 
 describe('loadCliConfig', () => {
@@ -959,6 +1025,44 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should prefer CLI fallback models over settings fallback models', async () => {
+    process.argv = ['node', 'script.js', '--fallback-model', 'cli-a,cli-b'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({ modelFallbacks: 'settings-a' }, argv);
+
+    expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
+  });
+
+  it('should use settings fallback models when the CLI flag is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { modelFallbacks: ' settings-a , settings-b ' },
+      argv,
+    );
+
+    expect(config.getModelFallbacks()).toEqual(['settings-a', 'settings-b']);
+  });
+
+  it('passes agents.maxParallelAgents from settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { agents: { maxParallelAgents: 2 } },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
+  });
+
+  it('should ignore blank settings fallback models', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({ modelFallbacks: '   ' }, argv);
+
+    expect(config.getModelFallbacks()).toEqual([]);
   });
 
   it('should enable runtime sleep prevention by default', async () => {
@@ -2835,6 +2939,72 @@ describe('loadCliConfig safe mode', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getDisabledTools().size).toBe(0);
+  });
+
+  it('should pass settings.tools.visible into visibleTools', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch', 'monitor'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
+  });
+
+  it('should default visibleTools to empty when settings.tools.visible is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should ignore settings-sourced visibleTools in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: ['web_fetch'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools().size).toBe(0);
+  });
+
+  it('should normalise settings.tools.visible entries (trim, dedupe, filter)', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        visible: [
+          '  web_fetch  ',
+          'web_fetch',
+          '',
+          'monitor',
+        ] as unknown as string[],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getVisibleTools()).toEqual(new Set(['web_fetch', 'monitor']));
   });
 
   it('should respect safe mode via QWEN_CODE_SAFE_MODE env var', async () => {

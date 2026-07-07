@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  ToolArtifact,
   VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -171,12 +172,18 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
   matchExtensionByRef,
   parseExtensionRef,
 } from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
 import type {
@@ -228,7 +235,6 @@ type DaemonToolLoopState = {
   loopDetected: boolean;
 };
 
-const DAEMON_TURN_TOOL_CALL_CAP = 100;
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -270,7 +276,12 @@ function recordDaemonToolCalls(
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += count;
-  if (loopState.totalToolCalls <= DAEMON_TURN_TOOL_CALL_CAP) return false;
+  // Same per-turn cap as the core LoopDetectionService (getMaxToolCallsPerTurn
+  // resolves model.maxToolCallsPerTurn to an effective value, Infinity when
+  // disabled). Unlike core there is no in-session disable check — that flag is
+  // only set by the interactive loop-detection dialog, which has no ACP
+  // equivalent.
+  if (loopState.totalToolCalls <= config.getMaxToolCallsPerTurn()) return false;
   return recordDaemonLoopDetected(
     config,
     promptId,
@@ -686,6 +697,20 @@ function collectExtensionMentionRefs(
   }
 }
 
+function collectMcpServerMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseMcpServerRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -710,35 +735,43 @@ export async function buildAvailableCommandsSnapshot(
     'acp',
     settings,
   );
+  const disabledSkillNames = config.getDisabledSkillNames();
 
-  const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
-    const acceptsInput =
-      cmd.acceptsInput ??
-      (cmd.kind !== CommandKind.BUILT_IN ||
-        cmd.completion != null ||
-        cmd.argumentHint != null ||
-        (cmd.subCommands != null && cmd.subCommands.length > 0));
-    return {
-      name: cmd.name,
-      description: cmd.description,
-      input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
-      _meta: {
-        argumentHint: cmd.argumentHint,
-        source: cmd.source,
-        sourceLabel: cmd.sourceLabel,
-        supportedModes: getEffectiveSupportedModes(cmd),
-        subcommands: getCommandSubcommandNames(cmd),
-        modelInvocable: cmd.modelInvocable === true,
-        // Carry aliases so a channel consumer (which only sees the wire snapshot,
-        // not the command registry) can recognize an aliased command and avoid
-        // tagging it. _meta is ACP's extension point; omitted when there are none
-        // so command entries without aliases stay byte-identical on the wire.
-        ...(cmd.altNames && cmd.altNames.length > 0
-          ? { altNames: cmd.altNames }
-          : {}),
-      },
-    };
+  const visibleSlashCommands = slashCommands.filter((cmd) => {
+    if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
+    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
   });
+
+  const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
+    (cmd) => {
+      const acceptsInput =
+        cmd.acceptsInput ??
+        (cmd.kind !== CommandKind.BUILT_IN ||
+          cmd.completion != null ||
+          cmd.argumentHint != null ||
+          (cmd.subCommands != null && cmd.subCommands.length > 0));
+      return {
+        name: cmd.name,
+        description: cmd.description,
+        input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+        _meta: {
+          argumentHint: cmd.argumentHint,
+          source: cmd.source,
+          sourceLabel: cmd.sourceLabel,
+          supportedModes: getEffectiveSupportedModes(cmd),
+          subcommands: getCommandSubcommandNames(cmd),
+          modelInvocable: cmd.modelInvocable === true,
+          // Carry aliases so a channel consumer (which only sees the wire snapshot,
+          // not the command registry) can recognize an aliased command and avoid
+          // tagging it. _meta is ACP's extension point; omitted when there are none
+          // so command entries without aliases stay byte-identical on the wire.
+          ...(cmd.altNames && cmd.altNames.length > 0
+            ? { altNames: cmd.altNames }
+            : {}),
+        },
+      };
+    },
+  );
 
   let availableSkills: string[] | undefined;
   const skillDetailsByName = new Map<
@@ -748,7 +781,9 @@ export async function buildAvailableCommandsSnapshot(
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
-      const skills = await skillManager.listSkills();
+      const skills = (await skillManager.listSkills()).filter(
+        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+      );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
         skillDetailsByName.set(skill.name, {
@@ -765,7 +800,7 @@ export async function buildAvailableCommandsSnapshot(
     debugLogger.error('Error loading available skills:', error);
   }
 
-  for (const command of slashCommands) {
+  for (const command of visibleSlashCommands) {
     if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
       continue;
     }
@@ -1033,11 +1068,15 @@ export class Session implements SessionContext {
    * Replays conversation history to the client using modular components.
    * Delegates to HistoryReplayer for consistent event emission.
    */
-  async replayHistory(records: ChatRecord[]): Promise<void> {
+  primeTurnFromHistory(records: ChatRecord[]): void {
     this.turn = Math.max(
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
     );
+  }
+
+  async replayHistory(records: ChatRecord[]): Promise<void> {
+    this.primeTurnFromHistory(records);
     await this.historyReplayer.replay(records);
   }
 
@@ -1112,7 +1151,9 @@ export class Session implements SessionContext {
 
   getRewindableUserTurnCount(): number {
     const apiHistory = this.captureHistorySnapshot();
-    const startIndex = getStartupContextLength(apiHistory);
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
     let count = 0;
 
     for (let i = startIndex; i < apiHistory.length; i++) {
@@ -1148,7 +1189,9 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = getStartupContextLength(apiHistory);
+    const startIndex = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
 
     if (targetTurnIndex === 0) {
       return startIndex;
@@ -1843,6 +1886,9 @@ export class Session implements SessionContext {
                     ) {
                       functionCalls.push(...resp.value.functionCalls);
                     }
+                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                      functionCalls.length = 0;
+                    }
                   }
                 } catch (error) {
                   // Restore the stripped orphan if the send threw before
@@ -2161,6 +2207,9 @@ export class Session implements SessionContext {
                 resp.value.functionCalls
               ) {
                 functionCalls.push(...resp.value.functionCalls);
+              }
+              if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                functionCalls.length = 0;
               }
             }
           } catch (error) {
@@ -3079,6 +3128,9 @@ export class Session implements SessionContext {
                   ) {
                     functionCalls.push(...resp.value.functionCalls);
                   }
+                  if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                    functionCalls.length = 0;
+                  }
                 }
 
                 if (usageMetadata) {
@@ -3387,6 +3439,9 @@ export class Session implements SessionContext {
                 resp.value.functionCalls
               ) {
                 functionCalls.push(...resp.value.functionCalls);
+              }
+              if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                functionCalls.length = 0;
               }
             }
 
@@ -3968,7 +4023,6 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
-
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -5001,6 +5055,11 @@ export class Session implements SessionContext {
               ? 'error'
               : 'success';
           const succeeded = status === 'success';
+          const responseError = toolResult.error
+            ? new Error(toolResult.error.message)
+            : aborted
+              ? new Error('Tool execution was cancelled')
+              : undefined;
 
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
@@ -5043,6 +5102,12 @@ export class Session implements SessionContext {
               const contextPart = { text: postHookResult.additionalContext };
               responseParts.push(contextPart);
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUse',
+              toolName,
+              toolCallId: callId,
+              artifacts: postHookResult.artifacts,
+            });
           } else if (
             hooksEnabledForTool &&
             messageBusForTool &&
@@ -5068,6 +5133,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
@@ -5086,20 +5157,15 @@ export class Session implements SessionContext {
             // Still log and return function response for LLM
           } else {
             // Normal tool handling: emit result using ToolCallEmitter
-            const error = toolResult.error
-              ? new Error(toolResult.error.message)
-              : aborted
-                ? new Error('Tool execution was cancelled')
-                : undefined;
-
             await this.toolCallEmitter.emitResult({
               callId,
               toolName,
               args,
               message: responseParts,
               resultDisplay: toolResult.returnDisplay,
-              error,
+              error: responseError,
               success: succeeded,
+              artifacts: toolResult.artifacts,
             });
           }
 
@@ -5175,6 +5241,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Use ToolCallEmitter for error handling
@@ -5211,8 +5283,9 @@ export class Session implements SessionContext {
               error,
             );
 
+          const responseParts = errorResponse(error);
           return {
-            parts: errorResponse(error),
+            parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
             loopDetected,
           };
@@ -5373,6 +5446,7 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
+    const mcpServerMentions = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -5381,6 +5455,7 @@ export class Session implements SessionContext {
       switch (part.type) {
         case 'text':
           collectExtensionMentionRefs(part.text, extensionMentions);
+          collectMcpServerMentionRefs(part.text, mcpServerMentions);
           return { text: part.text };
         case 'image':
           if (preserveUnsupportedImageForBridge) {
@@ -5433,18 +5508,21 @@ export class Session implements SessionContext {
       extensionMentions,
       abortSignal,
     );
+    const mcpServerParts =
+      this.#resolveMcpServerMentionParts(mcpServerMentions);
 
     if (
       atPathCommandParts.length === 0 &&
       embeddedContext.length === 0 &&
-      extensionParts.length === 0
+      extensionParts.length === 0 &&
+      mcpServerParts.length === 0
     ) {
       return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
       return this.#applyVisionBridgeIfNeeded(
-        [...parts, ...extensionParts],
+        [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
       );
     }
@@ -5493,6 +5571,7 @@ export class Session implements SessionContext {
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
@@ -5507,6 +5586,7 @@ export class Session implements SessionContext {
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
     }
 
     // Process embedded context from resource blocks
@@ -5650,9 +5730,62 @@ export class Session implements SessionContext {
     return extensionParts;
   }
 
+  #resolveMcpServerMentionParts(
+    mcpServerMentions: Map<string, string>,
+  ): Part[] {
+    if (mcpServerMentions.size === 0) return [];
+    const servers = this.config.getMcpServers?.() ?? {};
+    if (Object.keys(servers).length === 0) return [];
+
+    const parts: Part[] = [];
+    for (const name of mcpServerMentions.values()) {
+      const matched = matchMcpServerByRef(name, servers);
+      if (!matched) {
+        this.debug(
+          `MCP server "${name}" not found among configured MCP servers. ` +
+            `Available: ${Object.keys(servers).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      parts.push({
+        text: buildMcpServerContextText(this.config, matched.serverName),
+      });
+    }
+    return parts;
+  }
+
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
+    }
+  }
+
+  private async emitHookArtifactsNotification(args: {
+    hookEventName: 'PostToolUse' | 'PostToolUseFailure';
+    toolName?: string;
+    toolCallId?: string;
+    artifacts?: ToolArtifact[];
+  }): Promise<void> {
+    if (!args.artifacts || args.artifacts.length === 0) {
+      return;
+    }
+
+    try {
+      await this.client.extNotification('qwen/notify/session/artifact-event', {
+        v: 1,
+        sessionId: this.sessionId,
+        source: 'hook',
+        hookEventName: args.hookEventName,
+        toolName: args.toolName,
+        toolCallId: args.toolCallId,
+        artifacts: args.artifacts,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `Hook artifact notification dropped for ${args.toolName ?? args.hookEventName}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

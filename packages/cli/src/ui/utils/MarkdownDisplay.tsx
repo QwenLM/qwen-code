@@ -14,9 +14,24 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-// Minimum content lines to keep in a clipped live preview before the
-// "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
+import {
+  fitPendingSlice,
+  splitMarkdownTableRow,
+  TABLE_ROW_RE,
+  TABLE_SEPARATOR_RE,
+  CODE_FENCE_RE,
+} from './pending-rendered-height.js';
+// Minimum content lines to keep in a clipped live preview (own constant — not
+// coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
+
+// Rows reserved from the viewport when clamping a streaming table's height:
+// marginY 2 + one row of wrapped-cell safety headroom. Tables under-estimate
+// their rendered height the most (a wrapped cell), so they keep one more
+// reserved row than the other blocks. Shared by the render-side clamp
+// (RenderTable's `maxHeight`) and the slice-side estimate (`tableClampRows`)
+// so the two never diverge and let a table overflow the render cap.
+const TABLE_PENDING_RESERVED_ROWS = 3;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -42,7 +57,7 @@ export function countMarkdownSourceBlocks(
 ): MarkdownSourceBlockCounts {
   const codeBlockLanguageCounts = new Map<string, number>();
   const lines = text.split(/\r?\n/);
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const codeFenceRegex = CODE_FENCE_RE;
   const mathFenceRegex = /^ *\$\$ *$/;
   let activeCodeFence: string | null = null;
   let inMathBlock = false;
@@ -98,71 +113,6 @@ const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
 const MATH_BLOCK_PREFIX_PADDING = 1;
-const INLINE_MATH_MAX_CHARS = 1024;
-const TABLE_INLINE_MATH_SPAN_RE = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
-  'y',
-);
-
-function readTableInlineMathSpan(row: string, index: number): string | null {
-  TABLE_INLINE_MATH_SPAN_RE.lastIndex = index;
-  return TABLE_INLINE_MATH_SPAN_RE.exec(row)?.[0] ?? null;
-}
-
-function splitMarkdownTableRow(row: string): string[] {
-  const cells: string[] = [];
-  let current = '';
-  let activeCodeFenceLength = 0;
-
-  for (let index = 0; index < row.length; index++) {
-    const char = row[index]!;
-    if (char === '\\') {
-      const next = row[index + 1];
-      if (next === '|') {
-        current += '|';
-        index += 1;
-        continue;
-      }
-      current += char;
-      continue;
-    }
-
-    if (char === '`') {
-      let runLength = 1;
-      while (row[index + runLength] === '`') {
-        runLength += 1;
-      }
-      if (activeCodeFenceLength === 0) {
-        activeCodeFenceLength = runLength;
-      } else if (runLength === activeCodeFenceLength) {
-        activeCodeFenceLength = 0;
-      }
-      current += '`'.repeat(runLength);
-      index += runLength - 1;
-      continue;
-    }
-
-    if (char === '$' && activeCodeFenceLength === 0) {
-      const mathSpan = readTableInlineMathSpan(row, index);
-      if (mathSpan) {
-        current += mathSpan;
-        index += mathSpan.length - 1;
-        continue;
-      }
-    }
-
-    if (char === '|' && activeCodeFenceLength === 0) {
-      cells.push(current.trim());
-      current = '';
-      continue;
-    }
-
-    current += char;
-  }
-
-  cells.push(current.trim());
-  return cells;
-}
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   text,
@@ -183,41 +133,180 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const displayText = isPending ? text.trimEnd() : text;
   const allLines = displayText.split(/\r?\n/);
   // Bound the live (non-`<Static>`) markdown to the viewport budget. A long
-  // streaming message otherwise renders ALL its lines, pushing the non-`<Static>`
+  // streaming message otherwise renders ALL its lines, pushing the dynamic
   // frame past the terminal height — at which point ink clears the terminal and
-  // re-streams the entire transcript on every repaint (the top→bottom "scroll
-  // replay" seen on tab-switch in terminal multiplexers). Slice to a CONTIGUOUS
-  // head of source lines rather than clipping with ink `overflow="hidden"`,
-  // which decimates rows (drops interspersed lines) and can erase a code block's
-  // own truncation indicator. Short messages are untouched; the full message
-  // still renders once it commits to `<Static>`. Only while pending and when a
-  // budget is known (constrainHeight on — both non-VP and VP pending items pass
-  // a budget).
+  // re-streams the whole frame from the top on every repaint (the "scroll-to-
+  // top lock"). The rendered-height-aware slice below keeps a CONTIGUOUS head of
+  // source lines whose RENDERED height fits the budget; a contiguous slice
+  // (rather than ink `overflow="hidden"`) avoids decimating interspersed rows
+  // and preserves a code block's own truncation. The full message still
+  // renders once it commits to `<Static>`. Only while pending and when a budget
+  // is known (constrainHeight on — both non-VP and VP pending items pass one).
   //
-  // Reserve 2 rows below the content: 1 for the "generating more" cue, and 1
-  // more so a retained code/math block's OWN inner budget
-  // (availableTerminalHeight - RESERVED_LINES, where RESERVED_LINES is up to 3
-  // for math) is never exceeded within the slice — otherwise that block emits
-  // its own cue and we'd stack two.
-  const pendingLineBudget =
+  // Reserve 2 rows of headroom below the viewport so the live frame stays bound
+  // even when a retained code/math block's own rendered height slightly exceeds
+  // the source-line estimate.
+  //
+  // This is a SAFETY NET on top of incremental scrollback commit: it guarantees
+  // the live frame never exceeds the viewport regardless of how the streaming
+  // layer chunks content, because rendered height ≠ source-line count (a table
+  // renders ~2 rows per data row; a wide/CJK line wraps to multiple rows).
+  const pendingRenderedBudget =
     isPending && availableTerminalHeight !== undefined
       ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
       : undefined;
-  const pendingClipped =
-    pendingLineBudget !== undefined && allLines.length > pendingLineBudget;
-  const lines = pendingClipped
-    ? allLines.slice(0, pendingLineBudget)
-    : allLines;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const codeFenceRegex = CODE_FENCE_RE;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
   const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
   const hrRegex = /^ *([-*_] *){3,} *$/;
   const blockquoteRegex = /^ *> ?(.*)$/;
   const mathFenceRegex = /^ *\$\$ *$/;
-  const tableRowRegex = /^\s*\|(.+)\|\s*$/;
-  const tableSeparatorRegex =
-    /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+  // Single source of truth for table detection (shared with pending-rendered-
+  // height.ts so the height estimator and the renderer never diverge).
+  const tableRowRegex = TABLE_ROW_RE;
+  const tableSeparatorRegex = TABLE_SEPARATOR_RE;
+
+  // Rendered-height-aware slice of the pending preview (shared with
+  // useGeminiStream's incremental commit — see pending-rendered-height.ts — so the
+  // two agree on how tall the content renders). Guarantees the live frame never
+  // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
+  // (the scroll-to-top lock). Note keptLines can be 0 when even the first
+  // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
+  // the budget): render nothing rather than an oversized row.
+  let lines = allLines;
+  if (pendingRenderedBudget !== undefined) {
+    const tableClampRows =
+      availableTerminalHeight !== undefined
+        ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
+        : Number.MAX_SAFE_INTEGER;
+    const { keptLines } = fitPendingSlice(
+      allLines,
+      contentWidth,
+      pendingRenderedBudget,
+      tableClampRows,
+    );
+    if (keptLines < allLines.length) {
+      lines = allLines.slice(0, keptLines);
+    }
+  }
+
+  // Hold back a still-forming table at the streaming frontier. A table is only
+  // recognized once its separator line (matching the header's column count) has
+  // arrived; until then the header — and any partial separator — would render as
+  // raw `| a | b |` text and stream in character by character before snapping
+  // into a table box. So while pending, trim a trailing run of pipe-lines that
+  // does not yet contain a matching separator: nothing renders for it until it
+  // can render as a table. (A run that IS a recognizable table is kept — the
+  // per-row hold-back below then handles its unterminated frontier row.)
+  if (isPending && renderVisualBlocks && lines.length > 0) {
+    let start = lines.length;
+    while (start > 0 && /^\s*\|/.test(lines[start - 1]!)) start--;
+    if (start < lines.length) {
+      // Don't touch pipe-lines that are actually fenced code-block OR display-math
+      // (`$$ … $$`) content: the main parser pushes those verbatim, never as a
+      // table (a `| a | b |` norm/matrix line inside `$$` would otherwise be held
+      // back as a forming table and blank until the block closes). Track the OPEN
+      // code fence's delimiter, not a naive toggle: a closing fence must use the
+      // same char and be at least as long (mirrors the main parser), or a nested
+      // fence (```` inside ```` ) mis-toggles and a real code line like `| A | B |`
+      // gets held back. Mirror the main parser's precedence — a code block wins,
+      // then a math block — so a `$$` inside a code fence does not open math.
+      let activeCodeFence = '';
+      let insideMathBlock = false;
+      for (let i = 0; i < start; i++) {
+        const line = lines[i]!;
+        if (activeCodeFence) {
+          const fenceMatch = line.match(codeFenceRegex);
+          if (
+            fenceMatch &&
+            fenceMatch[1]!.startsWith(activeCodeFence[0]!) &&
+            fenceMatch[1]!.length >= activeCodeFence.length
+          ) {
+            activeCodeFence = '';
+          }
+          continue;
+        }
+        if (insideMathBlock) {
+          if (mathFenceRegex.test(line)) insideMathBlock = false;
+          continue;
+        }
+        const fenceMatch = line.match(codeFenceRegex);
+        if (fenceMatch) {
+          activeCodeFence = fenceMatch[1]!;
+        } else if (mathFenceRegex.test(line)) {
+          insideMathBlock = true;
+        }
+      }
+      const insideCodeFence = activeCodeFence !== '';
+      // Only hold back a plausible forming TABLE, not arbitrary pipe text. A
+      // table header has ≥2 columns; a single-pipe line (an un-fenced shell
+      // pipeline `| grep foo`, a pipe-prefixed log line) has one cell and must
+      // render. Count cells on the first line whether or not it is closed yet,
+      // so a multi-column header held mid-type does not flash in cell by cell
+      // before its separator arrives. (A header still typing its very first
+      // cell — one cell so far — is indistinguishable from a single-pipe line,
+      // so it renders briefly until the second column appears; that is the
+      // narrowest flash we can allow without hiding real non-table text.)
+      // Count header cells the way the main table detector does (strip the
+      // outer pipes, split WITHOUT dropping empty cells) so an empty-named
+      // column like `| A || B |` — which the renderer treats as a real table —
+      // agrees between this hold-back and the renderer, instead of being held
+      // back for the whole stream. The trailing pipe is stripped only when
+      // present, so a still-forming header (`| A | B`) is counted mid-type.
+      let headerCells = 0;
+      if (!insideCodeFence && !insideMathBlock) {
+        let hdr = lines[start]!.replace(/^\s*\|/, '');
+        if (/\|\s*$/.test(hdr)) hdr = hdr.replace(/\|\s*$/, '');
+        headerCells = splitMarkdownTableRow(hdr).length;
+      }
+      if (headerCells >= 2) {
+        const rest = lines.slice(start + 1);
+        const hasMatchingSeparator = rest.some((l) => {
+          if (!tableSeparatorRegex.test(l)) return false;
+          const cols = splitMarkdownTableRow(l).filter(
+            (c) => c.length > 0,
+          ).length;
+          return cols === headerCells;
+        });
+        // A markdown table's separator is the line IMMEDIATELY after the header.
+        // So once a line follows the header and it is not a (possibly still
+        // forming) separator row, this pipe run is decided: NOT a forming table —
+        // a multi-cell shell pipeline (`| grep foo | wc -l`), a log excerpt
+        // (`| 200 | OK | GET /x`), an options table whose first cell starts with
+        // a dash (`| --verbose | … |`), or an ASCII-art border. Release it rather
+        // than hiding it for the whole stream. `tableSeparatorRegex` matches a
+        // partial separator (`|--`) so a real header whose separator is still
+        // being typed stays held; it rejects a dash-led data cell like
+        // `--verbose` (trailing letters), which a looser "starts with a dash"
+        // test would wrongly hold. While only the header exists (no line after it
+        // yet) keep holding so a multi-column header does not flash in cell by
+        // cell before its separator arrives.
+        const lineAfterHeader = rest[0];
+        let couldStillBeTable =
+          lineAfterHeader === undefined ||
+          tableSeparatorRegex.test(lineAfterHeader);
+        // A COMPLETE separator (ends with `|`) whose column count already differs
+        // from the header will never become a valid table — the main parser
+        // treats it as plain text — so release it instead of holding the run for
+        // the rest of the stream. A still-forming separator (no closing `|`) can
+        // still gain columns, so keep holding it.
+        if (
+          couldStillBeTable &&
+          lineAfterHeader !== undefined &&
+          /\|\s*$/.test(lineAfterHeader)
+        ) {
+          const sepCols = splitMarkdownTableRow(lineAfterHeader).filter(
+            (c) => c.length > 0,
+          ).length;
+          if (sepCols !== headerCells) couldStillBeTable = false;
+        }
+        if (!hasMatchingSeparator && couldStillBeTable) {
+          lines = lines.slice(0, start);
+        }
+      }
+    }
+  }
 
   /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
   const parseTableAligns = (line: string): ColumnAlign[] =>
@@ -374,6 +463,26 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     } else if (inTable && tableSeparatorMatch) {
       // Parse alignment from separator line
       tableAligns = parseTableAligns(line);
+    } else if (
+      isPending &&
+      inTable &&
+      index === lines.length - 1 &&
+      tableHeaders.length > 0 &&
+      /^\s*\|/.test(line) &&
+      (!tableRowMatch ||
+        splitMarkdownTableRow(tableRowMatch[1]).length < tableHeaders.length)
+    ) {
+      // Live streaming frontier: the final line is a row still being typed —
+      // either mid-cell (`| a | b` with no closing `|` yet) or closed but with
+      // fewer cells than the header (`| a |` while `| a | b | c |` is coming, an
+      // intermediate that itself matches the row regex). Both would otherwise
+      // render as a padded row that fills in cell by cell and flips as the
+      // closing `|`/columns arrive, jittering the frame. Hold the row back until
+      // it has all its columns: skip it so `inTable` stays set and the
+      // end-of-content handler renders only the COMPLETE rows as a live table.
+      // The whole row (border + all cells) then appears in one step. Guarded on
+      // `tableHeaders.length > 0` so the header + separator never blank out with
+      // a stray partial line beneath them while the first row is typed.
     } else if (inTable && tableRowMatch) {
       // Add table row
       const cells = splitMarkdownTableRow(tableRowMatch[1]);
@@ -386,7 +495,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       }
       tableRows.push(cells);
     } else if (inTable && !tableRowMatch) {
-      // End of table
+      // End of table — a following line closes it, so this table is COMPLETE
+      // and renders in full (the rendered-aware slice guarantees a completed
+      // table that would overflow was cut before it; `maxHeight` clamps the
+      // residual wrapped-cell case).
       if (tableHeaders.length > 0 && tableRows.length > 0) {
         addContentBlock(
           <RenderTable
@@ -396,6 +508,13 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             contentWidth={contentWidth}
             aligns={tableAligns}
             enableInlineMath={renderVisualBlocks}
+            isPending={isPending}
+            // A following non-table line closed this table: it is COMPLETE and
+            // will gain no more rows, so it is not the streaming frontier. Decide
+            // its format from all rows (not just the first) so it does not flip
+            // horizontal→vertical when the message finally commits.
+            isFrontier={false}
+            availableTerminalHeight={availableTerminalHeight}
           />,
         );
       }
@@ -577,7 +696,25 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
-  // Handle table at end of content
+  // Handle table at end of content — the table still being written. Draw it live
+  // (growing each tick); the `maxHeight` clamp caps it at the viewport and the
+  // slice above keeps preceding content within budget, so it can never overflow
+  // and lock the terminal. Renders in full once the message commits to <Static>
+  // (isPending=false → no clamp).
+  //
+  // While PENDING, defer a table that has no COMPLETE data row yet. A zero-row
+  // table can only render horizontally (the vertical fallback needs rows to lay
+  // out), so drawing the empty header box and then flipping to the vertical
+  // `label: value` format once a long first row lands is a visible format change
+  // — and the format genuinely cannot be known from the header alone (column
+  // names are short; the width comes from the values). Waiting for the first
+  // complete row means the table first appears ALREADY in its final format, with
+  // no flip. Cost: the table area stays blank while the header + first row stream
+  // (the pre-loop trim already hid the header text, so this just extends that
+  // blank until the first row terminates). The `tableRows.length > 0` guard also
+  // matches the mid-content end-of-table handler above, so a degenerate zero-row
+  // table renders (or not) the same whether it ends the message or is followed by
+  // more text — pending or committed.
   if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
     addContentBlock(
       <RenderTable
@@ -587,24 +724,21 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         contentWidth={contentWidth}
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
+        isPending={isPending}
+        // End of content: this table is at the streaming frontier and may still
+        // gain rows, so anchor its format to the first row while pending.
+        isFrontier={true}
+        availableTerminalHeight={availableTerminalHeight}
       />,
     );
   }
 
-  // When the live message was clipped to a head slice (see pendingLineBudget
-  // above), add a cue that more is streaming. Code blocks retained in the head
-  // still render their own "... generating more ..." truncation.
-  if (pendingClipped) {
-    return (
-      <Box flexDirection="column">
-        {contentBlocks}
-        <Text color={theme.text.secondary} wrap="truncate">
-          ... generating more ...
-        </Text>
-      </Box>
-    );
-  }
-
+  // Safety-net clip: when the pending preview exceeds the rendered-height
+  // budget, slice it to keep the live frame within the viewport. The clipping
+  // still happens (prevents scroll-to-top lock), but we no longer show the
+  // "... generating more ..." cue — incremental scrollback commit (PR #6170)
+  // already streams content to <Static> in real-time, so clipped content is
+  // not "delayed output" but rather "still streaming".
   return <>{contentBlocks}</>;
 };
 
@@ -631,8 +765,13 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 }) => {
   const settings = useSettings();
   const { renderMode } = useRenderMode();
-  const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
-  const RESERVED_LINES = 2; // Lines reserved for the message itself and potential padding
+  // Below this many usable rows there is no room for a meaningful code
+  // preview, so we fall back to the "... code is being written ..." notice.
+  const MIN_PREVIEW_LINES = 1;
+  // One row of headroom below availableTerminalHeight. This used to also hold a
+  // "... generating more ..." cue (removed with PR #6170's incremental commit),
+  // so the reclaimed row now shows an extra code line at the same total height.
+  const RESERVED_LINES = 1;
 
   if (lang?.toLowerCase() === 'mermaid' && renderMode === 'render') {
     if (isPending) {
@@ -665,8 +804,8 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     );
 
     if (content.length > MAX_CODE_LINES_WHEN_PENDING) {
-      if (MAX_CODE_LINES_WHEN_PENDING < MIN_LINES_FOR_MESSAGE) {
-        // Not enough space to even show the message meaningfully
+      if (MAX_CODE_LINES_WHEN_PENDING < MIN_PREVIEW_LINES) {
+        // Not enough space to even show a truncated preview meaningfully
         return (
           <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING}>
             <Text color={theme.text.secondary}>
@@ -687,7 +826,6 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       return (
         <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
           {colorizedTruncatedCode}
-          <Text color={theme.text.secondary}>... generating more ...</Text>
         </Box>
       );
     }
@@ -725,10 +863,13 @@ interface RenderPendingMermaidBlockProps {
 const RenderPendingMermaidBlockInternal: React.FC<
   RenderPendingMermaidBlockProps
 > = ({ content, availableTerminalHeight, contentWidth }) => {
+  // Reserve one row for the "Mermaid diagram is being written..." header. The
+  // second reserved row used to hold a "... generating more ..." cue (removed
+  // with PR #6170); reclaiming it shows an extra preview line at the same height.
   const maxPreviewLines =
     availableTerminalHeight === undefined
       ? 6
-      : Math.max(0, availableTerminalHeight - 2);
+      : Math.max(0, availableTerminalHeight - 1);
   const previewLines = content.slice(0, maxPreviewLines);
   return (
     <Box
@@ -743,9 +884,6 @@ const RenderPendingMermaidBlockInternal: React.FC<
           {line || ' '}
         </Text>
       ))}
-      {content.length > previewLines.length && (
-        <Text color={theme.text.secondary}>... generating more ...</Text>
-      )}
     </Box>
   );
 };
@@ -767,7 +905,10 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   isPending,
   availableTerminalHeight,
 }) => {
-  const RESERVED_LINES = 3;
+  // One row for the "LaTeX block · source:" header plus one row of headroom.
+  // The third row used to hold a "... generating more ..." cue (removed with PR
+  // #6170); reclaiming it shows an extra preview line at the same total height.
+  const RESERVED_LINES = 2;
   if (isPending && availableTerminalHeight !== undefined) {
     const maxPreviewLines = Math.max(
       0,
@@ -790,7 +931,6 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
               {line || ' '}
             </Text>
           ))}
-          <Text color={theme.text.secondary}>... generating more ...</Text>
         </Box>
       );
     }
@@ -901,6 +1041,16 @@ interface RenderTableProps {
   contentWidth: number;
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
+  /** True while the whole message is still streaming — drives the height clamp. */
+  isPending?: boolean;
+  /**
+   * True only for the table at the streaming frontier (end of content, may still
+   * gain rows). A completed mid-content table passes false so its format is
+   * decided from all rows and does not flip when the message commits. Defaults
+   * true so a bare RenderTable behaves like the frontier.
+   */
+  isFrontier?: boolean;
+  availableTerminalHeight?: number;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
@@ -909,15 +1059,32 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
-}) => (
-  <TableRenderer
-    headers={headers}
-    rows={rows}
-    contentWidth={contentWidth}
-    aligns={aligns}
-    enableInlineMath={enableInlineMath}
-  />
-);
+  isPending = false,
+  isFrontier = true,
+  availableTerminalHeight,
+}) => {
+  // The height clamp tracks whether the MESSAGE is streaming (overflow can grow
+  // on any tick). The format anchor tracks whether THIS TABLE is still streaming
+  // — only the frontier table anchors its format to the first row; a completed
+  // mid-content table measures all rows. Keeping the clamp on isPending (not
+  // isFrontier) means a mid-content table is still bounded, so the estimator's
+  // clamped cost still matches the render and cannot under-estimate.
+  const maxHeight =
+    isPending && availableTerminalHeight !== undefined
+      ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
+      : undefined;
+  return (
+    <TableRenderer
+      headers={headers}
+      rows={rows}
+      contentWidth={contentWidth}
+      aligns={aligns}
+      enableInlineMath={enableInlineMath}
+      isStreaming={isPending && isFrontier}
+      maxHeight={maxHeight}
+    />
+  );
+};
 
 const RenderTable = React.memo(RenderTableInternal);
 

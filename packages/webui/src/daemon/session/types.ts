@@ -72,9 +72,15 @@ export interface DaemonConnectionState {
   supportedCommands?: DaemonSessionSupportedCommandsStatus;
   context?: DaemonSessionContextStatus;
   capabilities?: DaemonCapabilities;
+  /** True while the current session transcript is being loaded. */
+  loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
   error?: string;
+  /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
+  errorStatus?: number;
+  /** True only when the server confirmed the current session is missing. */
+  missingSession?: boolean;
 }
 
 export interface DaemonTokenUsage {
@@ -232,6 +238,14 @@ export interface SendPromptOptions {
    * message in the JSONL transcript. Used by Ctrl+Y retry.
    */
   retry?: boolean;
+  /**
+   * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
+   * runs to completion. Lets a caller act on "the prompt reached the session"
+   * without waiting for the whole turn — e.g. the scheduled-tasks "run now",
+   * which records the run at admission so a long/stalled turn or a closed tab
+   * can't lose the record.
+   */
+  onAdmitted?: () => void;
 }
 
 export interface SubmitPromptOptions extends SendPromptOptions {
@@ -308,8 +322,8 @@ export interface DaemonSessionActions {
   listSessions(options?: {
     pageSize?: number;
   }): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
-  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  loadSession(sessionId: string): Promise<void>;
+  resumeSession(sessionId: string): Promise<void>;
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.
@@ -365,10 +379,6 @@ export interface DaemonSessionActions {
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
-}
-
-export interface SessionSwitchOptions {
-  deferTranscriptReset?: boolean;
 }
 
 export interface DaemonSessionContextValue {

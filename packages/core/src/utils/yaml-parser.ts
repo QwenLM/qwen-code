@@ -202,7 +202,7 @@ function parseSimple(yamlString: string): Record<string, unknown> {
  * arbitrarily nested values (e.g. CC-style `mcpServers` / `hooks`) round-trip
  * cleanly. The previous hand-rolled formatter only walked one level of
  * nesting and emitted `[object Object]` for anything deeper, corrupting the
- * file on save — see `docs/yaml-parser-replacement.md` for the audit.
+ * file on save — see `docs/design/yaml-parser-replacement.md` for the audit.
  *
  * `lineWidth: 0` disables automatic line wrapping so multi-line strings are
  * preserved as-is, matching the stable-output posture the test suite assumes.

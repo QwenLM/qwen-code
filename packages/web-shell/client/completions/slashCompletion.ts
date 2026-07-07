@@ -4,6 +4,7 @@ import type {
   CompletionResult,
   CompletionSection,
 } from '@codemirror/autocomplete';
+import { Fzf } from 'fzf';
 import type { CommandInfo } from '../adapters/types';
 import type { WebShellLanguage } from '../i18n';
 import {
@@ -332,6 +333,62 @@ function getLineBounds(text: string, cursor: number) {
   };
 }
 
+// The visible slash menu (React SlashCommandPanel) drives its top-level command
+// list through getSlashCommandCompletionResult. For a non-empty query we rank
+// with fzf — the same fuzzy engine the TUI uses — so abbreviated input like
+// "mdl" surfaces "model" and "arf" surfaces "agent-reproduce-feature". Building
+// the index is keyed on the commands array identity, so it happens once per
+// command set rather than on every keystroke. (slashCompletionSource, the
+// CodeMirror source below, is not wired into the live editor and still does
+// substring filtering.)
+const commandFzfCache = new WeakMap<
+  readonly CommandInfo[],
+  { fzf: Fzf<readonly string[]>; byName: Map<string, CommandInfo> }
+>();
+
+function getCommandFzf(commands: CommandInfo[]) {
+  let entry = commandFzfCache.get(commands);
+  if (!entry) {
+    const names: string[] = [];
+    const byName = new Map<string, CommandInfo>();
+    for (const command of commands) {
+      if (byName.has(command.name)) continue;
+      names.push(command.name);
+      byName.set(command.name, command);
+    }
+    entry = {
+      fzf: new Fzf(names, { fuzzy: 'v2', casing: 'case-insensitive' }),
+      byName,
+    };
+    commandFzfCache.set(commands, entry);
+  }
+  return entry;
+}
+
+function fuzzyRankCommands(
+  commands: CommandInfo[],
+  query: string,
+): CommandInfo[] {
+  try {
+    const { fzf, byName } = getCommandFzf(commands);
+    const matches: CommandInfo[] = [];
+    for (const result of fzf.find(query)) {
+      const command = byName.get(result.item);
+      if (command) matches.push(command);
+    }
+    return matches;
+  } catch (error) {
+    console.warn(
+      '[web-shell] slash fuzzy search failed, falling back to substring match:',
+      error,
+    );
+    const lp = query.toLowerCase();
+    return commands.filter((command) =>
+      command.name.toLowerCase().includes(lp),
+    );
+  }
+}
+
 export function getSlashCommandCompletionResult(
   text: string,
   cursor: number,
@@ -423,13 +480,15 @@ export function getSlashCommandCompletionResult(
   if (!match) return null;
 
   const prefix = match[1];
-  const lp = prefix.toLowerCase();
-  const filteredCommands = commands
-    .filter((command) => {
-      if (!prefix) return true;
-      return command.name.toLowerCase().includes(lp);
-    })
-    .sort((a, b) => compareSlashCommands(a, b, lp, categoryOrder));
+  // Empty query: browse the full list grouped and ordered by category.
+  // Non-empty query: fuzzy-rank by relevance (best match first), matching the
+  // TUI, so partial or abbreviated input surfaces the command the user means.
+  const isBrowsing = prefix.length === 0;
+  const filteredCommands = isBrowsing
+    ? [...commands].sort((a, b) =>
+        compareSlashCommands(a, b, '', categoryOrder),
+      )
+    : fuzzyRankCommands(commands, prefix);
 
   const items = filteredCommands.map((command): SlashCommandCompletionItem => {
     const apply = `/${command.name} `;
@@ -441,7 +500,12 @@ export function getSlashCommandCompletionResult(
       detail: command.description || undefined,
       apply,
       category,
-      section: translate(COMMAND_SECTION_KEYS[category]),
+      // Section headers only make sense while browsing the category-ordered
+      // list; a relevance-ranked result set interleaves categories, so headers
+      // would appear before nearly every row. Drop them during search.
+      ...(isBrowsing
+        ? { section: translate(COMMAND_SECTION_KEYS[category]) }
+        : {}),
       ...(showCommandInfo && command.description
         ? { type: 'command-info' as const }
         : {}),

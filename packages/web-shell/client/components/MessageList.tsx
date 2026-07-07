@@ -29,6 +29,7 @@ import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
+import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
@@ -36,6 +37,7 @@ interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  loadingTranscript?: boolean;
   catchingUp?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
@@ -47,7 +49,6 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
-  shellOutputMaxLines: number;
   activeTurnStartedAt?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
@@ -68,6 +69,10 @@ function getLastUserMessageId(messages: Message[]): string | null {
     if (msg?.role === 'user') return msg.id;
   }
   return null;
+}
+
+function getLastMessage(messages: Message[]): Message | undefined {
+  return messages[messages.length - 1];
 }
 
 function getLastTurnStartMessageId(messages: Message[]): string | null {
@@ -109,6 +114,11 @@ export type DisplayItem =
       timestamp?: number;
     };
 
+interface LocateFlashTarget {
+  messageId: string;
+  callId?: string;
+}
+
 export type TurnTimelineNodeKind =
   | 'thought'
   | 'commentary'
@@ -130,6 +140,7 @@ export interface SessionTimelineEntry {
   detail: string;
   timestamp?: number;
   nodeKinds: TurnTimelineNodeKind[];
+  isScheduledTask?: boolean;
 }
 
 export interface SessionTimelineRange {
@@ -614,6 +625,16 @@ function timelineLabelForTurn(message: Message): string {
   return compact;
 }
 
+function isScheduledTaskMessage(message: {
+  role: Message['role'];
+  source?: string;
+}): boolean {
+  return (
+    message.role === 'user' &&
+    (message.source === 'cron' || message.source === 'loop')
+  );
+}
+
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat
 // auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
@@ -751,6 +772,7 @@ export function getSessionTimelineEntries(
       detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
       timestamp: turnStart.timestamp,
       nodeKinds,
+      ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
     });
   };
 
@@ -768,6 +790,20 @@ export function getSessionTimelineEntries(
   pushTurn();
 
   return entries;
+}
+
+function TimelineClockIcon() {
+  return (
+    <svg
+      className={styles.sessionTimelineDetailsIcon}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 4.5v4l-2.5 2" />
+    </svg>
+  );
 }
 
 function toolTimelineSignature(tool: ACPToolCall): string {
@@ -891,6 +927,14 @@ function terminalTurnTimestamp(item: DisplayItem): number | undefined {
     item.message.source === 'turn_error'
     ? item.message.timestamp
     : undefined;
+}
+
+function isTurnErrorItem(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'turn_error'
+  );
 }
 
 function assistantContentTimestamp(item: DisplayItem): number | undefined {
@@ -1107,11 +1151,15 @@ export function applyTurnCollapse(
     let toolCallCount = 0;
     let thinkingCount = 0;
     let hasUsage = false;
+    let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
       const isStep = isHideableStep(item, i === answerIdx);
       if (isStep) {
         hiddenCount++;
+      }
+      if (isTurnErrorItem(item)) {
+        hasTurnError = true;
       }
       toolCallCount += itemToolCallCount(item);
       if (item.type === 'message' && item.message.role === 'thinking') {
@@ -1161,15 +1209,17 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, collapsed once complete. A step-less turn (e.g. a plain "hi"
+    // streaming, when the turn errored, or when there is no final answer;
+    // otherwise it collapses once complete. A step-less turn (e.g. a plain "hi"
     // reply) has nothing to fold, so it stays expanded and shows a chevron-less
     // metrics line. An explicit user toggle always wins.
+    const shouldStayOpen = isActiveTurn || hasTurnError || answerIdx < 0;
     const expanded =
       hiddenCount === 0
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : isActiveTurn;
+          : shouldStayOpen;
     const collapsed = !expanded;
     let turnContentGroupIndex = 0;
     const pushTurnContentGroup = (groupItems: DisplayItem[]) => {
@@ -1302,6 +1352,33 @@ export function findDisplayItemIndex(
     }
   }
   return -1;
+}
+
+function displayItemMatchesLocateTarget(
+  item: DisplayItem,
+  target: LocateFlashTarget | null,
+): boolean {
+  if (!target) return false;
+  const callId = target.callId;
+  if (item.type === 'message') {
+    if (item.message.id === target.messageId) return true;
+    return (
+      !!callId &&
+      item.message.role === 'tool_group' &&
+      item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+    );
+  }
+  if (item.type === 'parallel_agents') {
+    return (
+      !!callId && item.agents.some((agent) => toolContainsCallId(agent, callId))
+    );
+  }
+  if (item.type === 'turn_content') {
+    return item.items.some((child) =>
+      displayItemMatchesLocateTarget(child, target),
+    );
+  }
+  return false;
 }
 
 export interface MessageListHandle {
@@ -1631,8 +1708,21 @@ const SessionTimeline = memo(function SessionTimeline({
                     data-testid="session-timeline-detail"
                     data-title={entry.label}
                     data-detail={entry.detail}
+                    data-scheduled-task={
+                      entry.isScheduledTask ? 'true' : undefined
+                    }
                     aria-hidden="true"
-                  />
+                  >
+                    <span className={styles.sessionTimelineDetailsTitle}>
+                      {entry.isScheduledTask && <TimelineClockIcon />}
+                      <span className={styles.sessionTimelineDetailsTitleText}>
+                        {entry.label}
+                      </span>
+                    </span>
+                    <span className={styles.sessionTimelineDetailsDetail}>
+                      {entry.detail}
+                    </span>
+                  </span>
                 </button>
               </li>
             );
@@ -1650,12 +1740,55 @@ function joinClassNames(
   return result || undefined;
 }
 
-export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
-  function MessageList(
+const EMPTY_SESSION_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
+
+function LoadingTranscriptSkeleton({ label }: { label: string }) {
+  return (
+    <>
+      <div role="status" aria-live="polite" className={styles.srOnly}>
+        {label}
+      </div>
+      <div
+        className={styles.loadingSkeleton}
+        data-testid="message-list-loading-skeleton"
+        aria-hidden="true"
+      >
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubble}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineShort} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineMedium} />
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineNarrow} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubbleCompact}>
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+export const MessageList = memo(
+  forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
       pendingApproval,
       onShowContextDetail,
+      loadingTranscript,
       catchingUp,
       isResponding = false,
       activeTurnStartedAt,
@@ -1664,7 +1797,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
-      shellOutputMaxLines,
       autoScrollTailIntoView = false,
       hideSessionTimeline = false,
       showRetryHint = false,
@@ -1674,6 +1806,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     },
     ref,
   ) {
+    const { t } = useI18n();
     const compactMode = useContext(CompactModeContext);
     const mergedMessages = useMemo(
       () =>
@@ -1686,19 +1819,25 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
     );
-    const sessionTimelineSignature =
-      getSessionTimelineSignature(mergedMessages);
+    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
+      useState(false);
     const sessionTimelineCache = useRef<{
       signature: string;
       entries: SessionTimelineEntry[];
     } | null>(null);
-    if (sessionTimelineCache.current?.signature !== sessionTimelineSignature) {
-      sessionTimelineCache.current = {
-        signature: sessionTimelineSignature,
-        entries: getSessionTimelineEntries(mergedMessages),
-      };
-    }
-    const sessionTimelineEntries = sessionTimelineCache.current.entries;
+    // Signature + entries are O(transcript text); only pay for them while the
+    // rail can actually show (container >= 1160px — never on mobile).
+    const sessionTimelineEntries = useMemo(() => {
+      if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
+      const signature = getSessionTimelineSignature(mergedMessages);
+      if (sessionTimelineCache.current?.signature !== signature) {
+        sessionTimelineCache.current = {
+          signature,
+          entries: getSessionTimelineEntries(mergedMessages),
+        };
+      }
+      return sessionTimelineCache.current.entries;
+    }, [isSessionTimelineVisible, mergedMessages]);
     const sessionTimelineEntryIndexById = useMemo(
       () =>
         new Map(
@@ -1760,7 +1899,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
+    const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
+    const pendingNewUserSmoothScroll = useRef(false);
+    const prevLoadingTranscript = useRef(loadingTranscript);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
@@ -1824,13 +1966,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       [visibleItems],
     );
 
-    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(false);
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
 
     useLayoutEffect(() => {
-      if (hideSessionTimeline || !hasEnoughSessionTimelineEntries) {
+      if (hideSessionTimeline) {
         setIsSessionTimelineVisible((prev) => (prev ? false : prev));
         return;
       }
@@ -1851,7 +1991,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const observer = new ResizeObserver(updateVisibility);
       observer.observe(el);
       return () => observer.disconnect();
-    }, [hasEnoughSessionTimelineEntries, hideSessionTimeline]);
+    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -1900,6 +2040,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // ─────────────────────────────────────────────────────────────────────
 
     const hasTailContent = tailContent !== undefined && tailContent !== null;
+    const showLoadingSkeleton = Boolean(loadingTranscript);
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
     const tailContentIndex = headerOffset + visibleItems.length;
@@ -2188,17 +2329,19 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     ]);
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
-    // transcript" button) with a brief highlight on the target row.
-    const [flashKey, setFlashKey] = useState<string | null>(null);
+    // transcript" button) with a brief highlight on the target message.
+    const [flashTarget, setFlashTarget] = useState<LocateFlashTarget | null>(
+      null,
+    );
     useEffect(() => {
-      if (!flashKey) return;
-      const timer = setTimeout(() => setFlashKey(null), 1600);
+      if (!flashTarget) return;
+      const timer = setTimeout(() => setFlashTarget(null), 1600);
       return () => clearTimeout(timer);
-    }, [flashKey]);
+    }, [flashTarget]);
 
-    // Scroll a visible row to center and flash it.
+    // Scroll a visible row to center and flash the target message inside it.
     const performScrollToRow = useCallback(
-      (rowIndex: number) => {
+      (rowIndex: number, target: LocateFlashTarget) => {
         // Explicit navigation away from the tail — pause follow so the
         // auto-scroll driver doesn't yank the viewport straight back down,
         // and engage the same cooldown scrollToBottom uses so the scroll
@@ -2227,14 +2370,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             scheduleScrollOverflowReport();
           }
         }, 150);
-        const key = getItemKey(rowIndex);
-        setFlashKey(null);
-        requestAnimationFrame(() => setFlashKey(key));
+        setFlashTarget(null);
+        requestAnimationFrame(() => setFlashTarget(target));
       },
       [
         useVirtualScroll,
         virtualizer,
-        getItemKey,
         setShouldFollow,
         scheduleSessionTimelineRangeUpdate,
         scheduleScrollOverflowReport,
@@ -2245,7 +2386,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       visibleItems: readonly DisplayItem[];
       displayItems: readonly DisplayItem[];
       headerOffset: number;
-      performScrollToRow: (rowIndex: number) => void;
+      performScrollToRow: (rowIndex: number, target: LocateFlashTarget) => void;
     }>({
       visibleItems: [],
       displayItems: [],
@@ -2261,10 +2402,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
-    const pendingScrollRef = useRef<{
-      messageId: string;
-      callId?: string;
-    } | null>(null);
+    const pendingScrollRef = useRef<LocateFlashTarget | null>(null);
 
     const scrollToMessage = useCallback(
       (messageId: string, callId?: string): boolean => {
@@ -2288,7 +2426,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             return true;
           }
           pendingScrollRef.current = null;
-          performScrollToRow(visibleIndex + headerOffset);
+          performScrollToRow(visibleIndex + headerOffset, {
+            messageId,
+            callId,
+          });
           return true;
         }
         // Not on screen — it may be folded inside a collapsed turn. Locate it
@@ -2326,7 +2467,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       );
       if (idx < 0) return;
       pendingScrollRef.current = null;
-      performScrollToRow(idx + headerOffset);
+      performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
@@ -2434,27 +2575,45 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
-    useEffect(() => {
+    useLayoutEffect(() => {
       const lastId = getLastUserMessageId(messages);
-      if (catchingUp) {
+      if (catchingUp || loadingTranscript || prevLoadingTranscript.current) {
         prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
+        prevLoadingTranscript.current = loadingTranscript;
         return;
       }
-      if (lastId && lastId !== prevLastUserMsgId.current) {
+      prevLoadingTranscript.current = loadingTranscript;
+      if (!didTrackLastUserMsgRef.current) {
+        prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
+        return;
+      }
+      const lastMessage = getLastMessage(messages);
+      if (
+        lastId &&
+        lastMessage?.role === 'user' &&
+        lastId !== prevLastUserMsgId.current
+      ) {
         setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
+        pendingNewUserSmoothScroll.current = true;
+      } else {
+        pendingNewUserSmoothScroll.current = false;
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, setShouldFollow]);
+    }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
     // latest content without the viewport fighting the replay.
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (prevCatchingUp.current && !catchingUp) {
         setShouldFollow(true);
-        requestAnimationFrame(() => scrollToBottom());
+        scrollToBottom('auto');
       }
       prevCatchingUp.current = catchingUp;
     }, [catchingUp, scrollToBottom, setShouldFollow]);
@@ -2521,10 +2680,18 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           if (displayItem.type === 'parallel_agents') {
             return (
               <MessageTimestamp timestamp={displayItem.timestamp}>
-                <ParallelAgentsGroup
-                  agents={displayItem.agents}
-                  pendingApproval={pendingApproval}
-                />
+                <div
+                  className={
+                    displayItemMatchesLocateTarget(displayItem, flashTarget)
+                      ? flashStyles.flash
+                      : undefined
+                  }
+                >
+                  <ParallelAgentsGroup
+                    agents={displayItem.agents}
+                    pendingApproval={pendingApproval}
+                  />
+                </div>
               </MessageTimestamp>
             );
           }
@@ -2571,7 +2738,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 displayItem.message.role === 'assistant' &&
                 displayItem.message.id === lastCompletedAssistantId
               }
-              shellOutputMaxLines={shellOutputMaxLines}
+              isLocateFlashing={displayItemMatchesLocateTarget(
+                displayItem,
+                flashTarget,
+              )}
             />
           );
         };
@@ -2600,24 +2770,21 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        flashTarget,
         finalAssistantIdsByTurn,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
         onBranchSession,
-        shellOutputMaxLines,
         handleToggleCollapse,
       ],
     );
 
     const getRowClassName = useCallback(
-      (key: string, item?: DisplayItem): string | undefined =>
-        joinClassNames(
-          flashKey === key ? styles.rowFlash : undefined,
-          item ? getChatRowClassName(item) : undefined,
-        ),
-      [flashKey],
+      (item?: DisplayItem): string | undefined =>
+        item ? getChatRowClassName(item) : undefined,
+      [],
     );
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
@@ -2633,13 +2800,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     //         and is a no-op when there's no overflow.
     useLayoutEffect(() => {
       if (catchingUp) return;
-      if (scrollCooldown.current) return;
-      if (pendingFollowRecheck.current) return;
-      if (shouldFollow.current) {
-        const lastId = getLastUserMessageId(messages);
-        const isNewUserMessage =
-          lastId !== null && lastId !== prevLastUserMsgId.current;
+      const isNewUserMessage = pendingNewUserSmoothScroll.current;
+      if (scrollCooldown.current && !isNewUserMessage) return;
+      // Preserve the new-prompt scroll even if a previous disclosure resize is
+      // still settling; it targets the latest virtualizer size from this render.
+      if (pendingFollowRecheck.current && !isNewUserMessage) return;
+      if (shouldFollow.current || isNewUserMessage) {
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
+        pendingNewUserSmoothScroll.current = false;
       }
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
@@ -2653,19 +2821,21 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         className={styles.list}
         onClickCapture={handleDisclosureClickCapture}
       >
+        {showLoadingSkeleton && (
+          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+        )}
         <SessionTimeline
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible}
+          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
           onSelect={scrollToMessage}
         />
         {useVirtualScroll ? (
           <div
+            className={styles.virtualSizer}
             style={{
               height: totalVirtualSize,
-              width: '100%',
-              position: 'relative',
             }}
           >
             {virtualItems.map((virtualRow) => (
@@ -2673,15 +2843,17 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
-                className={getRowClassName(
-                  String(virtualRow.key),
-                  visibleItems[virtualRow.index - headerOffset],
+                className={joinClassNames(
+                  styles.virtualRow,
+                  getRowClassName(
+                    visibleItems[virtualRow.index - headerOffset],
+                  ),
                 )}
                 style={{
                   position: 'absolute',
                   top: 0,
                   left: 0,
-                  width: '100%',
+                  right: 0,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
@@ -2697,7 +2869,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               <div
                 key={key}
                 data-index={index}
-                className={getRowClassName(key, item)}
+                className={getRowClassName(item)}
               >
                 {renderVirtualItem(index)}
               </div>
@@ -2706,5 +2878,5 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         )}
       </div>
     );
-  },
+  }),
 );

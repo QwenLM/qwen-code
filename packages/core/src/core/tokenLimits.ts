@@ -8,7 +8,7 @@ type TokenCount = number;
  */
 export type TokenLimitType = 'input' | 'output';
 
-export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
+export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
@@ -235,6 +235,33 @@ function findTokenLimit(
 export function hasExplicitOutputLimit(model: Model): boolean {
   const norm = normalize(model);
   return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+}
+
+/**
+ * Worst-case output budget for a model: the escalated retry limit
+ * `max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'))`, capped at half
+ * the context window so the output reservation can never consume the whole
+ * input budget (issue #6144: a 65,536-token custom window minus the flat
+ * 64,000 escalation floor left only 1,536 tokens for input).
+ *
+ * Used both to pre-reserve output space when computing compression
+ * thresholds (issue #5950) and as the actual max_tokens for the MAX_TOKENS
+ * escalation retry — the two must agree or the reservation is wrong.
+ *
+ * @param model - The model name
+ * @param contextWindowSize - The configured context window; falls back to
+ *   DEFAULT_TOKEN_LIMIT when unset, matching the threshold computation.
+ */
+export function escalatedOutputTokenLimit(
+  model: Model,
+  contextWindowSize?: number,
+): TokenCount {
+  const escalated = Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
+  const window =
+    contextWindowSize !== undefined && contextWindowSize > 0
+      ? contextWindowSize
+      : DEFAULT_TOKEN_LIMIT;
+  return Math.min(escalated, Math.floor(window / 2));
 }
 
 export function knownTokenLimit(

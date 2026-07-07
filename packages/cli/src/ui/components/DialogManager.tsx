@@ -272,6 +272,8 @@ export const DialogManager = ({
         isFastModelMode={uiState.isFastModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
+        persistScope={uiState.modelDialogPersistScope}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }

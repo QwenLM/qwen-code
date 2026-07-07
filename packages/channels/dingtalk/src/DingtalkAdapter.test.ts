@@ -145,6 +145,10 @@ function deferredPromise<T>() {
 }
 
 describe('DingtalkChannel prompt reactions', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('maps lifecycle start and terminal events to the eye reaction', () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
@@ -478,6 +482,155 @@ describe('DingtalkChannel prompt reactions', () => {
 
     expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
     expect(activeReactionKeys.size).toBe(0);
+  });
+
+  it('uses the app access token for emotion replies', async () => {
+    const channel = createChannel();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      });
+
+    await (
+      channel as unknown as {
+        attachReaction(msgId: string, conversationId: string): Promise<void>;
+      }
+    ).attachReaction('msg-1', 'cid-123');
+
+    const emotionCall = fetchSpy.mock.calls.find((call) =>
+      String(call[0]).startsWith(
+        'https://api.dingtalk.com/v1.0/robot/emotion/reply',
+      ),
+    );
+    expect(emotionCall).toBeDefined();
+    expect(
+      ((emotionCall![1] as RequestInit).headers as Record<string, string>)[
+        'x-acs-dingtalk-access-token'
+      ],
+    ).toBe('proactive-token');
+  });
+
+  it('uses stream auth token for emotion replies when clientSecret is absent', async () => {
+    const channel = createChannel();
+    (
+      channel as unknown as { config: { clientSecret?: string } }
+    ).config.clientSecret = undefined;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      const emotionCall = fetchSpy.mock.calls.find((call) =>
+        String(call[0]).startsWith(
+          'https://api.dingtalk.com/v1.0/robot/emotion/reply',
+        ),
+      );
+      expect(emotionCall).toBeDefined();
+      expect(
+        ((emotionCall![1] as RequestInit).headers as Record<string, string>)[
+          'x-acs-dingtalk-access-token'
+        ],
+      ).toBe('token');
+      expect(stderr).not.toHaveBeenCalledWith(
+        '[DingTalk:test-dingtalk] emotion/reply skipped: clientSecret not configured\n',
+      );
+    } finally {
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('skips emotion replies before token lookup when robotCode is missing', async () => {
+    const channel = createChannel();
+    (channel as unknown as { config: { clientId?: string } }).config.clientId =
+      '';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          errcode: 0,
+          access_token: 'proactive-token',
+          expires_in: 7200,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('sanitizes failed emotion response details before logging', async () => {
+    const channel = createChannel();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response('bad\n[DingTalk:fake] forged', { status: 500 }),
+        );
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('bad\\n[DingTalk:fake] forged');
+      expect(logged).not.toContain('bad\n');
+    } finally {
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
   });
 });
 
