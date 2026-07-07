@@ -99,6 +99,12 @@ const {
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestScheduledTasksProps: null as {
+        onRunPrompt?: (
+          prompt: string,
+          sessionId: string | null,
+        ) => Promise<void>;
+      } | null,
     },
     sidebarTokens: [] as Array<number | undefined>,
     rawEnqueuePrompt: vi.fn(() => true),
@@ -322,10 +328,20 @@ mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
-mockComponent(
-  './components/dialogs/ScheduledTasksDialog',
-  'ScheduledTasksDialog',
-);
+// Capturing mock: stores the onRunPrompt handler (App's real runTaskManually)
+// so tests can drive the manual-run orchestration directly, then renders a bare
+// node like the other dialog mocks.
+vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
+  const React = await import('react');
+  return {
+    ScheduledTasksDialog: (props: {
+      onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+    }) => {
+      testState.latestScheduledTasksProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/dialogs/ExtensionsDialog', 'ExtensionsDialog');
 mockComponent('./components/dialogs/ThemeDialog', 'ThemeDialog');
 mockComponent(
@@ -436,6 +452,7 @@ beforeEach(() => {
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.latestChatEditorProps = null;
+  testState.latestScheduledTasksProps = null;
   sidebarTokens.length = 0;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
@@ -705,7 +722,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     // A gated tool call arrives.
     await act(async () => {
@@ -727,7 +746,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [
@@ -753,7 +774,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -821,7 +844,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     testState.prompt = '/schedule';
     await clickSubmit(container);
@@ -841,7 +866,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock({ resolved: true })];
@@ -849,7 +876,9 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('keeps the composer dormant (dialogOpen) while an approval overlay is up', async () => {
@@ -881,7 +910,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/model';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -930,7 +961,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     const sidebar = container.querySelector('[data-testid="sidebar"]');
     await act(async () => {
@@ -939,7 +972,9 @@ describe('App session callbacks', () => {
       );
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('marks the composer dormant (dialogOpen) while a panel replaces the chat', async () => {
@@ -985,7 +1020,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
     editorFocus.mockClear();
 
     await act(async () => {
@@ -1012,7 +1049,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="dialog-shell"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       container
@@ -1059,7 +1098,9 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
 
     testState.prompt = '/resume session-2';
     await clickSubmit(container);
@@ -1094,5 +1135,116 @@ describe('App session callbacks', () => {
       rerender({ onSessionChange });
     });
     expect(onSessionChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('App manual-run orchestration (scheduled tasks)', () => {
+  // Drives App's real runTaskManually / enqueueManualRun / tryFireBoundRun via
+  // the onRunPrompt prop the (captured) ScheduledTasksDialog mock receives.
+  // Opening the page with /schedule mounts the dialog and captures the handler.
+  async function openRunHandler(
+    container: HTMLElement,
+  ): Promise<(prompt: string, sessionId: string | null) => Promise<void>> {
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const handler = testState.latestScheduledTasksProps?.onRunPrompt;
+    if (!handler) throw new Error('onRunPrompt was not captured');
+    return handler;
+  }
+
+  // Make sendPrompt admit the prompt (fire onAdmitted) then resolve, the normal
+  // "daemon accepted it" path.
+  const admitOnSend = () =>
+    mockSessionActions.sendPrompt.mockImplementation(
+      (_text: string, opts?: { onAdmitted?: () => void }) => {
+        opts?.onAdmitted?.();
+        return Promise.resolve(undefined);
+      },
+    );
+
+  it('resolves an unbound run once the daemon admits the prompt', async () => {
+    admitOnSend();
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).resolves.toBeUndefined();
+    });
+  });
+
+  it('rejects an unbound run that settles without admitting (cancel path)', async () => {
+    // Default sendPrompt resolves WITHOUT onAdmitted → onSubmitBefore cancel /
+    // never reached the session: the caller must skip recording a run.
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toThrow(
+        /cancelled before it started/,
+      );
+    });
+  });
+
+  it('rejects an unbound run when the send throws before admission', async () => {
+    mockSessionActions.sendPrompt.mockRejectedValue(new Error('daemon boom'));
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toThrow('daemon boom');
+    });
+  });
+
+  it('fires a bound run immediately when its session is already active', async () => {
+    admitOnSend();
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    // session-1 is the current, fully-loaded session, so tryFireBoundRun fires
+    // right after loadSidebarSession without waiting on a dep-change effect.
+    await act(async () => {
+      await expect(run('do the thing', 'session-1')).resolves.toBeUndefined();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+  });
+
+  it('supersedes an older pending bound run with a newer one', async () => {
+    // Neither target is the active session, so both stay latched; the second
+    // must reject the first so its caller does not record a dropped run.
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    let firstErr: unknown;
+    let second: Promise<void> | undefined;
+    await act(async () => {
+      void run('first', 'sess-A').catch((e) => {
+        firstErr = e;
+      });
+      second = run('second', 'sess-B').catch(() => {});
+      await Promise.resolve();
+    });
+    expect((firstErr as Error | undefined)?.message).toMatch(/superseded/);
+    vi.clearAllTimers();
+    void second;
+  });
+
+  it('rejects a bound run when the session switch times out', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'never-active').catch((e) => {
+        err = e;
+      });
+      await Promise.resolve(); // loadSidebarSession resolves; no fire (not current)
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect((err as Error | undefined)?.message).toMatch(/Timed out switching/);
   });
 });

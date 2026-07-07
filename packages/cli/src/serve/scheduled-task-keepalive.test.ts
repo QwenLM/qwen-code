@@ -76,6 +76,46 @@ describe('scheduled-task keepalive', () => {
     expect(beats.sort()).toEqual(['sess-1', 'sess-2']);
   });
 
+  it('skips heartbeat and revive for disabled tasks (keeps them reap-able)', async () => {
+    // A disabled task's session is intentionally left for the idle reaper — the
+    // keepalive must NOT heartbeat it (which would pin it resident) and must NOT
+    // revive it. This guards the `enabled === false` filter: covers both a
+    // user-disabled task and one disabled by archiving (`disabledByArchive`).
+    await updateCronTasks(workspace, () => [
+      task({ id: 'on', sessionId: 'sess-live' }),
+      task({
+        id: 'off',
+        sessionId: 'sess-archived',
+        enabled: false,
+        disabledByArchive: true,
+      }),
+      task({ id: 'off2', sessionId: 'sess-userdisabled', enabled: false }),
+    ]);
+    // Tripwire: heartbeating a disabled session would throw here, which the tick
+    // then "recovers" from by attempting a revive — so a regression that stopped
+    // filtering disabled tasks would surface in BOTH `beats` and `loads`.
+    const guarded = {
+      recordHeartbeat: (id: string) => {
+        if (id !== 'sess-live') {
+          throw new Error(`unexpected heartbeat for disabled session ${id}`);
+        }
+        beats.push(id);
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: guarded,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(beats).toEqual(['sess-live']); // only the enabled task's session
+    expect(loads).toEqual([]); // no revive attempted for any disabled session
+  });
+
   it('heartbeats nothing (and does not throw) when there are no tasks', async () => {
     const ka = startScheduledTaskKeepalive({
       bridge,
@@ -283,29 +323,32 @@ describe('scheduled-task keepalive', () => {
     expect(maxInFlight).toBeLessThanOrEqual(4); // but batched, never all at once
   });
 
-  it('holds a worker slot for a timed-out load so real in-flight never exceeds the cap', async () => {
-    // loadSession isn't abortable: a timed-out load keeps running. The slot must
-    // stay occupied until it actually settles, or the pool starts more loads and
-    // the real number of forked children exceeds the cap.
+  it('completes the sweep even when loads hang past the timeout (never wedges)', async () => {
+    // loadSession isn't abortable. If a worker awaited each hung load until it
+    // truly settled, enough never-settling loads would pin every worker and the
+    // whole boot sweep would never complete — later task sessions would never
+    // rehydrate. The timeout must free the worker to drain the rest of the queue;
+    // a hung load is recorded failed and left running in the background. This is
+    // the regression guard for that pre-fix deadlock: with the old "await the
+    // load after timeout" behavior this test would hang and time out.
     const many = Array.from({ length: 12 }, (_, i) =>
       task({ id: `t${i}`, sessionId: `s${i}` }),
     );
     await updateCronTasks(workspace, () => many);
-    let inFlight = 0;
-    let maxInFlight = 0;
+    let started = 0;
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
-        loadSession: async () => {
-          inFlight++;
-          maxInFlight = Math.max(maxInFlight, inFlight);
-          await new Promise((r) => setTimeout(r, 50)); // real load outlasts the timeout
-          inFlight--;
+        // Never resolves — a genuinely hung, non-abortable load.
+        loadSession: () => {
+          started++;
+          return new Promise<void>(() => {});
         },
       },
       boundWorkspace: workspace,
-      loadTimeoutMs: 20, // each load is recorded failed at 20ms, but runs to 50ms
+      loadTimeoutMs: 20,
     });
-    expect(res.failed).toHaveLength(12); // all timed out
-    expect(maxInFlight).toBeLessThanOrEqual(4); // slot held past timeout → cap kept
+    expect(res.failed).toHaveLength(12); // every session recorded failed...
+    expect(res.loaded).toHaveLength(0);
+    expect(started).toBe(12); // ...and every queued session was still attempted
   });
 });

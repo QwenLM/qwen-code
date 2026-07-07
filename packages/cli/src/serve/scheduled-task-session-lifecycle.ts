@@ -25,6 +25,17 @@ import {
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 
+/** A task is session-bound when it carries a non-empty `sessionId`. Mirrors the
+ * strict check the other scheduled-task modules use (`scheduled-tasks.ts`,
+ * `scheduled-task-keepalive.ts`, the `cronTasksFile` validator) so the
+ * "is this task bound?" test can't drift between them — and narrows the type so
+ * callers can index `targets` with a plain `string`. */
+function isBoundTask(
+  task: DurableCronTask,
+): task is DurableCronTask & { sessionId: string } {
+  return typeof task.sessionId === 'string' && task.sessionId.length > 0;
+}
+
 /**
  * Disables every ENABLED task bound to one of `sessionIds` (archived sessions),
  * marking it `disabledByArchive` so unarchive only re-enables tasks the archive
@@ -41,7 +52,7 @@ export async function disableTasksForSessions(
     let changed = false;
     const next = tasks.map((task) => {
       if (
-        task.sessionId !== undefined &&
+        isBoundTask(task) &&
         targets.has(task.sessionId) &&
         task.enabled !== false
       ) {
@@ -73,7 +84,7 @@ export async function enableTasksForSessions(
     let changed = false;
     const next = tasks.map((task) => {
       if (
-        task.sessionId !== undefined &&
+        isBoundTask(task) &&
         targets.has(task.sessionId) &&
         task.enabled === false &&
         task.disabledByArchive === true
@@ -112,7 +123,7 @@ export async function removeTasksForSessions(
   const targets = new Set(sessionIds);
   await updateCronTasks(projectRoot, (tasks) => {
     const next = tasks.filter(
-      (task) => task.sessionId === undefined || !targets.has(task.sessionId),
+      (task) => !isBoundTask(task) || !targets.has(task.sessionId),
     );
     return next.length === tasks.length ? tasks : next;
   });

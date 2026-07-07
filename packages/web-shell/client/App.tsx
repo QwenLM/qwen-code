@@ -2474,35 +2474,35 @@ export function App({
   // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
   // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
   // permission-blocked run, or a closed tab, would execute in the session but
-  // never get recorded. `onAdmitted` fires at submitPrompt acceptance; if the
-  // send settles WITHOUT it (onSubmitBefore cancel) or throws before admission,
-  // reject so the caller skips recording a run that never reached the session.
+  // never get recorded. `onAdmitted` fires at submitPrompt acceptance.
+  //
+  // Deliberately NO pre-admission timeout here. `sendPrompt` isn't abortable, so
+  // a timer that rejected while the send was still in flight could let a LATE
+  // admission execute the prompt in the session AFTER the caller had already
+  // handled the rejection and skipped recording — an unrecorded run the user
+  // could retry into a duplicate. Staying tied to admission guarantees any
+  // accepted prompt is recorded, and the run controls stay busy (not free to
+  // re-fire) until the send admits or settles. The earlier "session never becomes
+  // active" phase is still bounded by the switch timeout in runTaskManually. If
+  // the send settles WITHOUT admitting (onSubmitBefore cancel) or throws before
+  // admission, reject so the caller skips recording a run that never reached the
+  // session.
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
         let admitted = false;
-        // Bound the admission phase: a send that wedges before admission (daemon
-        // hung, connection stalled — no error, no settle) would otherwise leave
-        // this promise unsettled forever, freezing the run controls. On timeout
-        // reject so it degrades to a visible "run failed".
-        const timer = setTimeout(() => {
-          if (!admitted) reject(new Error('Timed out starting the run'));
-        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
         const admit = () => {
           if (admitted) return;
           admitted = true;
-          clearTimeout(timer);
           resolve();
         };
         sendPrompt(prompt, undefined, { onAdmitted: admit }).then(
           () => {
-            clearTimeout(timer);
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
             }
           },
           (error: unknown) => {
-            clearTimeout(timer);
             if (!admitted) reject(error);
           },
         );

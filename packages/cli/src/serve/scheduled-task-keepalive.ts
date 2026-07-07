@@ -28,9 +28,37 @@
  * gap is caught up when the session loads.
  */
 
-import { readCronTasks, createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  readCronTasks,
+  createDebugLogger,
+  type DurableCronTask,
+} from '@qwen-code/qwen-code-core';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
+
+/** Distinct `sessionId`s of enabled, session-bound tasks, in first-seen order.
+ * A task is skipped when it's disabled (its session may be let go by the reaper),
+ * unbound, or a duplicate of one already collected. The heartbeat pass and the
+ * boot rehydrate share this so the "which sessions to keep resident" filter lives
+ * in exactly one place and can't drift between them. */
+function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const task of tasks) {
+    const sessionId = task.sessionId;
+    if (
+      task.enabled === false || // disabled (e.g. archived) — let it be reaped
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      seen.has(sessionId)
+    ) {
+      continue;
+    }
+    seen.add(sessionId);
+    ids.push(sessionId);
+  }
+  return ids;
+}
 
 /** The slice of the bridge the keepalive needs — narrowed for testability.
  * `recordHeartbeat` keeps a live session resident; `loadSession` revives one
@@ -97,18 +125,7 @@ export function startScheduledTaskKeepalive(
       log.debug('keepalive: readCronTasks failed, skipping this pass', err);
       return;
     }
-    const beaten = new Set<string>();
-    for (const task of tasks) {
-      const sessionId = task.sessionId;
-      if (
-        task.enabled === false || // disabled (e.g. archived) — let it be reaped
-        typeof sessionId !== 'string' ||
-        sessionId.length === 0 ||
-        beaten.has(sessionId)
-      ) {
-        continue;
-      }
-      beaten.add(sessionId);
+    for (const sessionId of collectBoundSessionIds(tasks)) {
       try {
         bridge.recordHeartbeat(sessionId);
         reviveState.delete(sessionId); // resident again — reset any backoff
@@ -247,22 +264,8 @@ export async function rehydrateScheduledTaskSessions(deps: {
     return { loaded: [], failed: [] };
   }
 
-  // Distinct sessions of enabled bound tasks.
-  const seen = new Set<string>();
-  const sessionIds: string[] = [];
-  for (const task of tasks) {
-    const sessionId = task.sessionId;
-    if (
-      task.enabled === false || // disabled (e.g. archived) — don't reload it
-      typeof sessionId !== 'string' ||
-      sessionId.length === 0 ||
-      seen.has(sessionId)
-    ) {
-      continue;
-    }
-    seen.add(sessionId);
-    sessionIds.push(sessionId);
-  }
+  // Distinct sessions of enabled bound tasks — same filter the heartbeat uses.
+  const sessionIds = collectBoundSessionIds(tasks);
 
   const loaded: string[] = [];
   const failed: string[] = [];
@@ -272,25 +275,29 @@ export async function rehydrateScheduledTaskSessions(deps: {
       workspaceCwd: boundWorkspace,
       historyReplay: 'response',
     });
-    let settled = false;
+    // loadSession isn't abortable, so a timed-out load keeps forking/replaying
+    // in the background. Swallow its eventual settlement up front so it can't
+    // raise an unhandled rejection once we've stopped awaiting it below.
+    void load.catch(() => {});
     try {
       await withTimeout(load, timeoutMs, sessionId);
       loaded.push(sessionId);
-      settled = true;
     } catch (err) {
+      // Timed out (or the load rejected). Do NOT await the raw `load` here: a
+      // genuinely hung, non-abortable load would pin this worker forever and, if
+      // enough loads hang, the whole boot sweep never completes (`Promise.all`
+      // never settles) — later task sessions would then never rehydrate. Record
+      // it as failed and free the worker to pull the next queued session; the
+      // background load, if it ever settles, just warms that session late.
       failed.push(sessionId);
       deps.onError?.(sessionId, err);
     }
-    // loadSession isn't abortable, so a timed-out load keeps forking/replaying
-    // in the background. Hold this worker — and thus its concurrency slot —
-    // until that real load actually settles, so the number of in-flight child
-    // spawns never exceeds REHYDRATE_MAX_CONCURRENCY (the timeout only decides
-    // when the RESULT is recorded as failed, not when the slot frees).
-    if (!settled) await load.catch(() => {});
   };
-  // Bounded worker pool: exactly REHYDRATE_MAX_CONCURRENCY workers pull from a
-  // shared queue, each running one real load at a time (held to settlement),
-  // so no more than that many child spawns are ever in flight at once.
+  // Bounded worker pool: REHYDRATE_MAX_CONCURRENCY workers pull from a shared
+  // queue, each awaiting one load at a time — which bounds concurrent child
+  // spawns to the pool size in the common case. A load that exceeds the timeout
+  // is left running in the background (see loadOne) so a hang can't wedge the
+  // sweep, at the cost of a transient over-shoot only while such loads linger.
   const queue = sessionIds.slice();
   const worker = async () => {
     for (

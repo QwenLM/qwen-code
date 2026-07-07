@@ -1565,7 +1565,7 @@ export function nextDurableFireMs(
   const anchor = task.recurring
     ? (task.lastFiredAt ?? task.createdAt)
     : task.createdAt;
-  const key = `${task.id} ${task.cron} ${task.recurring ? 1 : 0} ${anchor}`;
+  const key = `${task.id}\x00${task.cron}\x00${task.recurring ? 1 : 0}\x00${anchor}`;
   const cached = nextDurableFireCache.get(key);
   if (cached !== undefined) return cached;
   const jitter = computeJitter(task.id, task.cron, task.recurring);
