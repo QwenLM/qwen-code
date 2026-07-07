@@ -854,6 +854,36 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('clears pending permission requests when the session dies', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+
+      (bridge as unknown as EventEmitter).emit('sessionDied', {
+        sessionId,
+      });
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
+    it('reports when the bridge cannot answer permission requests', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      emitPermission(sessionId, 'req-1');
+      delete (bridge as unknown as { respondToPermission?: unknown })
+        .respondToPermission;
+
+      await ch.handleInbound(envelope({ text: '/approve req-1' }));
+
+      expect(ch.sent.at(-1)?.text).toBe(
+        'Permission relay is not available for this session.',
+      );
+    });
+
     it('cancels the permission request when the relay message cannot be sent', async () => {
       const ch = createChannel();
       const sessionId = await startSession(ch);
