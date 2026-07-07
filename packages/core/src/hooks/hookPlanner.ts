@@ -247,6 +247,17 @@ export class HookPlanner {
   private matchesToolName(matcher: string, toolName: string): boolean {
     const targets = getToolMatcherTargets(toolName);
 
+    if (
+      matcher.includes('|') &&
+      !matcher.startsWith('^') &&
+      !matcher.startsWith('(')
+    ) {
+      const alternatives = matcher.split('|').map((entry) => entry.trim());
+      if (alternatives.some((entry) => targets.includes(entry))) {
+        return true;
+      }
+    }
+
     if (targets.includes(matcher)) {
       return true;
     }
@@ -257,9 +268,8 @@ export class HookPlanner {
       const regex = new RegExp(matcher);
       return regex.test(toolName);
     } catch (error) {
-      // If it's not a valid regex, treat it as a literal string for an exact match.
       debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
+        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", no alias match and invalid regex: ${error}`,
       );
       return false;
     }

@@ -249,6 +249,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
 | `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
 | `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
 | `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
 | `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
 
@@ -256,17 +257,17 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 
 `matcher` is a regular expression used to filter trigger conditions.
 
-| Event Type          | Events                                                                 | Matcher Support | Matcher Target                                                |
-| :------------------ | :--------------------------------------------------------------------- | :-------------- | :------------------------------------------------------------ |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc. |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                        | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
-| Session Events      | `SessionStart`                                                         | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
-| Session Events      | `SessionEnd`                                                           | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
-| Notification Events | `Notification`                                                         | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
-| Compact Events      | `PreCompact`                                                           | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
-| Todo Events         | `TodoCreated`, `TodoCompleted`                                         | ❌ No           | N/A                                                           |
-| Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                           |
-| Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                           |
+| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                |
+| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :------------------------------------------------------------ |
+| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc. |
+| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
+| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
+| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
+| Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
+| Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
+| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                           |
+| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                           |
 
 **Matcher Syntax:**
 

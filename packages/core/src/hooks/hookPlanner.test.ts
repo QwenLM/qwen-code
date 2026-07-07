@@ -373,6 +373,23 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it('matches pipe-separated display names against runtime tool ids', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: 'WriteFile|Edit',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'write_file',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
     it('matches legacy tool aliases against runtime tool ids', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },
