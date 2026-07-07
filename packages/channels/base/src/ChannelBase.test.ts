@@ -429,6 +429,52 @@ describe('ChannelBase', () => {
       expect(respondToPermissionMock()).not.toHaveBeenCalled();
     });
 
+    it('does not answer permission requests from another thread', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      emitPermission(sessionId, 'req-thread-1');
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-2',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'alice',
+          text: '/approve req-thread-1',
+          threadId: 'thread-1',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-thread-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
     it('routes single-scope permission requests to the active chat', async () => {
       const ch = createChannel({ sessionScope: 'single' });
       await startSession(ch, { senderId: 'alice', chatId: 'alice-dm' });
@@ -507,6 +553,43 @@ describe('ChannelBase', () => {
         }),
       );
 
+      expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+
+    it('matches the current sender before reporting ambiguous permissions', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'user',
+      });
+      const group = {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        threadId: 'thread-1',
+      };
+      const aliceSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'alice',
+      });
+      emitPermission(aliceSessionId, 'req-alice');
+      const bobSessionId = await startSession(ch, {
+        ...group,
+        senderId: 'bob',
+      });
+      emitPermission(bobSessionId, 'req-bob');
+
+      await ch.handleInbound(
+        envelope({
+          ...group,
+          senderId: 'alice',
+          text: '/approve',
+        }),
+      );
+
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved.');
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
       expect(respondToPermissionMock()).toHaveBeenCalledWith('req-alice', {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       });

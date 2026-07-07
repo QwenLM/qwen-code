@@ -1785,9 +1785,6 @@ export abstract class ChannelBase {
         '/approve [request-id] — Approve a pending permission request',
         '/approve-always [request-id] — Always approve a pending permission request',
         '/deny [request-id] — Deny a pending permission request',
-        '/remember-channel <text> — Save memory for this chat',
-        '/channel-memory — Show memory for this chat',
-        '/forget-channel confirm — Clear memory for this chat',
       ];
 
       // Platform-specific commands (registered by adapters, not shared ones)
