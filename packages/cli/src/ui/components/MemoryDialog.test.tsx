@@ -499,6 +499,33 @@ describe('MemoryDialog', () => {
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
+  it('opens the project QWEN.md editor entry when managed memory is unavailable', async () => {
+    const launchEditor = vi.fn();
+    mockedUseLaunchEditor.mockReturnValue(launchEditor);
+    mockedUseConfig.mockReturnValue({
+      getWorkingDir: vi.fn(() => '/tmp/project'),
+      getProjectRoot: vi.fn(() => '/tmp/project'),
+      getBareMode: vi.fn(() => true),
+      isSafeMode: vi.fn(() => false),
+      getManagedAutoMemoryEnabled: vi.fn(() => false),
+      getManagedAutoDreamEnabled: vi.fn(() => false),
+      getAutoSkillEnabled: vi.fn(() => false),
+      isManagedMemoryAvailable: vi.fn(() => false),
+    } as never);
+
+    render(<MemoryDialog onClose={vi.fn()} />);
+
+    const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: '2', sequence: '2' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(launchEditor).toHaveBeenCalledWith('/tmp/project/QWEN.md');
+    expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
   it('reflects the persisted value when the dialog is reopened (remounted)', () => {
     // Emulate LoadedSettings: setValue writes through to the merged view,
     // exactly like the real saveSettings + recomputeMerged path.

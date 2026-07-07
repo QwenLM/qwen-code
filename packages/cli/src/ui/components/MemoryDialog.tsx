@@ -75,14 +75,9 @@ async function openFolderPath(folderPath: string): Promise<void> {
       break;
   }
 
-  const needsShell =
-    process.platform === 'win32' &&
-    (command.endsWith('.cmd') || command.endsWith('.bat'));
-
   const child = spawn(command, [folderPath], {
     detached: true,
     stdio: 'ignore',
-    shell: needsShell,
   });
 
   child.unref();
