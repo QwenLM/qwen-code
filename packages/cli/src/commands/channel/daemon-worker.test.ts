@@ -1420,4 +1420,116 @@ describe('daemonWorkerCommand', () => {
       restoreSend();
     }
   });
+
+  it('acks webhook IPC messages before running the webhook task in the background', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const runWebhookTask = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      runWebhookTask,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const webhookListener = process
+        .listeners('message')
+        .find((listener) => !existingMessageListeners.includes(listener));
+      expect(webhookListener).toBeDefined();
+      (webhookListener as ((message: unknown) => void) | undefined)?.({
+        type: 'webhook_task',
+        id: 'webhook-1',
+        task: webhookTask,
+      });
+
+      expect(send).toHaveBeenCalledWith({
+        type: 'webhook_task_result',
+        id: 'webhook-1',
+        ok: true,
+      });
+      expect(runWebhookTask).toHaveBeenCalledWith(webhookTask);
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('logs background webhook task failures after acking the IPC message', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const runWebhookTask = vi.fn().mockRejectedValue(new Error('run boom'));
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      runWebhookTask,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const webhookListener = process
+        .listeners('message')
+        .find((listener) => !existingMessageListeners.includes(listener));
+      expect(webhookListener).toBeDefined();
+      (webhookListener as ((message: unknown) => void) | undefined)?.({
+        type: 'webhook_task',
+        id: 'webhook-1',
+        task: webhookTask,
+      });
+
+      expect(send).toHaveBeenCalledWith({
+        type: 'webhook_task_result',
+        id: 'webhook-1',
+        ok: true,
+      });
+      await vi.waitFor(() => {
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          '[Channel] webhook task failed: run boom',
+        );
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
 });

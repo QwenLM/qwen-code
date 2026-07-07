@@ -86,7 +86,10 @@ export interface ChannelWorkerChild {
   killed?: boolean;
   stdout?: WorkerLogStream;
   stderr?: WorkerLogStream;
-  send?(message: unknown): boolean;
+  send?(
+    message: unknown,
+    callback?: (err: Error | null) => void,
+  ): boolean;
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
@@ -501,16 +504,25 @@ export function createChannelWorkerSupervisor(
     pendingWebhookTasks.clear();
   };
 
+  const rejectPendingWebhookTask = (id: string, err: Error) => {
+    const pending = pendingWebhookTasks.get(id);
+    if (!pending) return;
+    pendingWebhookTasks.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(err);
+  };
+
   const settleWebhookTask = (message: unknown): boolean => {
     if (!isChannelWebhookTaskResultMessage(message)) return false;
     const pending = pendingWebhookTasks.get(message.id);
     if (!pending) return true;
-    pendingWebhookTasks.delete(message.id);
-    clearTimeout(pending.timer);
     if (message.ok) {
+      pendingWebhookTasks.delete(message.id);
+      clearTimeout(pending.timer);
       pending.resolve({ accepted: true });
     } else {
-      pending.reject(
+      rejectPendingWebhookTask(
+        message.id,
         new Error(message.error || 'Channel webhook task failed.'),
       );
     }
@@ -936,8 +948,13 @@ export function createChannelWorkerSupervisor(
       return snapshotCopy();
     },
     async enqueueWebhookTask(task) {
-      if (!child || snapshot.state !== 'running') {
+      const startedChild = child;
+      if (!startedChild || snapshot.state !== 'running') {
         throw new Error('Channel worker is not running.');
+      }
+      const send = startedChild.send;
+      if (!send) {
+        throw new Error('Channel worker IPC send failed.');
       }
       const message = createChannelWebhookTaskMessage(task);
       return await new Promise<ChannelWebhookAccepted>((resolve, reject) => {
@@ -947,10 +964,17 @@ export function createChannelWorkerSupervisor(
         }, 30_000);
         timer.unref();
         pendingWebhookTasks.set(message.id, { resolve, reject, timer });
-        if (!child?.send?.(message)) {
-          pendingWebhookTasks.delete(message.id);
-          clearTimeout(timer);
-          reject(new Error('Channel worker IPC send failed.'));
+        try {
+          send.call(startedChild, message, (err) => {
+            if (err) {
+              rejectPendingWebhookTask(message.id, err);
+            }
+          });
+        } catch (err) {
+          rejectPendingWebhookTask(
+            message.id,
+            err instanceof Error ? err : new Error(String(err)),
+          );
         }
       });
     },

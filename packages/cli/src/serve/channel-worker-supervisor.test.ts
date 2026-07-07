@@ -25,7 +25,9 @@ class FakeChild extends EventEmitter implements ChannelWorkerChild {
     }
     return true;
   });
-  send = vi.fn((_message: unknown) => true);
+  send = vi.fn(
+    (_message: unknown, _callback?: (err: Error | null) => void) => true,
+  );
 }
 
 const webhookTask: ChannelWebhookTask = {
@@ -2077,5 +2079,179 @@ describe('createChannelWorkerSupervisor', () => {
     });
 
     await expect(accepted).rejects.toThrow('boom');
+  });
+
+  it('keeps webhook tasks pending when IPC send reports backpressure', async () => {
+    const child = new FakeChild(false);
+    child.send.mockReturnValueOnce(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const accepted = supervisor.enqueueWebhookTask(webhookTask);
+    const sent = child.send.mock.calls[0]![0] as { id: string };
+    child.emit('message', {
+      type: 'webhook_task_result',
+      id: sent.id,
+      ok: true,
+    });
+
+    await expect(accepted).resolves.toEqual({ accepted: true });
+  });
+
+  it('rejects webhook tasks when IPC send throws synchronously', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    child.send.mockImplementationOnce(() => {
+      throw new Error('send boom');
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const rejected = expect(
+      supervisor.enqueueWebhookTask(webhookTask),
+    ).rejects.toThrow(
+      'send boom',
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+  });
+
+  it('rejects webhook tasks when the IPC send callback reports an error', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    child.send.mockImplementationOnce((_message, callback) => {
+      callback?.(new Error('callback boom'));
+      return true;
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const rejected = expect(
+      supervisor.enqueueWebhookTask(webhookTask),
+    ).rejects.toThrow(
+      'callback boom',
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+  });
+
+  it('rejects webhook tasks when IPC result times out', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const accepted = supervisor.enqueueWebhookTask(webhookTask);
+    const rejected = expect(accepted).rejects.toThrow(
+      'Channel webhook task IPC timed out.',
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+  });
+
+  it('rejects pending webhook tasks when the worker exits', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const accepted = supervisor.enqueueWebhookTask(webhookTask);
+    child.emit('exit', 1, null);
+
+    await expect(accepted).rejects.toThrow('Channel worker exited.');
+  });
+
+  it('rejects pending webhook tasks when the supervisor stops', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const accepted = supervisor.enqueueWebhookTask(webhookTask);
+    await supervisor.stop();
+
+    await expect(accepted).rejects.toThrow('Channel worker stopped.');
   });
 });
