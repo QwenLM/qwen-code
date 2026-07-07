@@ -510,6 +510,12 @@ describe('MonitorTool', () => {
       );
     });
 
+    it('rejects fractional max_events', () => {
+      expect(validate({ command: 'tail -f log', max_events: 1.5 })).toBe(
+        'max_events must be a positive integer.',
+      );
+    });
+
     it('rejects max_events over limit', () => {
       expect(validate({ command: 'tail -f log', max_events: 20000 })).toBe(
         'max_events cannot exceed 10000.',
@@ -518,6 +524,12 @@ describe('MonitorTool', () => {
 
     it('rejects invalid idle_timeout_ms', () => {
       expect(validate({ command: 'tail -f log', idle_timeout_ms: -100 })).toBe(
+        'idle_timeout_ms must be a positive integer.',
+      );
+    });
+
+    it('rejects fractional idle_timeout_ms', () => {
+      expect(validate({ command: 'tail -f log', idle_timeout_ms: 500.5 })).toBe(
         'idle_timeout_ms must be a positive integer.',
       );
     });

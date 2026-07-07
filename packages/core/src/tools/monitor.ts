@@ -734,6 +734,8 @@ export class MonitorTool extends BaseDeclarativeTool<
     if (hasUnsafeMonitorBackgroundOperator(params.command)) {
       return 'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
     }
+    // AJV enforces type: 'integer' from the schema. This method adds
+    // range checks (min/max) that the schema does not express.
     if (params.max_events !== undefined) {
       if (
         typeof params.max_events !== 'number' ||
