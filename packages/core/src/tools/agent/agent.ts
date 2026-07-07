@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
@@ -261,6 +262,15 @@ async function resolveExternalWorktreeDir(
       error: `Cannot use working_dir: ${gitCheck.error ?? 'git is not available'}.`,
     };
   }
+  // Mirror the isolation:'worktree' preflight. Without it, a non-repo parent
+  // dir yields the confusing "not a registered git worktree" error below
+  // (getRepoTopLevel() → null, validation then fails) instead of naming the
+  // real cause.
+  if (!(await probe.isGitRepository())) {
+    return {
+      error: `Cannot use working_dir: ${parentCwd} is not a git repository.`,
+    };
+  }
   // Anchor at the repo top-level so the common-dir comparison inside
   // getRegisteredWorktreeBranch is against the repository, not a monorepo
   // subdirectory the parent happened to launch from.
@@ -275,6 +285,26 @@ async function resolveExternalWorktreeDir(
         `working_dir "${resolvedPath}" is not a registered git worktree of ` +
         `this repository. Create it first (e.g. \`git worktree add <path> ` +
         `<ref>\`), then pass its path.`,
+    };
+  }
+  // getRegisteredWorktreeBranch also accepts the repository's OWN primary
+  // working tree (its --git-common-dir and --show-toplevel both match), so
+  // `working_dir: "."` or the repo root would pass — and silently pin the
+  // sub-agent to the user's main checkout, defeating the isolation. A LINKED
+  // worktree has a `.git` FILE (pointing into <repo>/.git/worktrees/<name>);
+  // the main working tree has a `.git` DIRECTORY. Require the former.
+  let gitEntryIsFile = false;
+  try {
+    gitEntryIsFile = (await fs.stat(path.join(resolvedPath, '.git'))).isFile();
+  } catch {
+    gitEntryIsFile = false;
+  }
+  if (!gitEntryIsFile) {
+    return {
+      error:
+        `working_dir "${resolvedPath}" is the repository's main working tree, ` +
+        `not a linked worktree — pinning a sub-agent there would not isolate ` +
+        `it. Pass a linked worktree created via \`git worktree add\`.`,
     };
   }
   return {
@@ -985,6 +1015,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         params.working_dir.length === 0
       ) {
         return 'Parameter "working_dir" must be a non-empty string when set.';
+      }
+      // A caller-owned worktree has no lifecycle coupling to a background
+      // agent: nothing stops the caller from removing the worktree while a
+      // detached agent is still running in it (ENOENT on its own cwd). The
+      // isolation:'worktree' path is safe in background because the tool owns
+      // and reaps the worktree; working_dir does not.
+      if (params.run_in_background === true) {
+        return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
       // A worktree pin and a fresh-worktree isolation are contradictory —
       // one reuses a caller-owned directory, the other provisions and
