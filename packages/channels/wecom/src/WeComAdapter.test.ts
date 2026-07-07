@@ -102,6 +102,10 @@ const mocks = vi.hoisted(() => {
           queueMicrotask(() => {
             callback(response);
             queueMicrotask(() => {
+              if (state.mediaResponseErrors) {
+                emit('error', new Error('response failed'));
+                return;
+              }
               emit('data', httpResponse.body);
               if (state.mediaResponseNeverEnds) return;
               emit('end');
@@ -123,6 +127,7 @@ const mocks = vi.hoisted(() => {
     connectResolvers: [] as Array<() => void>,
     connectWaitsForRelease: false,
     kickAfterConnectsRemaining: 0,
+    mediaResponseErrors: false,
     mediaResponseNeverEnds: false,
   };
 
@@ -373,6 +378,7 @@ describe('WeComChannel', () => {
     mocks.state.connectResolvers.length = 0;
     mocks.state.connectWaitsForRelease = false;
     mocks.state.kickAfterConnectsRemaining = 0;
+    mocks.state.mediaResponseErrors = false;
     mocks.state.mediaResponseNeverEnds = false;
     mocks.httpResponse.statusCode = 200;
     mocks.httpResponse.headers = {};
@@ -711,18 +717,22 @@ describe('WeComChannel', () => {
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
     const retry = setTimeout(() => {}, 60_000);
+    const reset = setTimeout(() => {}, 60_000);
     const inspectable = channel as unknown as {
       kickReconnectAttempts: number;
       kickReconnectRetry?: ReturnType<typeof setTimeout>;
+      kickReconnectReset?: ReturnType<typeof setTimeout>;
     };
     inspectable.kickReconnectAttempts = 3;
     inspectable.kickReconnectRetry = retry;
+    inspectable.kickReconnectReset = reset;
 
     lastClient().emit('event.disconnected_event', 'kicked');
 
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
     expect(inspectable.kickReconnectAttempts).toBe(0);
+    expect(inspectable.kickReconnectReset).not.toBe(reset);
 
     channel.disconnect();
   });
@@ -2394,6 +2404,35 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('blocks media hostnames that resolve to reserved IPv6 addresses', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.lookup.mockResolvedValueOnce([{ address: '2001:2::1', family: 6 }]);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-reserved-ipv6-host',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://reserved.example.com/image',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
   it('returns all resolved addresses when Node requests lookup all mode', async () => {
     type LookupCallback = (
       err: Error | null,
@@ -2590,6 +2629,35 @@ describe('WeComChannel', () => {
     expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('media download failed: HTTP 500'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('destroys the media request when the response stream errors', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.state.mediaResponseErrors = true;
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-response-error',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://example.invalid/response-error',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: response failed'),
     );
     stderr.mockRestore();
   });

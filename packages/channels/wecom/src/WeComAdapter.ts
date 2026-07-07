@@ -246,7 +246,11 @@ export class WeComChannel extends ChannelBase {
       this.startActivityWatchdog(connectionGeneration);
     } catch (err) {
       authentication.cancel();
-      this.detachClientHandlers(client, handlers);
+      try {
+        this.detachClientHandlers(client, handlers);
+      } catch {
+        // cleanup must not mask the original connection error
+      }
       if (this.connectingClient === client) this.connectingClient = undefined;
       if (this.authentication === authentication)
         this.authentication = undefined;
@@ -875,6 +879,10 @@ export class WeComChannel extends ChannelBase {
       clearTimeout(this.kickReconnectRetry);
       this.kickReconnectRetry = undefined;
       this.kickReconnectAttempts = 0;
+    }
+    if (this.kickReconnectReset) {
+      clearTimeout(this.kickReconnectReset);
+      this.kickReconnectReset = undefined;
     }
     this.reconnectingAfterKick = true;
     const previousConnecting = this.connecting;
@@ -1720,7 +1728,10 @@ function guardedHttpsDownload(
             ...parseContentDispositionFileName(res.headers),
           });
         });
-        res.on('error', (err: Error) => finish(err));
+        res.on('error', (err: Error) => {
+          req.destroy();
+          finish(err);
+        });
       },
     );
     req.setTimeout(10_000, () => {
@@ -1827,7 +1838,11 @@ function isPublicIpAddress(address: string): boolean {
       hasLowZeroPrivateIpv4 ||
       (first >= 0xfc00 && first <= 0xfdff) ||
       (first >= 0xff00 && first <= 0xffff) ||
+      (first === 0x0100 && groups.slice(1, 4).every((g) => g === 0)) ||
+      (first === 0x2001 && groups[1] === 0x0002) ||
       (first === 0x2001 && groups[1] === 0x0db8) ||
+      (first === 0x2001 && (groups[1] & 0xfff0) === 0x0010) ||
+      (first === 0x2001 && (groups[1] & 0xfff0) === 0x0030) ||
       isIpv6LinkLocalGroup(first)
     );
   }
@@ -1839,14 +1854,19 @@ function isIpv6LinkLocalGroup(firstGroup: number): boolean {
 }
 
 function parseIpv4Parts(host: string): number[] | undefined {
-  const parts = host.split('.').map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
+  const parts = host.split('.');
+  if (parts.length !== 4) {
     return undefined;
   }
-  return parts;
+  const nums = parts.map((part) => {
+    if (!/^(0|[1-9]\d{0,2})$/u.test(part)) return NaN;
+    const n = Number(part);
+    return n >= 0 && n <= 255 ? n : NaN;
+  });
+  if (nums.some((part) => Number.isNaN(part))) {
+    return undefined;
+  }
+  return nums;
 }
 
 function parseMappedIpv4(host: string): number[] | undefined {
