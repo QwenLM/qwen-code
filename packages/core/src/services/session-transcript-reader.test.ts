@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
@@ -197,6 +197,32 @@ describe('SessionTranscriptReader', () => {
       { text: 'hello' },
       { text: ' world' },
     ]);
+  });
+
+  it('does not repeatedly copy pending bytes for one large record', async () => {
+    const largeRecord = record('u1', null, 'x'.repeat(512 * 1024));
+    const filePath = await writeRawTranscript(
+      `${JSON.stringify(largeRecord)}\n`,
+    );
+    const snapshotSize = (await fs.stat(filePath)).size;
+    const originalConcat = Buffer.concat;
+    let copiedBytes = 0;
+    const concatSpy = vi
+      .spyOn(Buffer, 'concat')
+      .mockImplementation((list, totalLength) => {
+        copiedBytes += list.reduce((sum, buffer) => sum + buffer.length, 0);
+        return originalConcat(list, totalLength);
+      });
+
+    try {
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId);
+
+      expect(page.records.map((r) => r.uuid)).toEqual(['u1']);
+      expect(copiedBytes).toBeLessThan(snapshotSize * 2);
+    } finally {
+      concatSpy.mockRestore();
+    }
   });
 
   it('rejects oversized snapshots before indexing', async () => {

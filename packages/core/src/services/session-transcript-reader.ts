@@ -366,7 +366,8 @@ async function forEachLineInSnapshot(
   onLine: (line: Buffer, offset: number, length: number) => void,
 ): Promise<void> {
   if (snapshotSize === 0) return;
-  let pending = Buffer.alloc(0);
+  let pending: Buffer[] = [];
+  let pendingLength = 0;
   let pendingOffset = 0;
   let streamOffset = 0;
   const stream = fs.createReadStream(filePath, {
@@ -375,43 +376,52 @@ async function forEachLineInSnapshot(
     highWaterMark: READ_CHUNK_SIZE,
   });
 
+  const makePendingLine = (): Buffer =>
+    pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingLength);
+
   for await (const chunk of stream) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    let combined: Buffer;
-    let combinedOffset: number;
-    if (pending.length === 0) {
-      combined = buffer;
-      combinedOffset = streamOffset;
-    } else {
-      combined = Buffer.concat([pending, buffer]);
-      combinedOffset = pendingOffset;
-      pending = Buffer.alloc(0);
-    }
-
     let lineStart = 0;
-    for (let i = 0; i < combined.length; i++) {
-      if (combined[i] !== 0x0a) continue;
-      const rawLine = combined.subarray(lineStart, i);
+    while (lineStart < buffer.length) {
+      const lineEnd = buffer.indexOf(0x0a, lineStart);
+      if (lineEnd === -1) break;
+      const lineOffset =
+        pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
+      const currentLine = buffer.subarray(lineStart, lineEnd);
+      const rawLine =
+        pendingLength > 0
+          ? Buffer.concat(
+              [...pending, currentLine],
+              pendingLength + currentLine.length,
+            )
+          : currentLine;
       const line =
         rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      onLine(line, combinedOffset + lineStart, line.length);
-      lineStart = i + 1;
+      onLine(line, lineOffset, line.length);
+      pending = [];
+      pendingLength = 0;
+      lineStart = lineEnd + 1;
     }
 
-    if (lineStart < combined.length) {
-      pending = combined.subarray(lineStart);
-      pendingOffset = combinedOffset + lineStart;
+    if (lineStart < buffer.length) {
+      if (pendingLength === 0) {
+        pendingOffset = streamOffset + lineStart;
+      }
+      const tail = buffer.subarray(lineStart);
+      pending.push(tail);
+      pendingLength += tail.length;
     }
     streamOffset += buffer.length;
   }
 
-  if (pending.length > 0) {
+  if (pendingLength > 0) {
+    const rawLine = makePendingLine();
     const line =
-      pending[pending.length - 1] === 0x0d
-        ? pending.subarray(0, pending.length - 1)
-        : pending;
+      rawLine[rawLine.length - 1] === 0x0d
+        ? rawLine.subarray(0, rawLine.length - 1)
+        : rawLine;
     onLine(line, pendingOffset, line.length);
   }
 }
