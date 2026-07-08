@@ -36,8 +36,6 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
-import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
-import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -98,9 +96,6 @@ import {
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
-import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
-import { parseChannelWebhookConfig } from '../commands/channel/config-utils.js';
-import { loadChannelsConfig } from '../commands/channel/runtime.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -163,6 +158,10 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type ChannelWebhookConfigRuntime = {
+  loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
+  parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
+};
 
 function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
@@ -738,6 +737,20 @@ function loadSettingsRuntimeModules(): Promise<{
   return settingsRuntimePromise;
 }
 
+let channelWebhookConfigRuntimePromise:
+  | Promise<ChannelWebhookConfigRuntime>
+  | undefined;
+function loadChannelWebhookConfigRuntime(): Promise<ChannelWebhookConfigRuntime> {
+  channelWebhookConfigRuntimePromise ??= Promise.all([
+    import('../commands/channel/runtime.js'),
+    import('../commands/channel/config-utils.js'),
+  ]).then(([channelRuntime, configUtils]) => ({
+    loadChannelsConfig: channelRuntime.loadChannelsConfig,
+    parseChannelWebhookConfig: configUtils.parseChannelWebhookConfig,
+  }));
+  return channelWebhookConfigRuntimePromise;
+}
+
 async function loadServeRuntimeModules() {
   const [
     serverModule,
@@ -749,6 +762,9 @@ async function loadServeRuntimeModules() {
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
+    bridgeFileSystemAdapterModule,
+    pathMutexRegistryModule,
+    cliEntryPathModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -759,6 +775,9 @@ async function loadServeRuntimeModules() {
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
+    import('./bridge-file-system-adapter.js'),
+    import('./fs/path-mutex-registry.js'),
+    import('../commands/channel/cli-entry-path.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -779,6 +798,10 @@ async function loadServeRuntimeModules() {
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
+    createBridgeFileSystemAdapter:
+      bridgeFileSystemAdapterModule.createBridgeFileSystemAdapter,
+    PathMutexRegistry: pathMutexRegistryModule.PathMutexRegistry,
+    findCliEntryPath: cliEntryPathModule.findCliEntryPath,
   };
 }
 
@@ -1308,7 +1331,10 @@ function isChannelWebhookRequest(req: Request): boolean {
   );
 }
 
-function createDeferredChannelWebhookAuth(workspace: string): RequestHandler {
+function createDeferredChannelWebhookAuth(
+  workspace: string,
+  runtime: ChannelWebhookConfigRuntime,
+): RequestHandler {
   return (req, res, next) => {
     const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
     const channelName = match?.[1];
@@ -1318,7 +1344,12 @@ function createDeferredChannelWebhookAuth(workspace: string): RequestHandler {
       return;
     }
 
-    const secret = readDeferredWebhookSecret(workspace, channelName, source);
+    const secret = readDeferredWebhookSecret(
+      runtime,
+      workspace,
+      channelName,
+      source,
+    );
     if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
       res.status(401).json({ error: 'Invalid webhook secret' });
       return;
@@ -1329,16 +1360,17 @@ function createDeferredChannelWebhookAuth(workspace: string): RequestHandler {
 }
 
 function readDeferredWebhookSecret(
+  runtime: ChannelWebhookConfigRuntime,
   workspace: string,
   channelName: string,
   source: string,
 ): string | undefined {
-  const rawConfig = loadChannelsConfig(workspace)[channelName];
+  const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
   if (typeof rawConfig !== 'object' || rawConfig === null) {
     return undefined;
   }
   try {
-    return parseChannelWebhookConfig(
+    return runtime.parseChannelWebhookConfig(
       channelName,
       rawConfig as Record<string, unknown>,
     )?.sources[source]?.secret;
@@ -2337,7 +2369,7 @@ export async function runQwenServe(
       secondary: boundWorkspaces.slice(1),
       ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
     });
-    const sharedPathLocks = new PathMutexRegistry();
+    const sharedPathLocks = new runtime.PathMutexRegistry();
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -2496,7 +2528,7 @@ export async function runQwenServe(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider,
-        fileSystem: createBridgeFileSystemAdapter(fsFactory),
+        fileSystem: runtime.createBridgeFileSystemAdapter(fsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             const fresh = settingsRuntime.settings.loadSettings(workspace);
@@ -2857,6 +2889,12 @@ export async function runQwenServe(
       ? () => startRuntimeAfterHealth?.()
       : undefined,
   });
+  const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
+    ? createDeferredChannelWebhookAuth(
+        boundWorkspace,
+        await loadChannelWebhookConfigRuntime(),
+      )
+    : undefined;
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
@@ -2864,8 +2902,7 @@ export async function runQwenServe(
       startRuntime: () => startRuntimeForRequest?.(),
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
-      authenticateDeferredChannelWebhookRequest:
-        createDeferredChannelWebhookAuth(boundWorkspace),
+      authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -2973,7 +3010,7 @@ export async function runQwenServe(
             );
           }
           channelWorker = createSupervisor({
-            cliEntryPath: findCliEntryPath(),
+            cliEntryPath: runtime.findCliEntryPath(),
             daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
             ...(token ? { daemonToken: token } : {}),
             workspace: boundWorkspace,
