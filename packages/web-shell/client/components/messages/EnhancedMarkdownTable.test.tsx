@@ -707,14 +707,44 @@ describe('EnhancedMarkdownTable', () => {
     expect(dialog?.textContent).toContain('Alpha');
   });
 
-  it('copies the current cell value from the dialog', () => {
+  it('copies the current cell value from the dialog', async () => {
     const writeText = mockClipboard();
     const container = renderTable();
 
     doubleClick(dataCell(container, 1, 0));
-    click(textButton(container, 'Copy'));
+    await act(async () => {
+      textButton(container, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
 
     expect(writeText).toHaveBeenCalledWith('Beta');
+    expect(container.textContent).toContain('Copied!');
+  });
+
+  it('copies an empty cell value from the dialog', async () => {
+    const writeText = mockClipboard();
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td />
+        </tr>
+      </tbody>,
+    ]);
+
+    doubleClick(dataCell(container, 0, 0));
+    await act(async () => {
+      textButton(container, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('');
   });
 
   it('closes the cell value dialog with Escape', () => {
@@ -732,6 +762,56 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it('traps focus inside the cell value dialog', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+    const iconCloseButton = button(container, 'Close');
+    const footerCloseButton = textButton(container, 'Close');
+
+    expect(document.activeElement).toBe(iconCloseButton);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'Tab',
+          shiftKey: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(footerCloseButton);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
+      );
+    });
+    expect(document.activeElement).toBe(iconCloseButton);
+  });
+
+  it('keeps table Escape handling from running behind the cell dialog', () => {
+    const container = renderTable();
+    const teamHandle = button(container, 'Move Team');
+
+    click(button(container, 'Sort by Team'));
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+
+    doubleClick(dataCell(container, 0, 0));
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Escape',
+    });
+    act(() => {
+      document.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+  });
+
   it('clears table selection and row details when opening a cell dialog', () => {
     const container = renderTable();
 
@@ -746,6 +826,41 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('1 cell selected');
     expect(container.textContent).not.toContain('Row details');
     expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  it('closes an open filter menu when opening a cell dialog', () => {
+    const container = renderTable();
+
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+
+    doubleClick(dataCell(container, 0, 0));
+
+    expect(container.textContent).not.toContain('Custom filter');
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  it('does not open the cell dialog when double clicking an interactive target', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Link</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>
+            <a href="#details">Open details</a>
+          </td>
+        </tr>
+      </tbody>,
+    ]);
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+
+    doubleClick(link!);
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('quick copies the visible sorted table', () => {

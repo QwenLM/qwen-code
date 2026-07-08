@@ -91,7 +91,6 @@ interface ColumnResizeState {
 
 interface CellDialogState {
   rowKey: string;
-  columnIndex: number;
   value: string;
   content: ReactNode;
 }
@@ -137,11 +136,22 @@ function clampColumnWidth(width: number): number {
 
 const FOCUSABLE_FILTER_MENU_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE_CELL_DIALOG_SELECTOR =
+  'a[href]:not([hidden]), button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"]):not([hidden])';
 
 function getFocusableFilterMenuElements(container: HTMLElement): HTMLElement[] {
   return Array.from(
     container.querySelectorAll<HTMLElement>(FOCUSABLE_FILTER_MENU_SELECTOR),
   ).filter((element) => !element.hasAttribute('hidden'));
+}
+
+function getFocusableCellDialogElements(
+  container: HTMLElement | null,
+): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_CELL_DIALOG_SELECTOR),
+  );
 }
 
 function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
@@ -1183,6 +1193,7 @@ export function EnhancedTable({
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
+  const [copiedCellDialog, setCopiedCellDialog] = useState(false);
   const draggingRef = useRef(false);
   const copiedVisibleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -1190,13 +1201,19 @@ export function EnhancedTable({
   const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const copiedCellDialogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const copiedVisibleGenRef = useRef(0);
   const copiedSelectionGenRef = useRef(0);
+  const copiedCellDialogGenRef = useRef(0);
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
   const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const cellDialogRef = useRef<HTMLDivElement | null>(null);
+  const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
   const focusReturnFrameRef = useRef(0);
   const pendingSelectionRef = useRef<{
     rowIndex: number;
@@ -1245,6 +1262,15 @@ export function EnhancedTable({
       copiedSelectionTimerRef.current = null;
     }
     setCopiedSelection(false);
+  }, []);
+
+  const resetCopiedCellDialog = useCallback(() => {
+    copiedCellDialogGenRef.current += 1;
+    if (copiedCellDialogTimerRef.current) {
+      clearTimeout(copiedCellDialogTimerRef.current);
+      copiedCellDialogTimerRef.current = null;
+    }
+    setCopiedCellDialog(false);
   }, []);
 
   const flushPendingSelection = useCallback(() => {
@@ -1309,11 +1335,13 @@ export function EnhancedTable({
     setCellDialog(null);
     resetCopiedVisible();
     resetCopiedSelection();
+    resetCopiedCellDialog();
     draggingRef.current = false;
     draggingColumnRef.current = null;
     setIsDragging(false);
   }, [
     resetCopiedSelection,
+    resetCopiedCellDialog,
     resetCopiedVisible,
     table.columnCount,
     tableStructureKey,
@@ -1336,6 +1364,10 @@ export function EnhancedTable({
       if (copiedSelectionTimerRef.current) {
         clearTimeout(copiedSelectionTimerRef.current);
         copiedSelectionTimerRef.current = null;
+      }
+      if (copiedCellDialogTimerRef.current) {
+        clearTimeout(copiedCellDialogTimerRef.current);
+        copiedCellDialogTimerRef.current = null;
       }
     };
   }, []);
@@ -1411,7 +1443,7 @@ export function EnhancedTable({
       }
     };
     const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || openFilterMenu) return;
+      if (event.defaultPrevented || openFilterMenu || cellDialog) return;
       if (event.key === 'Escape') setActiveColumn(null);
     };
     document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);
@@ -1423,7 +1455,7 @@ export function EnhancedTable({
       );
       document.removeEventListener('keydown', clearActiveColumnOnEscape);
     };
-  }, [openFilterMenu]);
+  }, [cellDialog, openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1523,12 +1555,52 @@ export function EnhancedTable({
 
   useEffect(() => {
     if (!cellDialog) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setCellDialog(null);
+    const dialog = cellDialogRef.current;
+    const focusableElements = getFocusableCellDialogElements(dialog);
+    (focusableElements[0] ?? dialog)?.focus();
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setCellDialog(null);
+        resetCopiedCellDialog();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const nextFocusableElements = getFocusableCellDialogElements(
+        cellDialogRef.current,
+      );
+      if (nextFocusableElements.length === 0) {
+        event.preventDefault();
+        cellDialogRef.current?.focus();
+        return;
+      }
+      const first = nextFocusableElements[0];
+      const last = nextFocusableElements[nextFocusableElements.length - 1];
+      const activeElement = document.activeElement;
+      const currentIndex =
+        activeElement instanceof HTMLElement
+          ? nextFocusableElements.indexOf(activeElement)
+          : -1;
+      if (event.shiftKey && (activeElement === first || currentIndex === -1)) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
     };
-    document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [cellDialog]);
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleDialogKeyDown);
+      const focusReturn = cellDialogFocusReturnRef.current;
+      cellDialogFocusReturnRef.current = null;
+      if (focusReturn?.isConnected) focusReturn.focus();
+    };
+  }, [cellDialog, resetCopiedCellDialog]);
 
   const setColumnFilter = (
     columnIndex: number,
@@ -1632,19 +1704,21 @@ export function EnhancedTable({
   const toggleRowDetail = (rowKey: string) => {
     setSelection(null);
     setCellDialog(null);
+    resetCopiedCellDialog();
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
   };
 
-  const openCellDialog = (
-    rowKey: string,
-    columnIndex: number,
-    cell: EnhancedTableCell,
-  ) => {
+  const openCellDialog = (rowKey: string, cell: EnhancedTableCell) => {
+    cellDialogFocusReturnRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     setSelection(null);
+    setOpenFilterMenu(null);
     setDetailRowKey(null);
+    resetCopiedCellDialog();
     setCellDialog({
       rowKey,
-      columnIndex,
       value: cell.text,
       content: cell.content,
     });
@@ -1652,12 +1726,26 @@ export function EnhancedTable({
 
   const closeCellDialog = () => {
     setCellDialog(null);
+    resetCopiedCellDialog();
   };
 
   const copyCellDialogValue = () => {
-    if (!cellDialog?.value || !navigator.clipboard) return;
+    if (cellDialog?.value == null || !navigator.clipboard) return;
+    const copyGeneration = copiedCellDialogGenRef.current;
     void navigator.clipboard
       .writeText(cellDialog.value)
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedCellDialogGenRef.current !== copyGeneration) return;
+        if (copiedCellDialogTimerRef.current) {
+          clearTimeout(copiedCellDialogTimerRef.current);
+        }
+        setCopiedCellDialog(true);
+        copiedCellDialogTimerRef.current = setTimeout(
+          () => setCopiedCellDialog(false),
+          2000,
+        );
+      })
       .catch((error: unknown) =>
         console.warn('[web-shell] clipboard write failed:', error),
       );
@@ -2233,9 +2321,12 @@ export function EnhancedTable({
                           onTouchMove={extendTouchSelection}
                           onTouchEnd={stopDragging}
                           onTouchCancel={stopDragging}
-                          onDoubleClick={() =>
-                            openCellDialog(row.key, columnIndex, cell)
-                          }
+                          onDoubleClick={(event) => {
+                            if (isInteractiveSelectionTarget(event.target)) {
+                              return;
+                            }
+                            openCellDialog(row.key, cell);
+                          }}
                         >
                           {cell.content}
                         </td>
@@ -2324,10 +2415,12 @@ export function EnhancedTable({
           onMouseDown={closeCellDialog}
         >
           <div
+            ref={cellDialogRef}
             className={styles.cellDialog}
             role="dialog"
             aria-modal="true"
             aria-labelledby={`${tableId}-cell-dialog-title`}
+            tabIndex={-1}
             onMouseDown={(event) => event.stopPropagation()}
           >
             <button
@@ -2352,7 +2445,9 @@ export function EnhancedTable({
                   type="button"
                   onClick={copyCellDialogValue}
                 >
-                  {t('markdownTable.copyCell')}
+                  {copiedCellDialog
+                    ? t('code.copied')
+                    : t('markdownTable.copyCell')}
                 </button>
                 <button
                   className={`${styles.cellDialogButton} ${
