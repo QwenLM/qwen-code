@@ -440,24 +440,49 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItemsWithSourceCopyOffsets.map(
-            ({ item, sourceCopyIndexOffsets }, i) => (
-              <HistoryItemDisplay
-                key={i}
-                availableTerminalHeight={
-                  uiState.constrainHeight ? availableTerminalHeight : undefined
-                }
-                terminalWidth={terminalWidth}
-                mainAreaWidth={mainAreaWidth}
-                item={{ ...item, id: 0 }}
-                isPending={true}
-                isFocused={!uiState.isEditorDialogOpen}
-                activeShellPtyId={uiState.activePtyId}
-                embeddedShellFocused={uiState.embeddedShellFocused}
-                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-              />
-            ),
-          )}
+          {/*
+            Hard Ink backstop on the live (non-<Static>) pending region. The
+            estimator's source-line slice (MarkdownDisplay's fitPendingSlice) is
+            the primary bound, but it is disabled whenever availableTerminalHeight
+            is undefined — which is exactly what happens when constrainHeight is
+            off (ctrl-s "show more lines"). A tall pending item (e.g. a long
+            vertical-fallback table) then renders past the viewport, Ink cannot
+            update incrementally and clears the terminal, redrawing from the top
+            on every repaint — the "scroll-to-top lock". Capping this region at
+            availableTerminalHeight (which already excludes the footer/controls)
+            keeps its measured height within the viewport so Ink never trips that
+            path. While constrained the estimator keeps content well under this,
+            so the clamp is a no-op there and only engages on residual overflow.
+            ShowMoreLines stays OUTSIDE the clamp; it only renders while
+            constrained (so the clamp is inert) and must not be clipped.
+          */}
+          <Box
+            flexDirection="column"
+            flexShrink={0}
+            maxHeight={availableTerminalHeight || undefined}
+            overflow="hidden"
+          >
+            {pendingHistoryItemsWithSourceCopyOffsets.map(
+              ({ item, sourceCopyIndexOffsets }, i) => (
+                <HistoryItemDisplay
+                  key={i}
+                  availableTerminalHeight={
+                    uiState.constrainHeight
+                      ? availableTerminalHeight
+                      : undefined
+                  }
+                  terminalWidth={terminalWidth}
+                  mainAreaWidth={mainAreaWidth}
+                  item={{ ...item, id: 0 }}
+                  isPending={true}
+                  isFocused={!uiState.isEditorDialogOpen}
+                  activeShellPtyId={uiState.activePtyId}
+                  embeddedShellFocused={uiState.embeddedShellFocused}
+                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                />
+              ),
+            )}
+          </Box>
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>

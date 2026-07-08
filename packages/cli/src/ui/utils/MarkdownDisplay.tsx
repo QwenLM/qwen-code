@@ -283,14 +283,34 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         // yet) keep holding so a multi-column header does not flash in cell by
         // cell before its separator arrives.
         const lineAfterHeader = rest[0];
+        const separatorIsTrailing = rest.length === 1;
+        // The separator's first characters may arrive as a bare `|` or `| ` with
+        // no dash yet — not matched by tableSeparatorRegex, but a valid separator
+        // PREFIX. While it is the trailing line (still being typed) and contains
+        // only separator characters, treat it as a still-forming separator so the
+        // header does not flash raw for the frame between the header's newline and
+        // the separator's first dash.
+        const looksLikeSeparatorPrefix =
+          lineAfterHeader !== undefined &&
+          lineAfterHeader.includes('|') &&
+          /^[\s|:-]*$/.test(lineAfterHeader);
         let couldStillBeTable =
           lineAfterHeader === undefined ||
-          tableSeparatorRegex.test(lineAfterHeader);
-        // A COMPLETE separator (ends with `|`) whose column count already differs
-        // from the header will never become a valid table — the main parser
-        // treats it as plain text — so release it instead of holding the run for
-        // the rest of the stream. A still-forming separator (no closing `|`) can
-        // still gain columns, so keep holding it.
+          tableSeparatorRegex.test(lineAfterHeader) ||
+          (separatorIsTrailing && looksLikeSeparatorPrefix);
+        // A COMPLETE separator whose column count already differs from the header
+        // will never become a valid table — the main parser treats it as plain
+        // text — so release it instead of holding the run for the rest of the
+        // stream. The catch: a separator is typed one group at a time and, BETWEEN
+        // groups, momentarily ends with `|` at an intermediate count
+        // (`| --- | --- |` on the way to seven columns). "Ends with `|`" alone
+        // therefore does NOT mean "complete" while it is still streaming. A
+        // streaming separator only ever GAINS columns, so treat it as a final
+        // mismatch only when it can no longer become valid: it OVERSHOT the
+        // header's column count, or a further line has already committed it (it is
+        // not the trailing line, so it will not grow). While it is the trailing
+        // line and still short of the header, keep holding — releasing there makes
+        // the header flash as raw `| … |` text on every closed-group frame.
         if (
           couldStillBeTable &&
           lineAfterHeader !== undefined &&
@@ -299,7 +319,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           const sepCols = splitMarkdownTableRow(lineAfterHeader).filter(
             (c) => c.length > 0,
           ).length;
-          if (sepCols !== headerCells) couldStillBeTable = false;
+          if (
+            sepCols !== headerCells &&
+            (sepCols > headerCells || !separatorIsTrailing)
+          ) {
+            couldStillBeTable = false;
+          }
         }
         if (!hasMatchingSeparator && couldStillBeTable) {
           lines = lines.slice(0, start);
