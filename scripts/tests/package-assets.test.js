@@ -281,31 +281,40 @@ describe('package asset scripts', () => {
     const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
     writeFile(
       rootDir,
-      'dist/chunks/server.js',
-      `console.log(${JSON.stringify(browserMcpPackageName)});\n`,
+      'dist/web-shell/assets/icon.svg',
+      `<svg>${browserMcpPackageName}</svg>\n`,
     );
     stubConsole();
 
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
     ).toThrow(
-      /Prepared package contains forbidden string "chrome-devtools-mcp" in chunks\/server\.js/,
+      /Prepared package contains forbidden string "chrome-devtools-mcp" in web-shell\/assets\/icon\.svg/,
     );
   });
 
   it('fails packaging when prepared dist exceeds the unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
-    writeFile(rootDir, 'dist/chunks/large.js', 'x'.repeat(32));
     stubConsole();
+
+    preparePackage({
+      rootDir,
+      requireNativeAudioCapture: false,
+      maxPackageUnpackedBytes: 50_000,
+    });
+
+    const oversizedRootDir = createFixtureRoot();
+    createBundleArtifacts(oversizedRootDir);
+    writeFile(oversizedRootDir, 'dist/chunks/large.js', 'x'.repeat(64 * 1024));
 
     expect(() =>
       preparePackage({
-        rootDir,
+        rootDir: oversizedRootDir,
         requireNativeAudioCapture: false,
-        maxPackageUnpackedBytes: 10,
+        maxPackageUnpackedBytes: 50_000,
       }),
-    ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 10 bytes/);
+    ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
   it('omits bundledDependencies when audio-capture artifacts are missing', () => {

@@ -21,6 +21,7 @@ export function isBrowserAutomationMcpAvailable(opts: {
   return (
     opts.cdpTunnelOverWs === true &&
     !opts.token &&
+    process.env['QWEN_SERVE_ACP_HTTP'] !== '0' &&
     resolveCdpMcpCommand() !== undefined
   );
 }
