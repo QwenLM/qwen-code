@@ -6,7 +6,7 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import express from 'express';
-import type { Application, Request, RequestHandler } from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   ChannelWebhookConfig,
   ChannelWebhookSourceConfig,
@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/channel-base';
 import type { ChannelWebhookAccepted } from '../channel-webhook-ipc.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import type { RateLimiterInstance } from '../rate-limit.js';
 
 const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
   '__proto__',
@@ -27,7 +28,7 @@ export interface ChannelWebhookRouteDeps {
   enqueueWebhookTask: (
     task: ChannelWebhookTask,
   ) => Promise<ChannelWebhookAccepted>;
-  rateLimitMiddleware?: RequestHandler;
+  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>;
   daemonLog?: Pick<DaemonLogger, 'info' | 'warn'>;
 }
 
@@ -37,7 +38,7 @@ export function registerChannelWebhookRoutes(
 ): void {
   app.post(
     '/channels/:channelName/webhooks/:source',
-    ...(deps.rateLimitMiddleware ? [deps.rateLimitMiddleware] : []),
+    ...(deps.rateLimiter ? [createWebhookRateLimitMiddleware(deps)] : []),
     (req, res, next) => {
       const channelName = req.params['channelName'];
       const source = req.params['source'];
@@ -161,6 +162,31 @@ export function registerChannelWebhookRoutes(
       res.status(202).json({ accepted: true });
     },
   );
+}
+
+function createWebhookRateLimitMiddleware(
+  deps: Pick<ChannelWebhookRouteDeps, 'rateLimiter'>,
+): RequestHandler {
+  return (req, res, next) => {
+    if (!deps.rateLimiter) {
+      next();
+      return;
+    }
+    const key = `webhook:${req.socket.remoteAddress ?? 'unknown'}`;
+    if (deps.rateLimiter.checkRate(key, 'mutation')) {
+      next();
+      return;
+    }
+    sendWebhookRateLimitExceeded(res);
+  };
+}
+
+function sendWebhookRateLimitExceeded(res: Response): void {
+  res.status(429).json({
+    error: 'Rate limit exceeded',
+    code: 'rate_limit_exceeded',
+    tier: 'mutation',
+  });
 }
 
 function readRequiredBodyString(

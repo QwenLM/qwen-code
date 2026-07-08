@@ -12240,6 +12240,7 @@ describe('createServeApp', () => {
         const secondWebhook = await request(rateLimited)
           .post('/channels/dingtalk-main/webhooks/github-ci')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'rotated-client')
           .set('x-qwen-webhook-secret', 'secret-value')
           .send({
             eventType: 'ci_failed',

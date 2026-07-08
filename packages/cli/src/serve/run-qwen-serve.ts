@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
@@ -99,6 +99,8 @@ import {
 } from '../utils/startupProfiler.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
 import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
+import { parseChannelWebhookConfig } from '../commands/channel/config-utils.js';
+import { loadChannelsConfig } from '../commands/channel/runtime.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -1247,6 +1249,7 @@ function createDelegatingServeApp(
     startRuntime?: () => void;
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
+    authenticateDeferredChannelWebhookRequest?: RequestHandler;
   } = {},
 ): Application {
   const app = express();
@@ -1261,17 +1264,14 @@ function createDelegatingServeApp(
         options.startRuntime &&
         options.runtimeReady
       ) {
-        if (
-          options.authenticateDeferredRuntimeRequest &&
-          !isChannelWebhookRequest(req) &&
-          !runSynchronousRequestGate(
-            options.authenticateDeferredRuntimeRequest,
-            req,
-            res,
-            next,
-          )
-        ) {
-          return;
+        const webhookRequest = isChannelWebhookRequest(req);
+        const authGate = webhookRequest
+          ? options.authenticateDeferredChannelWebhookRequest
+          : options.authenticateDeferredRuntimeRequest;
+        if (authGate) {
+          if (!runSynchronousRequestGate(authGate, req, res, next)) {
+            return;
+          }
         }
         options.startRuntime();
         try {
@@ -1306,6 +1306,62 @@ function isChannelWebhookRequest(req: Request): boolean {
     req.method === 'POST' &&
     /^\/channels\/[^/]+\/webhooks\/[^/]+\/?$/u.test(req.path)
   );
+}
+
+function createDeferredChannelWebhookAuth(workspace: string): RequestHandler {
+  return (req, res, next) => {
+    const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
+    const channelName = match?.[1];
+    const source = match?.[2];
+    if (!channelName || !source) {
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    const secret = readDeferredWebhookSecret(workspace, channelName, source);
+    if (!matchesWebhookSecret(req.get('x-qwen-webhook-secret'), secret)) {
+      res.status(401).json({ error: 'Invalid webhook secret' });
+      return;
+    }
+
+    next();
+  };
+}
+
+function readDeferredWebhookSecret(
+  workspace: string,
+  channelName: string,
+  source: string,
+): string | undefined {
+  const rawConfig = loadChannelsConfig(workspace)[channelName];
+  if (typeof rawConfig !== 'object' || rawConfig === null) {
+    return undefined;
+  }
+  try {
+    return parseChannelWebhookConfig(
+      channelName,
+      rawConfig as Record<string, unknown>,
+    )?.sources[source]?.secret;
+  } catch {
+    return undefined;
+  }
+}
+
+function matchesWebhookSecret(
+  candidate: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (
+    typeof candidate !== 'string' ||
+    typeof expected !== 'string' ||
+    expected.length === 0
+  ) {
+    return false;
+  }
+
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const candidateDigest = createHash('sha256').update(candidate).digest();
+  return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
 function isCorsPreflightRequest(req: Request): boolean {
@@ -2808,6 +2864,8 @@ export async function runQwenServe(
       startRuntime: () => startRuntimeForRequest?.(),
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+      authenticateDeferredChannelWebhookRequest:
+        createDeferredChannelWebhookAuth(boundWorkspace),
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but

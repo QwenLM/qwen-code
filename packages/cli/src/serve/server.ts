@@ -758,7 +758,7 @@ export function createServeApp(
       channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
       safeBody,
       enqueueWebhookTask: deps.enqueueChannelWebhookTask,
-      rateLimitMiddleware: rateLimiter?.middleware,
+      rateLimiter,
       daemonLog,
     });
   }

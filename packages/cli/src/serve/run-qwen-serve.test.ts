@@ -2192,6 +2192,36 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-webhook-start-')),
     );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qws-runtime-webhook-home-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.writeFileSync(
+      path.join(tempHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'dingtalk-main': {
+            type: 'dingtalk',
+            webhooks: {
+              sources: {
+                'github-ci': {
+                  secret: 'webhook-secret',
+                  targets: {
+                    default: {
+                      chatId: 'group-1',
+                      senderId: 'webhook:github-ci',
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+      'utf8',
+    );
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -2250,6 +2280,109 @@ describe('runQwenServe runtime startup failures', () => {
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
       await handle.close();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      settingsRuntime.resetHomeEnvBootstrapForTesting();
+    }
+  });
+
+  it('rejects bad-secret deferred webhook routes before starting runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-webhook-auth-')),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qws-runtime-webhook-home-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.writeFileSync(
+      path.join(tempHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'dingtalk-main': {
+            type: 'dingtalk',
+            webhooks: {
+              sources: {
+                'github-ci': {
+                  secret: 'webhook-secret',
+                  targets: {
+                    default: {
+                      chatId: 'group-1',
+                      senderId: 'webhook:github-ci',
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+      'utf8',
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.post('/channels/:channelName/webhooks/:source', (_req, res) => {
+        res.status(202).json({ accepted: true });
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const res = await fetch(
+        `${handle.url}/channels/dingtalk-main/webhooks/github-ci`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-webhook-secret': 'wrong',
+          },
+          body: JSON.stringify({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          }),
+        },
+      );
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: 'Invalid webhook secret' });
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      settingsRuntime.resetHomeEnvBootstrapForTesting();
     }
   });
 
