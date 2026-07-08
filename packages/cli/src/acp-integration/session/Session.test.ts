@@ -1646,6 +1646,15 @@ describe('Session', () => {
           name: 'disabled-ext',
           displayName: 'Disabled Extension',
           isActive: false,
+          skills: [
+            {
+              name: 'disabled-extension-skill',
+              description: 'Disabled extension skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled/SKILL.md',
+              level: 'extension',
+            },
+          ],
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({
@@ -1672,7 +1681,7 @@ describe('Session', () => {
             body: 'Hidden instructions',
             filePath: '/skills/disabled/SKILL.md',
             level: 'extension',
-            extensionName: 'disabled-ext',
+            extensionName: 'Disabled Extension',
           },
         ]),
       });
@@ -1721,6 +1730,15 @@ describe('Session', () => {
         {
           name: 'disabled-ext',
           isActive: false,
+          skills: [
+            {
+              name: 'disabled-extension-skill',
+              description: 'Disabled extension skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled/SKILL.md',
+              level: 'extension',
+            },
+          ],
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({

@@ -787,6 +787,7 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
+    mutate,
     sendBridgeError,
   });
 
@@ -817,6 +818,7 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
+    mutate,
     sendBridgeError,
   });
 

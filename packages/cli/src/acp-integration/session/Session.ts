@@ -132,6 +132,10 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -711,15 +715,6 @@ function collectMcpServerMentionRefs(
   }
 }
 
-function inactiveExtensionSkillKeys(config: Config): Set<string> {
-  const names = new Set<string>();
-  for (const extension of config.getExtensions()) {
-    if (extension.isActive) continue;
-    names.add(extension.name);
-  }
-  return names;
-}
-
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -745,7 +740,7 @@ export async function buildAvailableCommandsSnapshot(
     settings,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
-  const inactiveExtensionNames = inactiveExtensionSkillKeys(config);
+  const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
@@ -794,11 +789,7 @@ export async function buildAvailableCommandsSnapshot(
       const skills = (await skillManager.listSkills()).filter(
         (skill) =>
           !disabledSkillNames.has(skill.name.toLowerCase()) &&
-          !(
-            skill.level === 'extension' &&
-            skill.extensionName !== undefined &&
-            inactiveExtensionNames.has(skill.extensionName)
-          ),
+          !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {

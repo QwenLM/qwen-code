@@ -170,6 +170,10 @@ import {
 import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
 import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+import {
+  inactiveExtensionSkillRefs,
+  isInactiveExtensionSkill,
+} from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -301,15 +305,6 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
-}
-
-function inactiveExtensionSkillKeys(config: Config): Set<string> {
-  const names = new Set<string>();
-  for (const extension of config.getExtensions()) {
-    if (extension.isActive) continue;
-    names.add(extension.name);
-  }
-  return names;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -4208,24 +4203,26 @@ class QwenAgent implements Agent {
       await config.getExtensionManager().refreshCache();
       await skillManager.refreshCache();
       const skills = await skillManager.listSkills();
-      const inactiveExtensionNames = inactiveExtensionSkillKeys(config);
+      const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
       const skillsByKey = new Map(
         skills.map((skill) => [
           `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
           mapSkillConfigToStatus(skill, disabled, {
-            disabled:
-              skill.level === 'extension' &&
-              skill.extensionName !== undefined &&
-              inactiveExtensionNames.has(skill.extensionName),
+            disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
           }),
         ]),
       );
       for (const extension of config.getExtensions()) {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
-          const extensionName = extension.name;
+          const extensionName = extension.displayName ?? extension.name;
           const key = `extension:${extensionName}:${skill.name}`;
-          if (skillsByKey.has(key)) continue;
+          if (
+            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
+            skillsByKey.has(key)
+          ) {
+            continue;
+          }
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(

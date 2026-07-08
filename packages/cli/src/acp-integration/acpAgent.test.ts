@@ -1869,6 +1869,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         body: 'extension secret body',
         filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
       },
+      {
+        name: 'gsd-display-stale',
+        description: 'Display-name stale extension skill',
+        level: 'extension',
+        extensionName: 'GSD Core',
+        disableModelInvocation: false,
+        body: 'display stale body',
+        filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
+      },
     ]);
     mockConfig = {
       ...mockConfig,
@@ -1926,6 +1935,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               disableModelInvocation: false,
               body: 'extension secret body',
               filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
+            },
+            {
+              name: 'gsd-display-stale',
+              description: 'Display-name stale extension skill',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'display stale body',
+              filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
             },
           ],
         },
@@ -2128,15 +2145,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           extensionName: 'gsd-core',
           modelInvocable: true,
         }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-display-stale',
+          description: 'Display-name stale extension skill',
+          level: 'extension',
+          extensionName: 'GSD Core',
+          modelInvocable: true,
+        }),
       ]),
     });
     expect(
       skills.skills.filter((skill) => skill.name === 'gsd-audit-uat'),
     ).toHaveLength(1);
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-display-stale'),
+    ).toHaveLength(1);
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
     expect(JSON.stringify(skills)).not.toContain('manual secret body');
     expect(JSON.stringify(skills)).not.toContain('disabled secret body');
     expect(JSON.stringify(skills)).not.toContain('extension secret body');
+    expect(JSON.stringify(skills)).not.toContain('display stale body');
     expect(JSON.stringify(skills)).not.toContain('/secret');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 

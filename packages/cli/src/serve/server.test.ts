@@ -2892,15 +2892,13 @@ describe('createServeApp', () => {
 
     it('rejects workspace ACP preheat timeouts above the route cap', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
 
       const res = await request(app)
         .post('/workspace/acp/preheat?timeoutMs=60001')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
 
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({
@@ -2911,15 +2909,13 @@ describe('createServeApp', () => {
 
     it('returns workspace ACP preheat status without a timeout override', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
 
       const res = await request(app)
         .post('/workspace/acp/preheat')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -2931,15 +2927,13 @@ describe('createServeApp', () => {
 
     it('returns workspace ACP preheat status with a valid timeout override', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      const opts = { ...baseOpts, workspace: WS_BOUND, token: 'secret' };
+      const app = createServeApp(opts, undefined, { bridge });
 
       const res = await request(app)
         .post('/workspace/acp/preheat?timeoutMs=5000')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -2947,6 +2941,28 @@ describe('createServeApp', () => {
         channelLive: false,
       });
       expect(typeof res.body.durationMs).toBe('number');
+    });
+
+    it('requires strict mutation auth before preheating the ACP child', async () => {
+      const preheatAcpChild = vi.fn();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: fakeBridge(),
+          workspace: {
+            preheatAcpChild,
+          } as unknown as DaemonWorkspaceService,
+        },
+      );
+
+      const res = await request(app)
+        .post('/workspace/acp/preheat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(preheatAcpChild).not.toHaveBeenCalled();
     });
 
     it('returns workspace ACP channel status', async () => {

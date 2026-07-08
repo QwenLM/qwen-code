@@ -1334,6 +1334,23 @@ describe('createDaemonWorkspaceService', () => {
         reason: 'timeout',
       });
     });
+
+    it('returns error when preheat fails before the deadline', async () => {
+      const preheatAcpChild = vi
+        .fn()
+        .mockRejectedValue(new Error('preheat failed'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false, preheatAcpChild }),
+      );
+
+      const result = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+
+      expect(result).toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+      });
+    });
   });
 
   describe('restartMcpServer', () => {
