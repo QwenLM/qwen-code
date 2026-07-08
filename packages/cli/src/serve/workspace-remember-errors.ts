@@ -26,6 +26,8 @@ const REMEMBER_ERROR_SECRET_ASSIGNMENT_WITH_SEPARATORS_RE =
   /((?:api[_-]?key|token|secret|password|pwd)[_-]?[=:]\s*)((?:\S+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*\S+)/giu;
 const REMEMBER_ERROR_ENV_SECRET_ASSIGNMENT_WITH_SEPARATORS_RE =
   /([A-Z][A-Z0-9]{0,50}(?:_[A-Z0-9]{1,50}){0,10}_(?:KEY|TOKEN|SECRET|PASSWORD)\s*[=:]\s*)((?:\S+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*\S+)/gu;
+const REMEMBER_ERROR_URL_CREDENTIALS_WITH_SEPARATORS_RE =
+  /(\b[a-z][a-z0-9+.-]{0,31}:\/\/)([^/@\s]*(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+[^/@\s]*)@/giu;
 const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
 /* eslint-enable no-control-regex */
 const DETAIL_SUPPRESSED_REMEMBER_ERROR_CODES = new Set([
@@ -51,6 +53,20 @@ export function createWorkspaceMemoryExtractionErrorLogger(
       extractionError: err instanceof Error ? err.message : String(err),
     });
   };
+}
+
+function reportRememberErrorExtractionFailure(
+  onExtractionError:
+    | ((target: RememberErrorExtractionTarget, err: unknown) => void)
+    | undefined,
+  target: RememberErrorExtractionTarget,
+  err: unknown,
+): void {
+  try {
+    onExtractionError?.(target, err);
+  } catch {
+    // Preserve fallback behavior if extraction logging fails.
+  }
 }
 
 function errorCodeFromRecord(
@@ -108,7 +124,11 @@ export function workspaceMemoryFailureCode(
   try {
     return extractRememberErrorCode(err, fallback);
   } catch (extractionErr) {
-    onExtractionError?.('code', extractionErr);
+    reportRememberErrorExtractionFailure(
+      onExtractionError,
+      'code',
+      extractionErr,
+    );
     return fallback;
   }
 }
@@ -175,6 +195,11 @@ function replaceStackControlChars(stack: string): string {
 
 function collapseCredentialSeparators(text: string): string {
   return text
+    .replace(
+      REMEMBER_ERROR_URL_CREDENTIALS_WITH_SEPARATORS_RE,
+      (_match, scheme: string, userinfo: string) =>
+        `${scheme}${userinfo.replace(REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE, '')}@`,
+    )
     .replace(
       REMEMBER_ERROR_AUTH_TOKEN_WITH_SEPARATORS_RE,
       (_match, scheme: string, token: string) =>
@@ -286,13 +311,21 @@ export function workspaceMemoryFailureDiagnostics(
   try {
     details = extractRememberErrorDetails(err);
   } catch (extractionErr) {
-    onExtractionError?.('details', extractionErr);
+    reportRememberErrorExtractionFailure(
+      onExtractionError,
+      'details',
+      extractionErr,
+    );
     details = undefined;
   }
   try {
     stack = extractRememberErrorStack(err);
   } catch (extractionErr) {
-    onExtractionError?.('stack', extractionErr);
+    reportRememberErrorExtractionFailure(
+      onExtractionError,
+      'stack',
+      extractionErr,
+    );
     stack = undefined;
   }
   return {

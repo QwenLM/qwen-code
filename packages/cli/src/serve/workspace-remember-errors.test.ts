@@ -79,6 +79,23 @@ describe('extractRememberErrorCode', () => {
       { target: 'code', message: 'code getter failed' },
     ]);
   });
+
+  it('keeps fallback behavior when code extraction logging throws', () => {
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+
+    expect(
+      workspaceMemoryFailureCode(err, 'dream_failed', () => {
+        throw new Error('logger failed');
+      }),
+    ).toBe('dream_failed');
+  });
 });
 
 describe('extractRememberErrorDetails', () => {
@@ -296,6 +313,21 @@ describe('extractRememberErrorDetails', () => {
     expect(details).not.toContain('BBBBBBBB');
   });
 
+  it('redacts URL credentials split by credential separators', () => {
+    for (const separator of ['\x01', '\u00a0', '\u200b']) {
+      const details = extractRememberErrorDetails(
+        new Error(
+          `postgresql://admin:S3cret${separator}P4ssw0rd@db.internal:5432/mydb`,
+        ),
+      );
+
+      expect(details).toBe('postgresql://<redacted>@db.internal:5432/mydb');
+      expect(details).not.toContain('admin');
+      expect(details).not.toContain('S3cret');
+      expect(details).not.toContain('P4ssw0rd');
+    }
+  });
+
   it('redacts bare bearer tokens separated by invisible characters', () => {
     const details = extractRememberErrorDetails(
       new Error('Bearer\u200BeyJhbGciOiABCDEFGHIJKLMN'),
@@ -475,6 +507,23 @@ describe('workspaceMemoryFailureDiagnostics', () => {
     ]);
   });
 
+  it('keeps fallback diagnostics when detail extraction logging throws', () => {
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('detail getter failed');
+        },
+      },
+    );
+
+    const diagnostics = workspaceMemoryFailureDiagnostics(err, () => {
+      throw new Error('logger failed');
+    });
+
+    expect(diagnostics).toEqual({ debugDetails: '<details unavailable>' });
+  });
+
   it('falls back when stack extraction throws', () => {
     const extractionErrors: Array<{ target: string; message: string }> = [];
     const err = new Proxy(new Error('boom'), {
@@ -502,6 +551,26 @@ describe('workspaceMemoryFailureDiagnostics', () => {
     expect(extractionErrors).toEqual([
       { target: 'stack', message: 'stack getter failed' },
     ]);
+  });
+
+  it('keeps fallback diagnostics when stack extraction logging throws', () => {
+    const err = new Proxy(new Error('boom'), {
+      get(target, property, receiver) {
+        if (property === 'stack') {
+          throw new Error('stack getter failed');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const diagnostics = workspaceMemoryFailureDiagnostics(err, () => {
+      throw new Error('logger failed');
+    });
+
+    expect(diagnostics).toEqual({
+      details: 'boom',
+      debugDetails: 'boom',
+    });
   });
 });
 
