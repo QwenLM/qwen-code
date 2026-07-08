@@ -332,6 +332,118 @@ describe('cronTextHandler', () => {
     const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
     expect(cronBuffer.has('sess-stream')).toBe(false);
   });
+
+  it('RATE_LIMITED triggers re-schedule, retry succeeds', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
+
+    // First call fails with RATE_LIMITED
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    // Retry succeeds
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-rate', 'rate limited text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown; pendingRetry?: string }
+    >;
+    expect(cronBuffer.has('sess-rate')).toBe(true);
+
+    // Advance past the initial 2s flush to trigger send
+    await vi.advanceTimersByTimeAsync(2000);
+    // Buffer should still exist after transient failure (retry scheduled)
+    expect(cronBuffer.has('sess-rate')).toBe(true);
+
+    // Advance past the 5s retry delay
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // Retry should have succeeded and cleaned up
+    expect(cronBuffer.has('sess-rate')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('transient failure, retry target is null → buffer cleaned up', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    const router = (ch as unknown as Record<string, unknown>)['router'] as {
+      getTarget: ReturnType<typeof vi.fn>;
+    };
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
+
+    // First call fails with FALLBACK_FAILED
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('FALLBACK_FAILED', 'fallback failed'),
+    );
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-null-target', 'text with no target');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Reset router.getTarget to return null for retry
+    router.getTarget.mockReturnValueOnce(null);
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-null-target')).toBe(false);
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      calls.some((c) =>
+        c.includes('Cron flush dropped after retry: no target'),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('retry send also fails → error logged, buffer cleaned up', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
+
+    // First call fails with RATE_LIMITED
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RATE_LIMITED', 'rate limited'),
+    );
+    // Retry also fails
+    mockSendQQMessage.mockRejectedValueOnce(new Error('network error'));
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-retry-fail', 'text that will fail twice');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-retry-fail')).toBe(false);
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('Cron flush retry failed'))).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------

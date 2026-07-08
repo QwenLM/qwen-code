@@ -309,6 +309,7 @@ export class QQChannel extends ChannelBase {
                     // Transient (RATE_LIMITED, FALLBACK_FAILED, etc.) — re-schedule flush
                     entry!.pendingRetry = toFlush;
                     entry!.timer = setTimeout(() => {
+                      entry!.pendingRetry = '';
                       const retryTarget = this.router.getTarget(sessionId);
                       if (!retryTarget) {
                         process.stderr.write(
@@ -721,8 +722,9 @@ export class QQChannel extends ChannelBase {
       this.chatTypeMap.get(chatId) || this.qqConfig.chatTypes?.[chatId];
     if (routeType !== 'group' && routeType !== 'c2c') {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: no chat type for ${sanitizeLogText(chatId, 64)}, defaulting to C2C\n`,
+        `[QQ:${this.name}] resolveRoute: no chat type for ${sanitizeLogText(chatId, 64)}, dropping message\n`,
       );
+      return null;
     }
     const path =
       routeType === 'group'
@@ -843,13 +845,22 @@ export class QQChannel extends ChannelBase {
         clearTimeout(state.timer);
         state.timer = null;
       }
-      // Flush immediately when buffer exceeds max to prevent unbounded growth
+      // Size-cap flush: check flushingSessions to prevent concurrent sends.
       if (
         state.buffer.length >=
         (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
       ) {
         const buf = state.buffer;
         state.buffer = '';
+        if (this.flushingSessions.has(sessionId)) {
+          // Send in-flight — re-buffer and let the in-flight send's .then() pick it up
+          state.buffer = buf + (state.buffer || '');
+          state.timer = setTimeout(() => {
+            this.idleFlush(sessionId, this._reconnectId);
+          }, QQChannel.IDLE_FLUSH_MS);
+          state.timer.unref?.();
+          return;
+        }
         this.flushAndTrack(sessionId, buf, state, 'idleFlush');
         return;
       }
@@ -1705,7 +1716,11 @@ export class QQChannel extends ChannelBase {
           this.startHeartbeat();
           if (this.coldStart) {
             this.restoreGlobalSessions();
-            this.restoreQQState();
+            if (!this.restoreQQState()) {
+              process.stderr.write(
+                `[QQ:${this.name}] WARNING: QQ state restore failed — routing maps are empty, group messages may be misrouted\n`,
+              );
+            }
             this.router
               .restoreSessions()
               .then(() => {
@@ -1723,12 +1738,16 @@ export class QQChannel extends ChannelBase {
                   `[QQ:${this.name}] Ready (${count} sessions)\n`,
                 );
                 this._ready = true;
+                this.reconnectAttempts = 0;
+                this.isReconnecting = false;
                 this.coldStart = false;
                 this.attachCronHandler();
                 onReady();
               })
               .catch(() => {
                 this._ready = true;
+                this.reconnectAttempts = 0;
+                this.isReconnecting = false;
                 this.coldStart = false;
                 this.attachCronHandler();
                 onReady();
@@ -1738,6 +1757,8 @@ export class QQChannel extends ChannelBase {
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
             this._ready = true;
+            this.reconnectAttempts = 0;
+            this.isReconnecting = false;
             this.attachCronHandler();
             onReady();
           }
@@ -1895,6 +1916,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
+    let gwCalled = false;
     const maxGwRetries = 5;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
       if (this.disposed || this._reconnectId !== myReconnectId) return;
@@ -1910,7 +1932,9 @@ export class QQChannel extends ChannelBase {
           if (this.disposed) return;
           continue;
         }
+        gwCalled = true;
         await this.connectGateway();
+        this.startReplyMsgIdCleanup();
         return;
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1924,7 +1948,7 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] RC: exhausted ${maxGwRetries} reconnect retries, will retry in 60s\n`,
     );
-    this.reconnectAttempts++;
+    if (gwCalled) this.reconnectAttempts++;
     this.tryResume = false;
     this.isReconnecting = false;
     this.reconnectTimer = setTimeout(() => this.reconnectWithRetry(), 60000);
@@ -2091,7 +2115,7 @@ export class QQChannel extends ChannelBase {
       : '';
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${suffixFromBotOpenId}`;
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2256,6 +2280,13 @@ export class QQChannel extends ChannelBase {
     }
 
     const chatId = event.group_openid;
+    if (!chatId) return;
+    if (!isValidChatId(chatId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group all-message dropped: invalid group_openid\n`,
+      );
+      return;
+    }
     const isNewGroup = !this.chatTypeMap.has(chatId);
     this.chatTypeMap.set(chatId, 'group');
     if (isNewGroup) this.saveQQState();
@@ -2290,8 +2321,14 @@ export class QQChannel extends ChannelBase {
           this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
             .filter((kw) => kw.length > 0)
             .map((kw) => {
-              const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              return new RegExp(`(?:^|[^\\w])${escaped}(?:[^\\w]|$)`, 'i');
+              const escaped = kw
+                .normalize('NFC')
+                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const firstIsAscii = /^[A-Za-z0-9_]/.test(kw);
+              const lastIsAscii = /[A-Za-z0-9_]$/.test(kw);
+              const lb = firstIsAscii ? '(?:^|[^\\w])' : '';
+              const la = lastIsAscii ? '(?:[^\\w]|$)' : '';
+              return new RegExp(`${lb}${escaped}${la}`, 'i');
             });
         }
         if (this._keywordTriggerCache.length === 0) {
@@ -2300,11 +2337,7 @@ export class QQChannel extends ChannelBase {
           );
           return;
         }
-        const keywordText = (event.content || '')
-          .replace(/<@[^>]{1,64}>/g, '')
-          .trim()
-          .toLowerCase()
-          .normalize('NFC');
+        const keywordText = result.cleanText.toLowerCase().normalize('NFC');
         const matched = this._keywordTriggerCache.some((re) =>
           re.test(keywordText),
         );
@@ -2375,6 +2408,7 @@ export class QQChannel extends ChannelBase {
   private handleGroupAddRobot(event: GroupAddRobotEvent): void {
     const groupId = event.group_openid;
     if (!groupId) return;
+    if (!isValidChatId(groupId)) return;
     this.chatTypeMap.set(groupId, 'group');
     this.saveQQState();
     process.stderr.write(
@@ -2405,6 +2439,7 @@ export class QQChannel extends ChannelBase {
         this.pendingStreamDelete.delete(sid);
         this.flushedSessions.delete(sid);
         this.streamState.delete(sid);
+        this.onSessionDied(sid);
         cleanedStreams++;
       }
     }
@@ -2431,6 +2466,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    if (!isValidChatId(event.group_openid)) return;
     this.groupActiveMsgEnabled.set(event.group_openid, false);
     this.saveQQState();
     process.stderr.write(
@@ -2445,6 +2481,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    if (!isValidChatId(event.group_openid)) return;
     this.groupActiveMsgEnabled.set(event.group_openid, true);
     this.saveQQState();
     process.stderr.write(

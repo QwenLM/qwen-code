@@ -53,6 +53,9 @@ vi.mock('@qwen-code/channel-base', () => ({
       mockHandleInbound(env);
       return Promise.resolve();
     }
+    protected onSessionDied(_sessionId: string): void {
+      // no-op in mock
+    }
   },
   SessionRouter: class {
     restoreSessions(): Promise<void> {
@@ -140,8 +143,8 @@ function makeGroupEvent(
   return {
     id: 'msg-group-001',
     author: {
-      member_openid: 'member-openid-1',
-      user_openid: 'user-openid-1',
+      member_openid: 'ABCDEF012345',
+      user_openid: 'ABCDEF012345',
       username: 'Bob',
     },
     content: '<@OPENID_BOT> 你好',
@@ -156,7 +159,7 @@ function makeGroupAllEvent(
   return {
     id: 'msg-groupall-001',
     author: {
-      member_openid: 'member-openid-3',
+      member_openid: 'FEDCBA987654',
       username: 'Charlie',
     },
     content: '大家早上好',
@@ -311,6 +314,16 @@ describe('handleC2C', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
+
+  it('drops bot C2C messages', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleC2C'](
+      makeC2CEvent({ author: { bot: true, user_openid: 'bot-1' } }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -371,7 +384,7 @@ describe('handleGroup', () => {
     expect(env['chatId']).toBe('group-openid-1');
     // allowMention defaults to true
     expect(env['text']).toBe(
-      '[atMention=true] [Bob(member-o…)]: <@OPENID_BOT> 你好',
+      '[atMention=true] [Bob(ABCDEF01…)]: <@OPENID_BOT> 你好',
     );
   });
 
@@ -393,7 +406,7 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     // allowMention=false; senderOpenId still displayed
-    expect(env['text']).toBe('[atMention=true] [Bob(member-o…)]: 帮我翻译这段');
+    expect(env['text']).toBe('[atMention=true] [Bob(ABCDEF01…)]: 帮我翻译这段');
   });
 
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
@@ -669,6 +682,33 @@ describe('handleGroupAll', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
+  it('groupActiveMsgEnabled=false 但 @-bot 消息允许通过（被动回复）', async () => {
+    const ch = makeChannel({ groupAllPolicy: 'all' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
+      'groupActiveMsgEnabled'
+    ] as Map<string, boolean>;
+    groupActiveMsgEnabled.set('group-openid-1', false);
+
+    // @-bot mention passes through even when active messages disabled
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '<@OPENID_BOT> 你好',
+        mentions: [
+          {
+            member_openid: 'ABCDEF012345',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['isMentioned']).toBe(true);
+  });
+
   it('重复消息不触发', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
@@ -689,7 +729,7 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     // isAtBot=false → no botOpenId, no suffix, but senderOpenId displayed
     expect(env['text']).toBe(
-      '[atMention=false] [Charlie(member-o…)]: hello world',
+      '[atMention=false] [Charlie(FEDCBA98…)]: hello world',
     );
   });
 });
