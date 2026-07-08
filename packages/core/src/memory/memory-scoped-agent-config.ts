@@ -28,6 +28,7 @@ type MemoryScopedPermissionManager = Pick<
 
 export interface MemoryScopedAgentConfigOptions {
   allowShell?: boolean;
+  bypassBaseAskForScopedPaths?: boolean;
   includeUserMemory?: boolean;
   restrictReadsToMemoryPaths?: boolean;
 }
@@ -50,7 +51,15 @@ function isScopedTool(
 function mergePermissionDecision(
   scopedDecision: PermissionDecision,
   baseDecision: PermissionDecision,
+  opts: Required<MemoryScopedAgentConfigOptions>,
 ): PermissionDecision {
+  if (
+    opts.bypassBaseAskForScopedPaths &&
+    scopedDecision === 'allow' &&
+    baseDecision === 'ask'
+  ) {
+    return 'allow';
+  }
   const priority: Record<PermissionDecision, number> = {
     deny: 4,
     ask: 3,
@@ -200,6 +209,7 @@ export function createMemoryScopedAgentConfig(
 ): Config {
   const opts: Required<MemoryScopedAgentConfigOptions> = {
     allowShell: options.allowShell ?? false,
+    bypassBaseAskForScopedPaths: options.bypassBaseAskForScopedPaths ?? false,
     includeUserMemory: options.includeUserMemory ?? true,
     restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
   };
@@ -232,7 +242,7 @@ export function createMemoryScopedAgentConfig(
       const baseDecision = basePm.hasRelevantRules(ctx)
         ? await basePm.evaluate(ctx)
         : 'default';
-      return mergePermissionDecision(scopedDecision, baseDecision);
+      return mergePermissionDecision(scopedDecision, baseDecision, opts);
     },
     async isToolEnabled(toolName: string): Promise<boolean> {
       if (toolName === ToolNames.SHELL) {

@@ -40,6 +40,7 @@ const config: ChannelConfig = {
   sessionScope: 'user',
   cwd: process.cwd(),
   groupPolicy: 'disabled',
+  dmPolicy: 'open',
   groups: {},
 };
 

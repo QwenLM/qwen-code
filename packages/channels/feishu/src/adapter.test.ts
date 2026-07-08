@@ -30,6 +30,7 @@ function createConfig(overrides?: Partial<ChannelConfig>): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'open',
+    dmPolicy: 'open',
     groups: { '*': { requireMention: true } },
     ...overrides,
   };

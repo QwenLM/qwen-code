@@ -12,6 +12,7 @@ import { getAdvertisedServeFeatures } from '../capabilities.js';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
+const DEFAULT_MAX_SESSIONS = 20;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 
 export const SERVE_LANGUAGE_CODES = [
@@ -27,12 +28,21 @@ export function advertisedMaxPendingPromptsPerSession(
   return value;
 }
 
+export function advertisedMaxSessions(
+  value: number | undefined,
+): number | null {
+  if (value === undefined) return DEFAULT_MAX_SESSIONS;
+  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
+  return value;
+}
+
 interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
   reloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
+  multiWorkspaceSessionsEnabled: boolean;
 }
 
 export interface ServeFeaturesRuntime {
@@ -50,6 +60,7 @@ export function createServeFeatures(
     persistSettingAvailable,
     reloadAvailable,
     sessionShellCommandEnabled,
+    multiWorkspaceSessionsEnabled,
   } = deps;
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
@@ -80,6 +91,7 @@ export function createServeFeatures(
         sessionShellCommandEnabled,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
+        multiWorkspaceSessionsEnabled,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),

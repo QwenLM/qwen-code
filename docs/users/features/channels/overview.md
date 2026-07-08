@@ -37,6 +37,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
       "cwd": "/path/to/working/directory",
       "instructions": "Optional system instructions for the agent.",
       "groupPolicy": "disabled",
+      "dmPolicy": "open",
       "groups": {
         "*": { "requireMention": true }
       }
@@ -62,6 +63,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
 | `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
+| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
 | `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
 | `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
 | `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
@@ -213,9 +215,10 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 ```
 1. groupPolicy — is this group allowed?           (no → ignore)
-2. requireMention — was the bot mentioned/replied to? (no → ignore)
-3. senderPolicy — is this sender approved?         (no → pairing flow)
-4. Route to session
+2. dmPolicy  — is this DM allowed?               (disabled → ignore)
+3. requireMention — was the bot mentioned/replied to? (no → ignore)
+4. senderPolicy — is this sender approved?         (no → pairing flow)
+5. Route to session
 ```
 
 ### Telegram Setup for Groups

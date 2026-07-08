@@ -2145,4 +2145,34 @@ export default {
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 個擴充',
+  '{{count}} extensions': '{{count}} 個擴充',
+  '{{count}} command': '{{count}} 個指令',
+  '{{count}} commands': '{{count}} 個指令',
+  '{{count}} skill': '{{count}} 個技能',
+  '{{count}} skills': '{{count}} 個技能',
+  '{{count}} agent': '{{count}} 個代理',
+  '{{count}} agents': '{{count}} 個代理',
+  '{{count}} hook': '{{count}} 個鉤子',
+  '{{count}} hooks': '{{count}} 個鉤子',
+  '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension MCP servers': '{{count}} 個擴充 MCP 伺服器',
+  '{{count}} extension LSP server': '{{count}} 個擴充 LSP 伺服器',
+  '{{count}} extension LSP servers': '{{count}} 個擴充 LSP 伺服器',
+  'Reload extension changes from disk': '從磁碟重新載入擴充變更',
+  'Reloaded extensions: {{summary}}': '已重新載入擴充：{{summary}}',
+  'Reload failed: {{message}}': '重新載入失敗：{{message}}',
+  'Reload failed.': '重新載入失敗。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁碟上的擴充已變更。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗：{{message}}。執行 /reload-plugins 來套用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '擴充內容重新整理失敗。執行 /reload-plugins 來套用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '擴充重新載入未完成。執行 /reload-plugins 重試。',
 };

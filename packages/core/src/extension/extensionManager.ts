@@ -216,6 +216,14 @@ export interface ExtensionManagerOptions {
   ) => Promise<string>;
 }
 
+export interface ExtensionMutationEvent {
+  id: number;
+  phase: 'start' | 'end';
+  operation: string;
+}
+
+export type ExtensionMutationListener = (event: ExtensionMutationEvent) => void;
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -302,6 +310,8 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
+  private readonly mutationListeners = new Set<ExtensionMutationListener>();
+  private nextMutationId = 0;
 
   // Enablement configuration (directly implemented)
   private readonly configDir: string;
@@ -372,6 +382,34 @@ export class ExtensionManager {
     ) => Promise<string>,
   ): void {
     this.requestChoicePlugin = requestChoicePlugin;
+  }
+
+  addMutationListener(listener: ExtensionMutationListener): () => void {
+    this.mutationListeners.add(listener);
+    return () => {
+      this.mutationListeners.delete(listener);
+    };
+  }
+
+  private beginMutation(operation: string): () => void {
+    const id = ++this.nextMutationId;
+    this.emitMutation({ id, phase: 'start', operation });
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.emitMutation({ id, phase: 'end', operation });
+    };
+  }
+
+  private emitMutation(event: ExtensionMutationEvent): void {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        debugLogger.warn('Extension mutation listener failed:', error);
+      }
+    }
   }
 
   // ==========================================================================
@@ -450,13 +488,19 @@ export class ExtensionManager {
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
-    const scopePath =
-      scope === SettingScope.Workspace ? currentDir : os.homedir();
-    this.enableByPath(name, true, scopePath);
-    const config = getTelemetryConfig(currentDir, this.telemetrySettings);
-    logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
-    extension.isActive = true;
-    await this.refreshTools();
+
+    const endMutation = this.beginMutation('enableExtension');
+    try {
+      const scopePath =
+        scope === SettingScope.Workspace ? currentDir : os.homedir();
+      this.enableByPath(name, true, scopePath);
+      const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+      logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
+      extension.isActive = true;
+      await this.refreshTools();
+    } finally {
+      endMutation();
+    }
   }
 
   /**
@@ -481,12 +525,18 @@ export class ExtensionManager {
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
-    const scopePath =
-      scope === SettingScope.Workspace ? currentDir : os.homedir();
-    this.disableByPath(name, true, scopePath);
-    logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
-    extension.isActive = false;
-    await this.refreshTools();
+
+    const endMutation = this.beginMutation('disableExtension');
+    try {
+      const scopePath =
+        scope === SettingScope.Workspace ? currentDir : os.homedir();
+      this.disableByPath(name, true, scopePath);
+      logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
+      extension.isActive = false;
+      await this.refreshTools();
+    } finally {
+      endMutation();
+    }
   }
 
   /**
@@ -526,7 +576,12 @@ export class ExtensionManager {
   }
 
   setExtensionScope(name: string, scope: ExtensionScope): void {
-    this.preferencesStore.setScope(name, scope);
+    const endMutation = this.beginMutation('setExtensionScope');
+    try {
+      this.preferencesStore.setScope(name, scope);
+    } finally {
+      endMutation();
+    }
   }
 
   /** MCP servers individually disabled inside the given extension. */
@@ -539,11 +594,16 @@ export class ExtensionManager {
     serverName: string,
     disabled: boolean,
   ): void {
-    this.preferencesStore.setMcpServerDisabled(
-      extensionName,
-      serverName,
-      disabled,
-    );
+    const endMutation = this.beginMutation('setMcpServerDisabled');
+    try {
+      this.preferencesStore.setMcpServerDisabled(
+        extensionName,
+        serverName,
+        disabled,
+      );
+    } finally {
+      endMutation();
+    }
   }
 
   // ==========================================================================
@@ -588,25 +648,36 @@ export class ExtensionManager {
           `Expected a .claude-plugin/marketplace.json.`,
       );
     }
-    const now = new Date().toISOString();
-    const entry: ExtensionSource = {
-      name: config.name || trimmed,
-      source: trimmed,
-      type: parseExtensionSourceType(trimmed),
-      addedAt: now,
-      lastUpdatedAt: now,
-    };
-    this.sourceRegistryStore.add(entry);
-    this.discoverCache = null; // sources changed -> refetch on next discover
-    return entry;
+
+    const endMutation = this.beginMutation('addSource');
+    try {
+      const now = new Date().toISOString();
+      const entry: ExtensionSource = {
+        name: config.name || trimmed,
+        source: trimmed,
+        type: parseExtensionSourceType(trimmed),
+        addedAt: now,
+        lastUpdatedAt: now,
+      };
+      this.sourceRegistryStore.add(entry);
+      this.discoverCache = null; // sources changed -> refetch on next discover
+      return entry;
+    } finally {
+      endMutation();
+    }
   }
 
   removeSource(name: string): boolean {
-    const removed = this.sourceRegistryStore.remove(name);
-    if (removed) {
-      this.discoverCache = null;
+    const endMutation = this.beginMutation('removeSource');
+    try {
+      const removed = this.sourceRegistryStore.remove(name);
+      if (removed) {
+        this.discoverCache = null;
+      }
+      return removed;
+    } finally {
+      endMutation();
     }
-    return removed;
   }
 
   /**
@@ -713,7 +784,6 @@ export class ExtensionManager {
    * Refreshes the extension cache from disk.
    */
   async refreshCache(options?: { names?: string[] }): Promise<void> {
-    this.extensionCache = new Map<string, Extension>();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     let extensions: Extension[];
     if (requestedNames.length > 0) {
@@ -729,9 +799,11 @@ export class ExtensionManager {
         this.workspaceDir,
       );
     }
+    const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
-      this.extensionCache!.set(extension.name, extension);
+      nextCache.set(extension.name, extension);
     });
+    this.extensionCache = nextCache;
   }
 
   getLoadedExtensions(): Extension[] {
@@ -1034,6 +1106,7 @@ export class ExtensionManager {
     let tempDir: string | undefined;
     let convertedSourcePath: string | undefined;
 
+    const endMutation = this.beginMutation('installExtension');
     try {
       if (!this.isWorkspaceTrusted) {
         throw new Error(
@@ -1376,6 +1449,8 @@ export class ExtensionManager {
         );
       }
       throw error;
+    } finally {
+      endMutation();
     }
   }
 
@@ -1387,47 +1462,52 @@ export class ExtensionManager {
     isUpdate: boolean,
     cwd?: string,
   ): Promise<void> {
-    const currentDir = cwd ?? this.workspaceDir;
-    const telemetryConfig = getTelemetryConfig(
-      currentDir,
-      this.telemetrySettings,
-    );
-    const installedExtensions = this.getLoadedExtensions();
-    const extension = installedExtensions.find(
-      (installed) =>
-        installed.config.name.toLowerCase() ===
-          extensionIdentifier.toLowerCase() ||
-        installed.installMetadata?.source.toLowerCase() ===
-          extensionIdentifier.toLowerCase(),
-    );
-    if (!extension) {
-      throw new Error(`Extension not found.`);
+    const endMutation = this.beginMutation('uninstallExtension');
+    try {
+      const currentDir = cwd ?? this.workspaceDir;
+      const telemetryConfig = getTelemetryConfig(
+        currentDir,
+        this.telemetrySettings,
+      );
+      const installedExtensions = this.getLoadedExtensions();
+      const extension = installedExtensions.find(
+        (installed) =>
+          installed.config.name.toLowerCase() ===
+            extensionIdentifier.toLowerCase() ||
+          installed.installMetadata?.source.toLowerCase() ===
+            extensionIdentifier.toLowerCase(),
+      );
+      if (!extension) {
+        throw new Error(`Extension not found.`);
+      }
+      const storage = new ExtensionStorage(
+        extension.installMetadata?.type === 'link'
+          ? extension.name
+          : path.basename(extension.path),
+      );
+
+      await fs.promises.rm(storage.getExtensionDir(), {
+        recursive: true,
+        force: true,
+      });
+
+      if (this.extensionCache) {
+        this.extensionCache.delete(extension.name);
+      }
+
+      if (isUpdate) return;
+
+      this.removeEnablementConfig(extension.name);
+      this.preferencesStore.clear(extension.name);
+      await this.refreshTools();
+
+      logExtensionUninstall(
+        telemetryConfig,
+        new ExtensionUninstallEvent(extension.name, 'success'),
+      );
+    } finally {
+      endMutation();
     }
-    const storage = new ExtensionStorage(
-      extension.installMetadata?.type === 'link'
-        ? extension.name
-        : path.basename(extension.path),
-    );
-
-    await fs.promises.rm(storage.getExtensionDir(), {
-      recursive: true,
-      force: true,
-    });
-
-    if (this.extensionCache) {
-      this.extensionCache.delete(extension.name);
-    }
-
-    if (isUpdate) return;
-
-    this.removeEnablementConfig(extension.name);
-    this.preferencesStore.clear(extension.name);
-    await this.refreshTools();
-
-    logExtensionUninstall(
-      telemetryConfig,
-      new ExtensionUninstallEvent(extension.name, 'success'),
-    );
   }
 
   async performWorkspaceExtensionMigration(
@@ -1498,10 +1578,12 @@ export class ExtensionManager {
       callback(extension.name, ExtensionUpdateState.UP_TO_DATE);
       throw new Error(`Extension is linked so does not need to be updated`);
     }
+    const endMutation = this.beginMutation('updateExtension');
     const originalVersion = extension.version;
+    let tempDir: string | undefined;
 
-    const tempDir = await ExtensionStorage.createTmpDir();
     try {
+      tempDir = await ExtensionStorage.createTmpDir();
       const previousExtensionConfig = this.loadExtensionConfig({
         extensionDir: extension.path,
       });
@@ -1537,10 +1619,15 @@ export class ExtensionManager {
         `Error updating extension, rolling back. ${getErrorMessage(e)}`,
       );
       callback(extension.name, ExtensionUpdateState.ERROR);
-      await copyExtension(tempDir, extension.path);
+      if (tempDir) {
+        await copyExtension(tempDir, extension.path);
+      }
       throw e;
     } finally {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      endMutation();
     }
   }
 
@@ -1570,14 +1657,8 @@ export class ExtensionManager {
     ).filter((updateInfo) => !!updateInfo);
   }
 
-  async refreshMemory(): Promise<void> {
-    await refreshExtensionRuntime(this.config);
-  }
-
   async refreshTools(): Promise<void> {
-    if (!this.config) return;
-    // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    await this.refreshMemory();
+    await refreshExtensionRuntime(this.config);
   }
 }
 
