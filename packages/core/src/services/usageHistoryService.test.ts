@@ -12,6 +12,7 @@ import {
   metricsToUsageRecord,
   aggregateUsage,
   loadUsageHistory,
+  loadUsageHistoryWithLive,
   persistSessionUsage,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
@@ -625,6 +626,131 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     let totalTokens = 0;
     for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
     expect(totalTokens).toBe(1600);
+  });
+
+  // loadUsageHistoryWithLive: the daemon usage-dashboard loader. Unlike
+  // loadUsageHistory (persisted file verbatim when non-empty), it unions the
+  // persisted history with a replay of recent transcripts so daemon / Web Shell
+  // and in-progress sessions — which only the TUI /clear path ever persists —
+  // are counted. See issue: Web Shell "today" undercounted ~20x.
+  function planted(sessionId: string): string {
+    return path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+      'chats',
+      `${sessionId}.jsonl`,
+    );
+  }
+  function seedPersisted(records: UsageSummaryRecord[]) {
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+  }
+  function persistedRec(sessionId: string, totalTokens: number) {
+    return {
+      version: 1 as const,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now() - 60000,
+      project: '/p',
+      durationMs: 60000,
+      totalLatencyMs: 1200,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: totalTokens,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+    };
+  }
+
+  it('withLive: unions a never-persisted (daemon) session with the persisted history', async () => {
+    // Persisted: a finalized TUI session. Transcript-only: a daemon / Web Shell
+    // session that /clear never wrote to usage_record.jsonl.
+    seedPersisted([persistedRec('sess-persisted', 1000)]);
+    plantChatJsonl('sess-daemon', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    const ids = merged.map((r) => r.sessionId).sort();
+    expect(ids).toEqual(['sess-daemon', 'sess-persisted']);
+
+    const report = aggregateUsage(merged, 'all');
+    let totalTokens = 0;
+    for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
+    // 1000 persisted + 1600 replayed from the daemon transcript.
+    expect(totalTokens).toBe(2600);
+
+    // Read-only: the persisted file must still hold only the original record.
+    const lines = fs
+      .readFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        'utf8',
+      )
+      .trim()
+      .split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('withLive: a persisted session with a live transcript is not double-counted (persisted wins)', async () => {
+    // Same sessionId in both the persisted file (authoritative 1000) and the
+    // transcript (1600). Must appear exactly once, keeping the persisted value.
+    seedPersisted([persistedRec('sess-both', 1000)]);
+    plantChatJsonl('sess-both', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.sessionId).toBe('sess-both');
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
+    // A persisted base means the window engages (old days come from the file).
+    seedPersisted([persistedRec('sess-persisted', 500)]);
+    plantChatJsonl('sess-old', 1600);
+    // Age the never-persisted transcript well past the default trailing window.
+    const stale = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(planted('sess-old'), stale / 1000, stale / 1000);
+
+    // Default window: the stale, never-persisted transcript is not replayed.
+    const windowed = await loadUsageHistoryWithLive();
+    expect(windowed.map((r) => r.sessionId)).toEqual(['sess-persisted']);
+    // An unbounded window picks it back up alongside the persisted record.
+    const all = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(all.map((r) => r.sessionId).sort()).toEqual([
+      'sess-old',
+      'sess-persisted',
+    ]);
+  });
+
+  it('withLive: with no persisted base, replays full history (no silent trailing-window truncation)', async () => {
+    // No usage_record.jsonl: nothing else covers old history, so an old
+    // transcript must still be replayed rather than truncated by the window.
+    plantChatJsonl('sess-old', 1600);
+    const stale = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(planted('sess-old'), stale / 1000, stale / 1000);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-old']);
+  });
+
+  it('withLive: read-only rebuild — never writes usage_record.jsonl', async () => {
+    plantChatJsonl('sess-daemon-only', 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon-only']);
+    expect(fs.existsSync(usagePath)).toBe(false);
   });
 });
 
