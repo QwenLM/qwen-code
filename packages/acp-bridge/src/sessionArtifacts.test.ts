@@ -3322,6 +3322,52 @@ describe('SessionArtifactStore', () => {
     ]);
   });
 
+  it('writes an eviction tombstone when evicting a downgraded durable artifact', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let failNext = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-downgraded-eviction-tombstone',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error('disk full');
+          }
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/downgraded-eviction' }],
+      { strict: true },
+    );
+
+    failNext = true;
+    await store.upsertMany([
+      {
+        title: 'Durable',
+        url: 'https://example.com/downgraded-eviction',
+        metadata: { phase: 'updated' },
+      },
+    ]);
+
+    await store.upsertMany(
+      [{ title: 'Overflow', url: 'https://example.com/overflow' }],
+      { strict: true },
+    );
+
+    expect(events.at(-1)?.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: created.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+  });
+
   it('restores rebuilt durable artifacts as metadata-only restored entries', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({

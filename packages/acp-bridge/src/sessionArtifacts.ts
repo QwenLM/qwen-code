@@ -768,7 +768,9 @@ export class SessionArtifactStore {
           'retention',
         );
       }
-      return this.downgradeDurableChanges(durableChanges);
+      const warnings = this.downgradeDurableChanges(durableChanges);
+      this.applyDurableMarkers(durableChanges);
+      return warnings;
     }
 
     const recordedAt = new Date().toISOString();
@@ -1319,6 +1321,7 @@ export class SessionArtifactStore {
         action: 'removed',
         artifactId: artifact.id,
         artifact: toPublicArtifact(artifact),
+        durableTombstoneRequired: artifact.durableTombstoneRequired,
         reason: 'eviction',
       });
     }
