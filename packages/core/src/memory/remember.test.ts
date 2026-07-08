@@ -173,6 +173,28 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValue(30);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
   it('classifies only successful memory writes', async () => {
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     vi.mocked(runForkedAgent).mockResolvedValue({

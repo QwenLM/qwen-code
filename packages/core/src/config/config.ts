@@ -2039,7 +2039,14 @@ export class Config {
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
-    this.memoryAgentTimeoutMinutes = params.memoryAgentTimeoutMinutes;
+    // Clamp: schema validation only runs on interactive edit paths, so a
+    // negative value in settings.json would otherwise reach the agent runtime
+    // and make every memory agent time out immediately.
+    this.memoryAgentTimeoutMinutes =
+      params.memoryAgentTimeoutMinutes !== undefined &&
+      params.memoryAgentTimeoutMinutes >= 0
+        ? params.memoryAgentTimeoutMinutes
+        : undefined;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);

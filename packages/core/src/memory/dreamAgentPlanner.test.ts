@@ -142,6 +142,20 @@ describe('dreamAgentPlanner', () => {
     );
   });
 
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(30);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
   it('can read transcripts while keeping writes project-memory-only', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
