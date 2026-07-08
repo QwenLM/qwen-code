@@ -11,12 +11,17 @@ const MAX_REMEMBER_ERROR_CAUSE_DEPTH = 50;
 const REMEMBER_ERROR_FORMAT_RE = /[\p{Cf}]|\p{Variation_Selector}/gu;
 const REMEMBER_ERROR_SPACE_SEPARATOR_RE =
   /[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/gu;
-const REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE =
-  /\b(Bearer|QQBot)(?:[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
+/* eslint-disable no-control-regex */
 const REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE =
-  /(\b(?:Bearer|QQBot)\s+[A-Za-z0-9._~+/=-]*|\bsk-[A-Za-z0-9-]*)(?:[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
-// eslint-disable-next-line no-control-regex
+  /[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector}/gu;
+const REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE =
+  /\b(Bearer|QQBot)(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
+const REMEMBER_ERROR_AUTH_TOKEN_WITH_SEPARATORS_RE =
+  /\b(Bearer|QQBot)(?:\s|[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+((?:[A-Za-z0-9._~+/=-]+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*[A-Za-z0-9._~+/=-]+)/giu;
+const REMEMBER_ERROR_BARE_TOKEN_WITH_SEPARATORS_RE =
+  /\bsk-(?:[A-Za-z0-9-]+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*[A-Za-z0-9-]+/gu;
 const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
+/* eslint-enable no-control-regex */
 const DETAIL_SUPPRESSED_REMEMBER_ERROR_CODES = new Set([
   'managed_memory_unavailable',
 ]);
@@ -162,16 +167,27 @@ function replaceStackControlChars(stack: string): string {
     );
 }
 
-function collapseCredentialSeparators(details: string): string {
-  let normalized = details;
-  while (true) {
-    const next = normalized.replace(
-      REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE,
-      '$1',
+function collapseCredentialSeparators(text: string): string {
+  return text
+    .replace(
+      REMEMBER_ERROR_AUTH_TOKEN_WITH_SEPARATORS_RE,
+      (_match, scheme: string, token: string) =>
+        `${scheme} ${token.replace(REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE, '')}`,
+    )
+    .replace(REMEMBER_ERROR_BARE_TOKEN_WITH_SEPARATORS_RE, (token) =>
+      token.replace(REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE, ''),
     );
-    if (next === normalized) return normalized;
-    normalized = next;
-  }
+}
+
+function collapseCredentialSeparatorsByStackLine(stack: string): string {
+  return stack
+    .split(/(\r\n|\n|\r)/)
+    .map((part) =>
+      part === '\r\n' || part === '\n' || part === '\r'
+        ? part
+        : collapseCredentialSeparators(part),
+    )
+    .join('');
 }
 
 function isHighSurrogate(codeUnit: number): boolean {
@@ -220,7 +236,7 @@ function sanitizeRememberErrorDetails(details: string): string | undefined {
 
 function sanitizeRememberErrorStack(stack: string): string | undefined {
   return redactAndCapRememberErrorText(
-    replaceStackControlChars(collapseCredentialSeparators(stack)),
+    replaceStackControlChars(collapseCredentialSeparatorsByStackLine(stack)),
   );
 }
 

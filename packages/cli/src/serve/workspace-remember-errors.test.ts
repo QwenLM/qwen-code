@@ -171,6 +171,16 @@ describe('extractRememberErrorDetails', () => {
     }
   });
 
+  it('redacts bearer tokens split by control characters', () => {
+    const details = extractRememberErrorDetails(
+      new Error('Authorization: Bearer secret\x01token-value'),
+    );
+
+    expect(details).toBe('Authorization: <redacted>');
+    expect(details).not.toContain('secret');
+    expect(details).not.toContain('token-value');
+  });
+
   it('redacts bearer tokens split by unicode space separators', () => {
     for (const separator of [
       '\u00a0',
@@ -358,6 +368,18 @@ describe('extractRememberErrorStack', () => {
     expect(stack).toBe(
       'Error: missing column name\n\tat handler (/workspace/file.ts:1:1)',
     );
+  });
+
+  it('redacts stack bearer tokens split by control characters', () => {
+    const err = new Error('Authorization: Bearer secret\x01token-value');
+    err.stack =
+      'Error: Authorization: Bearer secret\x01token-value\n\tat handler (/workspace/file.ts:1:1)';
+
+    const stack = extractRememberErrorStack(err);
+
+    expect(stack).toContain('Authorization: <redacted>');
+    expect(stack).not.toContain('secret');
+    expect(stack).not.toContain('token-value');
   });
 });
 

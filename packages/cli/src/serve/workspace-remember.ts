@@ -17,7 +17,6 @@ import type {
 } from './acp-session-bridge.js';
 import {
   createWorkspaceMemoryExtractionErrorLogger,
-  extractRememberErrorCode,
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
@@ -652,7 +651,11 @@ export function mountWorkspaceMemoryRememberRoutes(
           ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = workspaceMemoryFailureCode(
+          err,
+          'remember_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'remember'),
           code,
@@ -720,7 +723,11 @@ export function mountWorkspaceMemoryRememberRoutes(
         });
         res.status(202).json(task);
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'forget_failed');
+        const code = workspaceMemoryFailureCode(
+          err,
+          'forget_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'forget'),
           code,
@@ -765,7 +772,11 @@ export function mountWorkspaceMemoryRememberRoutes(
         });
         res.status(202).json(task);
       } catch (err) {
-        const code = extractRememberErrorCode(err, 'dream_failed');
+        const code = workspaceMemoryFailureCode(
+          err,
+          'dream_failed',
+          logWorkspaceMemoryExtractionError,
+        );
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'dream'),
           code,

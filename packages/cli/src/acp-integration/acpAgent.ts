@@ -5852,22 +5852,6 @@ class QwenAgent implements Agent {
           );
           if (childSignal.aborted) {
             const timeoutCode = 'remember_timeout';
-            if (shouldSuppressRememberErrorDetails(code)) {
-              debugLogger.error(
-                'Workspace memory remember unavailable during timeout:',
-                {
-                  projectRoot,
-                  code,
-                  details: diagnostics.debugDetails,
-                  ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
-                },
-              );
-              throw new RequestError(
-                -32009,
-                'Managed memory is unavailable for this daemon workspace',
-                { errorKind: 'managed_memory_unavailable' },
-              );
-            }
             debugLogger.error('Workspace memory remember timed out:', {
               projectRoot,
               code: timeoutCode,
@@ -5960,22 +5944,6 @@ class QwenAgent implements Agent {
           );
           if (childSignal.aborted) {
             const timeoutCode = 'forget_timeout';
-            if (shouldSuppressRememberErrorDetails(code)) {
-              debugLogger.error(
-                'Workspace memory forget unavailable during timeout:',
-                {
-                  projectRoot,
-                  code,
-                  details: diagnostics.debugDetails,
-                  ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
-                },
-              );
-              throw new RequestError(
-                -32009,
-                'Managed memory is unavailable for this daemon workspace',
-                { errorKind: 'managed_memory_unavailable' },
-              );
-            }
             debugLogger.error('Workspace memory forget timed out:', {
               projectRoot,
               code: timeoutCode,
@@ -6054,22 +6022,6 @@ class QwenAgent implements Agent {
           );
           if (childSignal.aborted) {
             const timeoutCode = 'dream_timeout';
-            if (shouldSuppressRememberErrorDetails(code)) {
-              debugLogger.error(
-                'Workspace memory dream unavailable during timeout:',
-                {
-                  projectRoot,
-                  code,
-                  details: diagnostics.debugDetails,
-                  ...(diagnostics.stack ? { stack: diagnostics.stack } : {}),
-                },
-              );
-              throw new RequestError(
-                -32009,
-                'Managed memory is unavailable for this daemon workspace',
-                { errorKind: 'managed_memory_unavailable' },
-              );
-            }
             debugLogger.error('Workspace memory dream timed out:', {
               projectRoot,
               code: timeoutCode,

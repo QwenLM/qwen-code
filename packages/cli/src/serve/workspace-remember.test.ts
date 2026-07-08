@@ -223,12 +223,13 @@ function buildApp(
     tokenConfigured: true,
     requireAuth: false,
   },
+  lane = new WorkspaceRememberTaskLane(bridge),
 ) {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
   mountWorkspaceMemoryRememberRoutes(app, {
     bridge,
-    lane: new WorkspaceRememberTaskLane(bridge),
+    lane,
     mutate: createMutationGate(auth),
     parseClientId: (req, res) => {
       const raw = req.get('x-qwen-client-id');
@@ -865,6 +866,66 @@ describe('workspace memory remember routes', () => {
     expect(bridge.rememberCalls).toHaveLength(0);
     expect(bridge.forgetCalls).toHaveLength(0);
     expect(bridge.dreamCalls).toBe(0);
+  });
+
+  it('falls back to kind-specific codes when enqueue code extraction throws', async () => {
+    mockDebugLogger.warn.mockClear();
+    const bridge = buildBridgeStub({});
+    const lane = new WorkspaceRememberTaskLane(bridge);
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+    vi.spyOn(lane, 'enqueue').mockImplementation(() => {
+      throw err;
+    });
+    vi.spyOn(lane, 'enqueueForget').mockImplementation(() => {
+      throw err;
+    });
+    vi.spyOn(lane, 'enqueueDream').mockImplementation(() => {
+      throw err;
+    });
+    const app = buildApp(bridge, undefined, lane);
+
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .expect(500)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace memory remember failed.',
+          code: 'remember_failed',
+        });
+      });
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference' })
+      .expect(500)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace memory forget failed.',
+          code: 'forget_failed',
+        });
+      });
+    await request(app)
+      .post('/workspace/memory/dream')
+      .send({})
+      .expect(500)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace memory dream failed.',
+          code: 'dream_failed',
+        });
+      });
+    expect(mockDebugLogger.warn).toHaveBeenCalledTimes(3);
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to extract workspace memory error code:',
+      { extractionError: 'code getter failed' },
+    );
   });
 
   it('records bridge failures with stable public error codes', async () => {

@@ -3681,7 +3681,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it('suppresses details for timed out workspace memory remember unavailable errors', async () => {
+  it('preserves timeout codes for timed out workspace memory remember unavailable errors', async () => {
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
@@ -3718,17 +3718,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         .catch((caught: unknown) => caught);
 
       expect(error).toMatchObject({
-        code: -32009,
-        message: 'Managed memory is unavailable for this daemon workspace',
-        data: { errorKind: 'managed_memory_unavailable' },
+        code: -32099,
+        message: 'Workspace memory remember timed out',
+        data: {
+          errorKind: 'remember_timeout',
+          details: 'memory service stopped',
+        },
       });
-      expect(
-        (error as { data?: Record<string, unknown> }).data,
-      ).not.toHaveProperty('details');
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
-        'Workspace memory remember unavailable during timeout:',
+        'Workspace memory remember timed out:',
         expect.objectContaining({
-          code: 'managed_memory_unavailable',
+          code: 'remember_timeout',
           details: 'memory service stopped',
         }),
       );
@@ -4029,7 +4029,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it('suppresses details for timed out workspace memory forget unavailable errors', async () => {
+  it('preserves timeout codes for timed out workspace memory forget unavailable errors', async () => {
     const forget = vi.fn().mockRejectedValue({
       data: {
         errorKind: 'managed_memory_unavailable',
@@ -4071,17 +4071,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         .catch((caught: unknown) => caught);
 
       expect(error).toMatchObject({
-        code: -32009,
-        message: 'Managed memory is unavailable for this daemon workspace',
-        data: { errorKind: 'managed_memory_unavailable' },
+        code: -32099,
+        message: 'Workspace memory forget timed out',
+        data: {
+          errorKind: 'forget_timeout',
+          details: 'memory service stopped',
+        },
       });
-      expect(
-        (error as { data?: Record<string, unknown> }).data,
-      ).not.toHaveProperty('details');
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
-        'Workspace memory forget unavailable during timeout:',
+        'Workspace memory forget timed out:',
         expect.objectContaining({
-          code: 'managed_memory_unavailable',
+          code: 'forget_timeout',
           details: 'memory service stopped',
         }),
       );
@@ -4291,7 +4291,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it('suppresses details for timed out workspace memory dream unavailable errors', async () => {
+  it('preserves timeout codes for timed out workspace memory dream unavailable errors', async () => {
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
@@ -4330,17 +4330,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         .catch((caught: unknown) => caught);
 
       expect(error).toMatchObject({
-        code: -32009,
-        message: 'Managed memory is unavailable for this daemon workspace',
-        data: { errorKind: 'managed_memory_unavailable' },
+        code: -32099,
+        message: 'Workspace memory dream timed out',
+        data: {
+          errorKind: 'dream_timeout',
+          details: 'memory service stopped',
+        },
       });
-      expect(
-        (error as { data?: Record<string, unknown> }).data,
-      ).not.toHaveProperty('details');
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
-        'Workspace memory dream unavailable during timeout:',
+        'Workspace memory dream timed out:',
         expect.objectContaining({
-          code: 'managed_memory_unavailable',
+          code: 'dream_timeout',
           details: 'memory service stopped',
         }),
       );
