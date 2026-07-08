@@ -763,7 +763,7 @@ describe('sendMessage', () => {
     await reconnect;
 
     expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(5);
-    expect(chp['reconnectAttempts']).toBe(20);
+    expect(chp['reconnectAttempts']).toBe(19);
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mockFetchGatewayUrl).toHaveBeenCalledTimes(5);

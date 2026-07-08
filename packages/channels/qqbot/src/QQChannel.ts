@@ -334,6 +334,9 @@ export class QQChannel extends ChannelBase {
                   return;
                 }
                 entry!.pendingRetry = toFlush;
+                if (entry!.timer) {
+                  clearTimeout(entry!.timer);
+                }
                 entry!.timer = setTimeout(() => {
                   entry!.timer = null;
                   entry!.pendingRetry = '';
@@ -355,7 +358,9 @@ export class QQChannel extends ChannelBase {
                         `[QQ:${this.name}] Cron flush retry failed: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
                       );
                       entry!.pendingRetry = '';
-                      this.cronBuffer.delete(sessionId);
+                      if (!entry!.buffer) {
+                        this.cronBuffer.delete(sessionId);
+                      }
                     });
                 }, 5000);
                 entry!.timer.unref();
@@ -2004,7 +2009,6 @@ export class QQChannel extends ChannelBase {
         return;
       }
 
-      let gwCalled = false;
       const maxGwRetries = this.qqConfig.maxGwRetries ?? 5;
       const unlimitedRetries = maxGwRetries <= 0;
       for (
@@ -2025,7 +2029,6 @@ export class QQChannel extends ChannelBase {
             if (this.disposed) return;
             continue;
           }
-          gwCalled = true;
           await this.connectGateway();
           this.startReplyMsgIdCleanup();
           return;
@@ -2042,7 +2045,6 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] RC: exhausted ${unlimitedRetries ? '∞' : maxGwRetries} reconnect retries, will retry in 60s\n`,
       );
-      if (gwCalled) this.reconnectAttempts++;
       this.tryResume = false;
     } finally {
       this.isReconnecting = false;
