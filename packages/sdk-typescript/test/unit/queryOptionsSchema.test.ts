@@ -68,6 +68,11 @@ describe('QueryOptionsSchema', () => {
     '-e',
     '--sandbox',
     '-s',
+    '--no-sandbox',
+    '--no-insecure',
+    '--no-safe-mode',
+    '--no-worktree',
+    '--sandbox-image',
   ])('rejects extraArgs containing reserved flag %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);

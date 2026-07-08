@@ -47,7 +47,11 @@ export function query({
   const abortController = options.abortController ?? new AbortController();
 
   // Generate or use provided session ID for SDK-CLI alignment
-  const sessionId = options.resume ?? options.sessionId ?? randomUUID();
+  // When forkSession is true, generate a new UUID for the forked session
+  // rather than reusing the resume (source) session ID
+  const sessionId = options.forkSession
+    ? (options.sessionId ?? randomUUID())
+    : (options.resume ?? options.sessionId ?? randomUUID());
   const resolvedSystemPrompt = resolveSystemPromptOption(options.systemPrompt);
 
   const transport = new ProcessTransport({

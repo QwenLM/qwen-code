@@ -30,6 +30,7 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--yolo",
         "-y",
         "--insecure",
+        "--no-insecure",
         "--core-tools",
         "--exclude-tools",
         "--allowed-tools",
@@ -51,9 +52,14 @@ _RESERVED_CLI_FLAGS = frozenset(
         "-e",
         "--proxy",
         "--sandbox",
+        "--no-sandbox",
         "-s",
+        "--sandbox-image",
+        "--sandbox-session-id",
         "--safe-mode",
+        "--no-safe-mode",
         "--worktree",
+        "--no-worktree",
         "--disabled-slash-commands",
         "--include-partial-messages",
         "--chat-recording",
@@ -100,7 +106,11 @@ def validate_query_options(options: QueryOptions) -> None:
             "or resume for a specific session ID."
         )
 
-    if options.session_id and (options.resume or options.continue_session):
+    if (
+        options.session_id
+        and (options.resume or options.continue_session)
+        and not options.fork_session
+    ):
         raise ValidationError(
             "Cannot use session_id with resume or continue_session. "
             "session_id starts a new session, "
@@ -113,8 +123,10 @@ def validate_query_options(options: QueryOptions) -> None:
     if options.resume:
         validate_session_id(options.resume, "resume")
 
-    if options.fork_session and not options.resume:
-        raise ValidationError("fork_session requires resume to be set")
+    if options.fork_session and not (options.resume or options.continue_session):
+        raise ValidationError(
+            "fork_session requires resume or continue_session to be set"
+        )
 
     if options.max_session_turns is not None and options.max_session_turns < -1:
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")
@@ -143,11 +155,30 @@ def validate_query_options(options: QueryOptions) -> None:
 
     if options.extra_args:
         for arg in options.extra_args:
+            if not arg:
+                raise ValidationError("extra_args items cannot be empty")
             flag = arg.split("=", 1)[0]
             if flag in _RESERVED_CLI_FLAGS:
                 raise ValidationError(
                     f"extra_args cannot contain reserved flag: {flag}"
                 )
+
+    for field_name in (
+        "include_directories",
+        "extensions",
+        "allowed_mcp_server_names",
+        "disabled_slash_commands",
+    ):
+        field_value = getattr(options, field_name, None)
+        if field_value:
+            for item in field_value:
+                if "," in str(item):
+                    raise ValidationError(f"{field_name} items cannot contain commas")
+
+    if options.fallback_model:
+        for item in options.fallback_model:
+            if "," in item:
+                raise ValidationError("fallback_model items cannot contain commas")
 
     if options.fallback_model and len(options.fallback_model) > 3:
         raise ValidationError(

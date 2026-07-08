@@ -221,6 +221,11 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "-e",
         "--sandbox",
         "-s",
+        "--no-sandbox",
+        "--no-insecure",
+        "--no-safe-mode",
+        "--no-worktree",
+        "--sandbox-image",
     ],
 )
 def test_rejects_extra_args_with_security_sensitive_flags(flag: str) -> None:

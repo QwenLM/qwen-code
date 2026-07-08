@@ -15,6 +15,7 @@ const RESERVED_CLI_FLAGS = new Set([
   '--yolo',
   '-y',
   '--insecure',
+  '--no-insecure',
   '--core-tools',
   '--exclude-tools',
   '--allowed-tools',
@@ -36,9 +37,14 @@ const RESERVED_CLI_FLAGS = new Set([
   '-e',
   '--proxy',
   '--sandbox',
+  '--no-sandbox',
   '-s',
+  '--sandbox-image',
+  '--sandbox-session-id',
   '--safe-mode',
+  '--no-safe-mode',
   '--worktree',
+  '--no-worktree',
   '--disabled-slash-commands',
   '--include-partial-messages',
   '--chat-recording',
@@ -243,9 +249,17 @@ export const QueryOptionsSchema = z
     forkSession: z.boolean().optional(),
     maxToolCalls: z.number().int().min(-1).optional(),
     maxSubagentDepth: z.number().int().min(1).max(100).optional(),
-    includeDirectories: z.array(z.string()).optional(),
+    includeDirectories: z
+      .array(
+        z
+          .string()
+          .refine((s) => !s.includes(','), {
+            message: 'includeDirectories items cannot contain commas',
+          }),
+      )
+      .optional(),
     extraArgs: z
-      .array(z.string())
+      .array(z.string().min(1, 'extraArgs items cannot be empty'))
       .refine(
         (args) =>
           !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? '')),
@@ -259,10 +273,32 @@ export const QueryOptionsSchema = z
         },
       )
       .optional(),
-    extensions: z.array(z.string()).optional(),
-    allowedMcpServerNames: z.array(z.string()).optional(),
+    extensions: z
+      .array(
+        z
+          .string()
+          .refine((s) => !s.includes(','), {
+            message: 'extensions items cannot contain commas',
+          }),
+      )
+      .optional(),
+    allowedMcpServerNames: z
+      .array(
+        z
+          .string()
+          .refine((s) => !s.includes(','), {
+            message: 'allowedMcpServerNames items cannot contain commas',
+          }),
+      )
+      .optional(),
     fallbackModel: z
-      .array(z.string())
+      .array(
+        z
+          .string()
+          .refine((s) => !s.includes(','), {
+            message: 'fallbackModel items cannot contain commas',
+          }),
+      )
       .max(3, 'fallbackModel supports a maximum of 3 models')
       .optional(),
     proxy: z.string().trim().min(1, 'proxy cannot be empty').optional(),
@@ -270,7 +306,15 @@ export const QueryOptionsSchema = z
     safeMode: z.boolean().optional(),
     insecure: z.boolean().optional(),
     worktree: z.boolean().optional(),
-    disabledSlashCommands: z.array(z.string()).optional(),
+    disabledSlashCommands: z
+      .array(
+        z
+          .string()
+          .refine((s) => !s.includes(','), {
+            message: 'disabledSlashCommands items cannot contain commas',
+          }),
+      )
+      .optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict()
