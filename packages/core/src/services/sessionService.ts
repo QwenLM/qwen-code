@@ -1025,7 +1025,13 @@ export class SessionService {
     }
 
     // Reconstruct linear history
+    const leafUuid = this.lastConversationRecordUuid(records);
+    if (!leafUuid) {
+      return;
+    }
+
     const { messages, gaps } = this.reconstructHistory(records, {
+      leafUuid,
       detectGaps: true,
     });
     if (messages.length === 0) {
