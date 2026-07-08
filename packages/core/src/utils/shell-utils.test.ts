@@ -827,9 +827,18 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill -9 $(pgrep qwen-cod)')).toBe(true);
   });
 
-  it('does not false-positive on very short pgrep patterns', () => {
-    expect(detectSelfKillCommand('kill -9 $(pgrep no)')).toBe(false);
+  it('blocks short pgrep patterns that substring-match a self name', () => {
+    // "no" is a substring of "node": pgrep treats the pattern as an ERE
+    // matched against the process name, so `pgrep no` matches "node"
+    // (which is qwen-code's own process) and must be blocked.
+    expect(detectSelfKillCommand('kill -9 $(pgrep no)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -f no)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep e)')).toBe(true);
+  });
+
+  it('does not false-positive on short patterns that no self name contains', () => {
     expect(detectSelfKillCommand('kill -9 $(pgrep a)')).toBe(false);
+    expect(detectSelfKillCommand('kill -9 $(pgrep ab)')).toBe(false);
   });
 
   it('handles xargs with additional options like -L, -d, -a', () => {
@@ -984,9 +993,13 @@ describe('detectSelfKillCommand', () => {
     );
   });
 
-  it('nice -n10 inside command substitution (regex bypass)', () => {
-    expect(detectSelfKillCommand('kill -9 $(nice -n10 pgrep node)')).toBe(
-      false,
+  it('detects pgrep wrapped by nice with a niceness value', () => {
+    // `nice -n10 pgrep node` and `nice -n 10 pgrep node` both execute
+    // `pgrep node`, which lists qwen-code's own PID, so the surrounding
+    // kill must be blocked.
+    expect(detectSelfKillCommand('kill -9 $(nice -n10 pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(nice -n 10 pgrep node)')).toBe(
+      true,
     );
   });
 

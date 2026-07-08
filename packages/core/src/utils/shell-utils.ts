@@ -878,8 +878,8 @@ const SELF_NAMES_LIST = [
 ];
 
 function isSubstringSelfTarget(value: string): boolean {
+  if (!value) return false;
   if (isBareSelfProcessName(value)) return true;
-  if (value.length < 3) return false;
   const lower = value.toLowerCase();
   return SELF_NAMES_LIST.some((name) => name.includes(lower));
 }
@@ -998,8 +998,7 @@ function pgrepCommandTargetsSelf(command: string): boolean {
     const tokens = unwrapExecutionPrefixes(parsed);
     const root = normalizeExecutableName(tokens[0] ?? '');
     return (
-      (root === 'pgrep' || root === 'pidof') &&
-      pgrepTargetsSelf(tokens, root)
+      (root === 'pgrep' || root === 'pidof') && pgrepTargetsSelf(tokens, root)
     );
   });
 }
@@ -1092,9 +1091,6 @@ function killCommandTargetsSelf(segment: string): boolean {
   }
   for (const match of segment.matchAll(/\$\(([^()]*)\)|<\s*<\(([^()]*)\)/g)) {
     const innerCommand = match[1] ?? match[2] ?? '';
-    if (/^\s*nice\s+-/i.test(innerCommand)) {
-      continue;
-    }
     if (pgrepCommandTargetsSelf(innerCommand)) {
       return true;
     }
