@@ -22,6 +22,7 @@ import {
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireSessionRuntime } from './session-runtime.js';
 
 let activeSseCount = 0;
 
@@ -94,40 +95,16 @@ export function registerSseEventsRoutes(
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
     try {
-      const owner =
-        workspaceRegistry.list().length === 1
-          ? { kind: 'found' as const, runtime: workspaceRegistry.primary }
-          : workspaceRegistry.resolveLiveSessionOwner(sessionId);
-      if (owner.kind === 'not_found') {
-        daemonLog?.warn('session routing failed', {
-          route: 'GET /session/:id/events',
-          resolutionKind: 'not_found',
-          sessionId,
-        });
-        res.status(404).json({
-          error: `No session with id "${sessionId}"`,
-          code: 'session_not_found',
-          sessionId,
-        });
-        return;
-      }
-      if (owner.kind === 'ambiguous') {
-        daemonLog?.warn('session routing failed', {
-          route: 'GET /session/:id/events',
-          resolutionKind: 'ambiguous',
-          sessionId,
-          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
-        });
-        res.status(500).json({
-          error: `Session owner is ambiguous for "${sessionId}"`,
-          code: 'ambiguous_session_owner',
-          sessionId,
-          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
-        });
-        return;
-      }
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route: 'GET /session/:id/events',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
       const snapshot = req.query['snapshot'] === '1';
-      const iterable = owner.runtime.bridge.subscribeEvents(sessionId, {
+      const iterable = runtime.bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
         ...(maxQueued !== undefined ? { maxQueued } : {}),

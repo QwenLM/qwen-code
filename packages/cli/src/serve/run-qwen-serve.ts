@@ -183,10 +183,7 @@ function deriveDefaultMaxTotalSessions(
 ): number | undefined {
   if (workspaceCount <= 1) return undefined;
   const perWorkspace = maxSessionsPerWorkspace ?? DEFAULT_MAX_SESSIONS;
-  if (
-    perWorkspace === 0 ||
-    perWorkspace === Number.POSITIVE_INFINITY
-  ) {
+  if (perWorkspace === 0 || perWorkspace === Number.POSITIVE_INFINITY) {
     return undefined;
   }
   return perWorkspace * workspaceCount;
@@ -2871,17 +2868,23 @@ export async function runQwenServe(
                 );
               logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
-              secondaryEnv.metadata.overlayKeys = [
-                ...refreshedRuntimeEnv.overlayKeys,
-              ];
-              secondaryEnv.metadata.envFilePaths = [
-                ...refreshedRuntimeEnv.envFilePaths,
-              ];
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
-              secondaryEnv.metadata.envFileReadFailures = [
+              secondaryEnv.metadata.envFileReadFailures.splice(
+                0,
+                secondaryEnv.metadata.envFileReadFailures.length,
                 ...refreshedRuntimeEnv.envFileReadFailures,
-              ];
+              );
+              secondaryEnv.metadata.overlayKeys.splice(
+                0,
+                secondaryEnv.metadata.overlayKeys.length,
+                ...refreshedRuntimeEnv.overlayKeys,
+              );
+              secondaryEnv.metadata.envFilePaths.splice(
+                0,
+                secondaryEnv.metadata.envFilePaths.length,
+                ...refreshedRuntimeEnv.envFilePaths,
+              );
               delete secondaryEnv.metadata.fallbackReason;
             } catch (err) {
               secondaryEnv.metadata.fallbackReason =

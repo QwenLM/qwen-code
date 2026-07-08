@@ -68,6 +68,7 @@ interface FakeBridge extends AcpSessionBridge {
 function makeSummary(
   sessionId: string,
   workspaceCwd: string,
+  overrides: Partial<BridgeSessionSummary> = {},
 ): BridgeSessionSummary {
   return {
     sessionId,
@@ -77,6 +78,7 @@ function makeSummary(
     displayName: sessionId,
     clientCount: 1,
     hasActivePrompt: false,
+    ...overrides,
   };
 }
 
@@ -300,6 +302,7 @@ function makeHarness(opts?: {
   secondaryTrusted?: boolean;
   secondaryChannelLive?: boolean;
   daemonLog?: DaemonLogger;
+  secondarySummaries?: BridgeSessionSummary[];
 }) {
   const primaryBridge = makeBridge(
     PRIMARY_CWD,
@@ -308,7 +311,9 @@ function makeHarness(opts?: {
   );
   const secondaryBridge = makeBridge(
     SECONDARY_CWD,
-    [makeSummary('secondary-session', SECONDARY_CWD)],
+    opts?.secondarySummaries ?? [
+      makeSummary('secondary-session', SECONDARY_CWD),
+    ],
     { channelLive: opts?.secondaryChannelLive ?? true },
   );
   const registry = createWorkspaceRegistry([
@@ -433,6 +438,7 @@ describe('multi-workspace session dispatch', () => {
 
     expect(unknownRes.status).toBe(400);
     expect(unknownRes.body.code).toBe('workspace_mismatch');
+    expect(unknownRes.body.workspaceCount).toBe(2);
     expect(unknown.primaryBridge.spawnCalls).toEqual([]);
     expect(unknown.secondaryBridge.spawnCalls).toEqual([]);
 
@@ -454,6 +460,19 @@ describe('multi-workspace session dispatch', () => {
         workspaceCwd: SECONDARY_CWD,
       }),
     );
+  });
+
+  it('revalidates runtime trust before dispatching live secondary session routes', async () => {
+    const { app, secondaryBridge } = makeHarness({ secondaryTrusted: false });
+
+    const res = await request(app)
+      .get('/session/secondary-session/status')
+      .set('Host', host());
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(secondaryBridge.promptCalls).toEqual([]);
   });
 
   it('dispatches live session routes by owner runtime', async () => {
@@ -620,9 +639,25 @@ describe('multi-workspace session dispatch', () => {
         .send({ cwd: SECONDARY_CWD });
 
       expect(res.status).toBe(400);
-      expect(res.body.code).toBe('workspace_mismatch');
+      expect(res.body.code).toBe('secondary_workspace_load_not_supported');
+      expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
     }
 
+    expect(primaryBridge.restoreCalls).toEqual([]);
+    expect(secondaryBridge.restoreCalls).toEqual([]);
+  });
+
+  it('returns a clear Phase 2a error for non-primary sessions on primary-only routes', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/secondary-session/branch')
+      .set('Host', host())
+      .send({ name: 'next' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('non_primary_session_route_not_supported');
+    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
     expect(primaryBridge.restoreCalls).toEqual([]);
     expect(secondaryBridge.restoreCalls).toEqual([]);
   });
@@ -653,5 +688,48 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host());
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
+    expect(unknown.body.workspaceCount).toBe(2);
+  });
+
+  it('pages live non-primary workspace sessions with a stable cursor', async () => {
+    const { app } = makeHarness({
+      secondarySummaries: [
+        makeSummary('secondary-b', SECONDARY_CWD, {
+          updatedAt: '2026-07-08T00:03:00.000Z',
+        }),
+        makeSummary('secondary-a', SECONDARY_CWD, {
+          updatedAt: '2026-07-08T00:03:00.000Z',
+        }),
+        makeSummary('secondary-c', SECONDARY_CWD, {
+          updatedAt: '2026-07-08T00:02:00.000Z',
+        }),
+      ],
+    });
+
+    const first = await request(app)
+      .get('/workspace/secondary-id/sessions?size=2')
+      .set('Host', host())
+      .expect(200);
+    expect(
+      first.body.sessions.map(
+        (session: { sessionId: string }) => session.sessionId,
+      ),
+    ).toEqual(['secondary-a', 'secondary-b']);
+    expect(first.body.nextCursor).toEqual(expect.any(String));
+
+    const second = await request(app)
+      .get(
+        `/workspace/secondary-id/sessions?size=2&cursor=${encodeURIComponent(
+          first.body.nextCursor as string,
+        )}`,
+      )
+      .set('Host', host())
+      .expect(200);
+    expect(
+      second.body.sessions.map(
+        (session: { sessionId: string }) => session.sessionId,
+      ),
+    ).toEqual(['secondary-c']);
+    expect(second.body.nextCursor).toBeUndefined();
   });
 });

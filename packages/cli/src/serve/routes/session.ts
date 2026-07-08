@@ -62,6 +62,7 @@ import {
   sessionExportFormatValues,
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { requireSessionRuntime } from './session-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -148,6 +149,17 @@ export function registerSessionRoutes(
     res: Response,
     requestedWorkspace: string,
   ): void => {
+    const runtimes = workspaceRegistry.list();
+    if (runtimes.length > 1) {
+      res.status(400).json({
+        error: `Workspace mismatch: daemon is bound to ${runtimes.length} workspaces; none matched the requested workspace.`,
+        code: 'workspace_mismatch',
+        boundWorkspace,
+        workspaceCount: runtimes.length,
+        requestedWorkspace,
+      });
+      return;
+    }
     res.status(400).json({
       error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
       code: 'workspace_mismatch',
@@ -249,6 +261,18 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (key !== boundWorkspace) {
+      const runtime = workspaceRegistry.getByWorkspaceCwd(key);
+      if (runtime && !runtime.primary) {
+        res.status(400).json({
+          error:
+            'Non-primary persisted session load/resume is not supported in Phase 2a.',
+          code: 'secondary_workspace_load_not_supported',
+          workspaceCwd: runtime.workspaceCwd,
+          workspaceId: runtime.workspaceId,
+          route,
+        });
+        return undefined;
+      }
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
@@ -260,32 +284,29 @@ export function registerSessionRoutes(
     res: Response,
     route: string,
   ): WorkspaceRuntime | undefined => {
-    if (workspaceRegistry.list().length === 1) {
-      return workspaceRegistry.primary;
-    }
-    const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
-    if (resolution.kind === 'found') return resolution.runtime;
-    if (resolution.kind === 'not_found') {
-      logSessionRoutingFailure(route, 'not_found', { sessionId });
-      res.status(404).json({
-        error: `No session with id "${sessionId}"`,
-        code: 'session_not_found',
-        sessionId,
-      });
-      return undefined;
-    }
-    logSessionRoutingFailure(route, 'ambiguous', {
-      sessionId,
-      workspaceIds: resolution.runtimes.map((runtime) => runtime.workspaceId),
-    });
-    res.status(500).json({
-      error: `Session owner is ambiguous for "${sessionId}"`,
-      code: 'ambiguous_session_owner',
+    return requireSessionRuntime({
       sessionId,
       route,
-      workspaceIds: resolution.runtimes.map((runtime) => runtime.workspaceId),
+      res,
+      workspaceRegistry,
+      daemonLog,
     });
-    return undefined;
+  };
+
+  const sendNonPrimarySessionRouteUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+    runtime: WorkspaceRuntime,
+  ): void => {
+    res.status(400).json({
+      error: `Route "${route}" is primary-only for non-primary workspace sessions in Phase 2a.`,
+      code: 'non_primary_session_route_not_supported',
+      sessionId,
+      workspaceId: runtime.workspaceId,
+      workspaceCwd: runtime.workspaceCwd,
+      route,
+    });
   };
 
   const withOwnerMutableSession =
@@ -377,6 +398,12 @@ export function registerSessionRoutes(
     async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
+      const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+      if (!runtime) return;
+      if (!runtime.primary) {
+        sendNonPrimarySessionRouteUnsupported(res, route, sessionId, runtime);
+        return;
+      }
       try {
         await archiveCoordinator.runSharedMany([sessionId], async () => {
           await handler(req, res, sessionId);

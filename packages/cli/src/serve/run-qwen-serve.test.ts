@@ -1690,6 +1690,102 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('updates secondary runtime env metadata in place after workspace reload', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-secondary-env-reload-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
+        const workspace = args[0];
+        const options = args[1];
+        const isReload =
+          typeof options === 'object' && options?.skipLoadEnvironment === true;
+        const isSecondary = workspace === secondary;
+        return {
+          merged: {
+            env: {
+              [isSecondary
+                ? 'QWEN_TEST_SECONDARY_ENV'
+                : 'QWEN_TEST_PRIMARY_ENV']: isReload ? 'reloaded' : 'boot',
+            },
+          },
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
+      updatedKeys: ['QWEN_TEST_SECONDARY_ENV'],
+      removedKeys: [],
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      )
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      );
+    let workspaceRegistry:
+      | import('./workspace-registry.js').WorkspaceRegistry
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        workspaceRegistry = deps?.workspaceRegistry;
+        return express();
+      },
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const secondaryRuntime = workspaceRegistry
+        ?.list()
+        .find((runtime) => runtime.workspaceCwd === secondary);
+      expect(secondaryRuntime).toBeDefined();
+      const env = secondaryRuntime!.env;
+      const overlayKeys = env.overlayKeys;
+      const envFilePaths = env.envFilePaths;
+      const envFileReadFailures = env.envFileReadFailures;
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('boot');
+
+      await secondaryRuntime!.workspaceService.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: secondary,
+      });
+
+      expect(env.overlayKeys).toBe(overlayKeys);
+      expect(env.envFilePaths).toBe(envFilePaths);
+      expect(env.envFileReadFailures).toBe(envFileReadFailures);
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('reloaded');
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('filters secondary workspace roots before constructing the bridge filesystem', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),

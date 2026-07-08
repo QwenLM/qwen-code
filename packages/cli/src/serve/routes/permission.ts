@@ -13,6 +13,7 @@ import {
   parsePermissionVoteBody,
 } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireSessionRuntime } from './session-runtime.js';
 
 type SendPermissionVoteError = (
   res: Response,
@@ -56,41 +57,16 @@ export function registerPermissionRoutes(
     };
     let accepted: boolean;
     try {
-      const owner =
-        workspaceRegistry.list().length === 1
-          ? { kind: 'found' as const, runtime: workspaceRegistry.primary }
-          : workspaceRegistry.resolveLiveSessionOwner(sessionId);
-      if (owner.kind === 'not_found') {
-        daemonLog?.warn('session routing failed', {
-          route: 'POST /session/:id/permission/:requestId',
-          resolutionKind: 'not_found',
-          sessionId,
-          requestId,
-        });
-        res.status(404).json({
-          error: `No session with id "${sessionId}"`,
-          code: 'session_not_found',
-          sessionId,
-        });
-        return;
-      }
-      if (owner.kind === 'ambiguous') {
-        daemonLog?.warn('session routing failed', {
-          route: 'POST /session/:id/permission/:requestId',
-          resolutionKind: 'ambiguous',
-          sessionId,
-          requestId,
-          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
-        });
-        res.status(500).json({
-          error: `Session owner is ambiguous for "${sessionId}"`,
-          code: 'ambiguous_session_owner',
-          sessionId,
-          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
-        });
-        return;
-      }
-      accepted = owner.runtime.bridge.respondToSessionPermission(
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route: 'POST /session/:id/permission/:requestId',
+        res,
+        workspaceRegistry,
+        daemonLog,
+        details: { requestId },
+      });
+      if (!runtime) return;
+      accepted = runtime.bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,
