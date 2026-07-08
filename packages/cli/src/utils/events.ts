@@ -6,6 +6,12 @@
 
 import { EventEmitter } from 'node:events';
 
+export type StartupIdeConnectionStatus =
+  | { state: 'idle' }
+  | { state: 'connecting' }
+  | { state: 'connected' }
+  | { state: 'failed'; message: string };
+
 export enum AppEvent {
   OpenDebugConsole = 'open-debug-console',
   LogError = 'log-error',
@@ -23,6 +29,7 @@ export enum AppEvent {
   ExtensionRefreshNeeded = 'extension-refresh-needed',
   ExtensionsReloadStarted = 'extensions-reload-started',
   ExtensionsReloaded = 'extensions-reloaded',
+  StartupIdeConnectionStatusChanged = 'startup-ide-connection-status-changed',
 }
 
 export const appEvents = new EventEmitter();

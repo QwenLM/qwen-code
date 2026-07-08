@@ -890,6 +890,14 @@ export interface ConfigParameters {
    * next ACP child spawn or `ToolRegistry.refresh()`.
    */
   disabledTools?: string[];
+  /**
+   * Deferred tool names that bypass the `shouldDefer` behaviour and
+   * are made visible in function declarations from session start,
+   * without requiring the model to call `tool_search`.
+   * Sourced from `settings.tools.visible`. Non-existent names are
+   * silently ignored (they don't cause config errors).
+   */
+  visibleTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -920,6 +928,11 @@ export interface ConfigParameters {
   accessibility?: AccessibilitySettings;
   showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
+  /**
+   * Delay SDK startup for interactive render paths. Telemetry settings still
+   * remain readable from Config; only the global SDK side effect is deferred.
+   */
+  deferTelemetryInitialization?: boolean;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
@@ -1514,6 +1527,7 @@ export class Config {
   // captured reference (e.g. by ToolRegistry mid-iteration) remains
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
+  private readonly visibleTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1573,6 +1587,7 @@ export class Config {
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: ResolvedTelemetrySettings;
+  private readonly telemetryInitializationDeferred: boolean;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -1695,7 +1710,7 @@ export class Config {
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
   // re-checks shareability instead of reusing the first repo's result.
   private readonly teamMemoryShareabilityChecked = new Set<string>();
-  private readonly enableAutoSkill: boolean;
+  private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
   private visionModel?: string;
@@ -1760,6 +1775,11 @@ export class Config {
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.disabledTools = new Set(params.disabledTools ?? []);
+    this.visibleTools = new Set(
+      (params.visibleTools ?? []).filter(
+        (name): name is string => typeof name === 'string',
+      ),
+    );
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -1808,6 +1828,8 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.telemetryInitializationDeferred =
+      params.deferTelemetryInitialization ?? false;
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
@@ -1972,7 +1994,10 @@ export class Config {
       onModelChange: this.handleModelChange.bind(this),
     });
 
-    if (this.telemetrySettings.enabled) {
+    if (
+      this.telemetrySettings.enabled &&
+      !this.telemetryInitializationDeferred
+    ) {
       initializeTelemetry(this);
     }
 
@@ -4012,6 +4037,18 @@ export class Config {
   }
 
   /**
+   * Deferred-tool names that should be visible from session start.
+   * Sourced from `settings.tools.visible`.
+   *
+   * These tools bypass `shouldDefer` in `getFunctionDeclarations()`
+   * and are excluded from `getDeferredToolSummary()` so they appear
+   * as first-class tools to the model.
+   */
+  getVisibleTools(): ReadonlySet<string> {
+    return this.visibleTools;
+  }
+
+  /**
    * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
@@ -4976,6 +5013,10 @@ export class Config {
     return this.telemetrySettings.enabled ?? false;
   }
 
+  isTelemetryInitializationDeferred(): boolean {
+    return this.telemetryInitializationDeferred;
+  }
+
   getTelemetryLogPromptsEnabled(): boolean {
     return this.telemetrySettings.logPrompts ?? true;
   }
@@ -5409,6 +5450,19 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
+  }
+
+  /**
+   * Toggle auto-skill for the running session. The startup value is copied from
+   * settings, so persisting a settings change alone would not take effect until
+   * the next launch; the skill-review scheduler reads `getAutoSkillEnabled()`
+   * live, so flipping this stops (or resumes) reviews immediately.
+   *
+   * @remarks `getAutoSkillEnabled()` additionally gates on bare/safe mode, so
+   * it can still return false after `setAutoSkillEnabled(true)`.
+   */
+  setAutoSkillEnabled(enabled: boolean): void {
+    this.enableAutoSkill = enabled;
   }
 
   getAutoSkillConfirmEnabled(): boolean {

@@ -132,7 +132,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     const absPath = path.resolve(this.params.file_path);
     const projectRoot = this.config.getTargetDir();
     // Auto-memory files (AGENTS.md and friends under the auto-memory
@@ -206,6 +206,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         offset: this.params.offset,
         limit: this.params.limit,
         pages: this.params.pages,
+        signal,
       },
     );
 
@@ -284,7 +285,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     ) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
-      llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
+      const totalLabel =
+        result.originalLineCountExact === false ? `at least ${total}` : total;
+      llmContent = `Showing lines ${start}-${end} of ${totalLabel} total lines.\n\n---\n\n${result.llmContent}`;
     } else {
       llmContent = result.llmContent || '';
     }
@@ -413,8 +416,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
             type: 'integer',
           },
           pages: {
-            description:
-              `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
+            description: `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
             type: 'string',
           },
         },

@@ -366,6 +366,29 @@ describe('startCommand.handler', () => {
     expect(mockChannelLoopStoreCreateForTarget).toHaveBeenCalledWith(input, 3);
   });
 
+  it('uses available env-var resolution for single-channel config', async () => {
+    const channels = { telegram: { type: 'telegram', token: '$BOT_TOKEN' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockParseChannelConfig).toHaveBeenCalledWith(
+      'telegram',
+      channels.telegram,
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
+  });
+
   it('rejects cron expressions that cannot fire', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -846,6 +869,9 @@ describe('startCommand.handler', () => {
           clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
         },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
       }),
     );
   });
@@ -881,6 +907,9 @@ describe('startCommand.handler', () => {
           clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
         },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
       }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(

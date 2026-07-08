@@ -29,6 +29,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
+  initializeTelemetry,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
@@ -586,6 +587,17 @@ describe('Server Config (config.ts)', () => {
           maxSubagentDepth: 5000,
         }).getMaxSubagentDepth(),
       ).toBe(100);
+    });
+  });
+
+  describe('setAutoSkillEnabled', () => {
+    it('flips the live value read by getAutoSkillEnabled', () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+      expect(config.getAutoSkillEnabled()).toBe(true);
+      config.setAutoSkillEnabled(false);
+      expect(config.getAutoSkillEnabled()).toBe(false);
+      config.setAutoSkillEnabled(true);
+      expect(config.getAutoSkillEnabled()).toBe(true);
     });
   });
 
@@ -4111,6 +4123,21 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(false);
+    expect(initializeTelemetry).toHaveBeenCalledWith(config);
+  });
+
+  it('Config constructor should defer telemetry initialization when requested', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+      deferTelemetryInitialization: true,
+    };
+    const config = new Config(paramsWithTelemetry);
+
+    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(true);
+    expect(initializeTelemetry).not.toHaveBeenCalled();
   });
 
   it('Config shutdown should flush telemetry when SDK is initialized', async () => {
@@ -6059,6 +6086,52 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
     });
     config.setDisabledTools(new Set());
     expect(config.getDisabledTools()).toEqual(new Set());
+  });
+});
+
+describe('visibleTools', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `visibleTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['Foo', 'Bar'],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `visibleTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getVisibleTools()).toEqual(new Set());
+  });
+
+  it('filters out non-string entries', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: [
+        'tool_a',
+        42 as unknown as string,
+        null as unknown as string,
+        'tool_b',
+      ],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['tool_a', 'tool_b']));
+  });
+
+  it('is readonly — returned set preserves config state', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['web_fetch'],
+    });
+    const set = config.getVisibleTools();
+    expect(set.has('web_fetch')).toBe(true);
+    // always returns the same reference
+    expect(config.getVisibleTools()).toBe(set);
   });
 });
 

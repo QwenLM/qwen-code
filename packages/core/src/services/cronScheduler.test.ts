@@ -1674,6 +1674,17 @@ describe('CronScheduler', () => {
       expect(tasks[0]!.prompt).toBe('headless durable');
     });
 
+    it('createDurable leaves tasks unbound even after enableDurable', async () => {
+      // Regression guard: durable tasks created via cron_create must stay
+      // unbound so non-daemon paths (TUI/ACP/headless) keep the shared-lock
+      // model. Binding is the daemon keepalive's job, not createDurable's.
+      await scheduler.enableDurable('session-1');
+      await scheduler.createDurable('* * * * *', 'unbound', true);
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.sessionId).toBeUndefined();
+    });
+
     it('non-owner loads durable tasks for listing but does not fire them', async () => {
       await lockAsOtherSession();
       await writeCronTasks(tmpDir, [diskTask('foreign1')]);

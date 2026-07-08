@@ -61,6 +61,8 @@ export type {
   BlockStreamingCoalesceConfig,
   ChannelConfig,
   ChannelIdentityConfig,
+  ChannelMemoryIntentClassifier,
+  ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
   ChannelPlugin,

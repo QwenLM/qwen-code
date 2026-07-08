@@ -27,15 +27,14 @@ import { VimModeProvider } from './contexts/VimModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
-import { checkForUpdates } from './utils/updateCheck.js';
 import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { handleAutoUpdate } from '../utils/handleAutoUpdate.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,
@@ -44,13 +43,19 @@ import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
+export interface StartInteractiveUIOptions {
+  postRenderConnectIde?: boolean;
+  postRenderInitializeTelemetry?: boolean;
+  extensionRefreshState?: ExtensionRefreshState;
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
-  extensionRefreshState?: ExtensionRefreshState,
+  options: StartInteractiveUIOptions = {},
 ) {
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
@@ -161,7 +166,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
-                        extensionRefreshState={extensionRefreshState}
+                        extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -198,19 +203,12 @@ export async function startInteractiveUI(
   // after this — it carries the `config_initialize_*` and
   // `input_enabled` checkpoints that complete the first-screen picture.
   profileCheckpoint('first_paint');
-
-  // Check for updates only if enableAutoUpdate is not explicitly disabled.
-  // Using !== false ensures updates are enabled by default when undefined.
-  if (settings.merged.general?.enableAutoUpdate !== false) {
-    checkForUpdates()
-      .then((info) => {
-        handleAutoUpdate(info, settings, config.getProjectRoot());
-      })
-      .catch((err) => {
-        // Silently ignore update check errors.
-        debugLogger.warn(`Update check failed: ${err}`);
-      });
-  }
+  startPostRenderPrefetches(config, settings, {
+    connectIde: options.postRenderConnectIde ?? false,
+    initializeTelemetry:
+      options.postRenderInitializeTelemetry ??
+      config.isTelemetryInitializationDeferred(),
+  });
 
   registerCleanup(async () => {
     remoteInputWatcher?.shutdown();

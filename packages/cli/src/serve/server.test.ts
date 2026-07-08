@@ -13,8 +13,8 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { trace, type Span } from '@opentelemetry/api';
 import {
-  computeKeepaliveIntervalMs,
   createServeApp,
+  computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
   PromptDeadlineExceededError,
@@ -72,6 +72,7 @@ import {
   SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  TotalSessionLimitExceededError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -122,6 +123,14 @@ import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
+import {
+  DeviceFlowRegistry,
+  TooManyActiveDeviceFlowsError,
+  UpstreamDeviceFlowError,
+  brandSecret,
+  type DeviceFlowProvider,
+  type DeviceFlowRegistry as DeviceFlowRegistryType,
+} from './auth/device-flow.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
@@ -1841,29 +1850,6 @@ function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
       else signal?.addEventListener('abort', onAbort, { once: true });
     });
 }
-
-describe('computeKeepaliveIntervalMs', () => {
-  it('keeps the heartbeat strictly under the reaper window (beats before reap)', () => {
-    // A small custom idle timeout must not get an interval ≥ the window, or the
-    // session is reaped before the first heartbeat. Half the window is the cap.
-    for (const idle of [1_000, 2_000, 10_000, 40_000, 60_000, 120_000]) {
-      const interval = computeKeepaliveIntervalMs(idle);
-      expect(interval).toBeLessThanOrEqual(Math.floor(idle / 2));
-      expect(interval).toBeGreaterThanOrEqual(1);
-    }
-  });
-
-  it('uses ~a third of a large window (default 30m → 10m cap)', () => {
-    expect(computeKeepaliveIntervalMs(30 * 60_000)).toBe(10 * 60_000); // MAX cap
-    expect(computeKeepaliveIntervalMs(15 * 60_000)).toBe(5 * 60_000); // /3
-  });
-
-  it('returns the relaxed max cadence when the reaper is disabled (≤ 0)', () => {
-    // No reaping → no heartbeat pressure, but the revive loop still runs.
-    expect(computeKeepaliveIntervalMs(0)).toBe(10 * 60_000);
-    expect(computeKeepaliveIntervalMs(-5)).toBe(10 * 60_000);
-  });
-});
 
 describe('createServeApp', () => {
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
@@ -12081,8 +12067,55 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         code: 'session_limit_exceeded',
         limit: 20,
+        scope: 'workspace',
       });
     });
+
+    it('503 + Retry-After + total scope and daemon log when bridge throws TotalSessionLimitExceededError', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new TotalSessionLimitExceededError(10);
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        daemonLog,
+      });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toMatchObject({
+        code: 'session_limit_exceeded',
+        limit: 10,
+        scope: 'total',
+      });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'total session admission rejected',
+        expect.objectContaining({
+          route: 'POST /session',
+          limit: 10,
+          scope: 'total',
+        }),
+      );
+    });
+  });
+});
+
+describe('computeKeepaliveIntervalMs', () => {
+  it('keeps the first heartbeat inside small custom idle windows', () => {
+    expect(computeKeepaliveIntervalMs(10_000)).toBe(5_000);
+  });
+
+  it('caps large idle windows at the relaxed maximum cadence', () => {
+    expect(computeKeepaliveIntervalMs(60 * 60_000)).toBe(10 * 60_000);
+  });
+
+  it('uses the relaxed cadence when idle reaping is disabled', () => {
+    expect(computeKeepaliveIntervalMs(0)).toBe(10 * 60_000);
   });
 });
 
@@ -12091,12 +12124,11 @@ describe('runQwenServe', () => {
   let runtimeDir: string | undefined;
 
   beforeEach(async () => {
-    // These tests spawn a real daemon bound to the repo cwd. Redirect the
-    // per-project runtime dir (where scheduled_tasks.json lives) into a temp
-    // dir so the daemon's scheduled-task rehydration reads an empty schedule
-    // instead of the developer's real ~/.qwen — otherwise it would try to
-    // reload a real bound session and hang these startup/shutdown tests.
-    runtimeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'run-qwen-serve-'));
+    runtimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-runtime-'),
+    );
+    // Keep real scheduled task state out of startup/shutdown tests; otherwise a
+    // developer's ~/.qwen/scheduled_tasks.json could rehydrate sessions here.
     Storage.setRuntimeBaseDir(runtimeDir);
   });
 
@@ -14185,6 +14217,94 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     expect(locals.workspaceRegistry!.primary.trusted).toBe(true);
   });
 
+  it('threads primary runtime env metadata into the default registry runtime', async () => {
+    const { createServeApp } = await import('./server.js');
+    const primaryRuntimeEnv = {
+      mode: 'runtime-overlay',
+      overlayKeys: ['OPENAI_API_KEY'],
+      envFilePaths: [],
+      effectiveEnv: { OPENAI_API_KEY: 'runtime-key' },
+    } as const;
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { primaryRuntimeEnv } as Parameters<typeof createServeApp>[2],
+    );
+    const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
+
+    expect(locals.workspaceRegistry!.primary.env).toBe(primaryRuntimeEnv);
+  });
+
+  it('wires total admission into the internally-created bridge', async () => {
+    type AdmissionContext = {
+      operation: 'spawn';
+      workspaceCwd: string;
+    };
+    let freshSessionAdmission:
+      | ((context: AdmissionContext) => { release(): void })
+      | undefined;
+    vi.resetModules();
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: unknown) => {
+          freshSessionAdmission = (
+            opts as {
+              freshSessionAdmission?: typeof freshSessionAdmission;
+            }
+          ).freshSessionAdmission;
+          return fakeBridge();
+        }),
+      };
+    });
+
+    try {
+      const { createServeApp } = await import('./server.js');
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: WS_BOUND,
+          maxTotalSessions: 1,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+
+      expect(freshSessionAdmission).toBeDefined();
+      const first = freshSessionAdmission!({
+        operation: 'spawn',
+        workspaceCwd: WS_BOUND,
+      });
+      let rejection: unknown;
+      try {
+        freshSessionAdmission!({
+          operation: 'spawn',
+          workspaceCwd: WS_BOUND,
+        });
+      } catch (err) {
+        rejection = err;
+      }
+      expect(rejection).toMatchObject({
+        name: 'TotalSessionLimitExceededError',
+        limit: 1,
+        scope: 'total',
+        operation: 'spawn',
+        workspaceCwd: WS_BOUND,
+      });
+      first.release();
+    } finally {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+    }
+  });
+
   it('uses an injected workspace registry as the primary runtime source', async () => {
     const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
@@ -14472,7 +14592,7 @@ describe('auth device-flow routes', () => {
   // whose `poll` is scripted per-test. Lives at the top of the suite so
   // every `it()` can compose it with the registry.
   function makeFakeProvider(): {
-    provider: import('./auth/device-flow.js').DeviceFlowProvider;
+    provider: DeviceFlowProvider;
     startCount: () => number;
   } {
     let starts = 0;
@@ -14485,12 +14605,8 @@ describe('auth device-flow routes', () => {
             deviceCode:
               // Use the brandSecret helper so the secret follows the same
               // redaction shape the production provider produces.
-              (await import('./auth/device-flow.js')).brandSecret(
-                `device-${starts}`,
-              ),
-            pkceVerifier: (await import('./auth/device-flow.js')).brandSecret(
-              `pkce-${starts}`,
-            ),
+              brandSecret(`device-${starts}`),
+            pkceVerifier: brandSecret(`pkce-${starts}`),
             userCode: `USER-${starts}`,
             verificationUri: 'https://idp.example/verify',
             verificationUriComplete: 'https://idp.example/verify?u=AB12',
@@ -14971,17 +15087,15 @@ describe('auth device-flow routes', () => {
     // must surface as 502 with code:'upstream_error' instead of falling
     // through `sendBridgeError`'s generic 500 path. Build a fake
     // provider whose start always throws.
-    const { UpstreamDeviceFlowError } = await import('./auth/device-flow.js');
-    const failingProvider: import('./auth/device-flow.js').DeviceFlowProvider =
-      {
-        providerId: 'qwen-oauth',
-        async start() {
-          throw new UpstreamDeviceFlowError('mocked upstream outage');
-        },
-        async poll() {
-          return { kind: 'pending' as const };
-        },
-      };
+    const failingProvider: DeviceFlowProvider = {
+      providerId: 'qwen-oauth',
+      async start() {
+        throw new UpstreamDeviceFlowError('mocked upstream outage');
+      },
+      async poll() {
+        return { kind: 'pending' as const };
+      },
+    };
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
       bridge,
@@ -15000,10 +15114,7 @@ describe('auth device-flow routes', () => {
   it('sweeper-driven auto-expiry transitions a stale entry to status:error and surfaces over GET', async () => {
     // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
     // injected registry with a controlled clock + manual sweeper trigger.
-    const { DeviceFlowRegistry, brandSecret } = await import(
-      './auth/device-flow.js'
-    );
-    const fakeProvider: import('./auth/device-flow.js').DeviceFlowProvider = {
+    const fakeProvider: DeviceFlowProvider = {
       providerId: 'qwen-oauth',
       async start() {
         return {
@@ -15103,9 +15214,6 @@ describe('auth device-flow routes', () => {
 
   it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
     // Inject a fake registry whose `start` always throws the cap error.
-    const { TooManyActiveDeviceFlowsError } = await import(
-      './auth/device-flow.js'
-    );
     const fakeRegistry = {
       start: async () => {
         throw new TooManyActiveDeviceFlowsError();
@@ -15114,7 +15222,7 @@ describe('auth device-flow routes', () => {
       cancel: () => undefined,
       listPending: () => [],
       dispose: () => {},
-    } as unknown as import('./auth/device-flow.js').DeviceFlowRegistry;
+    } as unknown as DeviceFlowRegistryType;
 
     const bridge = fakeBridge();
     const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {

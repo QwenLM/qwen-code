@@ -1739,6 +1739,10 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.disabled);
+  const visibleTools =
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.visible);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1999,6 +2003,7 @@ export async function loadCliConfig(
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
+    visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
@@ -2050,6 +2055,12 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
+    // Ordinary interactive TUI defers telemetry until after first paint. Auth
+    // events emitted before the deferred init are an accepted startup-latency
+    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
+    // "prompt"` must await IDE context before auto-submit, but telemetry can
+    // still initialize after render unless an initial prompt is present.
+    deferTelemetryInitialization: interactive && !isAcpMode && !question,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
