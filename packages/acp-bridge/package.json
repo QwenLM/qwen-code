@@ -59,6 +59,10 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./replayWindowLimits": {
+      "types": "./dist/replayWindowLimits.d.ts",
+      "import": "./dist/replayWindowLimits.js"
+    },
     "./spawnChannel": {
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
