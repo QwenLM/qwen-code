@@ -7,26 +7,11 @@
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
 
-interface FleetArgs {
-  'daemon-url'?: string;
-  token?: string;
-}
-
-export const fleetCommand: CommandModule<unknown, FleetArgs> = {
+export const fleetCommand: CommandModule = {
   command: 'fleet',
   describe: 'Open Fleet View to manage active sessions',
-  builder: (yargs) =>
-    yargs
-      .option('daemon-url', {
-        type: 'string',
-        description: 'Daemon URL to connect to (default: auto-discover)',
-      })
-      .option('token', {
-        type: 'string',
-        description: 'Daemon authentication token',
-      })
-      .version(false),
-  handler: async (_argv) => {
+  builder: (yargs) => yargs.version(false),
+  handler: async () => {
     const { showStandaloneFleetView } = await import(
       '../ui/components/fleet-view/StandaloneFleetView.js'
     );

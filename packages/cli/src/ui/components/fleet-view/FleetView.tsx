@@ -5,13 +5,7 @@
  */
 
 import type React from 'react';
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -202,9 +196,12 @@ export const FleetView: React.FC<FleetViewProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => () => {
+  useEffect(
+    () => () => {
       if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-    }, []);
+    },
+    [],
+  );
 
   const showStatus = useCallback((msg: string) => {
     setStatusMessage(msg);
@@ -226,9 +223,11 @@ export const FleetView: React.FC<FleetViewProps> = ({
     0,
     Math.min(selectedIndex, flatEntries.length - 1),
   );
-  if (clampedIndex !== selectedIndex && flatEntries.length > 0) {
-    onSelect(clampedIndex);
-  }
+  useEffect(() => {
+    if (clampedIndex !== selectedIndex && flatEntries.length > 0) {
+      onSelect(clampedIndex);
+    }
+  }, [clampedIndex, selectedIndex, flatEntries.length, onSelect]);
   const selectedEntry = flatEntries[clampedIndex];
 
   const handleKeypress = useCallback(
@@ -278,19 +277,6 @@ export const FleetView: React.FC<FleetViewProps> = ({
       // --- Delete confirmation ---
       if (mode === 'confirm-delete') {
         if (key.name === 'y' && selectedEntry) {
-          if (sessionService) {
-            void sessionService
-              .removeSession(selectedEntry.sessionId)
-              .then((ok) => {
-                if (ok) {
-                  showStatus('Session deleted');
-                  onRefresh?.();
-                } else {
-                  showStatus('Delete failed');
-                }
-              })
-              .catch(() => showStatus('Delete failed'));
-          }
           onDelete(selectedEntry.sessionId);
           setMode('normal');
         } else {
@@ -351,6 +337,25 @@ export const FleetView: React.FC<FleetViewProps> = ({
   useKeypress(handleKeypress, { isActive });
 
   const maxVisibleRows = rows - 6;
+
+  // Compute scroll offset to keep selected item visible.
+  // Each group header takes 1 row, each entry takes 1 row.
+  const entryRowIndex = useMemo(() => {
+    let row = 0;
+    for (const group of groups) {
+      row++; // group header
+      for (const entry of group.entries) {
+        if (entry === selectedEntry) return row;
+        row++;
+      }
+    }
+    return 0;
+  }, [groups, selectedEntry]);
+
+  const scrollOffset = useMemo(() => {
+    if (entryRowIndex < maxVisibleRows) return 0;
+    return Math.max(0, entryRowIndex - maxVisibleRows + 1);
+  }, [entryRowIndex, maxVisibleRows]);
 
   const footerText =
     mode === 'confirm-delete'
@@ -437,7 +442,10 @@ export const FleetView: React.FC<FleetViewProps> = ({
                   globalIdx++;
                 }
               }
-              return rowNodes.slice(0, maxVisibleRows);
+              return rowNodes.slice(
+                scrollOffset,
+                scrollOffset + maxVisibleRows,
+              );
             })()
           )}
         </Box>

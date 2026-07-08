@@ -6,19 +6,15 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { render, Box, useApp } from 'ink';
-import {
-  SessionService,
-  type Config,
-  type SessionListItem,
-} from '@qwen-code/qwen-code-core';
+import { SessionService, type Config } from '@qwen-code/qwen-code-core';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { FleetView } from './FleetView.js';
-import type {
-  FleetSessionEntry,
-  FleetSessionStatus,
+import {
+  toFleetEntry,
+  type FleetSessionEntry,
 } from '../../contexts/FleetViewContext.js';
 import { TerminalOutputProvider } from '../../contexts/TerminalOutputContext.js';
 
@@ -33,21 +29,6 @@ const STUB_CONFIG = {
 const STUB_SETTINGS = {
   merged: { ui: {} },
 } as unknown as LoadedSettings;
-
-function toFleetEntry(item: SessionListItem): FleetSessionEntry {
-  const displayName =
-    item.customTitle ||
-    (item.prompt
-      ? item.prompt.length > 60
-        ? item.prompt.slice(0, 57) + '...'
-        : item.prompt
-      : item.sessionId.slice(0, 8));
-  return {
-    ...item,
-    status: 'idle' as FleetSessionStatus,
-    displayName,
-  };
-}
 
 interface StandaloneFleetViewScreenProps {
   sessionService: SessionService;
@@ -74,7 +55,7 @@ function StandaloneFleetViewScreen({
     try {
       setLoading(true);
       const result = await sessionService.listSessions({ size: 100 });
-      setSessions(result.items.map(toFleetEntry));
+      setSessions(result.items.map((item) => toFleetEntry(item, null)));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

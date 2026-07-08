@@ -854,6 +854,10 @@ const SETTINGS_SCHEMA = {
         description:
           'How to group sessions in Fleet View. "state" groups by running/idle/persisted status. "directory" groups by workspace path.',
         showInDialog: true,
+        options: [
+          { value: 'state', label: 'By state' },
+          { value: 'directory', label: 'By directory' },
+        ],
       },
       history: {
         type: 'object',

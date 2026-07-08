@@ -5,35 +5,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SessionListItem } from '@qwen-code/qwen-code-core';
-import type {
-  FleetSessionEntry,
-  FleetSessionStatus,
+import {
+  toFleetEntry,
+  type FleetSessionEntry,
 } from '../contexts/FleetViewContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
 const POLL_INTERVAL_MS = 3000;
 const SESSION_LIST_SIZE = 100;
-
-function toFleetEntry(
-  item: SessionListItem,
-  currentSessionId: string | null,
-): FleetSessionEntry {
-  let status: FleetSessionStatus = 'idle';
-  if (item.sessionId === currentSessionId) {
-    status = 'active';
-  }
-
-  const displayName =
-    item.customTitle ||
-    (item.prompt
-      ? item.prompt.length > 60
-        ? item.prompt.slice(0, 57) + '...'
-        : item.prompt
-      : item.sessionId.slice(0, 8));
-
-  return { ...item, status, displayName };
-}
 
 export interface UseFleetViewSessionsResult {
   sessions: FleetSessionEntry[];

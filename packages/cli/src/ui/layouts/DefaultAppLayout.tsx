@@ -62,6 +62,13 @@ const FleetViewContainer: React.FC = () => {
     uiActions.closeFleetView();
   }, [uiActions]);
 
+  const handleDelete = useCallback(
+    (sessionId: string) => {
+      void sessionService.removeSession(sessionId).then(() => refresh());
+    },
+    [sessionService, refresh],
+  );
+
   const handleCreateNew = useCallback(() => {
     uiActions.setFleetDoubleTapPending(false);
     uiActions.closeFleetView();
@@ -82,7 +89,7 @@ const FleetViewContainer: React.FC = () => {
       onSelect={setSelectedIndex}
       onAttach={handleAttach}
       onClose={handleClose}
-      onDelete={() => {}}
+      onDelete={handleDelete}
       onCreateNew={handleCreateNew}
       onCycleGroupMode={handleCycleGroupMode}
       workspaceCwd={config.getWorkingDir()}
