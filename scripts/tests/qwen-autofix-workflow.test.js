@@ -421,6 +421,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
+    expect(
+      prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
+        [],
+    ).toHaveLength(2);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
