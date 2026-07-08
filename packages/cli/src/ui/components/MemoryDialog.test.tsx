@@ -35,9 +35,12 @@ const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
 describe('MemoryDialog', () => {
+  let setAutoSkillEnabled: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
 
+    setAutoSkillEnabled = vi.fn();
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
@@ -48,6 +51,7 @@ describe('MemoryDialog', () => {
       getManagedAutoMemoryEnabled: vi.fn(() => false),
       getManagedAutoDreamEnabled: vi.fn(() => false),
       getAutoSkillEnabled: vi.fn(() => false),
+      setAutoSkillEnabled,
     } as never);
 
     mockedUseSettings.mockReturnValue({
@@ -187,7 +191,49 @@ describe('MemoryDialog', () => {
       'memory.enableAutoSkill',
       true,
     );
+    // Also drives the live Config flag so it takes effect this session (and can
+    // re-enable auto-skill after the review dialog's `t` disabled it).
+    expect(setAutoSkillEnabled).toHaveBeenCalledWith(true);
     expect(lastFrame()).toContain('› Auto-skill: on');
+  });
+
+  it('toggles Auto-skill back OFF on Enter (re-disable path)', () => {
+    const setValue = vi.fn();
+    mockedUseSettings.mockReturnValue({
+      setValue,
+      merged: { memory: { enableAutoSkill: true, autoSkillConfirm: true } },
+    } as never);
+
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    const pressKey = (key: { name: string }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    expect(lastFrame()).toContain('Auto-skill: on');
+
+    // navigate to the autoSkillConfirm row first, then up to autoSkill
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Auto-skill: on');
+
+    pressKey({ name: 'return' });
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'memory.enableAutoSkill',
+      false,
+    );
+    // The live flag must go OFF too — this is the session-level disable, the
+    // same path the review dialog's turn-off option relies on.
+    expect(setAutoSkillEnabled).toHaveBeenCalledWith(false);
+    expect(lastFrame()).toContain('› Auto-skill: off');
   });
 
   it('toggles autoSkillConfirm on Enter and persists to workspace settings', () => {
