@@ -426,9 +426,21 @@ const ENV_OPTIONS_WITH_VALUES = new Set([
   '--chdir',
 ]);
 
-const TIMEOUT_OPTIONS_WITH_VALUES = new Set(['-s', '--signal', '-k']);
+const TIMEOUT_OPTIONS_WITH_VALUES = new Set([
+  '-s',
+  '--signal',
+  '-k',
+  '--kill-after',
+]);
 const NICE_OPTIONS_WITH_VALUES = new Set(['-n', '--adjustment']);
-const STRACE_OPTIONS_WITH_VALUES = new Set(['-o', '-e', '-p', '-s', '-u']);
+const STRACE_OPTIONS_WITH_VALUES = new Set([
+  '-o',
+  '-e',
+  '-p',
+  '-s',
+  '-u',
+  '-E',
+]);
 
 const KILLALL_OPTIONS_WITH_VALUES = new Set([
   '-n',
@@ -487,8 +499,10 @@ const XARGS_OPTIONS_WITH_VALUES = new Set([
   '-a',
   '-J',
   '-R',
+  '-j',
   '--arg-file',
   '--delimiter',
+  '--jobs',
   '--max-args',
   '--max-chars',
   '--max-lines',
@@ -827,13 +841,13 @@ function pkillTargetsSelf(tokens: string[]): boolean {
 }
 
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
+  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+(?:\S+\s+)*?)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+(?:\S+\s+)*?)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
 
 const SHELL_WRAPPER_COMMAND_SUBSTITUTION =
   /\$\(\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')[^)]*\)|`\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')[^`]*`/gi;
 
 const PROCESS_SUBSTITUTION_PGREP =
-  /<\s*<\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)/gi;
+  /<\s*<\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+(?:\S+\s+)*?)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)/gi;
 
 const BARE_SELF_PROCESS_PATTERN = new RegExp(`^(${SELF_PROCESS_NAMES})$`, 'i');
 
@@ -938,7 +952,7 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
   }
 
   if (usesInverse) {
-    return !result;
+    return true;
   }
   return result;
 }
@@ -1096,8 +1110,9 @@ function shellControlFlowTargetsSelf(command: string): boolean {
   }
 
   return (
-    /\b(?:mapfile|readarray)\b[\s\S]*?<\s*<\([^;]*;\s*kill\b/i.test(command) &&
-    processSubstitutionTargetsSelf(command)
+    /\b(?:mapfile|readarray)\b[\s\S]*?<\s*<\([^;]*?(?:;|&&|\|\|)\s*kill\b/i.test(
+      command,
+    ) && processSubstitutionTargetsSelf(command)
   );
 }
 

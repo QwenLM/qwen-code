@@ -898,10 +898,8 @@ describe('detectSelfKillCommand', () => {
   });
 
   it('handles pgrep -v (inverse match) correctly', () => {
-    expect(detectSelfKillCommand('kill -9 $(pgrep -v node)')).toBe(false);
-    expect(detectSelfKillCommand('kill -9 $(pgrep --inverse node)')).toBe(
-      false,
-    );
+    expect(detectSelfKillCommand('kill -9 $(pgrep -v node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep --inverse node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(pgrep -v nginx)')).toBe(true);
   });
 
@@ -932,7 +930,7 @@ describe('detectSelfKillCommand', () => {
   });
 
   it('handles pgrep -vf combined flags (inverse + full)', () => {
-    expect(detectSelfKillCommand('kill -9 $(pgrep -vf node)')).toBe(false);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -vf node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(pgrep -vf nginx)')).toBe(true);
   });
 
@@ -984,6 +982,36 @@ describe('detectSelfKillCommand', () => {
 
   it('strace prefix in command substitution', () => {
     expect(detectSelfKillCommand('kill -9 $(strace pgrep node)')).toBe(true);
+    expect(
+      detectSelfKillCommand('kill -9 $(strace -o /tmp/log pgrep node)'),
+    ).toBe(true);
+  });
+
+  it('strace prefix in process substitution', () => {
+    expect(detectSelfKillCommand('kill -9 < <(strace pgrep node)')).toBe(true);
+  });
+
+  it('parallel -j option skips correctly', () => {
+    expect(detectSelfKillCommand('pgrep node | parallel -j 4 kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | parallel --jobs 4 kill')).toBe(
+      true,
+    );
+  });
+
+  it('mapfile with && separator', () => {
+    expect(
+      detectSelfKillCommand(
+        'mapfile -t pids < <(pgrep node) && kill -9 "${pids[@]}"',
+      ),
+    ).toBe(true);
+  });
+
+  it('readarray with && separator', () => {
+    expect(
+      detectSelfKillCommand(
+        'readarray -t pids < <(pgrep node) && kill -9 "${pids[@]}"',
+      ),
+    ).toBe(true);
   });
 });
 
