@@ -3035,7 +3035,7 @@ export abstract class ChannelBase {
     try {
       process.stderr.write(
         `${prefix} ${sanitizeLogText(
-          JSON.stringify(payload, redactPayloadValue, 2),
+          JSON.stringify(payload, redactPayloadValue),
           DEBUG_PAYLOAD_LIMIT,
         )}\n`,
       );
