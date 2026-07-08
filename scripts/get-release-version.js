@@ -300,6 +300,17 @@ function getStableVersion(args) {
     releaseVersion = overrideVersion;
   } else if (tagResult) {
     releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
+    validateVersion(releaseVersion, 'X.Y.Z', 'derived from preview dist-tag');
+    const latestStable = getVersionFromNPM('latest');
+    if (
+      latestStable &&
+      semver.valid(latestStable) &&
+      semver.gt(latestStable, releaseVersion)
+    ) {
+      throw new Error(
+        `Derived stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
+      );
+    }
   } else {
     const packageJson = readJson('package.json');
     releaseVersion = packageJson.version.split('-')[0];
@@ -326,6 +337,11 @@ function getPreviewVersion(args) {
   } else if (tagResult) {
     releaseVersion =
       tagResult.latestVersion.replace(/-nightly.*/, '') + '-preview.0';
+    validateVersion(
+      releaseVersion,
+      'X.Y.Z-preview.N',
+      'derived from nightly dist-tag',
+    );
   } else {
     const packageJson = readJson('package.json');
     const baseVersion = packageJson.version.split('-')[0];

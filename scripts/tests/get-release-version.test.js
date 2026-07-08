@@ -407,5 +407,111 @@ describe('getVersion', () => {
       const result = getVersion({ type: 'preview' });
       expect(result.releaseVersion).toBe('0.8.0-preview.0');
     });
+
+    it('should throw when no preview dist-tag exists (patch)', () => {
+      const mockWithNoPreview = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoPreview);
+
+      expect(() =>
+        getVersion({ type: 'patch', 'patch-from': 'preview' }),
+      ).toThrow('Unable to determine baseline version for preview');
+    });
+
+    it('should derive preview from nightly versions when nightly dist-tag is missing', () => {
+      const mockWithNightliesButNoTag = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=nightly') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.6.0',
+            '0.6.1',
+            '0.8.0-nightly.20250916.abcdef',
+          ]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNightliesButNoTag);
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.0-preview.0');
+      expect(result.npmTag).toBe('preview');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should reject an invalid stable version derived from preview', () => {
+      const mockWithInvalidPreview = (command) => {
+        if (command.includes('npm view') && command.includes('--tag=preview'))
+          return 'invalid-preview.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithInvalidPreview);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'Invalid derived from preview dist-tag: invalid',
+      );
+    });
+
+    it('should reject an invalid preview version derived from nightly', () => {
+      const mockWithInvalidNightly = (command) => {
+        if (command.includes('npm view') && command.includes('--tag=nightly'))
+          return 'invalid-nightly.20250916.abcdef';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithInvalidNightly);
+
+      expect(() => getVersion({ type: 'preview' })).toThrow(
+        'Invalid derived from nightly dist-tag: invalid-preview.0',
+      );
+    });
+
+    it('should reject a stable release derived below the published latest version', () => {
+      const mockWithOlderPreviewVersions = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.7.0-preview.0',
+            '0.7.0-preview.1',
+            '0.9.0',
+          ]);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithOlderPreviewVersions);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'Derived stable version 0.7.0 is lower than published latest 0.9.0',
+      );
+    });
   });
 });
