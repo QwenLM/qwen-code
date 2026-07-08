@@ -48,6 +48,7 @@ import {
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -572,6 +573,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           ...result,
         });
       };
+      const activeWebhookTasks = new Set<string>();
       const onMessage = (message: unknown) => {
         if (!isChannelWebhookTaskMessage(message)) return;
         if (message.expiresAt <= Date.now()) {
@@ -593,22 +595,35 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           });
           return;
         }
+        if (activeWebhookTasks.size >= MAX_ACTIVE_WEBHOOK_TASKS) {
+          sendWebhookTaskResult(message.id, {
+            ok: false,
+            error: 'Channel webhook task queue is full.',
+          });
+          return;
+        }
+        const taskId = message.id;
+        const task = message.task;
+        const safeId = sanitizeLogText(taskId, 128);
+        const safeChannel = sanitizeLogText(task.channelName, 128);
+        const safeSource = sanitizeLogText(task.source, 128);
+        activeWebhookTasks.add(taskId);
         sendWebhookTaskResult(message.id, { ok: true });
         void handle
-          .runWebhookTask(message.task, { timeoutMs: 5 * 60_000 })
+          .runWebhookTask(task, { timeoutMs: 5 * 60_000 })
           .catch((err: unknown) => {
             const safeMessage = sanitizeLogText(
               err instanceof Error ? err.message : String(err),
               512,
             );
-            const safeId = sanitizeLogText(message.id, 128);
-            const safeChannel = sanitizeLogText(message.task.channelName, 128);
-            const safeSource = sanitizeLogText(message.task.source, 128);
             writeStderrLine(
               `[Channel] webhook task failed ` +
                 `(id=${safeId}, channel=${safeChannel}, source=${safeSource}): ` +
                 safeMessage,
             );
+          })
+          .finally(() => {
+            activeWebhookTasks.delete(taskId);
           });
       };
       const clearHeartbeat = () => {

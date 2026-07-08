@@ -1002,6 +1002,9 @@ export abstract class ChannelBase {
     );
     const promptText = buildChannelWebhookPrompt(task, target);
     const taskId = `webhook:${task.source}:${task.eventType}`;
+    const safeTaskId = sanitizeLogText(taskId, 64);
+    const safeChannel = sanitizeLogText(this.name, 64);
+    const safeSessionId = sanitizeLogText(sessionId, 64);
     const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
 
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
@@ -1009,7 +1012,7 @@ export abstract class ChannelBase {
     const current = prev.then(async (): Promise<string | undefined> => {
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
-          `[${this.name}] dropped webhook ${taskId} for session ${sessionId}: session was cleared before it ran\n`,
+          `[${safeChannel}] dropped webhook ${safeTaskId} for session ${safeSessionId}: session was cleared before it ran\n`,
         );
         throw new ChannelLoopSkippedError(
           'webhook task dropped because session was cleared before it ran',
@@ -1022,14 +1025,14 @@ export abstract class ChannelBase {
           sessionId,
           target,
           promptText,
-          `webhook task ${taskId}`,
+          `webhook task ${safeTaskId}`,
         );
         promptToSend = sessionContext.promptText;
         shouldClaimSessionContext = sessionContext.shouldClaimSessionContext;
       }
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
-          `[${this.name}] dropped webhook ${taskId} for session ${sessionId}: session was cleared before it ran\n`,
+          `[${safeChannel}] dropped webhook ${safeTaskId} for session ${safeSessionId}: session was cleared before it ran\n`,
         );
         throw new ChannelLoopSkippedError(
           'webhook task dropped because session was cleared before it ran',
@@ -1061,7 +1064,7 @@ export abstract class ChannelBase {
         this.onPromptStart(target.chatId, sessionId);
       } catch (err) {
         process.stderr.write(
-          `[${this.name}] onPromptStart threw in webhook ${taskId} for session ${sessionId}: ${this.lifecycleError(err)}\n`,
+          `[${safeChannel}] onPromptStart threw in webhook ${safeTaskId} for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
         );
       }
       const heldChunks: string[] = [];
@@ -1148,11 +1151,8 @@ export abstract class ChannelBase {
           !(err instanceof ChannelLoopSkippedError) &&
           !(err instanceof Error && err.message === LOOP_TIMED_OUT_MESSAGE)
         ) {
-          const channel = sanitizeLogText(this.name, 64);
-          const safeTaskId = sanitizeLogText(taskId, 64);
-          const safeSessionId = sanitizeLogText(sessionId, 64);
           process.stderr.write(
-            `[${channel}] webhook ${safeTaskId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+            `[${safeChannel}] webhook ${safeTaskId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
         throw err;
@@ -1164,7 +1164,7 @@ export abstract class ChannelBase {
             this.onPromptEnd(target.chatId, sessionId);
           } catch (err) {
             process.stderr.write(
-              `[${this.name}] onPromptEnd threw in webhook ${taskId} for session ${sessionId}: ${
+              `[${safeChannel}] onPromptEnd threw in webhook ${safeTaskId} for session ${safeSessionId}: ${
                 err instanceof Error ? err.message : err
               }\n`,
             );
@@ -1177,7 +1177,7 @@ export abstract class ChannelBase {
         this.drainCollectBufferForCurrentPrompt(
           sessionId,
           stillCurrent,
-          `webhook ${taskId}`,
+          `webhook ${safeTaskId}`,
         );
       }
     });

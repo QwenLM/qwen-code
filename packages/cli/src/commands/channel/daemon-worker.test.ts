@@ -1720,6 +1720,66 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
+  it('rejects webhook IPC messages when the worker webhook queue is full', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const validateWebhookTask = vi.fn();
+    const runWebhookTask = vi.fn(() => new Promise<void>(() => {}));
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask,
+      runWebhookTask,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const webhookListener = process
+        .listeners('message')
+        .find((listener) => !existingMessageListeners.includes(listener));
+      expect(webhookListener).toBeDefined();
+      for (let i = 0; i < 17; i++) {
+        (webhookListener as ((message: unknown) => void) | undefined)?.({
+          type: 'webhook_task',
+          id: `webhook-${i}`,
+          expiresAt: Date.now() + 1000,
+          task: webhookTask,
+        });
+      }
+
+      expect(send).toHaveBeenCalledWith({
+        type: 'webhook_task_result',
+        id: 'webhook-16',
+        ok: false,
+        error: 'Channel webhook task queue is full.',
+      });
+      expect(runWebhookTask).toHaveBeenCalledTimes(16);
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
   it('logs background webhook task failures after acking the IPC message', async () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();

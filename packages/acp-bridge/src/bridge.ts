@@ -1611,6 +1611,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
+  const rollbackAttachRegistration = (
+    entry: SessionEntry,
+    clientId: string,
+  ): void => {
+    if (entry.attachCount > 0) entry.attachCount--;
+    unregisterClient(entry, clientId);
+  };
+
   const resolveTrustedClientId = (
     entry: SessionEntry,
     clientId?: string,
@@ -2032,7 +2040,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
 
       if (approvalMode) {
-        await applyApprovalMode(entry, approvalMode, false, clientId);
+        try {
+          await applyApprovalMode(entry, approvalMode, false, clientId);
+        } catch (err) {
+          try {
+            await closeSessionImpl(entry.sessionId, undefined, {
+              reason: 'approval_mode_initialization_failed',
+            });
+          } catch {
+            /* best-effort; preserve the approval-mode failure */
+          }
+          throw err;
+        }
       }
 
       // Bd1zc: re-check that the entry is still live before returning.
@@ -2043,8 +2062,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // a sessionId that already 404s on every subsequent request.
       if (!byId.has(entry.sessionId)) {
         throw new Error(
-          `Session ${entry.sessionId} died during model-switch ` +
-            `initialization`,
+          `Session ${entry.sessionId} died during session initialization`,
         );
       }
 
@@ -2294,6 +2312,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : 'Trust-gate rejection from ACP child';
         throw new TrustGateError(message);
       }
+      throw err;
+    }
+  }
+
+  async function applyApprovalModeForAttach(
+    entry: SessionEntry,
+    mode: ApprovalMode,
+    clientId: string,
+  ): Promise<void> {
+    try {
+      await applyApprovalMode(entry, mode, false, clientId);
+    } catch (err) {
+      rollbackAttachRegistration(entry, clientId);
       throw err;
     }
   }
@@ -2995,7 +3026,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       if (req.approvalMode) {
-        await applyApprovalMode(existing, req.approvalMode, false, clientId);
+        await applyApprovalModeForAttach(existing, req.approvalMode, clientId);
       }
       return {
         sessionId: existing.sessionId,
@@ -3061,7 +3092,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // for restore waiter consistency).
       const clientId = registerClient(entry, req.clientId);
       if (req.approvalMode) {
-        await applyApprovalMode(entry, req.approvalMode, false, clientId);
+        await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
       }
       return {
         ...restored,
@@ -3215,6 +3246,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // (they read it off the registered entry on the next tick).
         racedEntry.attachCount += 1 + coalesceState.count;
         const clientId = registerClient(racedEntry, req.clientId);
+        if (req.approvalMode) {
+          try {
+            await applyApprovalMode(
+              racedEntry,
+              req.approvalMode,
+              false,
+              clientId,
+            );
+          } catch (err) {
+            racedEntry.attachCount = Math.max(
+              0,
+              racedEntry.attachCount - 1 - coalesceState.count,
+            );
+            unregisterClient(racedEntry, clientId);
+            throw err;
+          }
+        }
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -3628,10 +3676,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ).catch(() => {});
           }
           if (req.approvalMode) {
-            await applyApprovalMode(
+            await applyApprovalModeForAttach(
               existing,
               req.approvalMode,
-              false,
               clientId,
             );
           }
@@ -3691,10 +3738,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ).catch(() => {});
           }
           if (req.approvalMode) {
-            await applyApprovalMode(
+            await applyApprovalModeForAttach(
               attachedEntry,
               req.approvalMode,
-              false,
               clientId,
             );
           }

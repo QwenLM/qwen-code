@@ -267,6 +267,9 @@ function classifyChannelWebhookEnqueueError(error: unknown): {
   if (message === 'Channel webhook task IPC timed out.') {
     return { status: 504, code: 'channel_webhook_enqueue_timeout' };
   }
+  if (message === 'Channel webhook task queue is full.') {
+    return { status: 503, code: 'channel_webhook_queue_full' };
+  }
   if (
     message === 'Webhook tasks require unattended approval mode.' ||
     message ===

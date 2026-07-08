@@ -304,6 +304,28 @@ describe('channel webhook routes', () => {
     });
   });
 
+  it('returns 503 when the worker webhook queue is full', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new Error('Channel webhook task queue is full.');
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_queue_full',
+    });
+  });
+
   it.each([
     'Webhook tasks require unattended approval mode.',
     'Webhook tasks are not supported when sessionScope is single.',
