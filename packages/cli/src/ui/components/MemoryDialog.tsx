@@ -291,8 +291,14 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       'memory.enableAutoSkill',
       newValue,
     );
+    // Also drive the live Config flag: it is copied from settings at startup and
+    // read live by the skill-review scheduler. Without this, toggling here would
+    // not take effect until restart — and in particular could not re-enable
+    // auto-skill after the review dialog's turn-off option disabled it this
+    // session.
+    config.setAutoSkillEnabled(newValue);
     setAutoSkillOn(newValue);
-  }, [autoSkillOn, loadedSettings]);
+  }, [autoSkillOn, loadedSettings, config]);
 
   const handleToggleAutoSkillConfirm = useCallback(() => {
     const newValue = !autoSkillConfirmOn;

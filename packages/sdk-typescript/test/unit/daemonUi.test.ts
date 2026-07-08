@@ -1196,6 +1196,103 @@ describe('daemon UI normalizer and transcript reducer', () => {
     );
   });
 
+  it('preserves structured model stream interruption turn errors', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 44,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+          code: '-32603',
+          errorKind: 'model_stream_interrupted',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: 'error',
+        source: 'turn_error',
+        recoverable: true,
+        code: '-32603',
+        errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-1',
+        text: 'terminated',
+      },
+    ]);
+  });
+
+  it('keeps structured model stream interruption on transcript blocks', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      normalizeDaemonEvent({
+        id: 46,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+          code: '-32603',
+          errorKind: 'model_stream_interrupted',
+          promptId: 'prompt-1',
+        },
+      }),
+      { now: 101 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+        code: '-32603',
+        errorKind: 'model_stream_interrupted',
+        promptId: 'prompt-1',
+      },
+    ]);
+  });
+
+  it('keeps older daemon terminated turn error text unchanged', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 45,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'terminated',
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: 'error',
+        source: 'turn_error',
+        text: 'terminated',
+      },
+    ]);
+  });
+
+  it('drops unrecognized errorKind from turn error events', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 47,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'some error',
+        errorKind: 'some_future_kind',
+      },
+    });
+
+    expect(event).toMatchObject({
+      type: 'error',
+      source: 'turn_error',
+      text: 'some error',
+    });
+    expect(event).not.toHaveProperty('errorKind');
+  });
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({

@@ -225,6 +225,13 @@
   .hamburgerButton {
     display: flex;
   }
+
+  .hamburgerButtonFloating {
+    position: fixed;
+    top: calc(env(safe-area-inset-top) + 12px);
+    left: calc(env(safe-area-inset-left) + 12px);
+    z-index: 10;
+  }
 }
 
 .appChatEmpty.appWithSidebar {
@@ -235,14 +242,6 @@
 .appChatEmpty .chatPane {
   justify-content: center;
   overflow-y: auto;
-}
-
-@media (max-width: 760px) {
-  .appChatEmpty .hamburgerButton {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-  }
 }
 
 .app,

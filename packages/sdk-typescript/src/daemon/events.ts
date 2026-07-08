@@ -757,6 +757,7 @@ export interface DaemonTurnErrorData {
   sessionId: string;
   message: string;
   code?: string;
+  errorKind?: DaemonErrorKind | (string & {});
   promptId?: string;
   [key: string]: unknown;
 }

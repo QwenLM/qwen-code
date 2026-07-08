@@ -140,6 +140,44 @@
   stroke-width: 1.5;
 }
 
+.topRow {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topRow .newChatButton {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.brandLogo {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.brandLogo svg {
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+
+.collapsed .topRow {
+  width: 100%;
+  justify-content: center;
+}
+
+.collapsed .topRow .newChatButton {
+  flex: 0 0 auto;
+}
+
 .body {
   flex: 1 1 auto;
   min-height: 0;

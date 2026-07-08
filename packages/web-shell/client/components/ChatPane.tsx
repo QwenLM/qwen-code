@@ -30,8 +30,6 @@ const EMPTY_TOOLBAR: never[] = [];
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
-  /** Marks the pane bound to the window's primary (sidebar-selected) session. */
-  isCurrent?: boolean;
   onClose?: () => void;
   onError?: (error: unknown, fallback: string) => void;
 }
@@ -43,7 +41,7 @@ export interface ChatPaneProps {
  * state, approvals, and composer, and the browser scopes keyboard focus to the
  * pane the user clicks into — so there is no cross-pane approval arbitration.
  */
-export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) {
+export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
@@ -92,13 +90,19 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
-      // Keep the draft (return false) until the prompt is actually accepted:
-      // sendPrompt can reject (transcript still loading, session disconnected,
-      // or a turn already active), and committing first would silently drop the
-      // user's text. Commit only once it resolves.
+      // Keep the draft (return false) and clear it only once the daemon ADMITS
+      // the prompt. `onAdmitted` fires at acceptance; the sendPrompt promise
+      // itself resolves only when the whole (possibly long) turn finishes, so
+      // committing on resolution would strand the sent text in the composer for
+      // the entire response. If the prompt is rejected before admission
+      // (transcript still loading, session disconnected, or a turn already
+      // active) onAdmitted never fires, so the draft is preserved and the error
+      // is surfaced.
       actions
-        .sendPrompt(trimmed, images && images.length ? { images } : undefined)
-        .then(() => commitAccepted?.())
+        .sendPrompt(trimmed, {
+          ...(images && images.length ? { images } : {}),
+          onAdmitted: commitAccepted,
+        })
         .catch((error: unknown) => reportError(error, 'Failed to send prompt'));
       return false;
     },
@@ -119,7 +123,9 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
   const handleCancel = useCallback(() => {
     actions
       .cancel()
-      .catch((error: unknown) => reportError(error, 'Failed to cancel request'));
+      .catch((error: unknown) =>
+        reportError(error, 'Failed to cancel request'),
+      );
   }, [actions, reportError]);
 
   const headerLabel =
@@ -127,9 +133,7 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
 
   return (
     <section
-      className={[styles.pane, isCurrent ? styles.paneCurrent : '']
-        .filter(Boolean)
-        .join(' ')}
+      className={styles.pane}
       data-testid="chat-pane"
       aria-label={headerLabel}
     >
@@ -137,11 +141,6 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
         <span className={styles.title} title={headerLabel}>
           {headerLabel}
         </span>
-        {isCurrent && (
-          <span className={styles.currentBadge}>
-            {t('sessionsOverview.current')}
-          </span>
-        )}
         {onClose && (
           <button
             type="button"
@@ -206,7 +205,9 @@ export function ChatPane({ title, isCurrent, onClose, onError }: ChatPaneProps) 
             />
           </div>
         )}
-        <StreamingStatus startedAt={activeTurnStartedAt} />
+        {/* Panes keep the composer status compact: spinner + elapsed time +
+            token count + cancel hint, but no rotating "witty" loading phrase. */}
+        <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
         <ChatEditor
           onSubmit={handleSubmit}
           onCancel={handleCancel}

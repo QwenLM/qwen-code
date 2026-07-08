@@ -730,6 +730,8 @@ export const DAEMON_ERROR_KINDS = [
   // An SSE writer's last successful flush was older than the daemon's
   // writer-idle deadline.
   'writer_idle_timeout',
+  // The model response stream ended before a complete turn could be read.
+  'model_stream_interrupted',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
