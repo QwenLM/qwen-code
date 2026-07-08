@@ -152,6 +152,8 @@ export class QQChannel extends ChannelBase {
   /** Lazy cache for compiled keyword trigger RegExp patterns.
    * Built lazily on first access; never invalidated — keywordTriggers is not modified at runtime. */
   private _keywordTriggerCache: RegExp[] | null = null;
+  /** Rate-limit timestamps for keyword non-match log entries (chatId → last log ms). */
+  private _lastKeywordNoMatchLog: Map<string, number> = new Map();
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<
@@ -239,6 +241,15 @@ export class QQChannel extends ChannelBase {
     this.qqConfig = config as unknown as QQChannelConfig;
     this.maxReconnectAttempts = this.qqConfig.maxReconnectAttempts ?? 20;
     this.maxFlushRetries = this.qqConfig.maxFlushRetries ?? 3;
+    const raw = this.qqConfig.bufferFlushLength;
+    if (
+      raw !== undefined &&
+      (!Number.isInteger(raw) || raw <= 0 || raw > QQChannel.MAX_BUFFER_LENGTH)
+    ) {
+      process.stderr.write(
+        `[QQ:${this.name}] WARNING: invalid bufferFlushLength=${raw}, using default ${QQChannel.MAX_BUFFER_LENGTH}\n`,
+      );
+    }
     this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
@@ -311,6 +322,7 @@ export class QQChannel extends ChannelBase {
                     // Transient (RATE_LIMITED, FALLBACK_FAILED, etc.) — re-schedule flush
                     entry!.pendingRetry = toFlush;
                     entry!.timer = setTimeout(() => {
+                      entry!.timer = null;
                       entry!.pendingRetry = '';
                       const retryTarget = this.router.getTarget(sessionId);
                       if (!retryTarget) {
@@ -322,12 +334,14 @@ export class QQChannel extends ChannelBase {
                       }
                       this.sendMessage(retryTarget.chatId, toFlush)
                         .then(() => {
+                          entry!.pendingRetry = '';
                           if (!entry!.buffer) this.cronBuffer.delete(sessionId);
                         })
                         .catch((retryErr) => {
                           process.stderr.write(
                             `[QQ:${this.name}] Cron flush retry failed: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
                           );
+                          entry!.pendingRetry = '';
                           this.cronBuffer.delete(sessionId);
                         });
                     }, 5000);
@@ -689,7 +703,7 @@ export class QQChannel extends ChannelBase {
   ): Promise<{ base: string; path: string } | null> {
     if (this.disposed) {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: channel disposed, dropping message to ${sanitizeLogText(chatId, 64)}
+        `[QQ:${this.name}] resolveRoute: channel disposed, dropping message to ${sanitizeLogText(chatId, 64)}\n
 `,
       );
       return null;
@@ -699,7 +713,7 @@ export class QQChannel extends ChannelBase {
         await this.fetchToken();
       } catch (_e) {
         process.stderr.write(
-          `[QQ:${this.name}] resolveRoute: token refresh failed (${sanitizeLogText(_e instanceof Error ? _e.message : String(_e), 120)}), dropping message to ${sanitizeLogText(chatId, 64)}
+          `[QQ:${this.name}] resolveRoute: token refresh failed (${sanitizeLogText(_e instanceof Error ? _e.message : String(_e), 120)}), dropping message to ${sanitizeLogText(chatId, 64)}\n
 `,
         );
         return null;
@@ -707,14 +721,14 @@ export class QQChannel extends ChannelBase {
     }
     if (!this.accessToken) {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: accessToken is empty after fetchToken
+        `[QQ:${this.name}] resolveRoute: accessToken is empty after fetchToken\n
 `,
       );
       return null;
     }
     if (!isValidChatId(chatId)) {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: invalid chatId rejected (length=${chatId.length})
+        `[QQ:${this.name}] resolveRoute: invalid chatId rejected (length=${chatId.length})\n
 `,
       );
       return null;
@@ -792,9 +806,7 @@ export class QQChannel extends ChannelBase {
     this.coldStart = true;
     if (this._inCronFlow > 0) {
       process.stderr.write(
-        '[qqbot] resetRoutingState: orphaned cron flow (depth=' +
-          this._inCronFlow +
-          ') during disconnect',
+        `[QQ:${this.name}] resetRoutingState: orphaned cron flow (depth=${this._inCronFlow}) during disconnect\n`,
       );
     }
     this._inCronFlow = 0;
@@ -1912,7 +1924,8 @@ export class QQChannel extends ChannelBase {
     // Include GROUP_MESSAGE intent when groupAllPolicy requires it
     const needsGroupMsg =
       this.qqConfig.groupAllPolicy === 'keyword' ||
-      this.qqConfig.groupAllPolicy === 'all';
+      this.qqConfig.groupAllPolicy === 'all' ||
+      this.qqConfig.groupAllPolicy === 'log';
     this.ws.send(
       JSON.stringify({
         op: OpCode.IDENTIFY,
@@ -1938,60 +1951,62 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     if (this.isReconnecting) return;
     this.isReconnecting = true;
-    const myReconnectId = this._reconnectId;
+    try {
+      const myReconnectId = this._reconnectId;
 
-    if (
-      this.maxReconnectAttempts > 0 &&
-      this.reconnectAttempts >= this.maxReconnectAttempts
-    ) {
-      process.stderr.write(
-        `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
-      );
-      this.isReconnecting = false;
-      return;
-    }
-
-    let gwCalled = false;
-    const maxGwRetries = this.qqConfig.maxGwRetries ?? 5;
-    const unlimitedRetries = maxGwRetries <= 0;
-    for (
-      let attempt = 0;
-      unlimitedRetries || attempt < maxGwRetries;
-      attempt++
-    ) {
-      if (this.disposed || this._reconnectId !== myReconnectId) return;
-      try {
-        try {
-          await this.fetchToken();
-        } catch {
-          process.stderr.write(
-            `[QQ:${this.name}] RC: token refresh failed, retrying...
-`,
-          );
-          await this.sleep(2000);
-          if (this.disposed) return;
-          continue;
-        }
-        gwCalled = true;
-        await this.connectGateway();
-        this.startReplyMsgIdCleanup();
-        return;
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
+      if (
+        this.maxReconnectAttempts > 0 &&
+        this.reconnectAttempts >= this.maxReconnectAttempts
+      ) {
         process.stderr.write(
-          `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}${unlimitedRetries ? '' : `/${maxGwRetries}`})\n`,
+          `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
         );
-        if (unlimitedRetries || attempt < maxGwRetries - 1)
-          await this.sleep(backoff);
+        return;
       }
+
+      let gwCalled = false;
+      const maxGwRetries = this.qqConfig.maxGwRetries ?? 5;
+      const unlimitedRetries = maxGwRetries <= 0;
+      for (
+        let attempt = 0;
+        unlimitedRetries || attempt < maxGwRetries;
+        attempt++
+      ) {
+        if (this.disposed || this._reconnectId !== myReconnectId) return;
+        try {
+          try {
+            await this.fetchToken();
+          } catch {
+            process.stderr.write(
+              `[QQ:${this.name}] RC: token refresh failed, retrying...
+`,
+            );
+            await this.sleep(2000);
+            if (this.disposed) return;
+            continue;
+          }
+          gwCalled = true;
+          await this.connectGateway();
+          this.startReplyMsgIdCleanup();
+          return;
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
+          process.stderr.write(
+            `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}${unlimitedRetries ? '' : `/${maxGwRetries}`})\n`,
+          );
+          if (unlimitedRetries || attempt < maxGwRetries - 1)
+            await this.sleep(backoff);
+        }
+      }
+      process.stderr.write(
+        `[QQ:${this.name}] RC: exhausted ${unlimitedRetries ? '∞' : maxGwRetries} reconnect retries, will retry in 60s\n`,
+      );
+      if (gwCalled) this.reconnectAttempts++;
+      this.tryResume = false;
+    } finally {
+      this.isReconnecting = false;
     }
-    process.stderr.write(
-      `[QQ:${this.name}] RC: exhausted ${unlimitedRetries ? '∞' : maxGwRetries} reconnect retries, will retry in 60s\n`,
-    );
-    if (gwCalled) this.reconnectAttempts++;
-    this.tryResume = false;
-    this.isReconnecting = false;
     this.reconnectTimer = setTimeout(() => this.reconnectWithRetry(), 60000);
     this.reconnectTimer.unref();
   }
@@ -2123,6 +2138,11 @@ export class QQChannel extends ChannelBase {
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    // Strip trusted tags that could be forged by users
+    const safeContent = content
+      .replace(/\[atMention=[^\]]*]/g, '')
+      .replace(/\[botOpenId:[^\]]*]/g, '')
+      .replace(/\[bot]/g, '');
     if (!cleanText) return null;
 
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
@@ -2156,7 +2176,7 @@ export class QQChannel extends ChannelBase {
       : '';
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${suffixFromBotOpenId}`;
+      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderOpenId && /^[A-F0-9]+$/i.test(senderOpenId) ? `(${senderOpenId.slice(0, 8)}\u2026)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : cleanText)}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2378,14 +2398,19 @@ export class QQChannel extends ChannelBase {
           );
           return;
         }
-        const keywordText = result.cleanText.toLowerCase().normalize('NFC');
+        const keywordText = result.cleanText.normalize('NFC');
         const matched = this._keywordTriggerCache.some((re) =>
           re.test(keywordText),
         );
         if (!matched) {
-          process.stderr.write(
-            `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: keyword policy — no match for message from ${sanitizeLogText(senderName, 64)}\n`,
-          );
+          const now = Date.now();
+          const lastLog = this._lastKeywordNoMatchLog.get(chatId) ?? 0;
+          if (now - lastLog >= 60000) {
+            this._lastKeywordNoMatchLog.set(chatId, now);
+            process.stderr.write(
+              `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: keyword policy — no match for message from ${sanitizeLogText(senderName, 64)}\n`,
+            );
+          }
           return;
         }
       }
@@ -2470,6 +2495,16 @@ export class QQChannel extends ChannelBase {
     if (replyEntry) this.msgSeqMap.delete(replyEntry.msgId);
     this.replyMsgId.delete(groupId);
     this.botOpenIdByGroup.delete(groupId);
+    // Clean up cron buffers targeting this group (always, regardless of config flag)
+    let cleanedCron = 0;
+    for (const [sid, entry] of this.cronBuffer) {
+      const target = this.router.getTarget(sid);
+      if (target?.chatId === groupId) {
+        if (entry.timer) clearTimeout(entry.timer);
+        this.cronBuffer.delete(sid);
+        cleanedCron++;
+      }
+    }
     // Clean up active streamState sessions targeting this group.
     // Cancel pending idle-flush timers before deleting entries so
     // setTimeout callbacks don't fire and attempt to send to the
@@ -2484,16 +2519,6 @@ export class QQChannel extends ChannelBase {
         this.streamState.delete(sid);
         this.onSessionDied(sid);
         cleanedStreams++;
-      }
-    }
-    // Clean up cron buffers targeting this group (always, regardless of config flag)
-    let cleanedCron = 0;
-    for (const [sid, entry] of this.cronBuffer) {
-      const target = this.router.getTarget(sid);
-      if (target?.chatId === groupId) {
-        if (entry.timer) clearTimeout(entry.timer);
-        this.cronBuffer.delete(sid);
-        cleanedCron++;
       }
     }
     this.saveQQState();

@@ -1038,7 +1038,9 @@ describe('群管理事件', () => {
       (ch as unknown as Record<string, unknown>)['accessToken'] = 'test-token';
       pvt['sendIdentify']();
       const parsed = JSON.parse(sentPayload!);
-      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(0);
+      expect(parsed.d.intents & Intent.GROUP_MESSAGE).toBe(
+        Intent.GROUP_MESSAGE,
+      );
     });
 
     it('excludes GROUP_MESSAGE intent when groupAllPolicy is undefined', () => {

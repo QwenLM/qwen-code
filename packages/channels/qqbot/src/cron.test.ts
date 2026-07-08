@@ -151,7 +151,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     triggerTextChunk('sess-1', 'hello ');
     await flushSetImmediate();
@@ -211,7 +211,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     triggerTextChunk('sess-a', 'buffer-a ');
     triggerTextChunk('sess-b', 'buffer-b ');
@@ -231,7 +231,7 @@ describe('cronTextHandler', () => {
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
 
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
     const router = (ch as unknown as Record<string, unknown>)['router'] as {
       getTarget: ReturnType<typeof vi.fn>;
     };
@@ -257,7 +257,7 @@ describe('cronTextHandler', () => {
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
 
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
 
     triggerTextChunk('sess-cleanup', 'cleanup text');
@@ -280,7 +280,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     mockSendQQMessage.mockRejectedValue(
       new DeliveryError('RETRY_EXHAUSTED', 'network error'),
@@ -315,7 +315,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     // Pre-populate streamState for this session — prompt path owns it
     const ss = pvt['streamState'] as Map<string, unknown>;
@@ -337,7 +337,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     // First call fails with RATE_LIMITED
     mockSendQQMessage.mockRejectedValueOnce(
@@ -381,7 +381,7 @@ describe('cronTextHandler', () => {
       getTarget: ReturnType<typeof vi.fn>;
     };
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     // First call fails with FALLBACK_FAILED
     mockSendQQMessage.mockRejectedValueOnce(
@@ -418,7 +418,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     // First call fails with RATE_LIMITED
     mockSendQQMessage.mockRejectedValueOnce(
@@ -530,7 +530,7 @@ describe('disconnect cron cleanup', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
-    pvt['_inCronFlow'] = true;
+    pvt['_inCronFlow'] = 1;
 
     triggerTextChunk('sess-disc', 'pending cron text');
     vi.advanceTimersByTime(0); // let setImmediate fire

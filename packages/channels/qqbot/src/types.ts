@@ -78,7 +78,8 @@ export interface QQChannelConfig {
    *  Used by resolveRoute() as fallback when chatTypeMap has no entry.
    *  Essential for cron/scheduled messages to known groups.
    */
-  chatTypes?: Record<string, string>;
+  chatTypes?: Record<string, 'c2c' | 'group'>;
+  /** Valid values: 'c2c' or 'group' (for routing resolution). */
   /** Enable experimental cron-msg features. Use at your own risk. */
   'cron-msg-experimental'?: boolean;
   /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
