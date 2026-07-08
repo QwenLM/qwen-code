@@ -99,4 +99,50 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     );
     expect(container.textContent).not.toContain(formatTimestamp(reference));
   });
+
+  it('keeps sub-tools expandable while hiding their collapsed output summary', () => {
+    const container = renderPanel(
+      makeAgentWithSubTool({
+        callId: 'sub-1',
+        toolName: 'Shell',
+        status: 'completed',
+        args: { command: 'npm test' },
+        content: [
+          {
+            type: 'content',
+            content: { text: 'first line\nsecond line' },
+          },
+        ],
+      }),
+    );
+    const row = Array.from(container.querySelectorAll('[role="button"]')).find(
+      (el) => el.textContent?.includes('Shell'),
+    ) as HTMLElement | undefined;
+
+    expect(row).toBeDefined();
+    expect(row!.textContent).toContain('npm test');
+    expect(container.textContent).not.toContain('first line');
+    act(() => row!.click());
+    expect(container.textContent).toContain('first line');
+    expect(container.textContent).toContain('second line');
+  });
+
+  it('hides non-standard sub-tool summaries until the row is expanded', () => {
+    const container = renderPanel(
+      makeAgentWithSubTool({
+        callId: 'sub-1',
+        toolName: 'list_directory',
+        status: 'completed',
+        rawOutput: 'src\npackage.json',
+      }),
+    );
+    const row = Array.from(container.querySelectorAll('[role="button"]')).find(
+      (el) => el.textContent?.includes('ListFiles'),
+    ) as HTMLElement | undefined;
+
+    expect(row).toBeDefined();
+    expect(container.textContent).not.toContain('2 item(s)');
+    act(() => row!.click());
+    expect(container.textContent).toContain('2 item(s)');
+  });
 });

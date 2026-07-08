@@ -197,6 +197,8 @@ export type {
   DaemonApprovalModeChangedEvent,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
+  DaemonHistoryTruncatedData,
+  DaemonHistoryTruncatedEvent,
   DaemonControlEvent,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
@@ -431,6 +433,13 @@ export type {
   DaemonSessionStatsStatus,
   DaemonSessionStatsModelMetrics,
   DaemonSessionStatsToolByName,
+  DaemonUsageRange,
+  DaemonUsageDashboard,
+  DaemonUsageDashboardTotals,
+  DaemonUsageModelShare,
+  DaemonUsageSkillCall,
+  DaemonUsageDailyPoint,
+  DaemonUsageHeatmapDay,
   DaemonSkillLevel,
   DaemonPreflightCell,
   DaemonPreflightKind,

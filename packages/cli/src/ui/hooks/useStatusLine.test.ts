@@ -95,6 +95,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     createDebugLogger: () => debugLogMock,
+    // Stub cron-task exports to avoid loading async-mutex under fake timers
+    readCronTasks: vi.fn(async () => []),
+    updateCronTasks: vi.fn(async () => undefined),
+    removeCronTasks: vi.fn(async () => undefined),
+    getCronFilePath: vi.fn(() => '/tmp/cron-tasks.json'),
+    generateCronTaskId: vi.fn(() => 'test-id'),
   };
 });
 

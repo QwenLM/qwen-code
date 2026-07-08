@@ -58,6 +58,12 @@ export interface ServeOptions {
    */
   maxSessions?: number;
   /**
+   * Non-negative integer cap on concurrent live sessions across all workspace
+   * runtimes. Defaults to unlimited until multi-workspace sessions are ungated.
+   * `0` or `Infinity` disables the cap.
+   */
+  maxTotalSessions?: number;
+  /**
    * Per-session cap on accepted prompts that have not settled yet.
    * Defaults to 5. `0` or `Infinity` disables the cap.
    */
@@ -86,6 +92,12 @@ export interface ServeOptions {
    * at the cost of a few hundred KB extra RAM per session.
    */
   eventRingSize?: number;
+  /**
+   * Per-session in-memory compacted replay snapshot byte cap. Threaded into
+   * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
   /**
    * Absolute workspace path this daemon binds to. The daemon is
    * **1 daemon = 1 workspace × N sessions**: one bound

@@ -59,6 +59,7 @@ describe('auto-memory extraction', () => {
       touchedTopics: [],
       touchedProjectScope: false,
       touchedUserScope: false,
+      hasToolActivity: true,
       systemMessage: undefined,
     });
 
@@ -125,6 +126,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
       vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
@@ -151,6 +153,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: true,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
       vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValueOnce('');
@@ -180,6 +183,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user', 'project'],
         touchedProjectScope: true,
         touchedUserScope: true,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -200,6 +204,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: false,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -227,6 +232,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -284,6 +290,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: [],
         touchedProjectScope: false,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -331,6 +338,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -356,6 +364,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -400,6 +409,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -489,6 +499,7 @@ describe('auto-memory extraction', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: undefined,
       });
 
@@ -531,6 +542,51 @@ describe('auto-memory extraction', () => {
         agentCallsBefore + 1,
       );
       expect(result.cursor.processedOffset).toBe(compressedHistory.length);
+    });
+    it('BUG #6311: should NOT advance cursor when agent makes zero tool calls (hallucination)', async () => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: false,
+        systemMessage: undefined,
+      });
+
+      const history = [
+        {
+          role: 'user' as const,
+          parts: [{ text: 'Remember that I prefer pnpm over npm.' }],
+        },
+      ];
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...history],
+      });
+
+      expect(result.cursor.processedOffset).toBe(0);
+    });
+    it('should advance cursor on legitimate noop (agent checked memory, found nothing new)', async () => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+
+      const history = [{ role: 'user' as const, parts: [{ text: 'hello' }] }];
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...history],
+      });
+
+      expect(result.cursor.processedOffset).toBe(1);
     });
   });
 });

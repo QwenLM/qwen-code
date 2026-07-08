@@ -10,6 +10,7 @@ import {
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
   createDebugLogger,
+  GROUP_COLOR_OPTIONS,
   SessionService,
   SessionOrganizationError,
   type SessionGroupColor,
@@ -595,7 +596,27 @@ function toRpcError(err: unknown): {
     case 'InvalidClientIdError':
       return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
     case 'SessionLimitExceededError':
-      return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_limit_exceeded',
+          limit: (err as { limit?: unknown }).limit,
+          scope: 'workspace',
+          retryable: true,
+        },
+      };
+    case 'TotalSessionLimitExceededError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_limit_exceeded',
+          limit: (err as { limit?: unknown }).limit,
+          scope: (err as { scope?: unknown }).scope,
+          retryable: true,
+        },
+      };
     case 'PromptQueueFullError': {
       const promptErr = err as {
         sessionId?: unknown;
@@ -1285,6 +1306,7 @@ export class AcpDispatcher {
               ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
               ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
+              ...(s.color !== undefined ? { color: s.color } : {}),
             })),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
@@ -1950,6 +1972,18 @@ export class AcpDispatcher {
           ) {
             throw new AcpParamError('`groupId` must be a string or null');
           }
+          if (
+            'color' in params &&
+            params['color'] !== null &&
+            (typeof params['color'] !== 'string' ||
+              !GROUP_COLOR_OPTIONS.includes(
+                params['color'] as SessionGroupColor,
+              ))
+          ) {
+            throw new AcpParamError(
+              '`color` must be a supported color or null',
+            );
+          }
           await this.archiveCoordinator.runSharedMany([sessionId], async () => {
             const sessionService = new SessionService(this.boundWorkspace);
             let exists =
@@ -1973,6 +2007,9 @@ export class AcpDispatcher {
                 : {}),
               ...('groupId' in params
                 ? { groupId: params['groupId'] as string | null }
+                : {}),
+              ...('color' in params
+                ? { color: params['color'] as SessionGroupColor | null }
                 : {}),
             });
             this.replyConn(conn, id, { sessionId, ...organization });

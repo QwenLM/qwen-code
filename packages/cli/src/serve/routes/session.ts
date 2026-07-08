@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
+  GROUP_COLOR_OPTIONS,
   SessionService,
   SessionOrganizationError,
   addDaemonRequestAttribute,
@@ -1183,6 +1184,20 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const rawColor = body['color'];
+        if (
+          rawColor !== undefined &&
+          rawColor !== null &&
+          (typeof rawColor !== 'string' ||
+            !GROUP_COLOR_OPTIONS.includes(rawColor as SessionGroupColor))
+        ) {
+          res.status(400).json({
+            error: '`color` must be a supported color or null',
+            code: 'invalid_session_organization',
+            field: 'color',
+          });
+          return;
+        }
 
         const organization = await createSessionOrganizationService(
           boundWorkspace,
@@ -1190,6 +1205,9 @@ export function registerSessionRoutes(
           ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
           ...(rawGroupId !== undefined
             ? { groupId: rawGroupId as string | null }
+            : {}),
+          ...(rawColor !== undefined
+            ? { color: rawColor as SessionGroupColor | null }
             : {}),
         });
         res.status(200).json({ sessionId, ...organization });

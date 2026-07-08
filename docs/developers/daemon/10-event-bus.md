@@ -239,13 +239,13 @@ The daemon's `EventBus` replays all events from the ring buffer whose `id > Last
 
 ### Replay Behavior
 
-| Scenario                                     | Behavior                                                                                                                                                        |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Last-Event-ID` absent                       | Live-only stream; no replay. Backward-compatible with pre-resume clients.                                                                                       |
-| `Last-Event-ID: 0`                           | Replay entire ring buffer from the beginning (bounded by `--event-ring-size`, default 8000).                                                                    |
-| `Last-Event-ID: N` where `ring[0].id <= N+1` | Contiguous replay of events `id > N`, then live.                                                                                                                |
-| `Last-Event-ID: N` where `ring[0].id > N+1`  | Gap detected — `state_resync_required` (`reason: 'ring_evicted'`) emitted before replay of surviving suffix. SDK must call `loadSession` to recover full state. |
-| `Last-Event-ID: N` where `N >= nextId`       | Epoch reset (daemon restart) — `state_resync_required` (`reason: 'epoch_reset'`) emitted, then full ring replay.                                                |
+| Scenario                                     | Behavior                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Last-Event-ID` absent                       | Live-only stream; no replay. Backward-compatible with pre-resume clients.                                                                                                                                                                                                                               |
+| `Last-Event-ID: 0`                           | Replay entire ring buffer from the beginning (bounded by `--event-ring-size`, default 8000).                                                                                                                                                                                                            |
+| `Last-Event-ID: N` where `ring[0].id <= N+1` | Contiguous replay of events `id > N`, then live.                                                                                                                                                                                                                                                        |
+| `Last-Event-ID: N` where `ring[0].id > N+1`  | Gap detected — `state_resync_required` (`reason: 'ring_evicted'`) emitted before replay of surviving suffix. SDK must call `loadSession` to recover a bounded replay snapshot window; the returned `compactedReplay` may begin with `history_truncated` if older in-memory replay entries were dropped. |
+| `Last-Event-ID: N` where `N >= nextId`       | Epoch reset (daemon restart) — `state_resync_required` (`reason: 'epoch_reset'`) emitted, then full ring replay.                                                                                                                                                                                        |
 
 ### Validation Rules
 

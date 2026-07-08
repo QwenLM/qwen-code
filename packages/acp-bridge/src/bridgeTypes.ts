@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  SessionGroupColor,
+} from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
   LoadSessionResponse,
@@ -224,6 +227,8 @@ export interface BridgeSessionSummary {
   isPinned?: boolean;
   pinnedAt?: string;
   groupId?: string | null;
+  /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
+  color?: SessionGroupColor | null;
 }
 
 export interface SessionMetadataUpdate {
@@ -374,6 +379,7 @@ export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
+  compactedReplayMaxBytes: number;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }

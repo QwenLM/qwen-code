@@ -53,6 +53,21 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: multilineText },
       });
     });
+
+    it('should include source metadata when provided', async () => {
+      await emitter.emitUserMessage('scheduled prompt', 1_700_000_000_000, {
+        source: 'cron',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'scheduled prompt' },
+        _meta: {
+          timestamp: 1_700_000_000_000,
+          source: 'cron',
+        },
+      });
+    });
   });
 
   describe('emitAgentMessage', () => {

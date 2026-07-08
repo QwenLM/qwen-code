@@ -5,13 +5,79 @@
  */
 
 import { execFile, type ExecFileOptions } from 'node:child_process';
+import { estimateTextTokens } from './request-tokenizer/textTokenizer.js';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
+const PDF_FULL_TEXT_PAGE_LIMIT = 10;
+export const PDF_MAX_PAGES_PER_READ = 20;
+const PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES = 100 * 1024;
+export const PDF_TEXT_RESULT_MAX_TOKENS = 12_000;
+const PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS = 64;
+const PDF_TEXT_RESULT_CHARS_PER_TOKEN = 4;
+export const PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE =
+  'pdftotext is not installed. Install poppler-utils to enable PDF text extraction (e.g. `apt-get install poppler-utils` or `brew install poppler`).';
 // Upper bound on a page number we're willing to forward to pdftotext.
 // Sits well below Number.MAX_SAFE_INTEGER so arithmetic in validation
 // (e.g. lastPage - firstPage + 1) stays exact, and well above any real
 // PDF (the current world record is roughly 86,000 pages).
 const MAX_PDF_PAGE_NUMBER = 1_000_000;
+
+export interface PDFPageRangeRequirement {
+  required: boolean;
+  effectivePageCount: number;
+  hadPdfInfo: boolean;
+}
+
+export function shouldRequirePDFPageRange(
+  pageCount: number | null,
+  sizeBytes: number,
+): PDFPageRangeRequirement {
+  const hadPdfInfo = pageCount !== null;
+  const effectivePageCount =
+    pageCount ?? Math.ceil(sizeBytes / PDF_PAGE_COUNT_SIZE_HEURISTIC_BYTES);
+  return {
+    required: effectivePageCount > PDF_FULL_TEXT_PAGE_LIMIT,
+    effectivePageCount,
+    hadPdfInfo,
+  };
+}
+
+export function estimatePDFTextOutputTokens(text: string): number {
+  return Math.ceil(
+    estimateTextTokens(text) +
+      PDF_TEXT_RESULT_WRAPPER_TOKEN_CHARS / PDF_TEXT_RESULT_CHARS_PER_TOKEN,
+  );
+}
+
+export function buildLargePDFGuidance(
+  displayName: string,
+  requirement: PDFPageRangeRequirement,
+): string {
+  const source = requirement.hadPdfInfo ? 'has' : 'appears to have about';
+  return `PDF "${displayName}" ${source} ${requirement.effectivePageCount} pages, which is too many to read at once. Use the 'pages' parameter to read a specific page range such as '1-5'. Maximum ${PDF_MAX_PAGES_PER_READ} pages per request.`;
+}
+
+export function buildPDFTextTooLargeGuidance(
+  displayName: string,
+  estimatedTokens: number,
+  pagesUsed?: string,
+): string {
+  const pageRange = pagesUsed ? parsePDFPageRange(pagesUsed) : null;
+  const prefix = `PDF text extracted from "${displayName}" is too large to return safely (${estimatedTokens} estimated tokens; limit ${PDF_TEXT_RESULT_MAX_TOKENS}).`;
+  if (pageRange && pageRange.firstPage === pageRange.lastPage) {
+    return `${prefix} The selected page exceeds the output limit. Use a native PDF-capable model, split the page content externally, or extract a smaller section with another tool.`;
+  }
+  if (pageRange) {
+    const suggestedEnd = Math.floor(
+      (pageRange.firstPage + pageRange.lastPage) / 2,
+    );
+    if (suggestedEnd === pageRange.firstPage) {
+      return `${prefix} Use the 'pages' parameter with a single page, for example '${pageRange.firstPage}'.`;
+    }
+    return `${prefix} Use the 'pages' parameter with fewer pages, for example '${pageRange.firstPage}-${suggestedEnd}' or a single page.`;
+  }
+  return `${prefix} Use the 'pages' parameter with a narrower range, for example '1-2' or a single page.`;
+}
 
 /**
  * Lightweight wrapper around execFile that returns { stdout, stderr, code,
@@ -228,8 +294,7 @@ export async function extractPDFText(
   if (!available) {
     return {
       success: false,
-      error:
-        'pdftotext is not installed. Install poppler-utils to enable PDF text extraction (e.g. `apt-get install poppler-utils` or `brew install poppler`).',
+      error: PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
     };
   }
 
@@ -270,12 +335,22 @@ export async function extractPDFText(
     // the buffer overrun was driven by pathological stderr rather than
     // real text output) and still give the password/corrupt detectors a
     // chance to kick in on the partial stderr.
-    if (maxBufferExceeded && stdout.length >= MAX_PDF_TEXT_OUTPUT_CHARS) {
+    if (
+      maxBufferExceeded &&
+      Buffer.byteLength(stdout, 'utf8') >= MAX_PDF_TEXT_OUTPUT_CHARS
+    ) {
+      const wasCharTruncated = stdout.length > MAX_PDF_TEXT_OUTPUT_CHARS;
+      const text = wasCharTruncated
+        ? stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS)
+        : stdout;
+      const truncationReason = wasCharTruncated
+        ? `at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters`
+        : 'after reaching the PDF text buffer limit';
       return {
         success: true,
         text:
-          stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
-          `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
+          text +
+          `\n\n... [text truncated ${truncationReason}. Use the 'pages' parameter to read specific page ranges.]`,
       };
     }
 
