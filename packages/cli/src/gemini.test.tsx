@@ -41,16 +41,6 @@ const lspConfigWatcherMock = vi.hoisted(() => ({
   }>,
 }));
 
-function withExtensionWatcherConfig<T extends object>(config: T): T {
-  return {
-    getActiveExtensions: () => [],
-    getExtensionManager: () => ({
-      addMutationListener: vi.fn(() => vi.fn()),
-    }),
-    ...config,
-  } as T;
-}
-
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {
     const source = readFileSync('src/gemini.tsx', 'utf8');
@@ -103,14 +93,7 @@ vi.mock('./config/config.js', () => ({
     getLspClient: () => undefined,
     getWarnings: vi.fn(() => []),
     isSafeMode: vi.fn(() => false),
-    getModelsConfig: vi.fn(() => ({
-      getCurrentAuthType: () => null,
-      wasAuthTypeExplicitlyProvided: () => true,
-    })),
-    getActiveExtensions: () => [],
-    getExtensionManager: () => ({
-      addMutationListener: vi.fn(() => vi.fn()),
-    }),
+    getModelsConfig: vi.fn(() => ({ getCurrentAuthType: () => null })),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
@@ -218,6 +201,14 @@ vi.mock('./config/lsp-config-watcher.js', () => ({
   },
 }));
 
+vi.mock('./config/extension-file-watcher.js', () => ({
+  ExtensionFileWatcher: class {
+    startWatching() {}
+    restartWatching() {}
+    stopWatching() {}
+  },
+}));
+
 function withLspDisabledConfig<T extends object>(
   config: T,
 ): T & {
@@ -299,7 +290,7 @@ describe('gemini.tsx main function', () => {
     });
     vi.mocked(loadCliConfig).mockImplementation(async () => {
       callOrder.push('loadCliConfig');
-      return withExtensionWatcherConfig({
+      return {
         isInteractive: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
@@ -318,12 +309,9 @@ describe('gemini.tsx main function', () => {
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
         isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
         getSessionId: () => 'test-session-id',
-      }) as unknown as Config;
+      } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -430,7 +418,7 @@ describe('gemini.tsx main function', () => {
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     };
-    const configStub = withExtensionWatcherConfig({
+    const configStub = {
       isInteractive: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
@@ -449,12 +437,9 @@ describe('gemini.tsx main function', () => {
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => [],
       isSafeMode: () => false,
-      getModelsConfig: () => ({
-        getCurrentAuthType: () => null,
-        wasAuthTypeExplicitlyProvided: () => true,
-      }),
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getSessionId: () => 'test-session-id',
-    }) as unknown as Config;
+    } as unknown as Config;
 
     vi.mocked(parseArguments).mockResolvedValue({
       bare: true,
@@ -721,7 +706,7 @@ describe('gemini.tsx main function', () => {
     vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
 
     let initialized = false;
-    const configStub = withExtensionWatcherConfig({
+    const configStub = {
       isInteractive: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
@@ -743,15 +728,12 @@ describe('gemini.tsx main function', () => {
       getOutputFormat: () => OutputFormat.TEXT,
       getWarnings: () => (initialized ? ['late memory warning'] : []),
       isSafeMode: () => false,
-      getModelsConfig: () => ({
-        getCurrentAuthType: () => null,
-        wasAuthTypeExplicitlyProvided: () => true,
-      }),
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getContentGeneratorConfig: () => undefined,
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getProxy: () => undefined,
-    }) as unknown as Config;
+    } as unknown as Config;
 
     vi.mocked(parseArguments).mockResolvedValue({
       extensions: [],
@@ -850,15 +832,10 @@ describe('gemini.tsx main function', () => {
       command: 'sandbox-exec',
       image: '',
     });
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
-        getSessionId: () => sessionId,
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => sessionId,
+    } as unknown as Config);
 
     try {
       await main();
@@ -1062,7 +1039,7 @@ describe('gemini.tsx main function', () => {
       extensions: [],
     } as never);
 
-    const configStub = withExtensionWatcherConfig({
+    const configStub = {
       isInteractive: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
@@ -1082,14 +1059,11 @@ describe('gemini.tsx main function', () => {
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
       getWarnings: () => [],
       isSafeMode: () => false,
-      getModelsConfig: () => ({
-        getCurrentAuthType: () => null,
-        wasAuthTypeExplicitlyProvided: () => true,
-      }),
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
-    }) as unknown as Config;
+    } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
 
@@ -1215,32 +1189,27 @@ describe('gemini.tsx main function kitty protocol', () => {
         shouldOpenAuthDialog: false,
         geminiMdFileCount: 0,
       });
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        isInteractive: () => true,
-        getQuestion: () => '',
-        getSandbox: () => false,
-        getDebugMode: () => false,
-        getListExtensions: () => false,
-        getMcpServers: () => ({}),
-        getTopTierMcpServers: () => undefined,
-        initialize: vi.fn(),
-        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-        getIdeMode: () => false,
-        getExperimentalZedIntegration: () => false,
-        getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
-        getWarnings: () => [],
-        isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
-        getUsageStatisticsEnabled: () => true,
-        getSessionId: () => 'test-session-id',
-        isTelemetryInitializationDeferred: () => true,
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1345,32 +1314,27 @@ describe('gemini.tsx main function kitty protocol', () => {
         shouldOpenAuthDialog: false,
         geminiMdFileCount: 0,
       });
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        isInteractive: () => true,
-        getQuestion: () => 'hello from prompt-interactive',
-        getSandbox: () => false,
-        getDebugMode: () => false,
-        getListExtensions: () => false,
-        getMcpServers: () => ({}),
-        getTopTierMcpServers: () => undefined,
-        initialize: vi.fn(),
-        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-        getIdeMode: () => false,
-        getExperimentalZedIntegration: () => false,
-        getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
-        getWarnings: () => [],
-        isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
-        getUsageStatisticsEnabled: () => true,
-        getSessionId: () => 'test-session-id',
-        isTelemetryInitializationDeferred: () => false,
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => 'hello from prompt-interactive',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => false,
+    } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1473,33 +1437,28 @@ describe('gemini.tsx main function kitty protocol', () => {
         shouldOpenAuthDialog: false,
         geminiMdFileCount: 0,
       });
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        isInteractive: () => true,
-        getQuestion: () => '',
-        getInputFile: () => '/tmp/qwen-input.jsonl',
-        getSandbox: () => false,
-        getDebugMode: () => false,
-        getListExtensions: () => false,
-        getMcpServers: () => ({}),
-        getTopTierMcpServers: () => undefined,
-        initialize: vi.fn(),
-        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-        getIdeMode: () => false,
-        getExperimentalZedIntegration: () => false,
-        getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
-        getWarnings: () => [],
-        isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
-        getUsageStatisticsEnabled: () => true,
-        getSessionId: () => 'test-session-id',
-        isTelemetryInitializationDeferred: () => true,
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getInputFile: () => '/tmp/qwen-input.jsonl',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1599,31 +1558,26 @@ describe('gemini.tsx main function kitty protocol', () => {
         shouldOpenAuthDialog: false,
         geminiMdFileCount: 0,
       });
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        isInteractive: () => true,
-        getQuestion: () => '',
-        getSandbox: () => false,
-        getDebugMode: () => false,
-        getListExtensions: () => false,
-        getMcpServers: () => ({}),
-        getTopTierMcpServers: () => undefined,
-        initialize: vi.fn(),
-        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-        getIdeMode: () => false,
-        getExperimentalZedIntegration: () => true,
-        getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
-        getWarnings: () => [],
-        isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
-        getUsageStatisticsEnabled: () => true,
-        getSessionId: () => 'test-session-id',
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => true,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1743,34 +1697,31 @@ describe('gemini.tsx main function kitty protocol', () => {
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
 
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        isInteractive: () => true,
-        getQuestion: () => '',
-        getSandbox: () => false,
-        getDebugMode: () => false,
-        getListExtensions: () => false,
-        getMcpServers: () => ({}),
-        getTopTierMcpServers: () => undefined,
-        initialize: vi.fn(),
-        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-        getIdeMode: () => false,
-        getExperimentalZedIntegration: () => false,
-        getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
-        getWarnings: () => [],
-        isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-          getGenerationConfig: () => ({}),
-        }),
-        getProxy: () => undefined,
-        getUsageStatisticsEnabled: () => true,
-        getSessionId: () => 'test-session-id',
-        isTelemetryInitializationDeferred: () => true,
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({
+        getCurrentAuthType: () => null,
+        getGenerationConfig: () => ({}),
+      }),
+      getProxy: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {
@@ -1834,33 +1785,28 @@ describe('gemini.tsx main function kitty protocol', () => {
       throw new MockProcessExitError(code);
     }) as unknown as typeof process.exit);
 
-    vi.mocked(loadCliConfig).mockResolvedValue(
-      withExtensionWatcherConfig({
-        isInteractive: () => true,
-        getJsonSchema: () => ({ type: 'object' }),
-        getQuestion: () => '',
-        getSandbox: () => false,
-        getDebugMode: () => false,
-        getListExtensions: () => false,
-        getMcpServers: () => ({}),
-        getTopTierMcpServers: () => undefined,
-        initialize: vi.fn(),
-        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-        getIdeMode: () => false,
-        getExperimentalZedIntegration: () => false,
-        getScreenReader: () => false,
-        getGeminiMdFileCount: () => 0,
-        getWarnings: () => [],
-        isSafeMode: () => false,
-        getModelsConfig: () => ({
-          getCurrentAuthType: () => null,
-          wasAuthTypeExplicitlyProvided: () => true,
-        }),
-        getUsageStatisticsEnabled: () => true,
-        getSessionId: () => 'test-session-id',
-        shutdown: vi.fn(),
-      }) as unknown as Config,
-    );
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getJsonSchema: () => ({ type: 'object' }),
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      shutdown: vi.fn(),
+    } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
       merged: {

@@ -98,6 +98,89 @@ describe('loadUsageDashboard', () => {
     );
   }
 
+  /**
+   * Plant a transcript-only (never-persisted, e.g. daemon / Web Shell) session
+   * timestamped now, so it lands in the `today` window when replayed.
+   */
+  function plantTranscript(sessionId: string, totalTokens: number): void {
+    const cwd = '/daemon/project';
+    const ts = new Date().toISOString();
+    const chatsDir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'daemon-project',
+      'chats',
+    );
+    fs.mkdirSync(chatsDir, { recursive: true });
+    const records = [
+      {
+        sessionId,
+        cwd,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: ts,
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        sessionId,
+        cwd,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: ts,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': ts,
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: totalTokens * 0.6,
+            output_token_count: totalTokens * 0.4,
+            cached_content_token_count: 0,
+            thoughts_token_count: 0,
+            total_token_count: totalTokens,
+            prompt_id: 'p1',
+          },
+        },
+      },
+      {
+        sessionId,
+        cwd,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: ts,
+        type: 'assistant',
+        message: { role: 'assistant', content: 'ok' },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+  }
+
+  it('today totals include a daemon / Web Shell transcript session, not just the persisted file', async () => {
+    // Guards the wiring: loadUsageDashboard must read the live-merging loader,
+    // so a session that only lives in a transcript (never persisted by /clear)
+    // still counts. A revert to the persisted-only loader would drop it.
+    seed([
+      rec({
+        sessionId: 'persisted',
+        timestamp: Date.now(),
+        model: { totalTokens: 1000, inputTokens: 1000 },
+      }),
+    ]);
+    plantTranscript('daemon-live', 1600);
+
+    const dash = await loadUsageDashboard({ range: 'today' });
+
+    expect(dash.summary.sessions).toBe(2);
+    expect(dash.summary.totalTokens).toBe(2600);
+  });
+
   it('flattens today totals across all sessions active today', async () => {
     const now = Date.now();
     seed([
