@@ -232,6 +232,8 @@ function classifyChannelWebhookEnqueueError(error: unknown): {
   }
   if (
     message === 'Webhook tasks require unattended approval mode.' ||
+    message ===
+      'Webhook tasks are not supported when sessionScope is single.' ||
     message === 'Channel does not support proactive webhook messages.' ||
     message ===
       'Channel does not support proactive webhook messages for this chat target.'

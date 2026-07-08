@@ -275,6 +275,36 @@ describe('channel webhook routes', () => {
     });
   });
 
+  it.each([
+    'Webhook tasks require unattended approval mode.',
+    'Webhook tasks are not supported when sessionScope is single.',
+    'Channel does not support proactive webhook messages.',
+    'Channel does not support proactive webhook messages for this chat target.',
+  ])(
+    'returns 409 when the target cannot accept webhook work: %s',
+    async (message) => {
+      const h = appHarness({
+        enqueueWebhookTask: vi.fn(async () => {
+          throw new Error(message);
+        }),
+      });
+      const res = await request(h.app)
+        .post('/channels/dingtalk-main/webhooks/github-ci')
+        .set('x-qwen-webhook-secret', 'secret-value')
+        .send({
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        error: 'Failed to enqueue channel webhook task',
+        code: 'channel_webhook_target_unavailable',
+      });
+    },
+  );
+
   it('returns 504 when enqueueing the webhook task times out', async () => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {
