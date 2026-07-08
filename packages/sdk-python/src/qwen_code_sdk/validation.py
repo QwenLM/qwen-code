@@ -16,6 +16,46 @@ _VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "yolo"}
 _VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
 
 
+_RESERVED_CLI_FLAGS = frozenset(
+    {
+        "--input-format",
+        "--output-format",
+        "--channel",
+        "--model",
+        "--auth-type",
+        "--fallback-model",
+        "--approval-mode",
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--insecure",
+        "--core-tools",
+        "--exclude-tools",
+        "--allowed-tools",
+        "--max-tool-calls",
+        "--max-subagent-depth",
+        "--resume",
+        "--continue",
+        "--session-id",
+        "--fork-session",
+        "--max-session-turns",
+        "--system-prompt",
+        "--append-system-prompt",
+        "--include-directories",
+        "--allowed-mcp-server-names",
+        "--extensions",
+        "--proxy",
+        "--sandbox",
+        "--safe-mode",
+        "--worktree",
+        "--disabled-slash-commands",
+        "--include-partial-messages",
+        "--chat-recording",
+        "--openai-logging",
+        "--openai-logging-dir",
+    }
+)
+
+
 def validate_query_options(options: QueryOptions) -> None:
     if (
         options.permission_mode
@@ -67,13 +107,10 @@ def validate_query_options(options: QueryOptions) -> None:
     if options.max_tool_calls is not None and options.max_tool_calls < -1:
         raise ValidationError("max_tool_calls must be -1 or a non-negative integer")
 
-    if (
-        options.max_subagent_depth is not None
-        and not (1 <= options.max_subagent_depth <= 100)
+    if options.max_subagent_depth is not None and not (
+        1 <= options.max_subagent_depth <= 100
     ):
-        raise ValidationError(
-            "max_subagent_depth must be between 1 and 100"
-        )
+        raise ValidationError("max_subagent_depth must be between 1 and 100")
 
     if options.agents:
         for i, agent in enumerate(options.agents):
@@ -84,12 +121,9 @@ def validate_query_options(options: QueryOptions) -> None:
                     )
 
     if options.extra_args:
-        reserved = {"--input-format", "--output-format", "--channel"}
         for arg in options.extra_args:
-            if arg in reserved:
-                raise ValidationError(
-                    f"extra_args cannot contain reserved flag: {arg}"
-                )
+            if arg in _RESERVED_CLI_FLAGS:
+                raise ValidationError(f"extra_args cannot contain reserved flag: {arg}")
 
     if options.fallback_model and len(options.fallback_model) > 3:
         raise ValidationError(

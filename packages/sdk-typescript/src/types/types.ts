@@ -512,7 +512,8 @@ export interface QueryOptions {
 
   /**
    * Additional CLI arguments to pass through directly.
-   * Cannot contain `--input-format`, `--output-format`, or `--channel`.
+   * Cannot contain SDK-managed or security-sensitive flags (e.g. `--model`,
+   * `--auth-type`, `--approval-mode`, `--insecure`, `--dangerously-skip-permissions`).
    */
   extraArgs?: string[];
 

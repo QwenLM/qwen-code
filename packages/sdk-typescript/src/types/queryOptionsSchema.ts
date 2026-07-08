@@ -2,6 +2,43 @@ import { z } from 'zod';
 import type { CanUseTool } from './types.js';
 import type { SubagentConfig } from './protocol.js';
 
+const RESERVED_CLI_FLAGS = new Set([
+  '--input-format',
+  '--output-format',
+  '--channel',
+  '--model',
+  '--auth-type',
+  '--fallback-model',
+  '--approval-mode',
+  '--dangerously-skip-permissions',
+  '--allow-dangerously-skip-permissions',
+  '--insecure',
+  '--core-tools',
+  '--exclude-tools',
+  '--allowed-tools',
+  '--max-tool-calls',
+  '--max-subagent-depth',
+  '--resume',
+  '--continue',
+  '--session-id',
+  '--fork-session',
+  '--max-session-turns',
+  '--system-prompt',
+  '--append-system-prompt',
+  '--include-directories',
+  '--allowed-mcp-server-names',
+  '--extensions',
+  '--proxy',
+  '--sandbox',
+  '--safe-mode',
+  '--worktree',
+  '--disabled-slash-commands',
+  '--include-partial-messages',
+  '--chat-recording',
+  '--openai-logging',
+  '--openai-logging-dir',
+]);
+
 /**
  * OAuth configuration for MCP servers
  */
@@ -199,7 +236,18 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     includeDirectories: z.array(z.string()).optional(),
-    extraArgs: z.array(z.string()).optional(),
+    extraArgs: z
+      .array(z.string())
+      .refine(
+        (args) => !args.some((arg) => RESERVED_CLI_FLAGS.has(arg)),
+        (args) => {
+          const blocked = args.find((arg) => RESERVED_CLI_FLAGS.has(arg));
+          return {
+            message: `extraArgs cannot contain reserved flag: ${blocked}`,
+          };
+        },
+      )
+      .optional(),
     extensions: z.array(z.string()).optional(),
     allowedMcpServerNames: z.array(z.string()).optional(),
     fallbackModel: z

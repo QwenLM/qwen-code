@@ -94,4 +94,45 @@ describe('query()', () => {
       }),
     ).toThrow(/systemPrompt/);
   });
+
+  it('passes new option fields through to TransportOptions', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    query({
+      prompt: 'hello',
+      options: {
+        forkSession: true,
+        maxToolCalls: 10,
+        maxSubagentDepth: 3,
+        includeDirectories: ['/tmp/a', '/tmp/b'],
+        extraArgs: ['--verbose'],
+        extensions: ['ext1'],
+        allowedMcpServerNames: ['server1'],
+        fallbackModel: ['model-a', 'model-b'],
+        proxy: 'http://localhost:8080',
+        sandbox: true,
+        safeMode: true,
+        insecure: false,
+        worktree: false,
+        disabledSlashCommands: ['cmd1'],
+      } satisfies QueryOptions,
+    });
+
+    const transportOptions = mockProcessTransport.mock.calls[0]?.[0];
+
+    expect(transportOptions.forkSession).toBe(true);
+    expect(transportOptions.maxToolCalls).toBe(10);
+    expect(transportOptions.maxSubagentDepth).toBe(3);
+    expect(transportOptions.includeDirectories).toEqual(['/tmp/a', '/tmp/b']);
+    expect(transportOptions.extraArgs).toEqual(['--verbose']);
+    expect(transportOptions.extensions).toEqual(['ext1']);
+    expect(transportOptions.allowedMcpServerNames).toEqual(['server1']);
+    expect(transportOptions.fallbackModel).toEqual(['model-a', 'model-b']);
+    expect(transportOptions.proxy).toBe('http://localhost:8080');
+    expect(transportOptions.sandbox).toBe(true);
+    expect(transportOptions.safeMode).toBe(true);
+    expect(transportOptions.insecure).toBe(false);
+    expect(transportOptions.worktree).toBe(false);
+    expect(transportOptions.disabledSlashCommands).toEqual(['cmd1']);
+  });
 });

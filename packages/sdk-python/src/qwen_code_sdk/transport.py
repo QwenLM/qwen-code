@@ -250,9 +250,7 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
         args.extend(["--max-subagent-depth", str(options.max_subagent_depth)])
 
     if options.include_directories:
-        args.extend(
-            ["--include-directories", ",".join(options.include_directories)]
-        )
+        args.extend(["--include-directories", ",".join(options.include_directories)])
 
     if options.extensions:
         args.extend(["--extensions", ",".join(options.extensions)])

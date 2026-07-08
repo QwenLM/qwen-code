@@ -179,14 +179,38 @@ def test_rejects_invalid_max_subagent_depth() -> None:
 
 def test_rejects_agents_missing_required_fields() -> None:
     with pytest.raises(ValidationError, match="missing required field"):
-        validate_query_options(
-            QueryOptions(agents=[{"name": "test"}])
-        )
+        validate_query_options(QueryOptions(agents=[{"name": "test"}]))
 
 
 def test_rejects_extra_args_with_reserved_flags() -> None:
     with pytest.raises(ValidationError, match="reserved flag"):
         validate_query_options(QueryOptions(extra_args=["--input-format"]))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--model",
+        "--auth-type",
+        "--approval-mode",
+        "--insecure",
+        "--dangerously-skip-permissions",
+        "--allowed-tools",
+        "--exclude-tools",
+        "--resume",
+        "--session-id",
+        "--proxy",
+        "--channel",
+        "--output-format",
+    ],
+)
+def test_rejects_extra_args_with_security_sensitive_flags(flag: str) -> None:
+    with pytest.raises(ValidationError, match="reserved flag"):
+        validate_query_options(QueryOptions(extra_args=[flag]))
+
+
+def test_accepts_extra_args_with_non_reserved_flags() -> None:
+    validate_query_options(QueryOptions(extra_args=["--some-unknown-flag", "--value"]))
 
 
 def test_rejects_fallback_model_exceeding_max() -> None:
