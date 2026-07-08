@@ -453,9 +453,7 @@ tr:hover .selectedCell {
 
 .evenRow .stickyActionCell,
 .evenRow .frozenCell {
-  background:
-    linear-gradient(var(--subtle-bg), var(--subtle-bg)),
-    var(--card);
+  background: linear-gradient(var(--subtle-bg), var(--subtle-bg)), var(--card);
 }
 
 tr:hover .stickyActionCell,
@@ -535,9 +533,157 @@ tr:hover .frozenCell.selectedCell {
   white-space: pre-wrap;
 }
 
+.cellDialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--background) 62%, transparent);
+}
+
+.cellDialog {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(520px, calc(100vw - 32px));
+  min-height: 190px;
+  padding: 20px 24px 16px;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--card) 96%, white 4%),
+    color-mix(in srgb, var(--card) 92%, black 8%)
+  );
+  box-shadow: 0 18px 56px rgb(0 0 0 / 38%);
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.cellDialogCloseIcon {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cellDialogCloseIcon:hover {
+  color: var(--foreground);
+}
+
+.cellDialogTitle {
+  margin-bottom: 16px;
+  font-size: inherit;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.cellDialogValue {
+  min-height: 100px;
+  max-height: min(32vh, 200px);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  color: var(--foreground);
+  font: inherit;
+  font-weight: 600;
+  line-height: 1.45;
+  cursor: text;
+  user-select: text;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cellDialogFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+.cellDialogActions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.cellDialogButton {
+  min-width: 64px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--foreground) 12%, transparent);
+  color: var(--foreground);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cellDialogButton:hover {
+  background: color-mix(in srgb, var(--foreground) 18%, transparent);
+}
+
+.cellDialogPrimaryButton {
+  background: var(--agent-blue-500);
+  color: white;
+}
+
+.cellDialogPrimaryButton:hover {
+  background: color-mix(in srgb, var(--agent-blue-500) 86%, white 14%);
+}
+
 .emptyState {
   padding: 16px;
   color: var(--muted-foreground);
   font-size: 13px;
   text-align: center;
+}
+
+@media (max-width: 640px) {
+  .cellDialogBackdrop {
+    padding: 10px;
+  }
+
+  .cellDialog {
+    width: 100%;
+    min-height: 0;
+    padding: 20px 14px 14px;
+  }
+
+  .cellDialogTitle {
+    margin-bottom: 14px;
+  }
+
+  .cellDialogFooter {
+    flex-direction: column;
+    align-items: stretch;
+    padding-top: 18px;
+  }
+
+  .cellDialogActions {
+    justify-content: flex-end;
+  }
+
+  .cellDialogButton {
+    min-width: 0;
+    padding: 6px 12px;
+  }
 }

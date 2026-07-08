@@ -280,6 +280,9 @@ const EN: Messages = {
   'markdownTable.closeRowDetailsAria': (v) =>
     `Hide details for row ${v?.index ?? ''}`,
   'markdownTable.detailsHeader': 'Row details',
+  'markdownTable.cellDialogTitle': 'Current field value',
+  'markdownTable.copyCell': 'Copy',
+  'markdownTable.close': 'Close',
   'markdownTable.actions': 'Actions',
   'markdownTable.sortByColumn': (v) => `Sort by ${v?.column ?? ''}`,
   'markdownTable.sortByColumnAsc': (v) =>
@@ -1924,6 +1927,9 @@ const ZH: Messages = {
   'markdownTable.rowDetailsAria': (v) => `查看第 ${v?.index ?? ''} 行详情`,
   'markdownTable.closeRowDetailsAria': (v) => `收起第 ${v?.index ?? ''} 行详情`,
   'markdownTable.detailsHeader': '单行详情',
+  'markdownTable.cellDialogTitle': '当前字段值',
+  'markdownTable.copyCell': '复制',
+  'markdownTable.close': '关闭',
   'markdownTable.actions': '操作',
   'markdownTable.sortByColumn': (v) => `按 ${v?.column ?? ''} 排序`,
   'markdownTable.sortByColumnAsc': (v) => `${v?.column ?? ''} 已升序排序`,

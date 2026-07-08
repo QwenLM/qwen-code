@@ -110,6 +110,12 @@ function click(el: Element): void {
   });
 }
 
+function doubleClick(el: Element): void {
+  act(() => {
+    el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  });
+}
+
 function inputValue(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -681,6 +687,58 @@ describe('EnhancedMarkdownTable', () => {
     ).toBeDefined();
   });
 
+  it('opens a selectable cell value dialog on double click', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('Current field value');
+    expect(dialog?.textContent).toContain('Alpha');
+  });
+
+  it('copies the current cell value from the dialog', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 1, 0));
+    click(textButton(container, 'Copy'));
+
+    expect(writeText).toHaveBeenCalledWith('Beta');
+  });
+
+  it('closes the cell value dialog with Escape', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('clears table selection and row details when opening a cell dialog', () => {
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    expect(container.textContent).toContain('1 cell selected');
+
+    click(button(container, 'View details for row 1'));
+    expect(container.textContent).toContain('Row details');
+
+    doubleClick(dataCell(container, 0, 0));
+
+    expect(container.textContent).not.toContain('1 cell selected');
+    expect(container.textContent).not.toContain('Row details');
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
   it('quick copies the visible sorted table', () => {
     const writeText = mockClipboard();
     const container = renderTable();
@@ -978,7 +1036,10 @@ describe('EnhancedMarkdownTable', () => {
     const source = renderWideTable();
     const target = renderWideTable();
 
-    dragColumnElements(button(source, 'Move Score'), button(target, 'Move Team'));
+    dragColumnElements(
+      button(source, 'Move Score'),
+      button(target, 'Move Team'),
+    );
 
     expect(rowTexts(source)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
     expect(rowTexts(target)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);

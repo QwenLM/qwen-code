@@ -89,6 +89,13 @@ interface ColumnResizeState {
   startWidth: number;
 }
 
+interface CellDialogState {
+  rowKey: string;
+  columnIndex: number;
+  value: string;
+  content: ReactNode;
+}
+
 interface FilterOption {
   value: string;
   label: string;
@@ -412,11 +419,7 @@ function moveVisibleColumn(
   const visibleColumns = order.filter(
     (columnIndex) => !hiddenColumns.has(columnIndex),
   );
-  const nextVisibleColumns = moveColumn(
-    visibleColumns,
-    fromColumn,
-    toColumn,
-  );
+  const nextVisibleColumns = moveColumn(visibleColumns, fromColumn, toColumn);
   if (nextVisibleColumns === visibleColumns) return order;
   let visibleIndex = 0;
   return order.map((columnIndex) => {
@@ -1158,6 +1161,7 @@ export function EnhancedTable({
   const [resizingColumn, setResizingColumn] =
     useState<ColumnResizeState | null>(null);
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
+  const [cellDialog, setCellDialog] = useState<CellDialogState | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
@@ -1282,6 +1286,7 @@ export function EnhancedTable({
     setFreezeFirstColumn(false);
     setResizingColumn(null);
     setDetailRowKey(null);
+    setCellDialog(null);
     resetCopiedVisible();
     resetCopiedSelection();
     draggingRef.current = false;
@@ -1454,7 +1459,22 @@ export function EnhancedTable({
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
       setDetailRowKey(null);
     }
-  }, [detailRowKey, visibleRows]);
+    if (
+      cellDialog &&
+      !visibleRows.some((row) => row.key === cellDialog.rowKey)
+    ) {
+      setCellDialog(null);
+    }
+  }, [cellDialog, detailRowKey, visibleRows]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCellDialog(null);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [cellDialog]);
 
   const setColumnFilter = (
     columnIndex: number,
@@ -1557,7 +1577,36 @@ export function EnhancedTable({
 
   const toggleRowDetail = (rowKey: string) => {
     setSelection(null);
+    setCellDialog(null);
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
+  };
+
+  const openCellDialog = (
+    rowKey: string,
+    columnIndex: number,
+    cell: EnhancedTableCell,
+  ) => {
+    setSelection(null);
+    setDetailRowKey(null);
+    setCellDialog({
+      rowKey,
+      columnIndex,
+      value: cell.text,
+      content: cell.content,
+    });
+  };
+
+  const closeCellDialog = () => {
+    setCellDialog(null);
+  };
+
+  const copyCellDialogValue = () => {
+    if (!cellDialog?.value || !navigator.clipboard) return;
+    void navigator.clipboard
+      .writeText(cellDialog.value)
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   };
 
   const selectionRowBounds = useMemo(
@@ -1674,10 +1723,7 @@ export function EnhancedTable({
   ) => {
     const sourceColumnIndex = draggingColumnRef.current;
     stopColumnDrag();
-    if (
-      sourceColumnIndex === null ||
-      !hasColumnDragData(event.dataTransfer)
-    ) {
+    if (sourceColumnIndex === null || !hasColumnDragData(event.dataTransfer)) {
       return;
     }
     event.preventDefault();
@@ -2138,6 +2184,9 @@ export function EnhancedTable({
                           onTouchMove={extendTouchSelection}
                           onTouchEnd={stopDragging}
                           onTouchCancel={stopDragging}
+                          onDoubleClick={() =>
+                            openCellDialog(row.key, columnIndex, cell)
+                          }
                         >
                           {cell.content}
                         </td>
@@ -2219,6 +2268,56 @@ export function EnhancedTable({
           onHideColumn={hideColumn}
           onSort={setColumnSort}
         />
+      )}
+      {cellDialog && (
+        <div
+          className={styles.cellDialogBackdrop}
+          onMouseDown={closeCellDialog}
+        >
+          <div
+            className={styles.cellDialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`${tableId}-cell-dialog-title`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <button
+              className={styles.cellDialogCloseIcon}
+              type="button"
+              onClick={closeCellDialog}
+              aria-label={t('markdownTable.close')}
+            >
+              ×
+            </button>
+            <div
+              id={`${tableId}-cell-dialog-title`}
+              className={styles.cellDialogTitle}
+            >
+              {t('markdownTable.cellDialogTitle')}
+            </div>
+            <div className={styles.cellDialogValue}>{cellDialog.content}</div>
+            <div className={styles.cellDialogFooter}>
+              <div className={styles.cellDialogActions}>
+                <button
+                  className={styles.cellDialogButton}
+                  type="button"
+                  onClick={copyCellDialogValue}
+                >
+                  {t('markdownTable.copyCell')}
+                </button>
+                <button
+                  className={`${styles.cellDialogButton} ${
+                    styles.cellDialogPrimaryButton
+                  }`}
+                  type="button"
+                  onClick={closeCellDialog}
+                >
+                  {t('markdownTable.close')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
