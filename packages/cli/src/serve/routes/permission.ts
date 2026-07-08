@@ -11,6 +11,7 @@ import {
   parseClientIdHeader,
   parsePermissionVoteBody,
 } from '../server/request-helpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 type SendPermissionVoteError = (
   res: Response,
@@ -20,6 +21,7 @@ type SendPermissionVoteError = (
 
 interface RegisterPermissionRoutesDeps {
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendPermissionVoteError: SendPermissionVoteError;
 }
@@ -28,7 +30,7 @@ export function registerPermissionRoutes(
   app: Application,
   deps: RegisterPermissionRoutesDeps,
 ): void {
-  const { bridge, mutate, sendPermissionVoteError } = deps;
+  const { bridge, workspaceRegistry, mutate, sendPermissionVoteError } = deps;
 
   app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
@@ -46,7 +48,28 @@ export function registerPermissionRoutes(
     };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToSessionPermission(
+      const owner =
+        workspaceRegistry.list().length === 1
+          ? { kind: 'found' as const, runtime: workspaceRegistry.primary }
+          : workspaceRegistry.resolveLiveSessionOwner(sessionId);
+      if (owner.kind === 'not_found') {
+        res.status(404).json({
+          error: `No session with id "${sessionId}"`,
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
+      if (owner.kind === 'ambiguous') {
+        res.status(500).json({
+          error: `Session owner is ambiguous for "${sessionId}"`,
+          code: 'ambiguous_session_owner',
+          sessionId,
+          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
+        });
+        return;
+      }
+      accepted = owner.runtime.bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,

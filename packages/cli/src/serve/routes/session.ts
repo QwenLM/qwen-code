@@ -44,6 +44,7 @@ import {
 } from '../server/request-helpers.js';
 import {
   InvalidCursorError,
+  listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
 } from '../server/session-list.js';
@@ -61,10 +62,15 @@ import {
   sessionExportFormatValues,
 } from '../server/session-export.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
@@ -116,6 +122,7 @@ export function registerSessionRoutes(
   const {
     boundWorkspace,
     bridge,
+    workspaceRegistry,
     archiveCoordinator,
     mutate,
     sendBridgeError,
@@ -124,6 +131,159 @@ export function registerSessionRoutes(
     sessionShellCommandEnabled,
   } = deps;
   const LANGUAGE_CODES = deps.languageCodes;
+
+  const sendWorkspaceMismatch = (
+    res: Response,
+    requestedWorkspace: string,
+  ): void => {
+    res.status(400).json({
+      error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
+      code: 'workspace_mismatch',
+      boundWorkspace,
+      requestedWorkspace,
+    });
+  };
+
+  const resolveRuntimeForSessionCreation = (
+    body: Record<string, unknown>,
+    res: Response,
+  ): { runtime: WorkspaceRuntime; workspaceCwd: string } | undefined => {
+    const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+    if (cwd === undefined) return undefined;
+    let key: string;
+    try {
+      key = canonicalizeWorkspace(cwd);
+    } catch (err) {
+      if (workspaceRegistry.list().length > 1 && 'cwd' in body) {
+        sendWorkspaceMismatch(res, cwd);
+        return undefined;
+      }
+      sendBridgeError(res, err, { route: 'POST /session' });
+      return undefined;
+    }
+    if (workspaceRegistry.list().length === 1) {
+      return {
+        runtime: workspaceRegistry.primary,
+        workspaceCwd:
+          'cwd' in body ? key : workspaceRegistry.primary.workspaceCwd,
+      };
+    }
+    const runtime = workspaceRegistry.resolveWorkspaceCwd(
+      'cwd' in body ? key : undefined,
+    );
+    if (!runtime) {
+      sendWorkspaceMismatch(res, key);
+      return undefined;
+    }
+    if (!runtime.primary && !runtime.trusted) {
+      res.status(403).json({
+        error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
+        code: 'untrusted_workspace',
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      return undefined;
+    }
+    return { runtime, workspaceCwd: runtime.workspaceCwd };
+  };
+
+  const resolveRuntimeFromWorkspaceParam = (
+    req: Request,
+    res: Response,
+  ): WorkspaceRuntime | null => {
+    const workspaceParam = req.params['id'] ?? '';
+    const byId = workspaceRegistry.getByWorkspaceId(workspaceParam);
+    if (byId) return byId;
+    if (!path.isAbsolute(workspaceParam)) {
+      res.status(400).json({
+        error: '`:id` must decode to a workspace id or absolute path',
+      });
+      return null;
+    }
+    let key: string;
+    try {
+      key = canonicalizeWorkspace(workspaceParam);
+    } catch {
+      sendWorkspaceMismatch(res, workspaceParam);
+      return null;
+    }
+    const runtime = workspaceRegistry.getByWorkspaceCwd(key);
+    if (!runtime) {
+      sendWorkspaceMismatch(res, key);
+      return null;
+    }
+    return runtime;
+  };
+
+  const resolvePrimaryOnlyWorkspaceCwd = (
+    cwd: string,
+    res: Response,
+    route: string,
+  ): string | undefined => {
+    let key: string;
+    try {
+      key = canonicalizeWorkspace(cwd);
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+      return undefined;
+    }
+    if (key !== boundWorkspace) {
+      sendWorkspaceMismatch(res, key);
+      return undefined;
+    }
+    return key;
+  };
+
+  const resolveLiveSessionRuntime = (
+    sessionId: string,
+    res: Response,
+    route: string,
+  ): WorkspaceRuntime | undefined => {
+    if (workspaceRegistry.list().length === 1) {
+      return workspaceRegistry.primary;
+    }
+    const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+    if (resolution.kind === 'found') return resolution.runtime;
+    if (resolution.kind === 'not_found') {
+      res.status(404).json({
+        error: `No session with id "${sessionId}"`,
+        code: 'session_not_found',
+        sessionId,
+      });
+      return undefined;
+    }
+    res.status(500).json({
+      error: `Session owner is ambiguous for "${sessionId}"`,
+      code: 'ambiguous_session_owner',
+      sessionId,
+      route,
+      workspaceIds: resolution.runtimes.map((runtime) => runtime.workspaceId),
+    });
+    return undefined;
+  };
+
+  const withOwnerMutableSession =
+    (
+      route: string,
+      handler: (
+        req: Request,
+        res: Response,
+        sessionId: string,
+        runtime: WorkspaceRuntime,
+      ) => Promise<void> | void,
+    ): RequestHandler =>
+    async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+      if (!runtime) return;
+      try {
+        await archiveCoordinator.runSharedMany([sessionId], async () => {
+          await handler(req, res, sessionId, runtime);
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    };
 
   const parseSessionIdsBody = (
     req: Request,
@@ -201,8 +361,9 @@ export function registerSessionRoutes(
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
-    const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
-    if (cwd === undefined) return;
+    const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -224,8 +385,8 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: cwd,
+      const session = await runtime.bridge.spawnOrAttach({
+        workspaceCwd,
         modelServiceId,
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
@@ -275,7 +436,7 @@ export function registerSessionRoutes(
           // dispatching, the bridge will see `attachCount > 0` and
           // skip the kill. Without the flag, that second client's
           // session would die mid-prompt.
-          bridge
+          runtime.bridge
             .killSession(session.sessionId, { requireZeroAttaches: true })
             .catch(() => {
               // Best-effort cleanup; channel.exited will eventually reap.
@@ -290,9 +451,11 @@ export function registerSessionRoutes(
           // subscribers). Without this, both-coalesced-callers-
           // disconnect leaves an orphan agent child no client knows
           // the id of.
-          bridge.detachClient(session.sessionId, session.clientId).catch(() => {
-            // Best-effort cleanup; channel.exited will eventually reap.
-          });
+          runtime.bridge
+            .detachClient(session.sessionId, session.clientId)
+            .catch(() => {
+              // Best-effort cleanup; channel.exited will eventually reap.
+            });
         }
         return;
       }
@@ -309,23 +472,29 @@ export function registerSessionRoutes(
       const body = safeBody(req);
       const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
       if (cwd === undefined) return;
+      const primaryCwd = resolvePrimaryOnlyWorkspaceCwd(
+        cwd,
+        res,
+        `POST /session/:id/${action}`,
+      );
+      if (primaryCwd === undefined) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
-            await assertSessionLoadable(cwd, sessionId);
+            await assertSessionLoadable(primaryCwd, sessionId);
             return action === 'load'
               ? await bridge.loadSession({
                   sessionId,
-                  workspaceCwd: cwd,
+                  workspaceCwd: primaryCwd,
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                 })
               : await bridge.resumeSession({
                   sessionId,
-                  workspaceCwd: cwd,
+                  workspaceCwd: primaryCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                 });
           },
@@ -472,8 +641,14 @@ export function registerSessionRoutes(
   app.get('/session/:id/status', (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/status',
+    );
+    if (!runtime) return;
     try {
-      res.status(200).json(bridge.getSessionSummary(sessionId));
+      res.status(200).json(runtime.bridge.getSessionSummary(sessionId));
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/status',
@@ -778,9 +953,10 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/prompt',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/prompt',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
+        const ownerBridge = runtime.bridge;
         const body = safeBody(req);
         const prompt = body['prompt'];
         if (!Array.isArray(prompt) || prompt.length === 0) {
@@ -825,7 +1001,7 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
 
-        const lastEventId = bridge.getSessionLastEventId(sessionId);
+        const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
@@ -855,7 +1031,7 @@ export function registerSessionRoutes(
 
         let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
         try {
-          promptPromise = bridge.sendPrompt(
+          promptPromise = ownerBridge.sendPrompt(
             sessionId,
             {
               ...forwardedBody,
@@ -933,26 +1109,29 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/heartbeat',
     mutate(),
-    withMutableSession('POST /session/:id/heartbeat', (req, res, sessionId) => {
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = bridge.recordHeartbeat(
-        sessionId,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    }),
+    withOwnerMutableSession(
+      'POST /session/:id/heartbeat',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.recordHeartbeat(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
   );
 
   app.post(
     '/session/:id/detach',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/detach',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        await bridge.detachClient(sessionId, clientId);
+        await runtime.bridge.detachClient(sessionId, clientId);
         res.status(204).end();
       },
     ),
@@ -961,13 +1140,13 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cancel',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/cancel',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        await bridge.cancelSession(
+        await runtime.bridge.cancelSession(
           sessionId,
           {
             ...(body as object),
@@ -987,11 +1166,17 @@ export function registerSessionRoutes(
     const sessionId = req.params['id'];
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'DELETE /session/:id',
+    );
+    if (!runtime) return;
     try {
       // ACP session/close can fall back to a shared gate because it has
       // connection-local promptAbort state; REST close does not.
       await archiveCoordinator.runExclusiveMany([sessionId], async () =>
-        bridge.closeSession(
+        runtime.bridge.closeSession(
           sessionId,
           clientId !== undefined ? { clientId } : undefined,
         ),
@@ -1282,25 +1467,9 @@ export function registerSessionRoutes(
     // Express decodes URL-encoded path params automatically; clients pass
     // the absolute workspace cwd encoded (e.g.
     // GET /workspace/%2Fwork%2Fa/sessions).
-    const workspaceCwd = req.params['id'] ?? '';
-    if (!path.isAbsolute(workspaceCwd)) {
-      res
-        .status(400)
-        .json({ error: '`:id` must decode to an absolute workspace path' });
-      return;
-    }
-    // Reject cross-workspace queries so orchestrators don't mistake
-    // "no sessions here" for "workspace is idle".
-    const key = canonicalizeWorkspace(workspaceCwd);
-    if (key !== boundWorkspace) {
-      res.status(400).json({
-        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
-        code: 'workspace_mismatch',
-        boundWorkspace,
-        requestedWorkspace: key,
-      });
-      return;
-    }
+    const runtime = resolveRuntimeFromWorkspaceParam(req, res);
+    if (runtime === null) return;
+    const key = runtime.workspaceCwd;
     try {
       const cursor =
         typeof req.query['cursor'] === 'string'
@@ -1343,13 +1512,24 @@ export function registerSessionRoutes(
         }
         archiveState = rawArchiveState;
       }
-      const result = await listWorkspaceSessionsForResponse(bridge, key, {
+      if (!runtime.primary && (archiveState === 'archived' || view)) {
+        res.status(400).json({
+          error:
+            'Non-primary workspace session listing is live-only in Phase 2a.',
+          code: 'non_primary_live_sessions_only',
+        });
+        return;
+      }
+      const options = {
         ...(cursor !== undefined ? { cursor } : {}),
         ...(size !== undefined ? { size } : {}),
         ...(archiveState !== undefined ? { archiveState } : {}),
         ...(view !== undefined ? { view } : {}),
         ...(group !== undefined ? { group } : {}),
-      });
+      };
+      const result = runtime.primary
+        ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+        : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
       res.status(200).json({
         sessions: result.sessions,
         ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
@@ -1547,10 +1727,16 @@ export function registerSessionRoutes(
   app.get('/session/:id/pending-prompts', (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(
+      sessionId,
+      res,
+      'GET /session/:id/pending-prompts',
+    );
+    if (!runtime) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
-      const pendingPrompts = bridge.getPendingPrompts(
+      const pendingPrompts = runtime.bridge.getPendingPrompts(
         sessionId,
         clientId !== undefined ? { clientId } : undefined,
       );
@@ -1566,9 +1752,9 @@ export function registerSessionRoutes(
   app.delete(
     '/session/:id/pending-prompts/:promptId',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'DELETE /session/:id/pending-prompts/:promptId',
-      (req, res, sessionId) => {
+      (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const promptId = req.params['promptId'];
@@ -1578,7 +1764,7 @@ export function registerSessionRoutes(
             .json({ error: '`promptId` route parameter is required' });
           return;
         }
-        const result = bridge.removePendingPrompt(
+        const result = runtime.bridge.removePendingPrompt(
           sessionId,
           promptId,
           clientId !== undefined ? { clientId } : undefined,

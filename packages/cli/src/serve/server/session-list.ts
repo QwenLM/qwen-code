@@ -453,6 +453,32 @@ export async function listWorkspaceSessionsForResponse(
   return { sessions, nextCursor };
 }
 
+export function listLiveWorkspaceSessionsForResponse(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options?: Pick<ListWorkspaceSessionsOptions, 'cursor' | 'size'>,
+): ListWorkspaceSessionsResult {
+  const rawSize = options?.size;
+  const requestedSize =
+    typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
+      ? rawSize
+      : DEFAULT_SESSION_PAGE_SIZE;
+  const pageSize = Math.min(Math.max(requestedSize, 1), MAX_SESSION_PAGE_SIZE);
+  const start = options?.cursor ? (parseSessionCursor(options.cursor) ?? 0) : 0;
+  const sessions = bridge.listWorkspaceSessions(workspaceCwd).sort((a, b) => {
+    const aTime = Date.parse(a.updatedAt ?? a.createdAt);
+    const bTime = Date.parse(b.updatedAt ?? b.createdAt);
+    return bTime - aTime;
+  });
+  const page = sessions.slice(start, start + pageSize);
+  const nextCursor =
+    start + pageSize < sessions.length ? String(start + pageSize) : undefined;
+  return {
+    sessions: page,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+  };
+}
+
 export function parseSessionPageSizeQuery(raw: unknown): number | undefined {
   if (typeof raw !== 'string') return undefined;
   const trimmed = raw.trim();

@@ -21,6 +21,7 @@ import {
   parseLastEventId,
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 let activeSseCount = 0;
 
@@ -30,6 +31,7 @@ export function getActiveSseCount(): number {
 
 interface RegisterSseEventsRoutesDeps {
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
@@ -76,7 +78,8 @@ export function registerSseEventsRoutes(
   app: Application,
   deps: RegisterSseEventsRoutesDeps,
 ): void {
-  const { bridge, daemonLog, sendBridgeError, writerIdleTimeoutMs } = deps;
+  const { workspaceRegistry, daemonLog, sendBridgeError, writerIdleTimeoutMs } =
+    deps;
 
   app.get('/session/:id/events', (req, res) => {
     const sessionId = req.params['id'];
@@ -91,8 +94,29 @@ export function registerSseEventsRoutes(
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
     try {
+      const owner =
+        workspaceRegistry.list().length === 1
+          ? { kind: 'found' as const, runtime: workspaceRegistry.primary }
+          : workspaceRegistry.resolveLiveSessionOwner(sessionId);
+      if (owner.kind === 'not_found') {
+        res.status(404).json({
+          error: `No session with id "${sessionId}"`,
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
+      if (owner.kind === 'ambiguous') {
+        res.status(500).json({
+          error: `Session owner is ambiguous for "${sessionId}"`,
+          code: 'ambiguous_session_owner',
+          sessionId,
+          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
+        });
+        return;
+      }
       const snapshot = req.query['snapshot'] === '1';
-      const iterable = bridge.subscribeEvents(sessionId, {
+      const iterable = owner.runtime.bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
         ...(maxQueued !== undefined ? { maxQueued } : {}),
