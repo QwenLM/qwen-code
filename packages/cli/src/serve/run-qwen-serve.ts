@@ -3554,9 +3554,16 @@ export async function runQwenServe(
 
     const tryListen = (attemptPort: number, attempt: number): void => {
       try {
-        server = httpsServer
-          ? httpsServer.listen(attemptPort, listenHostname, onListening)
-          : app.listen(attemptPort, listenHostname, onListening);
+        if (httpsServer) {
+          // server.listen(port, host, cb) registers `cb` as a one-time
+          // `listening` listener. On failed attempts (EADDRINUSE),
+          // `listening` never fires so the listener accumulates. Clear
+          // stale listeners before each retry.
+          httpsServer.removeAllListeners('listening');
+          server = httpsServer.listen(attemptPort, listenHostname, onListening);
+        } else {
+          server = app.listen(attemptPort, listenHostname, onListening);
+        }
       } catch (err) {
         // Synchronous listen failure (e.g. invalid address) — not
         // recoverable via port bump.
