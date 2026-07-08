@@ -10,6 +10,10 @@ import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+const originalDocumentHidden = Object.getOwnPropertyDescriptor(
+  document,
+  'hidden',
+);
 const originalElementFromPoint = document.elementFromPoint;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 
@@ -21,6 +25,11 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   document.getSelection()?.removeAllRanges();
+  if (originalDocumentHidden) {
+    Object.defineProperty(document, 'hidden', originalDocumentHidden);
+  } else {
+    Reflect.deleteProperty(document, 'hidden');
+  }
   if (originalElementFromPoint) {
     Object.defineProperty(document, 'elementFromPoint', {
       configurable: true,
@@ -879,6 +888,10 @@ describe('EnhancedMarkdownTable', () => {
         }),
       );
     });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: true,
+    });
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
@@ -924,6 +937,25 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('ignores keyboard resize arrows with modifiers', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          ctrlKey: true,
+          key: 'ArrowRight',
+        }),
+      );
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '160px',
+    );
+  });
+
   it('shows column move handles only for the active column', () => {
     const container = renderWideTable();
     const teamHandle = button(container, 'Move Team');
@@ -943,6 +975,38 @@ describe('EnhancedMarkdownTable', () => {
     expect(
       button(container, 'Sort by Team, ascending').closest('th')?.className,
     ).toContain('activeHeaderCell');
+  });
+
+  it('clears the active column move handle on outside click, cell selection, and Escape', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+
+    click(button(container, 'Sort by Team'));
+    act(() => {
+      document.body.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true }),
+      );
+    });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+
+    click(button(container, 'Sort by Team, ascending'));
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+
+    click(button(container, 'Sort by Team, descending'));
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
   });
 
   it('reorders columns and quick copies in the visible order', () => {
@@ -978,7 +1042,10 @@ describe('EnhancedMarkdownTable', () => {
     const source = renderWideTable();
     const target = renderWideTable();
 
-    dragColumnElements(button(source, 'Move Score'), button(target, 'Move Team'));
+    dragColumnElements(
+      button(source, 'Move Score'),
+      button(target, 'Move Team'),
+    );
 
     expect(rowTexts(source)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
     expect(rowTexts(target)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
@@ -1032,6 +1099,14 @@ describe('EnhancedMarkdownTable', () => {
       button(container, 'Sort by Team').closest('th')?.className,
     ).toContain('frozenHeaderCell');
     expect(dataCell(container, 0, 0).className).toContain('frozenCell');
+
+    click(button(container, 'Sort by Team'));
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('activeHeaderCell');
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('frozenHeaderCell');
 
     dragColumn(container, 'Move Score', 'Move Team');
     expect(
