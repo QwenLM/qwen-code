@@ -39,6 +39,7 @@ const NUMBER_OPTIONS = new Map<
 >([
   ['port', 'port'],
   ['maxSessions', 'max-sessions'],
+  ['maxTotalSessions', 'max-total-sessions'],
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
   ['eventRingSize', 'event-ring-size'],

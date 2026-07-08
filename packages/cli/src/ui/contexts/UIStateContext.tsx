@@ -40,6 +40,7 @@ import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
+import type { StartupIdeConnectionStatus } from '../../utils/events.js';
 
 export interface PendingSkillView {
   name: string;
@@ -165,6 +166,7 @@ export interface UIState {
   terminalHeight: number;
   mainControlsRef: React.MutableRefObject<DOMElement | null>;
   currentIDE: IdeInfo | null;
+  startupIdeConnectionStatus: StartupIdeConnectionStatus;
   updateInfo: UpdateObject | null;
   showIdeRestartPrompt: boolean;
   ideTrustRestartReason: RestartReason;

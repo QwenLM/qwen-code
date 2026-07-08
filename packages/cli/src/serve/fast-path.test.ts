@@ -613,6 +613,7 @@ describe('serve fast path argument parsing', () => {
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
       ['max-sessions', ['--max-sessions', '10']],
+      ['max-total-sessions', ['--max-total-sessions', '20']],
       [
         'max-pending-prompts-per-session',
         ['--max-pending-prompts-per-session', '5'],
@@ -682,6 +683,7 @@ describe('serve fast path argument parsing', () => {
       },
     });
     expect(fastPathParsed).not.toHaveProperty('options.maxSessions');
+    expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
     expect(fastPathParsed).not.toHaveProperty(

@@ -106,6 +106,7 @@
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
     { "path": "../channels/dingtalk" },
+    { "path": "../channels/wecom" },
     { "path": "../channels/feishu" }
   ]
 }
