@@ -1021,7 +1021,7 @@ jobs:
             N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
               [ .[]
                 | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
-                | select((.workflowName // "") != "Qwen Autofix")
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
                 | select((.completedAt // .updatedAt // "") > $wm) ]
               | length
             ' <<< "${CHECKS_JSON}")"

@@ -221,6 +221,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('.conclusion // .state // ""');
     expect(reviewScanJob).toContain('.workflowName // ""');
     expect(reviewScanJob).toContain('startswith("review-address")');
+    expect(
+      reviewScanJob.match(/startswith\("review-address"\)/g) ?? [],
+    ).toHaveLength(2);
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
