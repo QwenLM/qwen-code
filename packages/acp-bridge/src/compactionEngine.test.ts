@@ -822,8 +822,9 @@ describe('EventBus + CompactionEngine integration', () => {
       fullTranscriptAvailable: false,
     });
     expect(
-      (snapshot.compactedTurns[0]?.data as Record<string, unknown>)
-        .truncatedTurns,
+      (snapshot.compactedTurns[0]?.data as Record<string, unknown>)[
+        'truncatedTurns'
+      ],
     ).toBeUndefined();
   });
 
