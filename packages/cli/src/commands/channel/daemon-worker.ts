@@ -88,6 +88,7 @@ interface ChannelDaemonWorkerReady {
 
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
+  validateWebhookTask(task: ChannelWebhookTask): void;
   runWebhookTask(task: ChannelWebhookTask): Promise<void>;
   close(): Promise<void>;
 }
@@ -387,6 +388,13 @@ export async function runChannelDaemonWorker(
 
     return {
       channels: connected,
+      validateWebhookTask(task: ChannelWebhookTask): void {
+        const channel = channels.get(task.channelName);
+        if (!channel || !connected.includes(task.channelName)) {
+          throw new Error(`Channel "${task.channelName}" is not running.`);
+        }
+        channel.validateWebhookTask(task);
+      },
       async runWebhookTask(task: ChannelWebhookTask): Promise<void> {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
@@ -530,11 +538,20 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       };
       const onMessage = (message: unknown) => {
         if (!isChannelWebhookTaskMessage(message)) return;
-        if (!handle.channels.includes(message.task.channelName)) {
+        if (message.expiresAt <= Date.now()) {
+          sendWebhookTaskResult(message.id, {
+            ok: false,
+            error: 'Channel webhook task IPC timed out.',
+          });
+          return;
+        }
+        try {
+          handle.validateWebhookTask(message.task);
+        } catch (err) {
           sendWebhookTaskResult(message.id, {
             ok: false,
             error: sanitizeLogText(
-              `Channel "${message.task.channelName}" is not running.`,
+              err instanceof Error ? err.message : String(err),
               512,
             ),
           });

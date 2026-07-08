@@ -137,7 +137,7 @@ export function allowOriginCors(
 ): RequestHandler {
   const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
   const allowedHeaders =
-    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID';
+    'Authorization, Content-Type, X-Qwen-Client-Id, X-Qwen-Webhook-Secret, Last-Event-ID';
   const maxAgeSeconds = '86400';
   const exposedHeaders = 'Retry-After';
   return (req: Request, res: Response, next: NextFunction) => {

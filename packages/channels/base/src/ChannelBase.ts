@@ -511,6 +511,37 @@ export abstract class ChannelBase {
     };
   }
 
+  private drainCollectBufferForCurrentPrompt(
+    sessionId: string,
+    stillCurrent: boolean,
+    taskLabel: string,
+  ): void {
+    const buffer = this.collectBuffers.get(sessionId);
+    if (!stillCurrent || !buffer || buffer.length === 0) {
+      return;
+    }
+    this.collectBuffers.delete(sessionId);
+    const lost = buffer.length;
+    const coalesced = buffer.map((b) => b.text).join('\n\n');
+    const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+    const syntheticEnvelope: Envelope = {
+      ...lastEnvelope,
+      text: coalesced,
+      alreadyPrefixed: true,
+      referencedText: undefined,
+      attachments: undefined,
+      imageBase64: undefined,
+      imageMimeType: undefined,
+    };
+    this.handleInbound(syntheticEnvelope).catch((err) => {
+      process.stderr.write(
+        `[${this.name}] dropped ${lost} buffered message(s) after ${taskLabel} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    });
+  }
+
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
     if (this.registerBridgeEvents) {
@@ -595,8 +626,7 @@ export abstract class ChannelBase {
           `loop ${job.id}`,
         );
         promptToSend = sessionContext.promptText;
-        shouldClaimSessionContext =
-          sessionContext.shouldClaimSessionContext;
+        shouldClaimSessionContext = sessionContext.shouldClaimSessionContext;
       }
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
@@ -770,29 +800,11 @@ export abstract class ChannelBase {
           this.activePrompts.delete(sessionId);
         }
         promptState.resolve();
-        const buffer = this.collectBuffers.get(sessionId);
-        if (stillCurrent && buffer && buffer.length > 0) {
-          this.collectBuffers.delete(sessionId);
-          const lost = buffer.length;
-          const coalesced = buffer.map((b) => b.text).join('\n\n');
-          const lastEnvelope = buffer[buffer.length - 1]!.envelope;
-          const syntheticEnvelope: Envelope = {
-            ...lastEnvelope,
-            text: coalesced,
-            alreadyPrefixed: true,
-            referencedText: undefined,
-            attachments: undefined,
-            imageBase64: undefined,
-            imageMimeType: undefined,
-          };
-          this.handleInbound(syntheticEnvelope).catch((err) => {
-            process.stderr.write(
-              `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
-                err instanceof Error ? err.message : String(err)
-              }\n`,
-            );
-          });
-        }
+        this.drainCollectBufferForCurrentPrompt(
+          sessionId,
+          stillCurrent,
+          `loop ${job.id}`,
+        );
       }
     });
     this.sessionQueues.set(
@@ -802,10 +814,11 @@ export abstract class ChannelBase {
     return current;
   }
 
-  async runWebhookTask(
-    task: ChannelWebhookTask,
-    options: ChannelWebhookRunOptions = {},
-  ): Promise<string | undefined> {
+  validateWebhookTask(task: ChannelWebhookTask): void {
+    this.resolveWebhookTaskTarget(task);
+  }
+
+  private resolveWebhookTaskTarget(task: ChannelWebhookTask): SessionTarget {
     if (!this.supportsProactiveSend()) {
       throw new Error('Channel does not support proactive webhook messages.');
     }
@@ -832,6 +845,14 @@ export abstract class ChannelBase {
         'Channel does not support proactive webhook messages for this chat target.',
       );
     }
+    return target;
+  }
+
+  async runWebhookTask(
+    task: ChannelWebhookTask,
+    options: ChannelWebhookRunOptions = {},
+  ): Promise<string | undefined> {
+    const target = this.resolveWebhookTaskTarget(task);
 
     const sessionId = await this.router.resolve(
       this.name,
@@ -846,7 +867,16 @@ export abstract class ChannelBase {
     const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
 
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const generation = this.sessionGenerations.get(sessionId) ?? 0;
     const current = prev.then(async (): Promise<string | undefined> => {
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        process.stderr.write(
+          `[${this.name}] dropped webhook ${taskId} for session ${sessionId}: session was cleared before it ran\n`,
+        );
+        throw new ChannelLoopSkippedError(
+          'webhook task dropped because session was cleared before it ran',
+        );
+      }
       let promptToSend = promptText;
       let shouldClaimSessionContext = false;
       if (shouldPrependSessionContext) {
@@ -857,11 +887,18 @@ export abstract class ChannelBase {
           `webhook task ${taskId}`,
         );
         promptToSend = sessionContext.promptText;
-        shouldClaimSessionContext =
-          sessionContext.shouldClaimSessionContext;
+        shouldClaimSessionContext = sessionContext.shouldClaimSessionContext;
       }
       if (shouldClaimSessionContext) {
         this.instructedSessions.add(sessionId);
+      }
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        process.stderr.write(
+          `[${this.name}] dropped webhook ${taskId} for session ${sessionId}: session was cleared before it ran\n`,
+        );
+        throw new ChannelLoopSkippedError(
+          'webhook task dropped because session was cleared before it ran',
+        );
       }
       let doneResolve: () => void = () => {};
       const done = new Promise<void>((resolve) => {
@@ -881,6 +918,13 @@ export abstract class ChannelBase {
         ...this.lifecycleBase(target.chatId, sessionId, taskId),
         type: 'started',
       });
+      try {
+        this.onPromptStart(target.chatId, sessionId);
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] onPromptStart threw in webhook ${taskId} for session ${sessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      }
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
@@ -945,10 +989,7 @@ export abstract class ChannelBase {
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
         }
-        if (
-          err instanceof ChannelLoopSkippedError &&
-          !promptState.cancelled
-        ) {
+        if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
           this.emitTaskCancellation(promptState, sessionId, err.reason);
           promptState.cancelled = true;
         }
@@ -978,10 +1019,27 @@ export abstract class ChannelBase {
         throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
-        if (this.activePrompts.get(sessionId) === promptState) {
+        const stillCurrent = this.activePrompts.get(sessionId) === promptState;
+        if (!promptState.clearEvicted) {
+          try {
+            this.onPromptEnd(target.chatId, sessionId);
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptEnd threw in webhook ${taskId} for session ${sessionId}: ${
+                err instanceof Error ? err.message : err
+              }\n`,
+            );
+          }
+        }
+        if (stillCurrent) {
           this.activePrompts.delete(sessionId);
         }
         promptState.resolve();
+        this.drainCollectBufferForCurrentPrompt(
+          sessionId,
+          stillCurrent,
+          `webhook ${taskId}`,
+        );
       }
     });
     this.sessionQueues.set(

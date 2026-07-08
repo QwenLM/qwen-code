@@ -380,7 +380,7 @@ When channels are serve-managed, `qwen channel status` shows the owner as `qwen 
 ## Webhook-triggered tasks
 
 Daemon-managed channels can also accept authenticated webhook events. Qwen receives the event as context, summarizes and decides what matters, and then delivers the final response to the configured chat target. This is not a raw notification relay.
-Webhook tasks require unattended approval mode because they run without interactive approval.
+Webhook tasks require `approvalMode: "yolo"` because they run without interactive approval. That setting applies to the whole channel, not only webhook turns, so use a dedicated webhook channel or tightly restrict normal chat senders for that channel.
 
 Example channel config:
 
@@ -402,7 +402,7 @@ Example channel config:
             "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET",
             "targets": {
               "default": {
-                "chatId": "67890",
+                "chatId": "OPEN_CONVERSATION_ID",
                 "senderId": "webhook:github-ci",
                 "isGroup": true
               }
@@ -413,6 +413,14 @@ Example channel config:
     }
   }
 }
+```
+
+For DingTalk, `chatId` must be the group `openConversationId`; other adapters may require their own proactive target shape.
+
+Start `qwen serve` with bearer auth for webhook channels:
+
+```bash
+QWEN_SERVER_TOKEN="$QWEN_SERVER_TOKEN" qwen serve --require-auth
 ```
 
 Example request:
@@ -434,7 +442,7 @@ curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
   }'
 ```
 
-The bearer header is required only when `qwen serve` is running with bearer auth enabled; the webhook secret header is always required for the webhook source.
+The bearer header is required when `qwen serve` is running with bearer auth enabled; the webhook secret header is always required for the webhook source. A `202 {"accepted": true}` response means the channel worker accepted ownership of the task, not that the final response has already been delivered to chat. Check daemon and channel worker logs, plus `/daemon/status`, when troubleshooting delivery failures.
 
 ### Multi-Channel Mode
 

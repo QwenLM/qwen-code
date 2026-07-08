@@ -2024,6 +2024,7 @@ describe('createChannelWorkerSupervisor', () => {
     expect(sent).toMatchObject({
       type: 'webhook_task',
       id: expect.any(String),
+      expiresAt: expect.any(Number),
       task: webhookTask,
     });
 
@@ -2137,9 +2138,7 @@ describe('createChannelWorkerSupervisor', () => {
 
     const rejected = expect(
       supervisor.enqueueWebhookTask(webhookTask),
-    ).rejects.toThrow(
-      'send boom',
-    );
+    ).rejects.toThrow('send boom');
     await vi.advanceTimersByTimeAsync(30_000);
     await rejected;
   });
@@ -2170,9 +2169,7 @@ describe('createChannelWorkerSupervisor', () => {
 
     const rejected = expect(
       supervisor.enqueueWebhookTask(webhookTask),
-    ).rejects.toThrow(
-      'callback boom',
-    );
+    ).rejects.toThrow('callback boom');
     await vi.advanceTimersByTimeAsync(30_000);
     await rejected;
   });

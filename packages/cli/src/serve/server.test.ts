@@ -351,9 +351,6 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
-  'daemon_a2a_discovery',
-  'daemon_a2a_peer_call',
-  'daemon_a2a_mcp_tool',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'voice_transcribe',
@@ -1931,24 +1928,6 @@ describe('createServeApp', () => {
       ).toContain('voice_transcribe');
     });
 
-    it('advertises A2A features only when the runtime toggle is on', () => {
-      for (const feature of [
-        'daemon_a2a_discovery',
-        'daemon_a2a_peer_call',
-        'daemon_a2a_mcp_tool',
-      ] as const) {
-        expect(
-          getAdvertisedServeFeatures(undefined, { a2aEnabled: true }),
-        ).toContain(feature);
-        expect(
-          getAdvertisedServeFeatures(undefined, { a2aEnabled: false }),
-        ).not.toContain(feature);
-        expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
-          feature,
-        );
-      }
-    });
-
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
       // Iterate the Map so any future conditional tag added here whose
       // predicate isn't honored by `getAdvertisedServeFeatures` fails
@@ -2119,24 +2098,6 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               cdpTunnelOverWsEnabled: true,
-            }),
-          ).toContain(feature);
-          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
-            feature,
-          );
-          continue;
-        }
-        if (
-          feature === 'daemon_a2a_discovery' ||
-          feature === 'daemon_a2a_peer_call' ||
-          feature === 'daemon_a2a_mcp_tool'
-        ) {
-          expect(predicate({ a2aEnabled: true })).toBe(true);
-          expect(predicate({ a2aEnabled: false })).toBe(false);
-          expect(predicate({})).toBe(false);
-          expect(
-            getAdvertisedServeFeatures(undefined, {
-              a2aEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -12200,6 +12161,63 @@ describe('createServeApp', () => {
           title: 'CI failed',
           payload: {},
         });
+
+        const withBearerAuth = createServeApp(
+          { ...baseOpts, workspace, token: 'secret' },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const missingBearer = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(missingBearer.status).toBe(401);
+
+        const withBothSecrets = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(withBothSecrets.status).toBe(202);
+
+        const withCors = createServeApp(
+          {
+            ...baseOpts,
+            workspace,
+            allowOrigins: ['https://hooks.example'],
+          },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const preflight = await request(withCors)
+          .options('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Origin', 'https://hooks.example')
+          .set('Access-Control-Request-Method', 'POST')
+          .set(
+            'Access-Control-Request-Headers',
+            'X-Qwen-Webhook-Secret, Content-Type',
+          );
+        expect(preflight.status).toBe(204);
+        expect(preflight.headers['access-control-allow-headers']).toContain(
+          'X-Qwen-Webhook-Secret',
+        );
       } finally {
         await fsp.rm(tempHome, { recursive: true, force: true });
         await fsp.rm(workspace, { recursive: true, force: true });

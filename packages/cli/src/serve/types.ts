@@ -178,10 +178,6 @@ export interface ServeOptions {
    */
   mcpPoolActive?: boolean;
   /**
-   * Advertise daemon agent-to-agent discovery and peer-call capabilities.
-   */
-  a2aEnabled?: boolean;
-  /**
    * Cross-origin allowlist for browser webui
    * deployments.
    */

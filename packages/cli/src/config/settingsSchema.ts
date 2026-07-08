@@ -365,65 +365,6 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
-  a2a: {
-    type: 'object',
-    label: 'Agent-to-Agent',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: {},
-    description: 'Daemon agent-to-agent coordination settings.',
-    showInDialog: false,
-    properties: {
-      enabled: {
-        type: 'boolean',
-        label: 'Enable Agent-to-Agent',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: false,
-        description: 'Enable daemon agent-to-agent coordination.',
-        showInDialog: false,
-      },
-      explicitPeers: {
-        type: 'array',
-        label: 'Explicit Agent-to-Agent Peers',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: [],
-        description: 'Explicit daemon peers for agent-to-agent calls.',
-        showInDialog: false,
-        items: {
-          type: 'object',
-          properties: {
-            id: {
-              type: 'string',
-              required: true,
-            },
-            alias: {
-              type: 'string',
-            },
-            url: {
-              type: 'string',
-              required: true,
-            },
-            tokenRef: {
-              type: 'string',
-            },
-          },
-        },
-      },
-      trustedPeers: {
-        type: 'object',
-        label: 'Trusted Agent-to-Agent Peers',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: {},
-        description:
-          'Trusted daemon peers keyed by peer id for agent-to-agent calls.',
-        showInDialog: false,
-      },
-    },
-  },
-
   general: {
     type: 'object',
     label: 'General',

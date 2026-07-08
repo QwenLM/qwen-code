@@ -15,6 +15,7 @@ import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import {
+  CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   createChannelWebhookTaskMessage,
   isChannelWebhookTaskResultMessage,
   type ChannelWebhookAccepted,
@@ -76,9 +77,7 @@ export interface ChannelWorkerSupervisor {
   stop(): Promise<void>;
   killAllSync(): void;
   snapshot(): ChannelWorkerSnapshot;
-  enqueueWebhookTask(
-    task: ChannelWebhookTask,
-  ): Promise<ChannelWebhookAccepted>;
+  enqueueWebhookTask(task: ChannelWebhookTask): Promise<ChannelWebhookAccepted>;
 }
 
 export interface ChannelWorkerChild {
@@ -86,10 +85,7 @@ export interface ChannelWorkerChild {
   killed?: boolean;
   stdout?: WorkerLogStream;
   stderr?: WorkerLogStream;
-  send?(
-    message: unknown,
-    callback?: (err: Error | null) => void,
-  ): boolean;
+  send?(message: unknown, callback?: (err: Error | null) => void): boolean;
   kill(signal?: NodeJS.Signals | number): boolean;
   on(event: 'message', listener: (message: unknown) => void): this;
   removeListener(event: 'message', listener: (message: unknown) => void): this;
@@ -961,7 +957,7 @@ export function createChannelWorkerSupervisor(
         const timer = setTimeout(() => {
           pendingWebhookTasks.delete(message.id);
           reject(new Error('Channel webhook task IPC timed out.'));
-        }, 30_000);
+        }, CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS);
         timer.unref();
         pendingWebhookTasks.set(message.id, { resolve, reject, timer });
         try {

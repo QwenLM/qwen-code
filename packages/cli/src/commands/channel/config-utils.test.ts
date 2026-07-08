@@ -361,4 +361,52 @@ describe('parseChannelConfig', () => {
       'Channel "dingtalk-main" field "webhooks.sources.custom.secret" must be a string.',
     );
   });
+
+  it('rejects webhook sources without a secret', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom" must define exactly one of "secret" or "secretEnv".',
+    );
+  });
+
+  it('rejects webhook sources with both secret and secretEnv', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secret: 'secret-value',
+              secretEnv: 'QWEN_TEST_WEBHOOK_SECRET',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.custom" must define exactly one of "secret" or "secretEnv".',
+    );
+  });
 });

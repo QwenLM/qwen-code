@@ -189,31 +189,33 @@ function parseWebhookSource(
     );
   }
 
-  let secret: string | undefined;
-  if (
-    record['secret'] !== undefined &&
-    record['secret'] !== null &&
-    record['secret'] !== ''
-  ) {
-    secret = resolveEnvVars(
-      requireStringField(channelName, `${path}.secret`, record['secret']),
-    );
-  }
-  if (
-    record['secretEnv'] !== undefined &&
-    record['secretEnv'] !== null &&
-    record['secretEnv'] !== ''
-  ) {
-    secret = resolveEnvVars(
-      `$${requireStringField(
-        channelName,
-        `${path}.secretEnv`,
-        record['secretEnv'],
-      )}`,
+  const hasSecret = record['secret'] !== undefined && record['secret'] !== null;
+  const hasSecretEnv =
+    record['secretEnv'] !== undefined && record['secretEnv'] !== null;
+  if (hasSecret === hasSecretEnv) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" must define exactly one of "secret" or "secretEnv".`,
     );
   }
 
-  return secret === undefined ? { targets } : { secret, targets };
+  const secret = hasSecret
+    ? resolveEnvVars(
+        requireStringField(channelName, `${path}.secret`, record['secret']),
+      )
+    : resolveEnvVars(
+        `$${requireStringField(
+          channelName,
+          `${path}.secretEnv`,
+          record['secretEnv'],
+        )}`,
+      );
+  if (secret.length === 0) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}" webhook secret must be non-empty.`,
+    );
+  }
+
+  return { secret, targets };
 }
 
 function parseWebhookConfig(
