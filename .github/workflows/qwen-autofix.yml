@@ -995,13 +995,6 @@ jobs:
               echo "⏳ #${PR}: PR has pending checks; skipping until the current verification finishes"
               continue
             fi
-            HAS_FAILED_CHECKS="$(jq -r '
-              [ .[]
-                | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
-                | select((.workflowName // "") != "Qwen Autofix") ]
-              | length > 0
-            ' <<< "${CHECKS_JSON}")"
-
             # Push watermark: the PR's last push. Feedback older than this was in
             # front of the agent on a previous round.
             PUSH_WM="$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date')"
@@ -1025,6 +1018,13 @@ jobs:
               echo "🚧 #${PR}: hit MAX_ROUNDS (${ROUND}/${MAX_ROUNDS}) — leaving for a human"
               continue
             fi
+            N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
+              [ .[]
+                | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+                | select((.workflowName // "") != "Qwen Autofix")
+                | select((.completedAt // .updatedAt // "") > $wm) ]
+              | length
+            ' <<< "${CHECKS_JSON}")"
 
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
             gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
@@ -1063,12 +1063,12 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" && "${HAS_FAILED_CHECKS}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) new, conflict=${HAS_CONFLICT}, failed_checks=${HAS_FAILED_CHECKS}, round=${ROUND}"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" \
@@ -1245,7 +1245,11 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not) | .created_at))
-            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json")"
+            + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              | select((.workflowName // "") != "Qwen Autofix")
+              | select((.completedAt // .updatedAt // "") > $wm)
+              | (.completedAt // .updatedAt // "")))
+            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json")"
           [[ -z "${NEWEST}" ]] && NEWEST="${WATERMARK}"
           echo "newest=${NEWEST}" >> "${GITHUB_OUTPUT}"
 
@@ -1291,10 +1295,11 @@ jobs:
               "${WORKDIR}/ic.json"
             echo
             echo "## Failed checks"
-            jq -r '
+            jq -r --arg wm "${WATERMARK}" '
               .[]
               | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select((.workflowName // "") != "Qwen Autofix")
+              | select((.completedAt // .updatedAt // "") > $wm)
               | "- \(.workflowName // "status") / \(.name // .context // "?"): \(.conclusion // .state // "?") \(.detailsUrl // .targetUrl // "")"' \
               "${WORKDIR}/checks.json"
           } > "${WORKDIR}/feedback.md"
