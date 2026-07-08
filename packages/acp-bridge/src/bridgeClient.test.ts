@@ -717,6 +717,109 @@ describe('BridgeClient — token usage accounting', () => {
   });
 });
 
+describe('BridgeClient — create-sub-session extMethod dispatch', () => {
+  const noFlow = () => {
+    throw new Error('test: should not run');
+  };
+
+  function makeClientWithCreateSubSession(
+    onCreateSubSession:
+      | ((info: {
+          prompt: string;
+          completion: 'sent' | 'first-turn';
+          model?: string;
+          name?: string;
+          callerSessionId?: string;
+        }) => Promise<{
+          sessionId: string;
+          result?: string;
+          stopReason?: string;
+        }>)
+      | undefined,
+  ) {
+    return new BridgeClient(
+      (() => undefined) as never, // resolveEntry
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession
+      undefined, // onTokenUsage
+      onCreateSubSession,
+    );
+  }
+
+  const METHOD = 'qwen/control/create-sub-session';
+
+  it('forwards a valid request to the host handler and returns its result', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'sub-9',
+      result: 'done',
+      stopReason: 'end_turn',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+
+    const res = await client.extMethod(METHOD, {
+      prompt: 'summarize',
+      completion: 'first-turn',
+      model: 'm1',
+      name: 'digest',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'summarize',
+      completion: 'first-turn',
+      model: 'm1',
+      name: 'digest',
+      callerSessionId: 'caller-1',
+    });
+    expect(res).toEqual({
+      sessionId: 'sub-9',
+      result: 'done',
+      stopReason: 'end_turn',
+    });
+  });
+
+  it('omits result/stopReason when the handler does not return them (sent mode)', async () => {
+    const client = makeClientWithCreateSubSession(async () => ({
+      sessionId: 'sub-10',
+    }));
+    const res = await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+    });
+    expect(res).toEqual({ sessionId: 'sub-10' });
+  });
+
+  it('rejects methodNotFound when no host handler is wired (non-daemon)', async () => {
+    const client = makeClientWithCreateSubSession(undefined);
+    await expect(
+      client.extMethod(METHOD, { prompt: 'x', completion: 'sent' }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects invalid params (missing prompt, bad completion)', async () => {
+    const onCreate = vi.fn();
+    const client = makeClientWithCreateSubSession(
+      onCreate as unknown as Parameters<
+        typeof makeClientWithCreateSubSession
+      >[0],
+    );
+    await expect(
+      client.extMethod(METHOD, { completion: 'sent' }),
+    ).rejects.toThrow();
+    await expect(
+      client.extMethod(METHOD, { prompt: 'x', completion: 'weird' }),
+    ).rejects.toThrow();
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — artifact ingress', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

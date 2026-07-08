@@ -469,6 +469,8 @@ describe('Session', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      setSubSessionSpawner: vi.fn(),
+      getSubSessionSpawner: vi.fn(),
     } as unknown as Config;
 
     mockClient = {

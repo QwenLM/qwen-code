@@ -130,6 +130,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -210,6 +211,23 @@ const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+
+/**
+ * Wraps an `isolated` scheduled task's prompt so the model dispatches it into a
+ * fresh sub-session (via the `create_sub_session` tool) instead of running it in
+ * this shared bound session. Whether/how the sub-session is spawned is the
+ * model's decision — this only carries the instruction.
+ */
+function wrapIsolatedTaskPrompt(prompt: string): string {
+  return (
+    'This scheduled task is configured to run in an ISOLATED session. Use the ' +
+    '`create_sub_session` tool with completion "sent" to run the task below in ' +
+    'a fresh sub-session — do NOT perform the task yourself in this session. ' +
+    'After dispatching it, reply with a one-line confirmation.\n\n' +
+    '--- Task ---\n' +
+    prompt
+  );
+}
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -953,6 +971,44 @@ export class Session implements SessionContext {
 
     this.#installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
+    this.#registerSubSessionSpawner();
+  }
+
+  /**
+   * Wire the `create_sub_session` tool's spawner to the daemon over the ACP
+   * `extMethod` request channel. ONLY the ACP/daemon session does this, so the
+   * tool is inert (reports daemon-only) in interactive TUI / headless, where no
+   * bridge exists. The request runs while the caller's turn is suspended in the
+   * tool await — safe because the ACP channel supports concurrent bidirectional
+   * in-flight requests and prompts serialize per-session, not per-child.
+   */
+  #registerSubSessionSpawner(): void {
+    this.config.setSubSessionSpawner(async (req) => {
+      const resp = await this.client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: req.prompt,
+          completion: req.completion,
+          ...(req.model ? { model: req.model } : {}),
+          ...(req.name ? { name: req.name } : {}),
+          callerSessionId: this.sessionId,
+        },
+      );
+      if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
+        throw new Error(
+          'create_sub_session: bridge returned non-string sessionId',
+        );
+      }
+      return {
+        sessionId: resp['sessionId'],
+        ...(typeof resp['result'] === 'string'
+          ? { result: resp['result'] }
+          : {}),
+        ...(typeof resp['stopReason'] === 'string'
+          ? { stopReason: resp['stopReason'] }
+          : {}),
+      };
+    });
   }
 
   getId(): string {
@@ -1027,6 +1083,7 @@ export class Session implements SessionContext {
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.config.setSubSessionSpawner(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -2808,11 +2865,26 @@ export class Session implements SessionContext {
     if (!scheduler.hasPendingWork) return;
 
     scheduler.start(
-      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+      (job: {
+        prompt: string;
+        cronExpr?: string;
+        missed?: boolean;
+        runMode?: 'shared' | 'isolated';
+      }) => {
         if (this.cronDisabledByTokenLimit) return;
         if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+        // An `isolated` scheduled task should run in a FRESH sub-session rather
+        // than accumulating in this (shared) bound session. Instead of a
+        // dedicated daemon path, we relay it through the model: wrap the prompt
+        // so the model dispatches it via the `create_sub_session` tool. The
+        // model decides the trigger; this session just carries the instruction.
+        // Excludes `missed` so a missed one-shot keeps its confirm-first path.
+        const prompt =
+          !job.missed && job.runMode === 'isolated'
+            ? wrapIsolatedTaskPrompt(job.prompt)
+            : job.prompt;
         this.cronQueue.push({
-          prompt: job.prompt,
+          prompt,
           source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         });
         void this.#drainCronQueue();

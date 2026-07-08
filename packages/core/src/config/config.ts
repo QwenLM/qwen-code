@@ -1431,6 +1431,37 @@ function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
   return normalizeRecurringMaxAge(raw, DEFAULT_RECURRING_MAX_AGE_DAYS);
 }
 
+/** Request from the `create_sub_session` tool to spawn a fresh top-level
+ * sub-session and run a prompt in it. */
+export interface SubSessionSpawnRequest {
+  prompt: string;
+  /** `'sent'` = resolve as soon as the prompt is dispatched; `'first-turn'` =
+   * resolve after the sub-session's first turn finishes (result returned). */
+  completion: 'sent' | 'first-turn';
+  /** Optional model service id for the sub-session. */
+  model?: string;
+  /** Optional display name for the sub-session in the session list. */
+  name?: string;
+}
+
+/** Result returned to the `create_sub_session` tool. `result` (the sub-session's
+ * first-turn output) is present only for `completion: 'first-turn'`. */
+export interface SubSessionSpawnResult {
+  sessionId: string;
+  result?: string;
+  stopReason?: string;
+}
+
+/**
+ * Injected capability that spawns a sub-session on behalf of the
+ * `create_sub_session` tool. Wired ONLY by the daemon/ACP session layer
+ * (`Session.ts` → `this.client.extMethod`); absent in interactive TUI / headless
+ * (no bridge), which is precisely the tool's daemon-only gate.
+ */
+export type SubSessionSpawner = (
+  req: SubSessionSpawnRequest,
+) => Promise<SubSessionSpawnResult>;
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -6346,6 +6377,18 @@ export class Config {
       });
     }
 
+    // create_sub_session: spawn a fresh top-level sub-session and run a prompt
+    // in it. Only functional under `qwen serve` (needs the bridge, wired as a
+    // spawner by the ACP session); the tool's execute() reports a clear
+    // daemon-only error otherwise. Registered unconditionally so the message is
+    // available rather than the tool silently missing.
+    await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
+      const { CreateSubSessionTool } = await import(
+        '../tools/create-sub-session.js'
+      );
+      return new CreateSubSessionTool(this);
+    });
+
     // Register team collaboration tools (experimental). The team-specific
     // tools (team_create/team_delete/task_create/task_update/task_list)
     // are gated on this flag.
@@ -6483,5 +6526,22 @@ export class Config {
     }
     // Pre-init path: stash for `createToolRegistry` to consume.
     this.pendingMcpBudgetCallback = cb;
+  }
+
+  private subSessionSpawner?: SubSessionSpawner;
+
+  /**
+   * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
+   * the daemon/ACP session layer (which routes it to the bridge over
+   * `extMethod`); left unset in interactive TUI / headless — the tool then
+   * reports itself as daemon-only. `undefined` clears it on session teardown.
+   */
+  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+    this.subSessionSpawner = spawner;
+  }
+
+  /** The injected sub-session spawner, or undefined outside daemon mode. */
+  getSubSessionSpawner(): SubSessionSpawner | undefined {
+    return this.subSessionSpawner;
   }
 }

@@ -415,6 +415,16 @@ export interface BridgeOptions {
    * receives an SDK MCP runtime server, so the method is never called.
    */
   clientMcpSender?: ClientMcpMessageSender;
+  /**
+   * Daemon-host seam for the `create_sub_session` tool. When a tool running
+   * inside a child's agent turn asks (over `extMethod`) to spawn a fresh
+   * top-level sub-session and run a prompt in it, the bridge's `extMethod`
+   * dispatch forwards it here. It RETURNS A PROMISE so the `'first-turn'` completion
+   * mode can wait for the sub-session's first turn and return its result to the
+   * caller. Omitted by tests / Mode A / non-daemon embeds — the tool then
+   * reports itself unavailable (daemon-only).
+   */
+  onCreateSubSession?: CreateSubSessionHandler;
 }
 
 /**
@@ -428,3 +438,36 @@ export interface BridgeOptions {
 export type ClientMcpMessageSender = (
   serverName: string,
 ) => ((payload: unknown) => Promise<unknown>) | undefined;
+
+/**
+ * Payload the bridge forwards to {@link BridgeOptions.onCreateSubSession} when
+ * the `create_sub_session` tool requests a sub-session.
+ */
+export interface CreateSubSessionInfo {
+  /** Prompt to run in the freshly-spawned sub-session. */
+  prompt: string;
+  /** When the request resolves: `'sent'` = as soon as the prompt is dispatched;
+   * `'first-turn'` = after the sub-session's first turn completes (result
+   * returned). Extensible — more criteria may be added later. */
+  completion: 'sent' | 'first-turn';
+  /** Optional model service id for the sub-session (falls back to default). */
+  model?: string;
+  /** Optional display name for the sub-session in the session list. */
+  name?: string;
+  /** The calling session's id — used for per-caller concurrency accounting. */
+  callerSessionId?: string;
+}
+
+/** Result the daemon host returns for a create-sub-session request. `result`
+ * (the sub-session's first-turn output) is present only for `'first-turn'`. */
+export interface CreateSubSessionResult {
+  sessionId: string;
+  result?: string;
+  stopReason?: string;
+}
+
+/** Daemon-host callback that spawns a sub-session and (for `'first-turn'`) waits
+ * for its first turn. Returns a Promise so the tool can block on the result. */
+export type CreateSubSessionHandler = (
+  info: CreateSubSessionInfo,
+) => Promise<CreateSubSessionResult>;
