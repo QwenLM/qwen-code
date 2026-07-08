@@ -1900,6 +1900,7 @@ describe('ContentGenerationPipeline', () => {
       expect(thrownError!.httpStatus).toBe(200);
       expect(thrownError!.status).toBe(200);
       expect(thrownError!.requestId).toBe('req-123');
+      expect(thrownError!.request_id).toBe('req-123');
     });
 
     it('should throw NonSSEResponseError for application/json streaming responses', async () => {

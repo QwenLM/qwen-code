@@ -93,6 +93,7 @@ function isSSECompatibleContentType(contentType: string | null): boolean {
  */
 export class NonSSEResponseError extends Error {
   readonly status: number;
+  readonly request_id: string | null;
 
   constructor(
     readonly contentType: string | null,
@@ -108,6 +109,7 @@ export class NonSSEResponseError extends Error {
     );
     this.name = 'NonSSEResponseError';
     this.status = httpStatus;
+    this.request_id = requestId;
   }
 }
 
