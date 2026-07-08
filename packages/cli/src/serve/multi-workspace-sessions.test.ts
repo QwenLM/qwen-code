@@ -630,7 +630,7 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
-  it('keeps persisted load and resume primary-only before touching a bridge', async () => {
+  it('dispatches trusted non-primary persisted load and resume', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 
     for (const action of ['load', 'resume'] as const) {
@@ -639,13 +639,61 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host())
         .send({ cwd: SECONDARY_CWD });
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('secondary_workspace_load_not_supported');
+      expect(res.status).toBe(200);
       expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
     }
 
     expect(primaryBridge.restoreCalls).toEqual([]);
-    expect(secondaryBridge.restoreCalls).toEqual([]);
+    expect(secondaryBridge.restoreCalls).toEqual([
+      {
+        action: 'load',
+        req: expect.objectContaining({
+          sessionId: 'secondary-session',
+          workspaceCwd: SECONDARY_CWD,
+        }),
+      },
+      {
+        action: 'resume',
+        req: expect.objectContaining({
+          sessionId: 'secondary-session',
+          workspaceCwd: SECONDARY_CWD,
+        }),
+      },
+    ]);
+  });
+
+  it('rejects unknown and untrusted restore cwd before touching a bridge', async () => {
+    const unknown = makeHarness();
+    const unknownRes = await request(unknown.app)
+      .post('/session/unknown-restore/load')
+      .set('Host', host())
+      .send({ cwd: UNKNOWN_CWD });
+
+    expect(unknownRes.status).toBe(400);
+    expect(unknownRes.body.code).toBe('workspace_mismatch');
+    expect(unknownRes.body.workspaceCount).toBe(2);
+    expect(unknown.primaryBridge.restoreCalls).toEqual([]);
+    expect(unknown.secondaryBridge.restoreCalls).toEqual([]);
+
+    const daemonLog = makeDaemonLog();
+    const untrusted = makeHarness({ secondaryTrusted: false, daemonLog });
+    const untrustedRes = await request(untrusted.app)
+      .post('/session/untrusted-restore/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(untrustedRes.status).toBe(403);
+    expect(untrustedRes.body.code).toBe('untrusted_workspace');
+    expect(untrusted.primaryBridge.restoreCalls).toEqual([]);
+    expect(untrusted.secondaryBridge.restoreCalls).toEqual([]);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /session/:id/resume',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
   });
 
   it('returns a clear Phase 2a error for non-primary sessions on primary-only routes', async () => {

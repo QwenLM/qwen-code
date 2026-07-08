@@ -45,6 +45,27 @@ export type WorkspaceSessionOwnerResolution =
       readonly runtimes: readonly WorkspaceRuntime[];
     };
 
+export type WorkspaceSessionLifecycleEvent =
+  | {
+      readonly type: 'registered';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason?: string;
+    }
+  | {
+      readonly type: 'removed';
+      readonly sessionId: string;
+      readonly workspaceCwd: string;
+      readonly reason?: string;
+    };
+
+export interface WorkspaceSessionOwnerIndex {
+  register(sessionId: string, workspaceCwd: string): void;
+  remove(sessionId: string, workspaceCwd?: string): void;
+  getWorkspaceCwds(sessionId: string): readonly string[];
+  handleBridgeSessionLifecycle(event: WorkspaceSessionLifecycleEvent): void;
+}
+
 export interface WorkspaceRegistry {
   readonly primary: WorkspaceRuntime;
   list(): readonly WorkspaceRuntime[];
@@ -56,8 +77,52 @@ export interface WorkspaceRegistry {
   resolveLiveSessionOwner(sessionId: string): WorkspaceSessionOwnerResolution;
 }
 
+export interface WorkspaceRegistryOptions {
+  readonly sessionOwnerIndex?: WorkspaceSessionOwnerIndex;
+}
+
+export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {
+  const bySessionId = new Map<string, Set<string>>();
+
+  const register = (sessionId: string, workspaceCwd: string): void => {
+    let owners = bySessionId.get(sessionId);
+    if (!owners) {
+      owners = new Set<string>();
+      bySessionId.set(sessionId, owners);
+    }
+    owners.add(workspaceCwd);
+  };
+
+  const remove = (sessionId: string, workspaceCwd?: string): void => {
+    if (workspaceCwd === undefined) {
+      bySessionId.delete(sessionId);
+      return;
+    }
+    const owners = bySessionId.get(sessionId);
+    if (!owners) return;
+    owners.delete(workspaceCwd);
+    if (owners.size === 0) {
+      bySessionId.delete(sessionId);
+    }
+  };
+
+  return {
+    register,
+    remove,
+    getWorkspaceCwds: (sessionId) => [...(bySessionId.get(sessionId) ?? [])],
+    handleBridgeSessionLifecycle: (event) => {
+      if (event.type === 'registered') {
+        register(event.sessionId, event.workspaceCwd);
+      } else {
+        remove(event.sessionId, event.workspaceCwd);
+      }
+    },
+  };
+}
+
 export function createWorkspaceRegistry(
   inputRuntimes: readonly WorkspaceRuntime[],
+  options: WorkspaceRegistryOptions = {},
 ): WorkspaceRegistry {
   if (inputRuntimes.length === 0) {
     throw new Error(
@@ -96,6 +161,28 @@ export function createWorkspaceRegistry(
 
   const runtimes = Object.freeze([...inputRuntimes]);
   const primary = primaryRuntimes[0]!;
+  const sessionOwnerIndex = options.sessionOwnerIndex;
+  const scanLiveOwners = (
+    sessionId: string,
+  ): WorkspaceSessionOwnerResolution => {
+    const matches: WorkspaceRuntime[] = [];
+    for (const runtime of runtimes) {
+      try {
+        runtime.bridge.getSessionSummary(sessionId);
+        matches.push(runtime);
+        sessionOwnerIndex?.register(sessionId, runtime.workspaceCwd);
+      } catch (err) {
+        if (err instanceof SessionNotFoundError) continue;
+        throw err;
+      }
+    }
+    if (matches.length === 0) return { kind: 'not_found' };
+    if (matches.length === 1) {
+      return { kind: 'found', runtime: matches[0]! };
+    }
+    return { kind: 'ambiguous', runtimes: matches };
+  };
+
   return {
     primary,
     list: () => runtimes,
@@ -104,27 +191,41 @@ export function createWorkspaceRegistry(
     resolveWorkspaceCwd: (workspaceCwd) =>
       workspaceCwd === undefined ? primary : byCwd.get(workspaceCwd),
     resolveLiveSessionOwner: (sessionId) => {
-      const matches: WorkspaceRuntime[] = [];
-      for (const runtime of runtimes) {
-        try {
-          runtime.bridge.getSessionSummary(sessionId);
-          matches.push(runtime);
-        } catch (err) {
-          if (err instanceof SessionNotFoundError) continue;
-          throw err;
+      const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
+      if (indexedCwds.length > 0) {
+        const matches: WorkspaceRuntime[] = [];
+        for (const workspaceCwd of indexedCwds) {
+          const runtime = byCwd.get(workspaceCwd);
+          if (!runtime) {
+            sessionOwnerIndex?.remove(sessionId, workspaceCwd);
+            continue;
+          }
+          try {
+            runtime.bridge.getSessionSummary(sessionId);
+            matches.push(runtime);
+          } catch (err) {
+            if (err instanceof SessionNotFoundError) {
+              sessionOwnerIndex?.remove(sessionId, workspaceCwd);
+              continue;
+            }
+            throw err;
+          }
+        }
+        if (matches.length === 1) {
+          return { kind: 'found', runtime: matches[0]! };
+        }
+        if (matches.length > 1) {
+          return { kind: 'ambiguous', runtimes: matches };
         }
       }
-      if (matches.length === 0) return { kind: 'not_found' };
-      if (matches.length === 1) {
-        return { kind: 'found', runtime: matches[0]! };
-      }
-      return { kind: 'ambiguous', runtimes: matches };
+      return scanLiveOwners(sessionId);
     },
   };
 }
 
 export function createSingleWorkspaceRegistry(
   runtime: WorkspaceRuntime,
+  options: WorkspaceRegistryOptions = {},
 ): WorkspaceRegistry {
-  return createWorkspaceRegistry([runtime]);
+  return createWorkspaceRegistry([runtime], options);
 }
