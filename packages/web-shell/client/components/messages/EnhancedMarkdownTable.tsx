@@ -18,7 +18,9 @@ import {
   type RefObject,
   type TouchEvent as ReactTouchEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
+import { useTheme, WebShellThemeId } from '../../themeContext';
 import styles from './EnhancedMarkdownTable.module.css';
 
 type TableElement = ReactElement<{
@@ -91,8 +93,7 @@ interface ColumnResizeState {
 
 interface CellDialogState {
   rowKey: string;
-  value: string;
-  content: ReactNode;
+  columnIndex: number;
 }
 
 interface FilterOption {
@@ -1170,6 +1171,7 @@ export function EnhancedTable({
   toolbarExtra?: ReactNode;
 }) {
   const { t } = useI18n();
+  const theme = useTheme();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
@@ -1491,6 +1493,13 @@ export function EnhancedTable({
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
     : undefined;
+  const currentCellDialogCell = useMemo(() => {
+    if (!cellDialog) return null;
+    const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
+    return row?.cells[cellDialog.columnIndex] ?? null;
+  }, [cellDialog, visibleRows]);
+  const cellDialogThemeClass =
+    theme === WebShellThemeId.Light ? styles.themeLight : styles.themeDark;
 
   useEffect(() => {
     resetCopiedVisible();
@@ -1547,7 +1556,10 @@ export function EnhancedTable({
     }
     if (
       cellDialog &&
-      !visibleRows.some((row) => row.key === cellDialog.rowKey)
+      !visibleRows.some(
+        (row) =>
+          row.key === cellDialog.rowKey && row.cells[cellDialog.columnIndex],
+      )
     ) {
       setCellDialog(null);
     }
@@ -1588,7 +1600,10 @@ export function EnhancedTable({
       if (event.shiftKey && (activeElement === first || currentIndex === -1)) {
         event.preventDefault();
         last?.focus();
-      } else if (!event.shiftKey && activeElement === last) {
+      } else if (
+        !event.shiftKey &&
+        (activeElement === last || currentIndex === -1)
+      ) {
         event.preventDefault();
         first?.focus();
       }
@@ -1708,7 +1723,7 @@ export function EnhancedTable({
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
   };
 
-  const openCellDialog = (rowKey: string, cell: EnhancedTableCell) => {
+  const openCellDialog = (rowKey: string, columnIndex: number) => {
     cellDialogFocusReturnRef.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -1719,8 +1734,7 @@ export function EnhancedTable({
     resetCopiedCellDialog();
     setCellDialog({
       rowKey,
-      value: cell.text,
-      content: cell.content,
+      columnIndex,
     });
   };
 
@@ -1730,10 +1744,10 @@ export function EnhancedTable({
   };
 
   const copyCellDialogValue = () => {
-    if (cellDialog?.value == null || !navigator.clipboard) return;
+    if (currentCellDialogCell?.text == null || !navigator.clipboard) return;
     const copyGeneration = copiedCellDialogGenRef.current;
     void navigator.clipboard
-      .writeText(cellDialog.value)
+      .writeText(currentCellDialogCell.text)
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedCellDialogGenRef.current !== copyGeneration) return;
@@ -2325,7 +2339,7 @@ export function EnhancedTable({
                             if (isInteractiveSelectionTarget(event.target)) {
                               return;
                             }
-                            openCellDialog(row.key, cell);
+                            openCellDialog(row.key, columnIndex);
                           }}
                         >
                           {cell.content}
@@ -2409,60 +2423,65 @@ export function EnhancedTable({
           onSort={setColumnSort}
         />
       )}
-      {cellDialog && (
-        <div
-          className={styles.cellDialogBackdrop}
-          onMouseDown={closeCellDialog}
-        >
+      {cellDialog &&
+        currentCellDialogCell &&
+        createPortal(
           <div
-            ref={cellDialogRef}
-            className={styles.cellDialog}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={`${tableId}-cell-dialog-title`}
-            tabIndex={-1}
-            onMouseDown={(event) => event.stopPropagation()}
+            className={`${styles.cellDialogBackdrop} ${cellDialogThemeClass}`}
+            onMouseDown={closeCellDialog}
           >
-            <button
-              className={styles.cellDialogCloseIcon}
-              type="button"
-              onClick={closeCellDialog}
-              aria-label={t('markdownTable.close')}
-            >
-              ×
-            </button>
             <div
-              id={`${tableId}-cell-dialog-title`}
-              className={styles.cellDialogTitle}
+              ref={cellDialogRef}
+              className={styles.cellDialog}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={`${tableId}-cell-dialog-title`}
+              tabIndex={-1}
+              onMouseDown={(event) => event.stopPropagation()}
             >
-              {t('markdownTable.cellDialogTitle')}
-            </div>
-            <div className={styles.cellDialogValue}>{cellDialog.content}</div>
-            <div className={styles.cellDialogFooter}>
-              <div className={styles.cellDialogActions}>
-                <button
-                  className={styles.cellDialogButton}
-                  type="button"
-                  onClick={copyCellDialogValue}
-                >
-                  {copiedCellDialog
-                    ? t('code.copied')
-                    : t('markdownTable.copyCell')}
-                </button>
-                <button
-                  className={`${styles.cellDialogButton} ${
-                    styles.cellDialogPrimaryButton
-                  }`}
-                  type="button"
-                  onClick={closeCellDialog}
-                >
-                  {t('markdownTable.close')}
-                </button>
+              <button
+                className={styles.cellDialogCloseIcon}
+                type="button"
+                onClick={closeCellDialog}
+                aria-label={t('markdownTable.close')}
+              >
+                ×
+              </button>
+              <div
+                id={`${tableId}-cell-dialog-title`}
+                className={styles.cellDialogTitle}
+              >
+                {t('markdownTable.cellDialogTitle')}
+              </div>
+              <div className={styles.cellDialogValue}>
+                {currentCellDialogCell.content}
+              </div>
+              <div className={styles.cellDialogFooter}>
+                <div className={styles.cellDialogActions}>
+                  <button
+                    className={styles.cellDialogButton}
+                    type="button"
+                    onClick={copyCellDialogValue}
+                  >
+                    {copiedCellDialog
+                      ? t('code.copied')
+                      : t('markdownTable.copyCell')}
+                  </button>
+                  <button
+                    className={`${styles.cellDialogButton} ${
+                      styles.cellDialogPrimaryButton
+                    }`}
+                    type="button"
+                    onClick={closeCellDialog}
+                  >
+                    {t('markdownTable.close')}
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

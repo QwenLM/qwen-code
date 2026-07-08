@@ -537,6 +537,24 @@ tr:hover .frozenCell.selectedCell {
   white-space: pre-wrap;
 }
 
+.themeDark {
+  --background: #0d0d0d;
+  --foreground: #fafafa;
+  --muted-foreground: #808598;
+  --border: #2a2a2a;
+  --card: #161616;
+  --agent-blue-500: #6785ff;
+}
+
+.themeLight {
+  --background: #ffffff;
+  --foreground: #0a0a0b;
+  --muted-foreground: #a3a3a5;
+  --border: #e3e4e6;
+  --card: #ffffff;
+  --agent-blue-500: #0033ff;
+}
+
 .cellDialogBackdrop {
   position: fixed;
   inset: 0;

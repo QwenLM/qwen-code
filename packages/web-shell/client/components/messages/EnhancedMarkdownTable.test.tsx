@@ -166,6 +166,10 @@ function textButton(container: HTMLElement, text: string): HTMLButtonElement {
   return el!;
 }
 
+function cellDialog(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[role="dialog"]');
+}
+
 function textButtonContaining(
   container: HTMLElement,
   text: string,
@@ -701,7 +705,7 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(dataCell(container, 0, 0));
 
-    const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+    const dialog = cellDialog();
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain('Current field value');
     expect(dialog?.textContent).toContain('Alpha');
@@ -713,13 +717,57 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(dataCell(container, 1, 0));
     await act(async () => {
-      textButton(container, 'Copy').click();
+      textButton(document.body, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(writeText).toHaveBeenCalledWith('Beta');
-    expect(container.textContent).toContain('Copied!');
+    expect(document.body.textContent).toContain('Copied!');
+  });
+
+  it('keeps the cell value dialog in sync with table updates', async () => {
+    const writeText = mockClipboard();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (value: string) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>{value}</td>
+                </tr>
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render('Alpha');
+    doubleClick(dataCell(container, 0, 0));
+    expect(cellDialog()?.textContent).toContain('Alpha');
+
+    render('Beta');
+    expect(cellDialog()?.textContent).not.toContain('Alpha');
+    expect(cellDialog()?.textContent).toContain('Beta');
+
+    await act(async () => {
+      textButton(document.body, 'Copy').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('Beta');
   });
 
   it('copies an empty cell value from the dialog', async () => {
@@ -739,7 +787,7 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(dataCell(container, 0, 0));
     await act(async () => {
-      textButton(container, 'Copy').click();
+      textButton(document.body, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -751,7 +799,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     doubleClick(dataCell(container, 0, 0));
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(cellDialog()).not.toBeNull();
 
     act(() => {
       document.dispatchEvent(
@@ -759,15 +807,51 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(cellDialog()).toBeNull();
+  });
+
+  it('closes the cell value dialog from the backdrop and buttons', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+    const backdrop = cellDialog()?.parentElement;
+    expect(backdrop).not.toBeNull();
+    act(() => {
+      backdrop!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(cellDialog()).toBeNull();
+
+    doubleClick(dataCell(container, 0, 0));
+    click(button(document.body, 'Close'));
+    expect(cellDialog()).toBeNull();
+
+    doubleClick(dataCell(container, 0, 0));
+    click(textButton(document.body, 'Close'));
+    expect(cellDialog()).toBeNull();
+  });
+
+  it('restores focus when closing the cell value dialog', () => {
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]');
+    expect(scroller).not.toBeNull();
+    act(() => {
+      scroller!.focus();
+    });
+
+    doubleClick(dataCell(container, 0, 0));
+    expect(document.activeElement).not.toBe(scroller);
+
+    click(textButton(document.body, 'Close'));
+
+    expect(document.activeElement).toBe(scroller);
   });
 
   it('traps focus inside the cell value dialog', () => {
     const container = renderTable();
 
     doubleClick(dataCell(container, 0, 0));
-    const iconCloseButton = button(container, 'Close');
-    const footerCloseButton = textButton(container, 'Close');
+    const iconCloseButton = button(document.body, 'Close');
+    const footerCloseButton = textButton(document.body, 'Close');
 
     expect(document.activeElement).toBe(iconCloseButton);
 
@@ -783,6 +867,16 @@ describe('EnhancedMarkdownTable', () => {
     expect(document.activeElement).toBe(footerCloseButton);
 
     act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
+      );
+    });
+    expect(document.activeElement).toBe(iconCloseButton);
+
+    const dialog = cellDialog();
+    expect(dialog).not.toBeNull();
+    act(() => {
+      dialog!.focus();
       document.dispatchEvent(
         new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }),
       );
@@ -808,7 +902,7 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(event.defaultPrevented).toBe(true);
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(cellDialog()).toBeNull();
     expect(teamHandle.className).toContain('reorderHandleVisible');
   });
 
@@ -825,7 +919,7 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(container.textContent).not.toContain('1 cell selected');
     expect(container.textContent).not.toContain('Row details');
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(cellDialog()).not.toBeNull();
   });
 
   it('closes an open filter menu when opening a cell dialog', () => {
@@ -837,7 +931,7 @@ describe('EnhancedMarkdownTable', () => {
     doubleClick(dataCell(container, 0, 0));
 
     expect(container.textContent).not.toContain('Custom filter');
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(cellDialog()).not.toBeNull();
   });
 
   it('does not open the cell dialog when double clicking an interactive target', () => {
@@ -860,7 +954,7 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(link!);
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(cellDialog()).toBeNull();
   });
 
   it('quick copies the visible sorted table', () => {
