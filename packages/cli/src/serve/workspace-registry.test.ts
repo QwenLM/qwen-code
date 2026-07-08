@@ -273,4 +273,35 @@ describe('createWorkspaceRegistry', () => {
 
     expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
   });
+
+  it('does not cache partial scan results when live owner scan fails', () => {
+    const lookupError = new Error('bridge unavailable');
+    const primarySummary = vi.fn((sessionId: string) => ({
+      sessionId,
+      workspaceCwd: '/work/primary',
+    }));
+    const secondarySummary = vi.fn(() => {
+      throw lookupError;
+    });
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(primarySummary),
+    });
+    const secondary = makeRuntime('/work/secondary', {
+      workspaceId: 'ws-secondary',
+      bridge: bridgeWithSummary(secondarySummary),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    const registry = createWorkspaceRegistry([primary, secondary], {
+      sessionOwnerIndex,
+    });
+
+    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+    expect(sessionOwnerIndex.getWorkspaceCwds('sess')).toEqual([]);
+
+    expect(() => registry.resolveLiveSessionOwner('sess')).toThrow(lookupError);
+    expect(primarySummary).toHaveBeenCalledTimes(2);
+    expect(secondarySummary).toHaveBeenCalledTimes(2);
+  });
 });

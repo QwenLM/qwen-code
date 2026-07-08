@@ -170,11 +170,13 @@ export function createWorkspaceRegistry(
       try {
         runtime.bridge.getSessionSummary(sessionId);
         matches.push(runtime);
-        sessionOwnerIndex?.register(sessionId, runtime.workspaceCwd);
       } catch (err) {
         if (err instanceof SessionNotFoundError) continue;
         throw err;
       }
+    }
+    for (const match of matches) {
+      sessionOwnerIndex?.register(sessionId, match.workspaceCwd);
     }
     if (matches.length === 0) return { kind: 'not_found' };
     if (matches.length === 1) {
