@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { HistoryGap } from '../utils/conversation-chain.js';
 import type { ChatRecord } from './chatRecordingService.js';
 
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
@@ -66,6 +67,7 @@ export interface SessionTranscriptRecordPage {
   sessionId: string;
   filePath: string;
   records: ChatRecord[];
+  gaps: HistoryGap[];
   hasMore: boolean;
   nextCursorState?: SessionTranscriptCursorState;
   replay?: unknown;
@@ -96,6 +98,7 @@ interface TranscriptIndex {
   snapshotSize: number;
   leafUuid: string;
   activeUuids: string[];
+  gaps: HistoryGap[];
   startTime: string;
   lastUpdated: string;
   byUuid: Map<string, UuidIndexEntry>;
@@ -569,12 +572,21 @@ async function buildIndex(params: {
   }
 
   const activeUuids: string[] = [];
+  const gaps: HistoryGap[] = [];
   const visited = new Set<string>();
   let currentUuid: string | null = leafUuid;
   while (currentUuid && !visited.has(currentUuid)) {
     visited.add(currentUuid);
+    const entry = byUuid.get(currentUuid);
+    if (!entry) break;
     activeUuids.push(currentUuid);
-    currentUuid = byUuid.get(currentUuid)?.parentUuid ?? null;
+    const parentUuid = entry.parentUuid;
+    if (!parentUuid) break;
+    if (!byUuid.has(parentUuid)) {
+      gaps.push({ childUuid: currentUuid, missingParentUuid: parentUuid });
+      break;
+    }
+    currentUuid = parentUuid;
   }
   activeUuids.reverse();
 
@@ -584,6 +596,7 @@ async function buildIndex(params: {
     snapshotSize,
     leafUuid,
     activeUuids,
+    gaps,
     startTime,
     lastUpdated,
     byUuid,
@@ -707,6 +720,7 @@ export class SessionTranscriptReader {
       sessionId,
       filePath,
       records,
+      gaps: index.gaps,
       hasMore,
       ...(nextCursorState ? { nextCursorState } : {}),
       ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),

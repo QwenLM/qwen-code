@@ -158,6 +158,32 @@ describe('SessionTranscriptReader', () => {
     expect(page.hasMore).toBe(true);
   });
 
+  it('marks missing parentUuid gaps without paging phantom uuids', async () => {
+    await writeRecords([
+      record('u2', 'missing-a1', 'tail'),
+      record('a2', 'u2', 'tail reply'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+
+    expect(first.records.map((r) => r.uuid)).toEqual(['u2']);
+    expect(first.gaps).toEqual([
+      { childUuid: 'u2', missingParentUuid: 'missing-a1' },
+    ]);
+    expect(first.hasMore).toBe(true);
+
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 1,
+    });
+    expect(second.records.map((r) => r.uuid)).toEqual(['a2']);
+    expect(second.gaps).toEqual([
+      { childUuid: 'u2', missingParentUuid: 'missing-a1' },
+    ]);
+    expect(second.hasMore).toBe(false);
+  });
+
   it('keeps cursors valid after the in-memory key cache is reset', async () => {
     await writeRecords([
       record('u1', null, 'hello'),

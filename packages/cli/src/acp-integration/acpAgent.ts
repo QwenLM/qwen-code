@@ -430,6 +430,7 @@ async function collectHistoryReplayUpdatesPage({
   sessionId,
   config,
   records,
+  gaps,
   cumulativeUsage,
   pendingToolCalls,
   finalizeDangling,
@@ -437,6 +438,7 @@ async function collectHistoryReplayUpdatesPage({
   sessionId: string;
   config: Config;
   records: ChatRecord[];
+  gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
   pendingToolCalls: PendingReplayToolCall[];
   finalizeDangling: boolean;
@@ -459,6 +461,7 @@ async function collectHistoryReplayUpdatesPage({
     const state = await new HistoryReplayer(replayContext).replayPage(records, {
       pendingToolCalls,
       finalizeDangling,
+      gaps,
     });
     return { updates, pendingToolCalls: state.pendingToolCalls };
   } catch (error) {
@@ -5853,6 +5856,7 @@ class QwenAgent implements Agent {
               sessionId,
               config,
               records: page.records,
+              gaps: page.gaps,
               cumulativeUsage: replayState.cumulativeUsage,
               pendingToolCalls: replayState.pendingToolCalls,
               finalizeDangling: !page.hasMore,

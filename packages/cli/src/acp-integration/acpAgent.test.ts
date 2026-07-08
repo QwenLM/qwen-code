@@ -5328,6 +5328,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('qwen/status/session/transcript returns id-less replay events from transcript reader pages', async () => {
     const settings = makeCoreSettings();
     mockRunExitCleanup.mockResolvedValue(undefined);
+    const gaps = [{ childUuid: 'u1', missingParentUuid: 'missing-a1' }];
     vi.mocked(loadCliConfig).mockResolvedValue({
       ...makeInnerConfig(),
       enableFileCheckpointing: vi.fn(),
@@ -5346,6 +5347,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         startTime: 'start',
         lastUpdated: 'end',
       },
+      gaps,
       startTime: 'start',
       lastUpdated: 'end',
     });
@@ -5405,6 +5407,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.events[0]).not.toHaveProperty('id');
     expect(result.hasMore).toBe(true);
     expect(result.nextCursor).toBeDefined();
+    expect(mockHistoryReplayPage).toHaveBeenCalledWith(
+      expect.anything(),
+      [{ uuid: 'u1' }],
+      expect.objectContaining({ gaps }),
+    );
     const transcriptConfigArgv = vi
       .mocked(loadCliConfig)
       .mock.calls.at(-1)?.[1] as CliArgs | undefined;
