@@ -208,6 +208,7 @@ export function splitCommands(command: string): string[] {
   let currentCommand = '';
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
+  let substitutionDepth = 0;
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -242,6 +243,29 @@ export function splitCommands(command: string): string[] {
     }
 
     if (!inSingleQuotes && !inDoubleQuotes) {
+      if (
+        (char === '$' || char === '<' || char === '>') &&
+        nextChar === '('
+      ) {
+        substitutionDepth++;
+        currentCommand += char + nextChar;
+        i += 2;
+        continue;
+      }
+
+      if (char === ')' && substitutionDepth > 0) {
+        substitutionDepth--;
+        currentCommand += char;
+        i++;
+        continue;
+      }
+
+      if (substitutionDepth > 0) {
+        currentCommand += char;
+        i++;
+        continue;
+      }
+
       if (
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
@@ -979,13 +1003,24 @@ function pgrepRawArgsTargetSelf(command: string, rawArgs: string): boolean {
 }
 
 function pgrepCommandTargetsSelf(command: string): boolean {
-  const parsed = parseShellSegment(command);
-  if (!parsed) return pgrepRawArgsTargetSelf('pgrep', command);
-  const tokens = unwrapExecutionPrefixes(parsed);
-  const root = normalizeExecutableName(tokens[0] ?? '');
-  return (
-    (root === 'pgrep' || root === 'pidof') && pgrepTargetsSelf(tokens, root)
-  );
+  for (const segment of getCommandSegments(command)) {
+    const parsed = parseShellSegment(segment);
+    if (!parsed) {
+      if (pgrepRawArgsTargetSelf('pgrep', segment)) {
+        return true;
+      }
+      continue;
+    }
+    const tokens = unwrapExecutionPrefixes(parsed);
+    const root = normalizeExecutableName(tokens[0] ?? '');
+    if (
+      (root === 'pgrep' || root === 'pidof') &&
+      pgrepTargetsSelf(tokens, root)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function tokenInvokesKill(token: string): boolean {
@@ -1048,8 +1083,16 @@ function downstreamSegmentContainsKill(segment: string | undefined): boolean {
       }
       cmdIndex++;
     }
-    const commandToken = postParallel[cmdIndex];
-    return commandToken ? tokenInvokesKill(commandToken) : false;
+    const remaining = unwrapExecutionPrefixes(postParallel.slice(cmdIndex));
+    const commandToken = remaining[0];
+    if (commandToken && tokenInvokesKill(commandToken)) {
+      return true;
+    }
+    const command = normalizeExecutableName(remaining[0] ?? '');
+    return (
+      ['sh', 'bash', 'zsh'].includes(command) &&
+      remaining.slice(1).some((arg) => /\bkill\b/i.test(arg))
+    );
   }
   return (
     /\bwhile\b[\s\S]*?\bread\b[\s\S]*?;\s*do\b[\s\S]*?\bkill\b/i.test(
@@ -1063,6 +1106,15 @@ function killCommandTargetsSelf(segment: string): boolean {
     const matchedCommand = match[1] ?? match[3] ?? 'pgrep';
     const rawArgs = match[2] ?? match[4] ?? '';
     if (pgrepRawArgsTargetSelf(matchedCommand, rawArgs)) {
+      return true;
+    }
+  }
+  for (const match of segment.matchAll(/\$\(([^()]*)\)|<\s*<\(([^()]*)\)/g)) {
+    const innerCommand = match[1] ?? match[2] ?? '';
+    if (
+      (/[;&|]/.test(innerCommand) || /^\s*sudo\b/i.test(innerCommand)) &&
+      pgrepCommandTargetsSelf(innerCommand)
+    ) {
       return true;
     }
   }

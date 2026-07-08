@@ -419,6 +419,17 @@ describe('getCommandRoots', () => {
     expect(result).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
   });
 
+  it('should not split on operators inside substitutions', async () => {
+    expect(getCommandRoots('echo $(a;b|c&&d) && git status')).toEqual([
+      'echo',
+      'git',
+    ]);
+    expect(getCommandRoots('cat < <(a;b|c&&d) && git status')).toEqual([
+      'cat',
+      'git',
+    ]);
+  });
+
   it('should correctly parse a chained command with quotes', async () => {
     const result = getCommandRoots('echo "hello" && git commit -m "feat"');
     expect(result).toEqual(['echo', 'git']);
@@ -677,6 +688,12 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand("kill -9 $(sh -c 'pgrep node')")).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(\\pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 `command pgrep node`')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(sudo -u root pgrep node)')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('kill -9 $(true; pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(true && pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(true | pgrep node)')).toBe(true);
   });
 
   it('detects pgrep command substitution with multiple self-names', () => {
@@ -752,6 +769,15 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('pgrep node | parallel "kill -9 {}"')).toBe(
       true,
     );
+    expect(detectSelfKillCommand('pgrep node | parallel env kill -9')).toBe(
+      true,
+    );
+    expect(detectSelfKillCommand('pgrep node | parallel sudo kill -9')).toBe(
+      true,
+    );
+    expect(
+      detectSelfKillCommand("pgrep node | parallel sh -c 'kill -9 {}'"),
+    ).toBe(true);
     expect(
       detectSelfKillCommand(`pgrep node | xargs sh -c 'kill -9 "$@"' --`),
     ).toBe(true);
@@ -845,6 +871,8 @@ describe('detectSelfKillCommand', () => {
         'while IFS= read -r pid; do kill -9 "$pid"; done < <(pgrep node)',
       ),
     ).toBe(true);
+    expect(detectSelfKillCommand('kill -9 < <(true; pgrep node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 < <(true | pgrep node)')).toBe(true);
     expect(
       detectSelfKillCommand(
         'mapfile -t pids < <(pgrep node); kill -9 "${pids[@]}"',
