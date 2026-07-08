@@ -3265,6 +3265,68 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     expect(JSON.stringify(state.blocks)).not.toContain('stale delta');
   });
 
+  it('projects history truncation as status without entering resync', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: 4,
+        retainedEvents: 2,
+        maxBytes: 512,
+        truncatedTurns: 2,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        source: 'history_truncated',
+        text: expect.stringContaining('History truncated') as string,
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+      { now: 2 },
+    );
+
+    expect(state.awaitingResync).toBe(false);
+    expect(state.resyncRequiredCount).toBe(0);
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'status',
+        text: expect.stringContaining('History truncated') as string,
+      },
+    ]);
+    expect(daemonUiEventToTerminalText(events[0])).toContain(
+      'History truncated',
+    );
+  });
+
+  it('routes malformed history truncation payloads to debug', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        truncatedEvents: '4',
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        text: 'history_truncated: malformed history_truncated payload',
+      }),
+    ]);
+  });
+
   it('mirrors approval mode from session.approval_mode.changed event', async () => {
     const { selectApprovalMode } = await import('../../src/daemon/ui/index.js');
     let state = createDaemonTranscriptState({ now: 1 });
