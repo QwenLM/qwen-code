@@ -1304,12 +1304,39 @@ export function App({
     },
     [connection.sessionId],
   );
+  const externalSplitSignature = useMemo(() => {
+    const requested = Array.from(
+      new Set((externalSplitSessionIds ?? []).filter(Boolean)),
+    ).slice(0, MAX_SPLIT_PANES);
+    return requested.join('\0');
+  }, [externalSplitSessionIds]);
+  const externalSplitControlled = externalSplitSessionIds !== undefined;
+  const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
+  onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
+  const requestOpenSplitView = useCallback(() => {
+    if (!externalSplitControlled) {
+      openSplitView();
+      return;
+    }
+    const requested =
+      splitSessionIds.length > 0
+        ? splitSessionIds
+        : connection.sessionId
+          ? [connection.sessionId]
+          : [];
+    onSplitSessionIdsChangeRef.current?.(requested);
+  }, [
+    connection.sessionId,
+    externalSplitControlled,
+    openSplitView,
+    splitSessionIds,
+  ]);
   const shellApi = useMemo<WebShellApi>(
     () => ({
-      openSplitView: () => openSplitView(),
+      openSplitView: () => requestOpenSplitView(),
       openSessionOverview: () => openPanel('sessions'),
     }),
-    [openPanel, openSplitView],
+    [openPanel, requestOpenSplitView],
   );
   useEffect(() => {
     assignShellRef(shellRef, shellApi);
@@ -1320,15 +1347,6 @@ export function App({
     },
     [shellRef],
   );
-  const externalSplitSignature = useMemo(() => {
-    const requested = Array.from(
-      new Set((externalSplitSessionIds ?? []).filter(Boolean)),
-    ).slice(0, MAX_SPLIT_PANES);
-    return requested.join('\0');
-  }, [externalSplitSessionIds]);
-  const externalSplitControlled = externalSplitSessionIds !== undefined;
-  const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
-  onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
   useEffect(() => {
     if (!externalSplitControlled) return;
     const requested = externalSplitSignature
@@ -1361,13 +1379,14 @@ export function App({
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
   useEffect(() => {
-    if (externalSplitControlled) return;
     const ids = parseSplitSessionIds(window.location.search);
     if (ids.length === 0) return;
-    openSplitView(ids);
     const url = new URL(window.location.href);
     url.searchParams.delete('split');
     window.history.replaceState(null, '', url);
+    if (!externalSplitControlled) {
+      openSplitView(ids);
+    }
   }, [externalSplitControlled, openSplitView]);
   // If the viewport shrinks below the large-screen breakpoint, close the Session
   // Overview panel and the split view — both are large-screen-only surfaces

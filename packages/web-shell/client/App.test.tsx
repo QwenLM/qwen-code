@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellApi } from './App';
 
@@ -444,6 +444,7 @@ const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
+  unmount: () => void;
 } {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -454,8 +455,15 @@ function renderApp(props: React.ComponentProps<typeof App> = {}): {
     });
   };
   doRender(props);
-  mounted.push({ root, container });
-  return { container, rerender: doRender };
+  const entry = { root, container };
+  mounted.push(entry);
+  const unmount = () => {
+    const index = mounted.indexOf(entry);
+    if (index >= 0) mounted.splice(index, 1);
+    act(() => root.unmount());
+    container.remove();
+  };
+  return { container, rerender: doRender, unmount };
 }
 
 async function flush(): Promise<void> {
@@ -1212,6 +1220,30 @@ describe('App session callbacks', () => {
     ).toBe('s1,s2,s3');
   });
 
+  it('notifies external callers when uncontrolled split session ids change', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      sidebar: false,
+      onSplitSessionIdsChange,
+      shellRef,
+    });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith(['s1', 's2', 's3']);
+  });
+
   it('opens the split view from the external shell ref like the sidebar button', async () => {
     let shellApi: WebShellApi | null = null;
     const { container } = renderApp({
@@ -1234,6 +1266,43 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('session-1');
+  });
+
+  it('requests controlled split ids from the external shell ref', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: [],
+      onSplitSessionIdsChange,
+      shellRef,
+    });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSplitView();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith(['session-1']);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('assigns and clears the external shell object ref', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { unmount } = renderApp({
+      sidebar: false,
+      shellRef,
+    });
+    await flush();
+
+    expect(shellRef.current).not.toBeNull();
+
+    unmount();
+
+    expect(shellRef.current).toBeNull();
   });
 
   it('opens the Session Overview from the external shell ref like the sidebar button', async () => {
@@ -1356,7 +1425,7 @@ describe('App session callbacks', () => {
       expect(
         container.querySelector('[data-testid="split-initial"]')?.textContent,
       ).toBe('s3');
-      expect(window.location.search).toBe('?split=s1,s2');
+      expect(window.location.search).toBe('');
     } finally {
       window.history.pushState({}, '', '/');
     }

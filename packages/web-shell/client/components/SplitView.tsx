@@ -106,6 +106,8 @@ export function SplitView({
         : normalizedSessionIds,
     );
   }, [normalizedSessionIds, sessionIdsControlled]);
+  const paneIdsRef = useRef(paneIds);
+  paneIdsRef.current = paneIds;
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -169,11 +171,15 @@ export function SplitView({
 
   const addPane = useCallback(
     (sessionId: string) => {
-      if (paneIds.includes(sessionId) || paneIds.length >= MAX_PANES) {
+      const currentPaneIds = paneIdsRef.current;
+      if (
+        currentPaneIds.includes(sessionId) ||
+        currentPaneIds.length >= MAX_PANES
+      ) {
         setPickerOpen(false);
         return;
       }
-      const next = [...paneIds, sessionId];
+      const next = [...currentPaneIds, sessionId];
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
@@ -181,7 +187,7 @@ export function SplitView({
       }
       setPickerOpen(false);
     },
-    [onPanesChange, paneIds, sessionIdsControlled],
+    [onPanesChange, sessionIdsControlled],
   );
 
   // Closing the last pane is a natural "I'm done" gesture — return to the
@@ -205,15 +211,16 @@ export function SplitView({
 
   const removePane = useCallback(
     (sessionId: string) => {
-      if (!paneIds.includes(sessionId)) return;
-      const next = paneIds.filter((id) => id !== sessionId);
+      const currentPaneIds = paneIdsRef.current;
+      if (!currentPaneIds.includes(sessionId)) return;
+      const next = currentPaneIds.filter((id) => id !== sessionId);
       if (sessionIdsControlled) {
         onPanesChange?.(next);
       } else {
         setPaneIds(next);
       }
     },
-    [onPanesChange, paneIds, sessionIdsControlled],
+    [onPanesChange, sessionIdsControlled],
   );
 
   const available = useMemo(
