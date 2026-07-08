@@ -216,9 +216,13 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('break # one PR per scheduled scan');
     expect(reviewScanJob).toContain('statusCheckRollup');
     expect(reviewScanJob).toContain('HAS_PENDING_CHECKS');
+    expect(reviewScanJob).toContain('HAS_FAILED_CHECKS');
     expect(reviewScanJob).toContain('.status // .state // ""');
+    expect(reviewScanJob).toContain('.conclusion // .state // ""');
     expect(reviewScanJob).toContain('.workflowName // ""');
     expect(reviewScanJob).toContain('startswith("review-address")');
+    expect(reviewScanJob).toContain('"${HAS_FAILED_CHECKS}" != "true"');
+    expect(reviewScanJob).toContain('failed_checks=${HAS_FAILED_CHECKS}');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain(
       'PR has pending checks; skipping until the current verification finishes',
@@ -402,6 +406,8 @@ describe('qwen-autofix workflow', () => {
       'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
     );
     expect(workflow).toContain('## Issue-level comments');
+    expect(workflow).toContain('## Failed checks');
+    expect(workflow).toContain('checks.json');
     // NEWEST watermark must consider issue-level comment timestamps.
     expect(workflow).toContain('.[2] | map(select((.created_at // "")');
     // Permission API failures in the review-trigger path must be logged.

@@ -995,6 +995,12 @@ jobs:
               echo "⏳ #${PR}: PR has pending checks; skipping until the current verification finishes"
               continue
             fi
+            HAS_FAILED_CHECKS="$(jq -r '
+              [ .[]
+                | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+                | select((.workflowName // "") != "Qwen Autofix") ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
 
             # Push watermark: the PR's last push. Feedback older than this was in
             # front of the agent on a previous round.
@@ -1057,12 +1063,12 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" && "${HAS_FAILED_CHECKS}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) new, conflict=${HAS_CONFLICT}, failed_checks=${HAS_FAILED_CHECKS}, round=${ROUND}"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" \
@@ -1218,6 +1224,8 @@ jobs:
           gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
           gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
           gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+          gh pr view "${PR}" --repo "${REPO}" \
+            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
@@ -1281,6 +1289,14 @@ jobs:
               | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
+            echo
+            echo "## Failed checks"
+            jq -r '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              | select((.workflowName // "") != "Qwen Autofix")
+              | "- \(.workflowName // "status") / \(.name // .context // "?"): \(.conclusion // .state // "?") \(.detailsUrl // .targetUrl // "")"' \
+              "${WORKDIR}/checks.json"
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"

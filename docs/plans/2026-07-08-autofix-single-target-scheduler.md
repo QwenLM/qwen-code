@@ -1,6 +1,6 @@
 # Autofix Single Target Scheduler Implementation Plan
 
-**Goal:** Make the Qwen Autofix workflow run every 10 minutes, process at most one actionable autofix PR per scan, react once to submitted reviews on bot PRs, and fall back to one existing approved issue only when no PR needs work.
+**Goal:** Make the Qwen Autofix workflow run every 10 minutes, process at most one actionable autofix PR per scan, react once to submitted reviews on bot PRs, handle failed PR checks, and fall back to one existing approved issue only when no PR needs work.
 
 **Architecture:** Keep the existing `qwen-autofix.yml` lifecycle and agent modes. Tighten the route and scan jobs so scheduled runs always scan review PRs first, issue work only proceeds when review scan has no target, and PR handling is still locked per PR.
 
@@ -35,7 +35,7 @@
 4. Add `MAX_OPEN_AUTOFIX_PRS`.
 5. Add a low-frequency `pull_request_review: submitted` trigger for bot PRs.
 6. Make `issue-autofix` depend on `review-scan` for scheduled review-first fallback.
-7. Make review scan pick one target and skip PRs with pending checks.
+7. Make review scan pick one target, skip PRs with pending checks, and handle failed checks.
 8. Gate issue candidate scan when review scan has a target or open autofix PR count exceeds the WIP cap.
 
 ### Task 3: Verify
