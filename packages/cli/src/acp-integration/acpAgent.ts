@@ -5816,6 +5816,8 @@ class QwenAgent implements Agent {
             contextMode,
             abortSignal: childSignal,
           });
+          await this.config.refreshHierarchicalMemory();
+          await this.config.getGeminiClient()?.refreshSystemInstruction();
           return result as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof RequestError) {

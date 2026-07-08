@@ -3320,9 +3320,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('runs workspace memory remember without requiring a session', async () => {
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      refreshHierarchicalMemory,
+      getGeminiClient: vi.fn().mockReturnValue({
+        refreshSystemInstruction,
+      }),
     });
     mockRunManagedRememberByAgent.mockResolvedValue({
       summary: 'saved',
@@ -3361,6 +3367,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         abortSignal: expect.any(AbortSignal),
       }),
     );
+    expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

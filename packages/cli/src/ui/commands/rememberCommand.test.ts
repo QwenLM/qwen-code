@@ -29,12 +29,18 @@ describe('rememberCommand', () => {
     });
   });
 
-  it('routes to managed memory when available', () => {
+  it('routes to managed memory when available', async () => {
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
     const context = createMockCommandContext({
       services: {
         config: {
           isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
           getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
+          refreshHierarchicalMemory,
+          getGeminiClient: vi.fn().mockReturnValue({
+            refreshSystemInstruction,
+          }),
         },
       },
     });
@@ -47,6 +53,10 @@ describe('rememberCommand', () => {
     expect((result as { content: string }).content).not.toContain(
       '<user-content>',
     );
+
+    await (result as { onComplete: () => Promise<void> }).onComplete();
+    expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+    expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to QWEN.md in bare mode', () => {
@@ -64,6 +74,9 @@ describe('rememberCommand', () => {
       content: expect.stringContaining('some fact'),
     });
     expect((result as { content: string }).content).toContain('QWEN.md');
+    expect((result as { onComplete?: () => Promise<void> }).onComplete).toBe(
+      undefined,
+    );
   });
 
   it('declares acp in supportedModes', () => {

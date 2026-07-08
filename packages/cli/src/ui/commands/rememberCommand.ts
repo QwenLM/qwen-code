@@ -49,6 +49,10 @@ export const rememberCommand: SlashCommand = {
       return {
         type: 'submit_prompt',
         content: buildManagedRememberPrompt(fact, config.getProjectRoot()),
+        onComplete: async () => {
+          await config.refreshHierarchicalMemory();
+          await config.getGeminiClient()?.refreshSystemInstruction();
+        },
       };
     }
 
