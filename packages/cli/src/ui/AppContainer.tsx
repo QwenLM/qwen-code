@@ -2649,6 +2649,7 @@ export const AppContainer = (props: AppContainerProps) => {
     IdeContext | undefined
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
+  const [isPasting, setIsPasting] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
@@ -3796,6 +3797,7 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       ctrlDPressedOnce,
       showEscapePrompt,
+      isPasting,
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
@@ -3937,6 +3939,7 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       ctrlDPressedOnce,
       showEscapePrompt,
+      isPasting,
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
@@ -4049,6 +4052,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleMcpApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
+      setIsPasting,
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,

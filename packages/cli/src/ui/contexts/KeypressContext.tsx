@@ -18,8 +18,10 @@ import {
   useContext,
   useEffect,
   useRef,
+  useState,
 } from 'react';
 import readline from 'node:readline';
+import { execFile } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
@@ -126,12 +128,19 @@ export interface Key {
 export type KeypressHandler = (key: Key) => void;
 export type MouseHandler = (event: SgrMouseEvent) => void;
 
+export interface PasteProgress {
+  active: boolean;
+  receivedBytes: number;
+  totalBytes: number | null;
+}
+
 interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
   subscribeMouse: (handler: MouseHandler) => void;
   unsubscribeMouse: (handler: MouseHandler) => void;
   pasteWorkaround: boolean;
+  pasteProgress: PasteProgress;
 }
 
 const KeypressContext = createContext<KeypressContextValue | undefined>(
@@ -167,6 +176,11 @@ export function KeypressProvider({
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
   const mouseSubscribers = useRef<Set<MouseHandler>>(new Set()).current;
+  const [pasteProgress, setPasteProgress] = useState<PasteProgress>({
+    active: false,
+    receivedBytes: 0,
+    totalBytes: null,
+  });
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -212,7 +226,7 @@ export function KeypressProvider({
     }
 
     let isPaste = false;
-    let pasteBuffer = Buffer.alloc(0);
+    let pasteChunks: string[] = [];
     // Set to true when paste mode is ended by something other than a
     // received paste-end event (idle timeout or Ctrl+C escape). The next
     // real paste-end event that arrives — if any — is then a stale echo
@@ -311,10 +325,10 @@ export function KeypressProvider({
       // We still run when either condition is true — e.g. isPaste=true with
       // an empty buffer (need to clear the flag) or isPaste=false with stale
       // buffered content (e.g. after a race between Ctrl+C and the timer).
-      if (!isPaste && pasteBuffer.length === 0) return;
-      const buffered = pasteBuffer.toString();
+      if (!isPaste && pasteChunks.length === 0) return;
+      const buffered = pasteChunks.join('');
       isPaste = false;
-      pasteBuffer = Buffer.alloc(0);
+      pasteChunks = [];
       pasteAlreadyFlushed = true;
       if (buffered.length > 0) {
         broadcast({
@@ -799,9 +813,9 @@ export function KeypressProvider({
         (key.ctrl && key.name === 'c') ||
         key.sequence === `${ESC}${KITTY_CTRL_C}`;
       if (isCtrlCKey) {
-        if (isPaste || pasteBuffer.length > 0) {
+        if (isPaste || pasteChunks.length > 0) {
           isPaste = false;
-          pasteBuffer = Buffer.alloc(0);
+          pasteChunks = [];
           pasteAlreadyFlushed = true;
           clearPasteIdleTimeout();
         }
@@ -843,18 +857,20 @@ export function KeypressProvider({
           // Reset for the next paste cycle.
           pasteAlreadyFlushed = false;
           isPaste = false;
-          pasteBuffer = Buffer.alloc(0);
+          pasteChunks = [];
           return;
         }
         isPaste = false;
-        if (pasteBuffer.toString().length > 0) {
+        const buffered = pasteChunks.join('');
+        pasteChunks = [];
+        if (buffered.length > 0) {
           broadcast({
             name: '',
             ctrl: false,
             meta: false,
             shift: false,
             paste: true,
-            sequence: pasteBuffer.toString(),
+            sequence: buffered,
           });
         } else {
           const hasImage = await clipboardHasImage();
@@ -865,17 +881,21 @@ export function KeypressProvider({
             shift: false,
             paste: true,
             pasteImage: hasImage,
-            sequence: pasteBuffer.toString(),
+            sequence: buffered,
           });
         }
-
-        pasteBuffer = Buffer.alloc(0);
         return;
       }
 
       if (isPaste) {
-        pasteBuffer = Buffer.concat([pasteBuffer, Buffer.from(key.sequence)]);
-        startPasteIdleTimeout();
+        pasteChunks.push(key.sequence);
+        // Reset the idle timeout periodically rather than on every single
+        // character — avoids hundreds of thousands of clearTimeout/setTimeout
+        // syscall pairs for large pastes while still detecting stuck paste
+        // mode within ~1s of the last received character.
+        if (pasteChunks.length % 1000 === 1) {
+          startPasteIdleTimeout();
+        }
         return;
       }
 
@@ -1227,6 +1247,182 @@ export function KeypressProvider({
       }
     };
 
+    // Intercept raw stdin data to extract bracketed paste content BEFORE it
+    // reaches readline. Without this, readline fires a keypress event for
+    // every single character inside a paste (260K chars → 260K events),
+    // blocking the main thread for seconds. By scanning for paste markers
+    // at the raw data level, we broadcast the entire paste as one event and
+    // only forward non-paste bytes to readline.
+    const pasteModePrefixBuf = Buffer.from(PASTE_MODE_PREFIX);
+    const pasteModeSuffixBuf = Buffer.from(PASTE_MODE_SUFFIX);
+    let rawPasteAccumulating = false;
+    let rawPasteChunks: Buffer[] = [];
+    let rawPasteReceivedBytes = 0;
+    let rawPasteIdleTimeout: NodeJS.Timeout | null = null;
+
+    const clearRawPasteIdleTimeout = () => {
+      if (rawPasteIdleTimeout) {
+        clearTimeout(rawPasteIdleTimeout);
+        rawPasteIdleTimeout = null;
+      }
+    };
+
+    const forceFlushRawPaste = () => {
+      clearRawPasteIdleTimeout();
+      if (!rawPasteAccumulating && rawPasteChunks.length === 0) return;
+      const content = Buffer.concat(rawPasteChunks);
+      rawPasteChunks = [];
+      rawPasteAccumulating = false;
+      broadcastPasteFromRaw(content);
+    };
+
+    const startRawPasteIdleTimeout = () => {
+      clearRawPasteIdleTimeout();
+      rawPasteIdleTimeout = setTimeout(
+        forceFlushRawPaste,
+        PASTE_IDLE_TIMEOUT_MS,
+      );
+    };
+
+    const broadcastPasteFromRaw = (content: Buffer) => {
+      setPasteProgress({ active: false, receivedBytes: 0, totalBytes: null });
+      const text = content.toString('utf-8');
+      if (text.length > 0) {
+        broadcast({
+          name: '',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: true,
+          sequence: text,
+        });
+      } else {
+        // Empty paste — check for clipboard image (async, but fine here)
+        void clipboardHasImage().then((hasImage) => {
+          broadcast({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: true,
+            pasteImage: hasImage,
+            sequence: '',
+          });
+        });
+      }
+    };
+
+    const handleStdinData = (data: Buffer) => {
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+      let cursor = 0;
+
+      while (cursor < buf.length) {
+        if (rawPasteAccumulating) {
+          // Ctrl+C (0x03) inside a stuck paste must escape immediately,
+          // matching the Ctrl+C escape-hatch in handleKeypress.
+          const ctrlCIdx = buf.indexOf(0x03, cursor);
+          const suffixIdx = buf.indexOf(pasteModeSuffixBuf, cursor);
+
+          // If Ctrl+C comes before paste-end (or there is no paste-end),
+          // flush the accumulated paste and let Ctrl+C through.
+          if (ctrlCIdx !== -1 && (suffixIdx === -1 || ctrlCIdx < suffixIdx)) {
+            if (ctrlCIdx > cursor) {
+              rawPasteChunks.push(buf.subarray(cursor, ctrlCIdx));
+            }
+            clearRawPasteIdleTimeout();
+            rawPasteAccumulating = false;
+            rawPasteChunks = [];
+            setPasteProgress({
+              active: false,
+              receivedBytes: 0,
+              totalBytes: null,
+            });
+            // Forward Ctrl+C to readline so handleKeypress processes it
+            keypressStream.write(buf.subarray(ctrlCIdx, ctrlCIdx + 1));
+            cursor = ctrlCIdx + 1;
+          } else if (suffixIdx === -1) {
+            // No paste-end in this chunk — accumulate the rest
+            const chunk = buf.subarray(cursor);
+            rawPasteChunks.push(chunk);
+            rawPasteReceivedBytes += chunk.length;
+            setPasteProgress((prev) => ({
+              ...prev,
+              receivedBytes: rawPasteReceivedBytes,
+            }));
+            startRawPasteIdleTimeout();
+            cursor = buf.length;
+          } else {
+            // Found paste-end — accumulate up to it, broadcast, continue
+            clearRawPasteIdleTimeout();
+            if (suffixIdx > cursor) {
+              rawPasteChunks.push(buf.subarray(cursor, suffixIdx));
+            }
+            const pasteContent = Buffer.concat(rawPasteChunks);
+            rawPasteChunks = [];
+            rawPasteAccumulating = false;
+            broadcastPasteFromRaw(pasteContent);
+            cursor = suffixIdx + pasteModeSuffixBuf.length;
+          }
+        } else {
+          const prefixIdx = buf.indexOf(pasteModePrefixBuf, cursor);
+          if (prefixIdx === -1) {
+            // No paste-start — forward the rest to readline
+            const remaining = buf.subarray(cursor);
+            if (remaining.length > 0) {
+              keypressStream.write(remaining);
+            }
+            cursor = buf.length;
+          } else {
+            // Found paste-start — forward data before it, then start accumulating
+            if (prefixIdx > cursor) {
+              keypressStream.write(buf.subarray(cursor, prefixIdx));
+            }
+            rawPasteAccumulating = true;
+            rawPasteChunks = [];
+            rawPasteReceivedBytes = 0;
+            startRawPasteIdleTimeout();
+            setPasteProgress({
+              active: true,
+              receivedBytes: 0,
+              totalBytes: null,
+            });
+            // Probe clipboard size for progress bar. Platform-specific:
+            // macOS: pbpaste | wc -c; Linux: xclip/xsel/wl-paste | wc -c
+            const clipCmd =
+              process.platform === 'darwin'
+                ? 'pbpaste'
+                : process.platform === 'win32'
+                  ? 'powershell.exe'
+                  : 'xclip';
+            const clipArgs =
+              process.platform === 'darwin'
+                ? []
+                : process.platform === 'win32'
+                  ? [
+                      '-command',
+                      'Get-Clipboard -Raw | Measure-Object -Character | Select-Object -ExpandProperty Characters',
+                    ]
+                  : ['-selection', 'clipboard', '-o'];
+            execFile(
+              clipCmd,
+              clipArgs,
+              { timeout: 2000, maxBuffer: 50 * 1024 * 1024 },
+              (err, stdout) => {
+                if (err || !rawPasteAccumulating) return;
+                const bytes = Buffer.byteLength(stdout, 'utf-8');
+                if (bytes > 0) {
+                  setPasteProgress((prev) =>
+                    prev.active ? { ...prev, totalBytes: bytes } : prev,
+                  );
+                }
+              },
+            );
+            cursor = prefixIdx + pasteModePrefixBuf.length;
+          }
+        }
+      }
+    };
+
     let rl: readline.Interface;
 
     if (usePassthrough) {
@@ -1238,9 +1434,23 @@ export function KeypressProvider({
       keypressStream.on('keypress', handleKeypress);
       stdin.on('data', handleRawKeypress);
     } else {
-      rl = readline.createInterface({ input: stdin, escapeCodeTimeout: 0 });
-      readline.emitKeypressEvents(stdin, rl);
+      // Route stdin through keypressStream so we can intercept bracketed
+      // paste markers at the raw data level. Without this, readline fires
+      // one keypress event per character for the entire paste content
+      // (260K chars → 260K events), blocking the main thread for seconds.
+      // handleStdinData strips out paste regions and broadcasts them
+      // directly; only non-paste bytes reach readline via keypressStream.
+      rl = readline.createInterface({
+        input: keypressStream,
+        escapeCodeTimeout: 0,
+      });
+      readline.emitKeypressEvents(keypressStream, rl);
+      keypressStream.on('keypress', handleKeypress);
+      // Also keep stdin keypress for fallback / direct keypress emits (e.g.
+      // terminals that don't use bracketed paste, or test mocks that emit
+      // keypress directly on stdin).
       stdin.on('keypress', handleKeypress);
+      stdin.on('data', handleStdinData);
     }
 
     // Startup optimization: replay captured input if available
@@ -1271,7 +1481,9 @@ export function KeypressProvider({
         keypressStream.removeListener('keypress', handleKeypress);
         stdin.removeListener('data', handleRawKeypress);
       } else {
+        keypressStream.removeListener('keypress', handleKeypress);
         stdin.removeListener('keypress', handleKeypress);
+        stdin.removeListener('data', handleStdinData);
       }
 
       rl.close();
@@ -1285,6 +1497,7 @@ export function KeypressProvider({
 
       clearKittyBufferAndTimeout();
       clearPasteIdleTimeout();
+      clearRawPasteIdleTimeout();
 
       resetSgrMouse();
 
@@ -1294,16 +1507,23 @@ export function KeypressProvider({
       }
 
       // Flush any pending paste data to avoid data loss on exit.
-      if (isPaste) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          sequence: pasteBuffer.toString(),
-        });
-        pasteBuffer = Buffer.alloc(0);
+      if (rawPasteAccumulating && rawPasteChunks.length > 0) {
+        broadcastPasteFromRaw(Buffer.concat(rawPasteChunks));
+        rawPasteChunks = [];
+        rawPasteAccumulating = false;
+      } else if (isPaste) {
+        const buffered = pasteChunks.join('');
+        if (buffered.length > 0) {
+          broadcast({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: true,
+            sequence: buffered,
+          });
+        }
+        pasteChunks = [];
       }
     };
   }, [
@@ -1326,6 +1546,7 @@ export function KeypressProvider({
         subscribeMouse,
         unsubscribeMouse,
         pasteWorkaround,
+        pasteProgress,
       }}
     >
       {children}
