@@ -499,6 +499,32 @@ describe('parseChannelConfig', () => {
     delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
   });
 
+  it('rejects webhook secretEnv refs when the environment variable is unset', async () => {
+    delete process.env['QWEN_MISSING_WEBHOOK_SECRET'];
+
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secretEnv: 'QWEN_MISSING_WEBHOOK_SECRET',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:custom',
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Environment variable QWEN_MISSING_WEBHOOK_SECRET is not set',
+    );
+  });
+
   it('rejects webhook targets without chatId or senderId', async () => {
     await expect(
       parseChannelConfig('dingtalk-main', {

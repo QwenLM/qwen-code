@@ -15,6 +15,12 @@ import type {
 import type { ChannelWebhookAccepted } from '../channel-webhook-ipc.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 
+const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
 export interface ChannelWebhookRouteDeps {
   channelsConfig: Record<string, { webhooks?: ChannelWebhookConfig }>;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -206,7 +212,11 @@ function readPayload(
     payload !== null &&
     !Array.isArray(payload)
   ) {
-    return payload as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(payload).filter(
+        ([key]) => !PROTOTYPE_POLLUTION_KEYS.has(key),
+      ),
+    );
   }
   res.status(400).json({
     error: 'Body field "payload" must be an object when provided',

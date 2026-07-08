@@ -12209,7 +12209,7 @@ describe('createServeApp', () => {
             'X-Qwen-Webhook-Secret, Content-Type',
           );
         expect(preflight.status).toBe(204);
-        expect(preflight.headers['access-control-allow-headers']).toContain(
+        expect(preflight.headers['access-control-allow-headers']).not.toContain(
           'X-Qwen-Webhook-Secret',
         );
 
