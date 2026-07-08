@@ -872,6 +872,64 @@ describe('detectSelfKillCommand', () => {
     detectSelfKillCommand(adversarial);
     expect(Date.now() - start).toBeLessThan(1000);
   });
+
+  it('for/while regexes complete quickly on adversarial input (no ReDoS)', () => {
+    const adversarialFor =
+      'for ' + 'a'.repeat(200) + ' in $(pgrep node); do kill -9 $pid; done';
+    const start1 = Date.now();
+    detectSelfKillCommand(adversarialFor);
+    expect(Date.now() - start1).toBeLessThan(1000);
+
+    const adversarialWhile =
+      'while ' + 'a'.repeat(200) + ' read line; do kill -9 $pid; done < <(pgrep node)';
+    const start2 = Date.now();
+    detectSelfKillCommand(adversarialWhile);
+    expect(Date.now() - start2).toBeLessThan(1000);
+  });
+
+  it('detects readarray as synonym for mapfile', () => {
+    expect(
+      detectSelfKillCommand(
+        'readarray -t pids < <(pgrep node); kill -9 "${pids[@]}"',
+      ),
+    ).toBe(true);
+  });
+
+  it('handles pgrep -v (inverse match) correctly', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep -v node)')).toBe(false);
+    expect(detectSelfKillCommand('kill -9 $(pgrep --inverse node)')).toBe(
+      false,
+    );
+    expect(detectSelfKillCommand('kill -9 $(pgrep -v nginx)')).toBe(true);
+  });
+
+  it('detects process substitution in direct kill command', () => {
+    expect(detectSelfKillCommand('kill -9 < <(pgrep node)')).toBe(true);
+  });
+
+  it('handles SHELL_WRAPPER with trailing redirections', () => {
+    expect(
+      detectSelfKillCommand("kill -9 $(bash -c 'pgrep node' 2>/dev/null)"),
+    ).toBe(true);
+  });
+
+  it('parallel with option values skips to command', () => {
+    expect(
+      detectSelfKillCommand('pgrep node | parallel --max-procs 4 kill'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand('pgrep node | parallel -P 4 kill'),
+    ).toBe(true);
+  });
+
+  it('handles xargs long-form options', () => {
+    expect(
+      detectSelfKillCommand('pgrep node | xargs --max-args 1 kill -9'),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand('pgrep node | xargs --max-procs 4 kill'),
+    ).toBe(true);
+  });
 });
 
 describe('hasNonFinalTopLevelBackgroundOperator', () => {

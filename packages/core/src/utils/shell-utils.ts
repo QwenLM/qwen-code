@@ -489,8 +489,13 @@ const XARGS_OPTIONS_WITH_VALUES = new Set([
   '-R',
   '--arg-file',
   '--delimiter',
+  '--max-args',
+  '--max-chars',
   '--max-lines',
+  '--max-procs',
+  '--process-slot-var',
   '--replace',
+  '--exit',
 ]);
 
 function xargsOptionConsumesNext(token: string): boolean {
@@ -597,14 +602,15 @@ function consumeOptionsWithValues(
     }
 
     index++;
-    if (
-      (optionsWithValues.has(normalized) ||
-        [...optionsWithValues].some((option) =>
-          shortOptionBundleHasFlag(token, option),
-        )) &&
-      !optionHasInlineValue(token)
-    ) {
-      index++;
+    if (!optionHasInlineValue(token)) {
+      if (optionsWithValues.has(normalized)) {
+        index++;
+      } else if (!normalized.startsWith('--') && token.length >= 2) {
+        const lastOption = `-${token[token.length - 1]!}`;
+        if (optionsWithValues.has(lastOption)) {
+          index++;
+        }
+      }
     }
   }
   return index;
@@ -825,7 +831,7 @@ const KILL_COMMAND_SUBSTITUTION_PGREP =
   /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
 
 const SHELL_WRAPPER_COMMAND_SUBSTITUTION =
-  /\$\(\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')\s*\)|`\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')\s*`/gi;
+  /\$\(\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')[^)]*\)|`\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')[^`]*`/gi;
 
 const PROCESS_SUBSTITUTION_PGREP =
   /<\s*<\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)/gi;
@@ -871,6 +877,7 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
         : PKILL_OPTIONS_WITH_VALUES;
   let usesFullCommandLine = false;
   let usesExactMatch = false;
+  let usesInverse = false;
   const args: string[] = [];
   for (let index = 1; index < tokens.length; index++) {
     const token = tokens[index]!;
@@ -887,6 +894,14 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
     ) {
       usesFullCommandLine = true;
       continue;
+    }
+
+    if (
+      normalized === '-v' ||
+      normalized === '--inverse' ||
+      shortOptionBundleHasFlag(token, '-v')
+    ) {
+      usesInverse = true;
     }
 
     if (isOptionToken(token)) {
@@ -906,21 +921,27 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
     args.push(token);
   }
 
+  let result: boolean;
   if (usesFullCommandLine) {
-    return args.some(
+    result = args.some(
       (arg) =>
         matchesQwenProcessPattern(arg) ||
         isBroadNodeFullPattern(arg) ||
         argMatchesSelfAsRegex(arg) ||
         isSubstringSelfTarget(arg),
     );
+  } else {
+    result = args.some((arg) =>
+      usesExactMatch
+        ? isBareSelfProcessName(arg) || argMatchesSelfAsRegex(arg)
+        : isSubstringSelfTarget(arg) || argMatchesSelfAsRegex(arg),
+    );
   }
 
-  return args.some((arg) =>
-    usesExactMatch
-      ? isBareSelfProcessName(arg) || argMatchesSelfAsRegex(arg)
-      : isSubstringSelfTarget(arg) || argMatchesSelfAsRegex(arg),
-  );
+  if (usesInverse) {
+    return !result;
+  }
+  return result;
 }
 
 function pgrepRawArgsTargetSelf(command: string, rawArgs: string): boolean {
@@ -1000,11 +1021,19 @@ function downstreamSegmentContainsKill(segment: string | undefined): boolean {
   const tokens = parsed ? unwrapExecutionPrefixes(parsed) : [];
   const root = normalizeExecutableName(tokens[0] ?? '');
   if (root === 'parallel') {
-    const commandToken = tokens.slice(1).find((token) => !isOptionToken(token));
+    const postParallel = tokens.slice(1);
+    let cmdIndex = 0;
+    while (cmdIndex < postParallel.length && isOptionToken(postParallel[cmdIndex]!)) {
+      if (xargsOptionConsumesNext(postParallel[cmdIndex]!) && cmdIndex + 1 < postParallel.length) {
+        cmdIndex++;
+      }
+      cmdIndex++;
+    }
+    const commandToken = postParallel[cmdIndex];
     return commandToken ? tokenInvokesKill(commandToken) : false;
   }
   return (
-    /\bwhile\b[\s\S]*\bread\b[\s\S]*;\s*do\b[\s\S]*\bkill\b/i.test(segment) ||
+    /\bwhile\b[\s\S]*?\bread\b[\s\S]*?;\s*do\b[\s\S]*?\bkill\b/i.test(segment) ||
     /^\s*do\s+kill\b/i.test(segment)
   );
 }
@@ -1043,7 +1072,7 @@ function processSubstitutionTargetsSelf(command: string): boolean {
 
 function shellControlFlowTargetsSelf(command: string): boolean {
   if (
-    /\bfor\b[\s\S]*\bin\b[\s\S]*(?:\$\(|`)[\s\S]*\bdo\b[\s\S]*\bkill\b/i.test(
+    /\bfor\b[\s\S]*?\bin\b[\s\S]*?(?:\$\(|`)[\s\S]*?\bdo\b[\s\S]*?\bkill\b/i.test(
       command,
     ) &&
     killCommandTargetsSelf(command)
@@ -1052,7 +1081,7 @@ function shellControlFlowTargetsSelf(command: string): boolean {
   }
 
   if (
-    /\bwhile\b[\s\S]*\bread\b[\s\S]*\bdo\b[\s\S]*\bkill\b[\s\S]*<\s*<\(/i.test(
+    /\bwhile\b[\s\S]*?\bread\b[\s\S]*?\bdo\b[\s\S]*?\bkill\b[\s\S]*?<\s*<\(/i.test(
       command,
     ) &&
     processSubstitutionTargetsSelf(command)
@@ -1061,7 +1090,7 @@ function shellControlFlowTargetsSelf(command: string): boolean {
   }
 
   return (
-    /\bmapfile\b[\s\S]*<\s*<\([^;]*;\s*kill\b/i.test(command) &&
+    /\b(?:mapfile|readarray)\b[\s\S]*?<\s*<\([^;]*;\s*kill\b/i.test(command) &&
     processSubstitutionTargetsSelf(command)
   );
 }
@@ -1114,6 +1143,9 @@ export function detectSelfKillCommand(command: string): boolean {
       return true;
     }
     if (root === 'kill' && shellWrapperSubstitutionTargetsSelf(segment)) {
+      return true;
+    }
+    if (root === 'kill' && processSubstitutionTargetsSelf(segment)) {
       return true;
     }
   }
