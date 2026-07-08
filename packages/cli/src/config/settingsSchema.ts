@@ -1276,6 +1276,18 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  visionBridgeTimeoutMs: {
+    type: 'number',
+    label: 'Vision Bridge Timeout (ms)',
+    category: 'Model',
+    requiresRestart: false,
+    default: undefined as number | undefined,
+    minimum: 1,
+    description:
+      'Per-attempt timeout in milliseconds for the vision bridge image transcription call. Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.',
+    showInDialog: false,
+  },
+
   modelFallbacks: {
     type: 'string',
     label: 'Model Fallbacks',

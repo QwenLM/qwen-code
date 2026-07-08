@@ -557,6 +557,36 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getVisionBridgeTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getVisionBridgeTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 120_000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(120_000);
+    });
+
+    it('treats non-positive values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 0,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: -5000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);

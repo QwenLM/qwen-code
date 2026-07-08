@@ -1157,6 +1157,12 @@ export interface ConfigParameters {
    */
   visionModel?: string;
   /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Unset → built-in 30s. Corresponds to the `visionBridgeTimeoutMs`
+   * setting; useful for slow or proxied vision endpoints.
+   */
+  visionBridgeTimeoutMs?: number;
+  /**
    * Ordered list of fallback model IDs to try when the primary model hits
    * capacity errors (429/503/529). At most 3 entries; duplicate fallback
    * entries are filtered during normalization, and primary/current model
@@ -1720,6 +1726,7 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private fastModel?: string;
   private visionModel?: string;
+  private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -2049,6 +2056,15 @@ export class Config {
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
+    // Guard: schema validation only runs on interactive edit paths, so a
+    // non-positive value in settings.json would otherwise abort every bridge
+    // call instantly.
+    this.visionBridgeTimeoutMs =
+      params.visionBridgeTimeoutMs !== undefined &&
+      Number.isFinite(params.visionBridgeTimeoutMs) &&
+      params.visionBridgeTimeoutMs > 0
+        ? params.visionBridgeTimeoutMs
+        : undefined;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -3432,6 +3448,15 @@ export class Config {
         baseUrl: contentGeneratorConfig?.baseUrl,
       },
     );
+  }
+
+  /**
+   * Per-attempt timeout in milliseconds for the vision bridge transcription
+   * call. Resolves the `visionBridgeTimeoutMs` setting; `undefined` means the
+   * bridge's built-in default applies.
+   */
+  getVisionBridgeTimeoutMs(): number | undefined {
+    return this.visionBridgeTimeoutMs;
   }
 
   /**

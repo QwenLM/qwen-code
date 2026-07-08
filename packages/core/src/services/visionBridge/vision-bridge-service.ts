@@ -21,6 +21,9 @@ import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 const debugLogger = createDebugLogger('VISION_BRIDGE');
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;
 const VISION_BRIDGE_TIMEOUT_MS = 30_000;
+// One retry on timeout, with a fresh timeout budget per attempt: a transient
+// latency spike on the vision endpoint shouldn't permanently drop the image.
+const VISION_BRIDGE_MAX_ATTEMPTS = 2;
 // Cap intent so @-file contents in nonImageParts aren't dumped to the bridge model.
 const BRIDGE_INTENT_MAX_CHARS = 2000;
 
@@ -314,9 +317,8 @@ export async function runVisionBridge(params: {
     );
   }
 
-  // The vision call gets its own timeout, linked to the turn's abort signal.
-  const timeoutSignal = AbortSignal.timeout(VISION_BRIDGE_TIMEOUT_MS);
-  const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
+  const timeoutMs =
+    config.getVisionBridgeTimeoutMs?.() ?? VISION_BRIDGE_TIMEOUT_MS;
   const requestContents: Content[] = [
     { role: 'user', parts: [...toConvert, { text: buildIntentPart(intent) }] },
   ];
@@ -328,89 +330,106 @@ export async function runVisionBridge(params: {
     ...(modelEndpoint && { modelEndpoint }),
   } as const;
 
-  try {
-    debugLogger.debug(`calling ${modelId} for ${toConvert.length} image(s)`);
-    const { text } = await runSideQuery(config, {
-      contents: requestContents,
-      abortSignal: combinedSignal,
-      model: modelForApi,
-      systemInstruction: BRIDGE_SYSTEM_INSTRUCTION,
-      purpose: 'vision-bridge',
-      maxAttempts: 2,
-      skipOutputLanguagePreference: true,
-      config: { maxOutputTokens: BRIDGE_MAX_OUTPUT_TOKENS },
-      // Fail closed: if the pinned/auto-selected vision model's generator can't
-      // be created (e.g. a missing cross-provider credential), throw here rather
-      // than letting BaseLlmClient fall back to the main generator — that would
-      // send image payloads to the text-only primary while the egress notice
-      // names a different endpoint. The catch below turns this into a failure.
-      failClosed: true,
-    });
+  for (let attempt = 1; attempt <= VISION_BRIDGE_MAX_ATTEMPTS; attempt++) {
+    // The vision call gets its own timeout, linked to the turn's abort signal.
+    // Created per attempt so a retry starts with a full budget instead of the
+    // few seconds left over from the attempt that just timed out.
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
 
-    const description = stripThinkTags(text ?? '');
-    if (description.length === 0) {
-      debugLogger.warn(`${modelId} returned an empty description`);
-      return failure(
-        'the vision model returned no description',
-        parts,
-        omittedCount,
-        { modelId, ...egress },
-      );
-    }
+    try {
+      debugLogger.debug(`calling ${modelId} for ${toConvert.length} image(s)`);
+      const { text } = await runSideQuery(config, {
+        contents: requestContents,
+        abortSignal: combinedSignal,
+        model: modelForApi,
+        systemInstruction: BRIDGE_SYSTEM_INSTRUCTION,
+        purpose: 'vision-bridge',
+        maxAttempts: 2,
+        skipOutputLanguagePreference: true,
+        config: { maxOutputTokens: BRIDGE_MAX_OUTPUT_TOKENS },
+        // Fail closed: if the pinned/auto-selected vision model's generator can't
+        // be created (e.g. a missing cross-provider credential), throw here rather
+        // than letting BaseLlmClient fall back to the main generator — that would
+        // send image payloads to the text-only primary while the egress notice
+        // names a different endpoint. The catch below turns this into a failure.
+        failClosed: true,
+      });
 
-    // The transcription often carries sensitive screen contents (tokens, PII,
-    // private code), and debug logs can end up in shared support bundles — so
-    // log only metadata (model + length), never the raw text. Trace a wrong
-    // primary-model answer via the length/model here, not the content.
-    debugLogger.debug(
-      `vision bridge transcription via ${modelId} (${description.length} chars)`,
-    );
-
-    return {
-      applied: true,
-      status: 'ok',
-      // Stand the transcription in the first image's slot (right after its
-      // "Content from <file>:" prefix) so the primary model reads it as that
-      // file's content instead of re-reading the image with a tool.
-      parts: replaceImagesWithText(
-        parts,
-        buildInterpretationBlock(
-          modelId,
-          description,
-          toConvert.length,
+      const description = stripThinkTags(text ?? '');
+      if (description.length === 0) {
+        debugLogger.warn(`${modelId} returned an empty description`);
+        return failure(
+          'the vision model returned no description',
+          parts,
           omittedCount,
-        ),
-      ),
-      convertedCount: toConvert.length,
-      omittedCount,
-      modelId,
-      ...egress,
-    };
-  } catch (error) {
-    if (signal.aborted) {
-      debugLogger.debug(`conversion cancelled via ${modelId}`);
+          { modelId, ...egress },
+        );
+      }
+
+      // The transcription often carries sensitive screen contents (tokens, PII,
+      // private code), and debug logs can end up in shared support bundles — so
+      // log only metadata (model + length), never the raw text. Trace a wrong
+      // primary-model answer via the length/model here, not the content.
+      debugLogger.debug(
+        `vision bridge transcription via ${modelId} (${description.length} chars)`,
+      );
+
       return {
-        applied: false,
-        status: 'skipped',
-        convertedCount: 0,
+        applied: true,
+        status: 'ok',
+        // Stand the transcription in the first image's slot (right after its
+        // "Content from <file>:" prefix) so the primary model reads it as that
+        // file's content instead of re-reading the image with a tool.
+        parts: replaceImagesWithText(
+          parts,
+          buildInterpretationBlock(
+            modelId,
+            description,
+            toConvert.length,
+            omittedCount,
+          ),
+        ),
+        convertedCount: toConvert.length,
         omittedCount,
         modelId,
         ...egress,
       };
+    } catch (error) {
+      if (signal.aborted) {
+        debugLogger.debug(`conversion cancelled via ${modelId}`);
+        return {
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount,
+          modelId,
+          ...egress,
+        };
+      }
+      const timedOut = combinedSignal.aborted && timeoutSignal.aborted;
+      if (timedOut && attempt < VISION_BRIDGE_MAX_ATTEMPTS) {
+        debugLogger.warn(
+          `conversion attempt ${attempt} via ${modelId} timed out after ${timeoutMs}ms; retrying`,
+        );
+        continue;
+      }
+      const reason = timedOut
+        ? `timed out after ${timeoutMs}ms (${VISION_BRIDGE_MAX_ATTEMPTS} attempts)`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      debugLogger.warn(`conversion failed via ${modelId}: ${reason}`);
+      return failure(reason, parts, omittedCount, {
+        modelId,
+        // The timeout message is safe to show; an arbitrary provider error is not
+        // (it can carry a signed URL or token), so keep it generic for the model.
+        noteReason: timedOut ? reason : 'the vision model request failed',
+        ...egress,
+      });
     }
-    const timedOut = combinedSignal.aborted && timeoutSignal.aborted;
-    const reason = timedOut
-      ? `timed out after ${VISION_BRIDGE_TIMEOUT_MS}ms`
-      : error instanceof Error
-        ? error.message
-        : String(error);
-    debugLogger.warn(`conversion failed via ${modelId}: ${reason}`);
-    return failure(reason, parts, omittedCount, {
-      modelId,
-      // The timeout message is safe to show; an arbitrary provider error is not
-      // (it can carry a signed URL or token), so keep it generic for the model.
-      noteReason: timedOut ? reason : 'the vision model request failed',
-      ...egress,
-    });
   }
+  // Unreachable: every loop iteration returns. Keeps TS's control-flow analysis
+  // satisfied without widening the return type.
+  throw new Error('vision bridge: exhausted attempts without a result');
 }

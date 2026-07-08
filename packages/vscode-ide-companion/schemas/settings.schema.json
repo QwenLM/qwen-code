@@ -550,6 +550,11 @@
       "type": "string",
       "default": ""
     },
+    "visionBridgeTimeoutMs": {
+      "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call. Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
+      "type": "number",
+      "minimum": 1
+    },
     "modelFallbacks": {
       "description": "Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: \"qwen-plus,qwen-turbo\". Set via CLI with --fallback-model.",
       "type": "string",
