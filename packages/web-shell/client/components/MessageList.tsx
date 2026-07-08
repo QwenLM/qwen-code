@@ -1841,6 +1841,7 @@ export const MessageList = memo(
       useState(false);
     const sessionTimelineCache = useRef<{
       signature: string;
+      t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
     // Signature + entries are O(transcript text); only pay for them while the
@@ -1848,9 +1849,13 @@ export const MessageList = memo(
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
-      if (sessionTimelineCache.current?.signature !== signature) {
+      if (
+        sessionTimelineCache.current?.signature !== signature ||
+        sessionTimelineCache.current?.t !== t
+      ) {
         sessionTimelineCache.current = {
           signature,
+          t,
           entries: getSessionTimelineEntries(mergedMessages, t),
         };
       }
