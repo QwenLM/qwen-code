@@ -195,6 +195,26 @@ describe('remember memory helper', () => {
     );
   });
 
+  it('keeps the built-in 5-minute default when no timeout is configured', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 5 }),
+    );
+  });
+
   it('classifies only successful memory writes', async () => {
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     vi.mocked(runForkedAgent).mockResolvedValue({
