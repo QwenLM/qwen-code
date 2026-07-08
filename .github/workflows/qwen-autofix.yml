@@ -1225,7 +1225,8 @@ jobs:
           gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
           gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
           gh pr view "${PR}" --repo "${REPO}" \
-            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json"
+            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
+            2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
@@ -1300,7 +1301,7 @@ jobs:
               | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select((.workflowName // "") != "Qwen Autofix")
               | select((.completedAt // .updatedAt // "") > $wm)
-              | "- \(.workflowName // "status") / \(.name // .context // "?"): \(.conclusion // .state // "?") \(.detailsUrl // .targetUrl // "")"' \
+              | "- \((.workflowName // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'

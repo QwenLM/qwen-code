@@ -409,11 +409,23 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
     );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
+    );
     expect(workflow).toContain('## Issue-level comments');
     expect(workflow).toContain('## Failed checks');
     expect(workflow).toContain('checks.json');
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      '.detailsUrl // .targetUrl',
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      '.name // .context // "?"',
     );
     // NEWEST watermark must consider issue-level comment timestamps.
     expect(workflow).toContain('.[2] | map(select((.created_at // "")');
