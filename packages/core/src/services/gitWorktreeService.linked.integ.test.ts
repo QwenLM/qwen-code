@@ -147,23 +147,51 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
     expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
   });
 
-  it('is not fooled by a worktree path containing a newline that fakes a registry entry', async () => {
-    // A worktree whose path embeds "\nworktree <other>" would inject a bogus
-    // record into any newline-split parse of `git worktree list --porcelain`.
-    // Verifying the registry pointer for the one probed path sidesteps that
-    // class of bug entirely — no list is parsed, on any git version.
-    const repo = initRepo('qwen-linked-nl-');
-    const fake = path.join(repo, 'fake');
-    fs.mkdirSync(fake);
-    const evil = `${path.join(repo, 'evil')}\nworktree ${fake}`;
-    execFileSync('git', ['worktree', 'add', '-b', 'evil', evil, 'HEAD'], {
+  it('returns false for a stale registry record whose path was recreated as a plain directory', async () => {
+    // Deleting a worktree directory without `git worktree remove`/`prune`
+    // leaves the record in `git worktree list` (tagged `prunable`) for
+    // gc.worktreePruneExpire (3 months by default). If the path is then
+    // recreated as an ordinary directory, a registry-list match would accept
+    // it — and `git rev-parse --show-toplevel` there resolves to the MAIN
+    // checkout, so the pinned agent's git commands would hit the user's tree.
+    // Probing the path itself catches this: with no `.git` of its own, git
+    // resolves it into the main repo, where --git-dir == --git-common-dir.
+    const repo = initRepo('qwen-linked-stale-');
+    const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
+    execFileSync('git', ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'], {
       cwd: repo,
     });
+    fs.rmSync(wt, { recursive: true, force: true }); // NOT `worktree remove`
+    fs.mkdirSync(wt, { recursive: true }); // recreated as a plain directory
 
     const svc = new GitWorktreeService(repo);
-    // The injected path must NOT be accepted as a registered worktree.
-    expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
-    // ...while the real (awkwardly named) worktree still validates.
-    expect(await svc.isRegisteredLinkedWorktree(evil)).toBe(true);
+    expect(await svc.isRegisteredLinkedWorktree(wt)).toBe(false);
   });
+
+  // A path component containing a newline is not representable on Win32 (the
+  // embedded `C:` makes it an invalid path), so `git worktree add` errors out.
+  // The injection this guards against cannot occur there either.
+  it.skipIf(process.platform === 'win32')(
+    'is not fooled by a worktree path containing a newline that fakes a registry entry',
+    async () => {
+      // A worktree whose path embeds "\nworktree <other>" would inject a bogus
+      // record into any newline-split parse of `git worktree list --porcelain`.
+      // Verifying the registry pointer for the one probed path sidesteps that
+      // class of bug entirely — no list is parsed, on any git version.
+      const repo = initRepo('qwen-linked-nl-');
+      const fake = path.join(repo, 'fake');
+      fs.mkdirSync(fake);
+      const evil = `${path.join(repo, 'evil')}\nworktree ${fake}`;
+      execFileSync('git', ['worktree', 'add', '-b', 'evil', evil, 'HEAD'], {
+        cwd: repo,
+      });
+
+      const svc = new GitWorktreeService(repo);
+      // The injected path must NOT be accepted as a registered worktree.
+      expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
+      // ...while the real (awkwardly named) worktree still validates.
+      expect(await svc.isRegisteredLinkedWorktree(evil)).toBe(true);
+    },
+  );
 });

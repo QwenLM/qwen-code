@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
@@ -41,6 +42,7 @@ import {
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
   buildChildMessage,
+  buildPinnedWorktreeNotice,
   buildWorktreeNotice,
   isForkSubagentEnabled,
   runInForkContext,
@@ -222,7 +224,8 @@ export interface AgentParams {
    * search tools resolve inside the worktree rather than the parent tree.
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
-   * worktree registered against this repository. Mutually exclusive with
+   * worktree registered against this repository, and must live inside it —
+   * pinning rebinds the child's workspace boundary. Mutually exclusive with
    * `isolation`.
    */
   working_dir?: string;
@@ -280,11 +283,31 @@ async function resolveExternalWorktreeDir(
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
 
+  // Containment. A registered worktree may live anywhere on disk, but pinning
+  // rebinds the child's WorkspaceContext wholesale, so a model-supplied path
+  // must not silently move the file tools' boundary outside the repository.
+  // (`isolation: 'worktree'` has this property implicitly — it always
+  // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
+  // paths so a symlink cannot straddle the boundary.
+  const realRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
+  const realResolved = await fs
+    .realpath(resolvedPath)
+    .catch(() => resolvedPath);
+  const relToRepo = path.relative(realRepoRoot, realResolved);
+  if (relToRepo.startsWith('..') || path.isAbsolute(relToRepo)) {
+    return {
+      error:
+        `working_dir "${resolvedPath}" resolves outside this repository ` +
+        `(${realRepoRoot}). Pass a worktree that lives inside the repository.`,
+    };
+  }
+
   // The single authoritative gate: the path must be a REGISTERED linked
-  // worktree of this repository (present in `git worktree list`, and not the
-  // main tree). That one check rejects the primary working tree, a plain
-  // sub-directory, a worktree belonging to another repo, and a hand-crafted
-  // directory carrying a copied `.git` file.
+  // worktree of this repository — git's own registry entry for it points back
+  // at exactly this path, and it is not the primary working tree. That one
+  // check rejects the main tree, a plain sub-directory (including a stale
+  // registry record whose directory was recreated), a worktree belonging to
+  // another repo, and a hand-crafted directory carrying a copied `.git` file.
   if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
     // Fails closed (returns false) on a git error too, so the cause is either
     // "not a registered linked worktree" (main tree / unregistered) or "its
@@ -745,7 +768,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository. Mutually exclusive with 'isolation'.",
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. Mutually exclusive with 'isolation'.",
         },
       },
       required: ['description', 'prompt'],
@@ -2630,10 +2653,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // was running from `packages/core/`. Round-5 review caught this:
       // the model's mental map is the parent's cwd, not the repo root.
       if (worktreeIsolation) {
-        const notice = buildWorktreeNotice(
-          this.config.getTargetDir(),
-          worktreeIsolation.path,
-        );
+        // A caller-owned worktree (working_dir) is the code the agent was asked
+        // to work on, not a provisioned copy of the parent's tree, so it gets a
+        // narrower notice. The isolation notice's "translate the parent's
+        // paths" / "re-read what the parent changed" guidance would contradict
+        // the caller's own instructions (e.g. /review tells its agents not to
+        // `cd` or prefix absolute paths).
+        const notice = worktreeIsolation.externallyManaged
+          ? buildPinnedWorktreeNotice(worktreeIsolation.path)
+          : buildWorktreeNotice(
+              this.config.getTargetDir(),
+              worktreeIsolation.path,
+            );
         taskPrompt = `${notice}\n\n${taskPrompt}`;
       }
 

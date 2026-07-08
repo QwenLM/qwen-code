@@ -1457,6 +1457,16 @@ describe('AgentTool', () => {
         expect(partToString(result.llmContent)).not.toContain(
           '[worktree preserved',
         );
+        // A pinned worktree gets the narrow notice, not the isolation notice
+        // (which tells the agent to translate the parent's paths).
+        expect(mockContextState.set).toHaveBeenCalledWith(
+          'task_prompt',
+          expect.stringContaining('Your working directory is'),
+        );
+        expect(mockContextState.set).not.toHaveBeenCalledWith(
+          'task_prompt',
+          expect.stringContaining('translate it to the corresponding path'),
+        );
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
