@@ -36,6 +36,7 @@ if (typeof navigator !== 'undefined' && !navigator.clipboard) {
 if (typeof window !== 'undefined' && !window.matchMedia) {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
+    writable: true,
     value: vi.fn((query: string) => ({
       matches: false,
       media: query,
