@@ -1524,6 +1524,8 @@ describe('GeminiChat', async () => {
     it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 1,
+
       });
       chat.setHistory([
         {
@@ -1531,9 +1533,18 @@ describe('GeminiChat', async () => {
           parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
         },
         {
+          role: 'model',
+          parts: [{ text: 'I see the first image' }],
+        },
+        {
           role: 'user',
           parts: [{ inlineData: { mimeType: 'image/png', data: 'new-shot' } }],
         },
+        {
+          role: 'model',
+          parts: [{ text: 'I see the second image' }],
+        },
+
       ]);
       const response = (async function* () {
         yield {
@@ -8051,6 +8062,8 @@ describe('GeminiChat', async () => {
     it('preserves current user image bytes during output recovery', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 0,
+        imagePayloadThreshold: 1,
+
       });
       const streams = [
         makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
@@ -8064,6 +8077,7 @@ describe('GeminiChat', async () => {
 
       const stream = await chat.sendMessageStream(
         'gemini-pro',
+
         {
           message: [
             { text: 'describe this image' },
@@ -8125,6 +8139,7 @@ describe('GeminiChat', async () => {
         .join('');
       expect(text).toBe('Hello ending.');
     });
+
 
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [

@@ -215,7 +215,7 @@ jobs:
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -997,7 +997,7 @@ jobs:
       WATERMARK: '${{ matrix.target.watermark }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1281,7 +1281,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -1382,6 +1382,8 @@ jobs:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          NEWEST: '${{ steps.prepare.outputs.newest }}'
         run: |-
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
@@ -1389,7 +1391,7 @@ jobs:
             echo "### PR #${PR} (issue #${ISSUE}) — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo "- Base conflict: ${CONFLICT:-unknown}"
             echo
-            for f in address-summary.md no-action.md failure.md; do
+            for f in address-summary.md no-action.md failure.md handoff.md; do
               if [[ -s "${WORKDIR}/${f}" ]]; then
                 echo "**${f}:**"
                 cat "${WORKDIR}/${f}"
@@ -1397,3 +1399,33 @@ jobs:
               fi
             done
           } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${DRY_RUN}" != "true" && "${OUTCOME:-unknown}" == "failed" && -n "${NEWEST:-}" && -n "${GITHUB_TOKEN:-}" && -s "${WORKDIR}/handoff.md" ]]; then
+            api_error_file="$(mktemp)"
+            if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+              api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+              rm -f "${api_error_file}"
+              echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+              exit 1
+            fi
+            rm -f "${api_error_file}"
+            echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+            if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+              echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+              exit 1
+            fi
+            {
+              echo "🤖 Could not address the latest review feedback automatically."
+              echo
+              echo "The feedback was evaluated, but AutoFix failed before producing a verified commit. A human should take over this PR."
+              echo
+              echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              echo
+              echo "**Failure:**"
+              head -c 1500 "${WORKDIR}/failure.md" | sed 's/<!--[^>]*-->//g'
+              echo
+              echo
+              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"
+            } > "${WORKDIR}/report.md"
+            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
+          fi

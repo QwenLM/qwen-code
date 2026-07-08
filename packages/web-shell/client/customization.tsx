@@ -65,6 +65,7 @@ export type MarkdownTableMode = 'basic' | 'advanced';
 
 export type ToolHeaderKind =
   | 'agent'
+  | 'ask'
   | 'edit'
   | 'fetch'
   | 'read'
@@ -88,6 +89,15 @@ export type ToolHeaderExtraRenderer = (
 
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
+
+export interface UserMessageContentRenderInfo {
+  content: string;
+  images?: readonly { data: string; mimeType: string }[];
+}
+
+export type UserMessageContentRenderer = (
+  info: UserMessageContentRenderInfo,
+) => ReactNode;
 
 export type WebShellBuiltinComposerTagKind =
   | 'extension'
@@ -276,6 +286,7 @@ export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  renderUserMessageContent?: UserMessageContentRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;

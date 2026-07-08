@@ -28,8 +28,10 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  SessionLimitExceededError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import {
@@ -1164,6 +1166,80 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
+  });
+
+  it('maps workspace session admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new SessionLimitExceededError(20);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: '/ws' },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          limit: number;
+          scope: string;
+          retryable: boolean;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'session_limit_exceeded',
+      limit: 20,
+      scope: 'workspace',
+      retryable: true,
+    });
+  });
+
+  it('maps total session admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new TotalSessionLimitExceededError(10);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: '/ws' },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          limit: number;
+          scope: string;
+          retryable: boolean;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'session_limit_exceeded',
+      limit: 10,
+      scope: 'total',
+      retryable: true,
+    });
   });
 
   it('prompt streams session/update then the final result', async () => {

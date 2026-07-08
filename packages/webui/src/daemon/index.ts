@@ -30,6 +30,7 @@ export {
   selectDaemonStreamingState,
   selectDaemonTodoLists,
   selectDaemonTranscriptStreamingState,
+  isMissingSessionHttpStatus,
   toDaemonPromptContent,
 } from './session/index.js';
 export type {
@@ -87,6 +88,7 @@ export type {
   DaemonGlobOptions,
   DaemonGlobResult,
   DaemonScheduledTask,
+  DaemonScheduledTaskRun,
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,
   DaemonResourceOptions,

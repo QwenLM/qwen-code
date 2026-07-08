@@ -101,6 +101,8 @@ export function getConnectionAfterSessionClear(
     loadingTranscript: undefined,
     catchingUp: undefined,
     error: undefined,
+    errorStatus: undefined,
+    missingSession: false,
   };
 }
 
@@ -229,6 +231,8 @@ export function createDaemonSessionActions({
       clientId: undefined,
       displayName: undefined,
       error: undefined,
+      errorStatus: undefined,
+      missingSession: false,
       loadingTranscript: true,
       catchingUp: undefined,
     }));
@@ -294,6 +298,9 @@ export function createDaemonSessionActions({
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
         );
+        // The prompt is admitted to the session here — signal it before we wait
+        // out the (possibly long) turn, so an admission-only caller can proceed.
+        options?.onAdmitted?.();
         return await waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,
@@ -617,6 +624,8 @@ export function createDaemonSessionActions({
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
+          errorStatus: undefined,
+          missingSession: false,
         }));
         return nextSession;
       } catch (error) {
@@ -661,6 +670,12 @@ export function createDaemonSessionActions({
     async newSession() {
       manualSessionClearRef.current = false;
       clearActiveSessionState();
+      setConnection((current) => ({
+        ...current,
+        missingSession: false,
+        error: undefined,
+        errorStatus: undefined,
+      }));
       setNewSessionNonce((nonce) => nonce + 1);
     },
 

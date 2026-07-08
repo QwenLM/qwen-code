@@ -76,6 +76,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: ['/tmp/auto-memory/user/prefs.md'],
+      filesWritten: ['/tmp/auto-memory/user/prefs.md'],
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
@@ -84,6 +85,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedTopics: ['user'],
       touchedProjectScope: true,
       touchedUserScope: false,
+      hasToolActivity: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
     expect(runForkedAgent).toHaveBeenCalledWith(
@@ -108,6 +110,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [],
+      filesWritten: [],
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
@@ -115,6 +118,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedTopics: [],
       touchedProjectScope: false,
       touchedUserScope: false,
+      hasToolActivity: false,
       systemMessage: undefined,
     });
   });
@@ -176,6 +180,11 @@ describe('runAutoMemoryExtractionByAgent', () => {
         '/tmp/auto-memory/reference/api.md',
         '/tmp/some/other/file.ts',
       ],
+      filesWritten: [
+        '/tmp/auto-memory/project/arch.md',
+        '/tmp/auto-memory/reference/api.md',
+        '/tmp/some/other/file.ts',
+      ],
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
@@ -192,6 +201,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [
+        '/tmp/user-memory/user/role.md',
+        '/tmp/user-memory/feedback/terse.md',
+      ],
+      filesWritten: [
         '/tmp/user-memory/user/role.md',
         '/tmp/user-memory/feedback/terse.md',
       ],
@@ -230,6 +243,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
         'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
         'C:/Users/foo/.qwen/memories/user/role.md',
       ],
+      filesWritten: [
+        'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
+        'C:/Users/foo/.qwen/memories/user/role.md',
+      ],
     });
 
     try {
@@ -253,6 +270,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [
+        '/tmp/auto-memory\\project\\arch.md',
+        '/tmp/user-memory\\user\\role.md',
+      ],
+      filesWritten: [
         '/tmp/auto-memory\\project\\arch.md',
         '/tmp/user-memory\\user\\role.md',
       ],
@@ -291,6 +312,10 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: [
+        '/tmp/user-memory/user/role.md',
+        '/tmp/auto-memory/project/release.md',
+      ],
+      filesWritten: [
         '/tmp/user-memory/user/role.md',
         '/tmp/auto-memory/project/release.md',
       ],
