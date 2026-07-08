@@ -525,6 +525,38 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getMemoryAgentTimeoutMinutes', () => {
+    it('returns undefined when unset', () => {
+      expect(
+        new Config(baseParams).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0 (no time limit)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 30,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(30);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 0,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: -5,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
   describe('getMaxSubagentDepth', () => {
     it('defaults to 5 when unset', () => {
       expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);

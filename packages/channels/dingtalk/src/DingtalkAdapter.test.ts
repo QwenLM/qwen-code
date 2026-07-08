@@ -89,6 +89,7 @@ function createChannel(): DingtalkChannelInstance {
       sessionScope: 'user',
       cwd: '/tmp',
       groupPolicy: 'open',
+      dmPolicy: 'open',
       groups: {},
     },
     {} as never,

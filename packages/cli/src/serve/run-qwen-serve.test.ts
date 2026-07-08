@@ -4820,11 +4820,12 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     const listenError = new Error('listen failed') as NodeJS.ErrnoException;
     listenError.code = 'EADDRINUSE';
-    const fakeServer = createServer();
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
       listen: vi.fn(() => {
-        setImmediate(() => fakeServer.emit('error', listenError));
-        return fakeServer;
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
       }),
     } as unknown as express.Application);
     const worker = makeWorker({
@@ -4858,6 +4859,180 @@ describe('runQwenServe channel worker supervisor', () => {
       servePid: process.pid,
     });
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('retries the next port on EADDRINUSE and succeeds', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        if (portsAttempted.length === 1) {
+          const err = new Error('address in use') as NodeJS.ErrnoException;
+          err.code = 'EADDRINUSE';
+          setImmediate(() => srv.emit('error', err));
+        } else {
+          srv.listen(0, '127.0.0.1', () => {
+            setImmediate(() => {
+              srv.emit('listening');
+              if (typeof cb === 'function') cb();
+            });
+          });
+        }
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      stderrSpy.mockRestore();
+      expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(handle.url).not.toContain(':4170');
+      expect(
+        stderrWrites.some((w) =>
+          w.includes('port 4170 is in use, trying 4171'),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not retry on non-EADDRINUSE listen errors', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('permission denied') as NodeJS.ErrnoException;
+    listenError.code = 'EACCES';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, _cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([4170]);
+  });
+
+  it('rejects after exhausting all port retry attempts', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-exhaust-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    stderrSpy.mockRestore();
+    expect(portsAttempted).toEqual(
+      Array.from({ length: 10 }, (_, i) => 4170 + i),
+    );
+    expect(
+      stderrWrites.some((w) => w.includes('all ports 4170–4179 are in use')),
+    ).toBe(true);
+  });
+
+  it('does not retry EADDRINUSE when port is 0 (ephemeral)', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port0-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([0]);
   });
 
   it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {

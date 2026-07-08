@@ -253,6 +253,7 @@ function makeConfig(
     sessionScope: 'user',
     cwd: process.cwd(),
     groupPolicy: 'disabled',
+    dmPolicy: 'open',
     groups: {},
     botId: 'bot-id',
     secret: 'bot-secret',

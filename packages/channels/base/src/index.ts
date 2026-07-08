@@ -59,6 +59,8 @@ export { PairingStore } from './PairingStore.js';
 export type { PairingRequest } from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
+export { DmGate } from './DmGate.js';
+export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
@@ -86,6 +88,7 @@ export type {
   ChannelTaskLifecycleEvent,
   ChannelType,
   DispatchMode,
+  DmPolicy,
   Envelope,
   GroupConfig,
   GroupPolicy,

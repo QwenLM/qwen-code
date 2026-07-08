@@ -170,6 +170,7 @@ describe('parseChannelConfig', () => {
     expect(result.sessionScope).toBe('user');
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
+    expect(result.dmPolicy).toBe('open');
     expect(result.groups).toEqual({});
     expect(result.identity).toBeUndefined();
     expect(result.memoryScope).toBeUndefined();
@@ -325,6 +326,7 @@ describe('parseChannelConfig', () => {
       memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
       model: 'qwen-coder',
       groupPolicy: 'open',
+      dmPolicy: 'disabled',
       groups: { g1: { mentionKeywords: ['@bot'] } },
     });
 
@@ -345,6 +347,7 @@ describe('parseChannelConfig', () => {
     });
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
+    expect(result.dmPolicy).toBe('disabled');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
   });
 

@@ -44,6 +44,80 @@ describe('resumeHistoryUtils', () => {
     } as unknown as AnyDeclarativeTool;
   });
 
+  it('inserts a history-gap divider before the gap child record', () => {
+    // The gap child is the first reachable record; the notice sits above it and
+    // states the earlier history could not be recovered.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          uuid: 'b1',
+          message: { parts: [{ text: 'first surviving turn' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [{ childUuid: 'b1', missingParentUuid: 'gone' }],
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    expect(items).toHaveLength(2);
+    expect(items[0].type).toBe(MessageType.INFO);
+    // Test locale has no translations loaded → t() returns the English source.
+    const text = (items[0] as { text: string }).text;
+    expect(text).toContain('History gap');
+    expect(text).toContain('could not be recovered');
+    expect(items[1]).toMatchObject({
+      type: 'user',
+      text: 'first surviving turn',
+    });
+  });
+
+  it('does not pair a pre-gap @-command with the post-gap user turn', () => {
+    // Defense-in-depth: reconstructHistory truncates to the tail island, so a
+    // pre-gap at_command is normally never replayed (the gap child is the first
+    // record). But convertToHistoryItems must stay robust if a divider ever
+    // lands with an unconsumed at_command buffered — the post-gap user turn must
+    // NOT inherit the pre-gap @file reads.
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'at_command',
+          uuid: 'a1',
+          systemPayload: {
+            userText: 'pre-gap @old.ts summarize',
+            filesRead: ['/pre/old.ts'],
+            status: 'success',
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'b1',
+          message: { parts: [{ text: 'post-gap message' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [{ childUuid: 'b1', missingParentUuid: 'gone' }],
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    // Divider, then the post-gap user turn as authored — no @-command text
+    // leaked in, no file-read tool group synthesized.
+    const texts = items.map((i) => (i as { text?: string }).text ?? '');
+    expect(texts.some((t) => t.includes('pre-gap @old.ts'))).toBe(false);
+    expect(items.some((i) => i.type === 'tool_group')).toBe(false);
+    const userItem = items.find((i) => i.type === 'user') as { text: string };
+    expect(userItem.text).toBe('post-gap message');
+  });
+
   it('converts conversation into history items with incremental ids', () => {
     const conversation = {
       messages: [
