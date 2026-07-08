@@ -147,6 +147,22 @@ describe('readManyFiles', () => {
       expect(content).toContain('--- End of content ---');
     });
 
+    it('should include truncated large text files instead of reporting a size error', async () => {
+      const relativePath = 'large.log';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, 'x'.repeat(11 * 1024 * 1024), 'utf-8');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Showing lines 1-1 of at least 1 total lines');
+      expect(content).toContain('... [truncated]');
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toBeUndefined();
+      expect(result.files[0]!.filePath).toBe(absolutePath);
+    });
+
     it('should include truncated notebooks that do not expose text line ranges', async () => {
       const relativePath = 'large.ipynb';
       const absolutePath = path.join(tempRootDir, relativePath);
@@ -274,6 +290,20 @@ describe('readManyFiles', () => {
       expect(content).toContain('file2.txt');
       // Should NOT contain the file contents, just the structure
       expect(content).not.toContain('Content of file1.txt');
+    });
+
+    it('should propagate aborts before reading a directory', async () => {
+      await createTestFile('mydir', 'file1.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readManyFiles(mockConfig, {
+          paths: ['mydir'],
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
     });
 
     it('should handle directory with trailing slash', async () => {
@@ -439,6 +469,20 @@ describe('readManyFiles', () => {
   });
 
   describe('per-file error surfacing', () => {
+    it('should propagate aborts from file reads instead of returning an error message', async () => {
+      const { relativePath } = await createTestFile('cancel.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readManyFiles(mockConfig, {
+          paths: [relativePath],
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
     it('should surface processSingleFileContent errors instead of silently skipping the file', async () => {
       // Trigger the >10MB file-size error path in processSingleFileContent.
       const relativePath = 'huge.bin';

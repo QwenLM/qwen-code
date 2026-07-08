@@ -487,6 +487,7 @@ export interface RunHandle {
 type CoreRuntime = typeof import('@qwen-code/qwen-code-core');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
+type EnvironmentRuntime = typeof import('../config/environment.js');
 type LoadedSettingsAdapterRuntime =
   typeof import('../config/loadedSettingsAdapter.js');
 type TrustedFoldersRuntime = typeof import('../config/trustedFolders.js');
@@ -710,21 +711,25 @@ async function resolveDaemonLogBaseDirForRun(input: {
 let settingsRuntimePromise:
   | Promise<{
       settings: SettingsRuntime;
+      environment: EnvironmentRuntime;
       loadedSettingsAdapter: LoadedSettingsAdapterRuntime;
       trustedFolders: TrustedFoldersRuntime;
     }>
   | undefined;
 function loadSettingsRuntimeModules(): Promise<{
   settings: SettingsRuntime;
+  environment: EnvironmentRuntime;
   loadedSettingsAdapter: LoadedSettingsAdapterRuntime;
   trustedFolders: TrustedFoldersRuntime;
 }> {
   settingsRuntimePromise ??= Promise.all([
     import('../config/settings.js'),
+    import('../config/environment.js'),
     import('../config/loadedSettingsAdapter.js'),
     import('../config/trustedFolders.js'),
-  ]).then(([settings, loadedSettingsAdapter, trustedFolders]) => ({
+  ]).then(([settings, environment, loadedSettingsAdapter, trustedFolders]) => ({
     settings,
+    environment,
     loadedSettingsAdapter,
     trustedFolders,
   }));
@@ -741,6 +746,7 @@ async function loadServeRuntimeModules() {
     daemonStatusProviderModule,
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
+    totalSessionAdmissionModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -750,6 +756,7 @@ async function loadServeRuntimeModules() {
     import('./daemon-status-provider.js'),
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
+    import('./total-session-admission.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -768,6 +775,8 @@ async function loadServeRuntimeModules() {
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
     createWorkspaceSkillsStatusProvider:
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
+    createTotalSessionAdmissionController:
+      totalSessionAdmissionModule.createTotalSessionAdmissionController,
   };
 }
 
@@ -1141,6 +1150,7 @@ function createBootstrapServeApp(input: {
       },
       limits: {
         maxSessions: advertisedMaxSessions(opts.maxSessions),
+        maxTotalSessions: positiveFiniteOrNull(opts.maxTotalSessions),
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           opts.maxPendingPromptsPerSession,
         ),
@@ -1348,6 +1358,9 @@ export async function runQwenServe(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+    ...process.env,
+  });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -1773,6 +1786,14 @@ export async function runQwenServe(
       );
     }
   }
+  if (opts.maxTotalSessions !== undefined) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxTotalSessions)) {
+      throw new TypeError(
+        `Invalid maxTotalSessions: ${opts.maxTotalSessions}. Must be a non-negative integer ` +
+          `(0 / Infinity = unlimited).`,
+      );
+    }
+  }
   if (opts.maxPendingPromptsPerSession !== undefined) {
     if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
       throw new TypeError(
@@ -2017,6 +2038,64 @@ export async function runQwenServe(
         { workspace: boundWorkspace },
       );
     }
+    const runtimeEnvSnapshot = runtimeBootSettings
+      ? settingsRuntime.environment.buildRuntimeEnvironment(
+          runtimeBootSettings.merged,
+          boundWorkspace,
+          daemonRuntimeBaseEnv,
+        )
+      : {
+          effectiveEnv: { ...daemonRuntimeBaseEnv },
+          overlayKeys: Object.freeze([] as string[]),
+          envFilePaths: Object.freeze([] as string[]),
+          envFileReadFailed: false,
+          envFileReadFailures: Object.freeze([]),
+        };
+    const logRuntimeEnvFileReadFailures = (
+      workspace: string,
+      snapshot: {
+        readonly envFileReadFailed: boolean;
+        readonly envFileReadFailures?: ReadonlyArray<{
+          readonly path: string;
+          readonly error: string;
+        }>;
+      },
+    ): void => {
+      if (!snapshot.envFileReadFailed) return;
+      const failedFiles = snapshot.envFileReadFailures ?? [];
+      daemonLog.warn('one or more runtime env files could not be read', {
+        workspace,
+        ...(failedFiles.length > 0 ? { failedFiles } : {}),
+      });
+    };
+    logRuntimeEnvFileReadFailures(boundWorkspace, runtimeEnvSnapshot);
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
+      ...runtimeEnvSnapshot.effectiveEnv,
+    };
+    const replaceRuntimeEffectiveEnv = (
+      nextEnv: Readonly<NodeJS.ProcessEnv>,
+    ): void => {
+      for (const key of Object.keys(runtimeEffectiveEnv)) {
+        delete runtimeEffectiveEnv[key];
+      }
+      Object.assign(runtimeEffectiveEnv, nextEnv);
+    };
+    const primaryRuntimeEnv: {
+      mode: 'runtime-overlay';
+      overlayKeys: string[];
+      envFilePaths: string[];
+      effectiveEnv: NodeJS.ProcessEnv;
+      envFileReadFailed: boolean;
+      envFileReadFailures: Array<{ path: string; error: string }>;
+      fallbackReason?: string;
+    } = {
+      mode: 'runtime-overlay' as const,
+      overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
+      effectiveEnv: runtimeEffectiveEnv,
+      envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
+      envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
+      envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
+    };
     const daemonWorkspaceHash = core.hashDaemonWorkspace(boundWorkspace);
     let daemonTelemetrySettings: TelemetrySettings;
     try {
@@ -2206,6 +2285,7 @@ export async function runQwenServe(
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
+      sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
@@ -2221,9 +2301,13 @@ export async function runQwenServe(
         ? { extraArgs: ['--experimental-lsp'] }
         : {}),
     });
-    const statusProvider = runtime.createDaemonStatusProvider();
+    const statusProvider = runtime.createDaemonStatusProvider({
+      env: runtimeEffectiveEnv,
+    });
     const workspaceProvidersStatusProvider =
-      runtime.createWorkspaceProvidersStatusProvider();
+      runtime.createWorkspaceProvidersStatusProvider({
+        env: runtimeEffectiveEnv,
+      });
     const workspaceSkillsStatusProvider =
       runtime.createWorkspaceSkillsStatusProvider();
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
@@ -2232,6 +2316,12 @@ export async function runQwenServe(
     // (which registers a per-connection `ClientMcpRegistrar`'s sender on
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
+      {
+        maxTotalSessions: opts.maxTotalSessions,
+        getBridges: () => (bridgeRef ? [bridgeRef] : []),
+      },
+    );
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -2311,6 +2401,7 @@ export async function runQwenServe(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
+        freshSessionAdmission: totalSessionAdmission.admit,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2366,10 +2457,64 @@ export async function runQwenServe(
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
             skipLoadEnvironment: true,
           });
-          return settingsRuntime.settings.reloadEnvironment(
+          const result = settingsRuntime.settings.reloadEnvironment(
             fresh.merged,
             workspace,
           );
+          let refreshedRuntimeEnv: ReturnType<
+            EnvironmentRuntime['buildRuntimeEnvironment']
+          >;
+          let fallbackReason: string | undefined;
+          try {
+            refreshedRuntimeEnv =
+              settingsRuntime.environment.buildRuntimeEnvironment(
+                fresh.merged,
+                workspace,
+                daemonRuntimeBaseEnv,
+              );
+          } catch (err) {
+            fallbackReason = err instanceof Error ? err.message : String(err);
+            daemonLog.warn(
+              'failed to rebuild runtime env snapshot after daemon env reload; preserving previous runtime env',
+              {
+                error: fallbackReason,
+              },
+            );
+            refreshedRuntimeEnv = {
+              effectiveEnv: { ...runtimeEffectiveEnv },
+              overlayKeys: [...primaryRuntimeEnv.overlayKeys],
+              envFilePaths: [...primaryRuntimeEnv.envFilePaths],
+              envFileReadFailed: primaryRuntimeEnv.envFileReadFailed ?? false,
+              envFileReadFailures: [
+                ...(primaryRuntimeEnv.envFileReadFailures ?? []),
+              ],
+            };
+          }
+          logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+          replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
+          if (fallbackReason) {
+            primaryRuntimeEnv.fallbackReason = fallbackReason;
+          } else {
+            delete primaryRuntimeEnv.fallbackReason;
+          }
+          primaryRuntimeEnv.envFileReadFailed =
+            refreshedRuntimeEnv.envFileReadFailed;
+          primaryRuntimeEnv.envFileReadFailures.splice(
+            0,
+            primaryRuntimeEnv.envFileReadFailures.length,
+            ...refreshedRuntimeEnv.envFileReadFailures,
+          );
+          primaryRuntimeEnv.overlayKeys.splice(
+            0,
+            primaryRuntimeEnv.overlayKeys.length,
+            ...refreshedRuntimeEnv.overlayKeys,
+          );
+          primaryRuntimeEnv.envFilePaths.splice(
+            0,
+            primaryRuntimeEnv.envFilePaths.length,
+            ...refreshedRuntimeEnv.envFilePaths,
+          );
+          return result;
         }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
@@ -2540,6 +2685,7 @@ export async function runQwenServe(
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       }),
       primaryWorkspaceTrusted: trustedWorkspace,
+      primaryRuntimeEnv,
       daemonLog,
       getChannelWorkerSnapshot,
       enqueueChannelWebhookTask: (task) =>
@@ -2561,6 +2707,7 @@ export async function runQwenServe(
         },
       }),
       getMetricsSeries: () => metricsRing.snapshot(),
+      getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
       recordDaemonRequest: (durationMs, statusCode) =>
         metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,

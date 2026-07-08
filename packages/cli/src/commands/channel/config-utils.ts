@@ -10,6 +10,9 @@ import { getPlugin, supportedTypes } from './channel-registry.js';
 export { findCliEntryPath } from './cli-entry-path.js';
 
 export function resolveEnvVars(value: string): string {
+  if (value.startsWith('$$')) {
+    return value.substring(1);
+  }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
     const envValue = process.env[envName];
@@ -27,6 +30,7 @@ function resolveOptionalStringField(
   channelName: string,
   rawConfig: Record<string, unknown>,
   field: 'token' | 'clientId' | 'clientSecret',
+  envResolution: EnvResolution,
 ): string | undefined {
   const value = rawConfig[field];
   if (value === undefined || value === null || value === '') {
@@ -36,6 +40,36 @@ function resolveOptionalStringField(
     throw new Error(
       `Channel "${channelName}" field "${field}" must be a string.`,
     );
+  }
+  return resolveConfigEnvVar(value, envResolution);
+}
+
+/**
+ * false: leave string values unchanged.
+ * true: resolve $VAR references with the legacy generic not-set error.
+ * 'available': resolve $VAR references with explicit unset vs empty errors.
+ */
+type EnvResolution = boolean | 'available';
+const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
+
+function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
+  if (mode === false) return value;
+  if (value.startsWith('$$')) return value.substring(1);
+  if (mode === 'available' && value.startsWith('$')) {
+    const envName = value.substring(1);
+    const envValue = process.env[envName];
+    if (envValue === undefined) {
+      throw new Error(
+        `Environment variable ${envName} is not set (referenced as ${value}). ` +
+          'Set the variable or remove the $ prefix to use a literal value.',
+      );
+    }
+    if (envValue === '') {
+      throw new Error(
+        `Environment variable ${envName} is empty (referenced as ${value})`,
+      );
+    }
+    return envValue;
   }
   return resolveEnvVars(value);
 }
@@ -254,6 +288,7 @@ export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
   defaultCwd: string = process.cwd(),
+  options: { resolveEnvVars?: EnvResolution } = {},
 ): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
@@ -268,6 +303,10 @@ export async function parseChannelConfig(
     );
   }
 
+  const resolvedRawConfig = { ...rawConfig };
+  const envResolution = options.resolveEnvVars ?? true;
+  const resolvedPluginFields = new Set<string>();
+
   // Validate plugin-required fields
   for (const field of plugin.requiredConfigFields ?? []) {
     const value = rawConfig[field];
@@ -276,19 +315,37 @@ export async function parseChannelConfig(
         `Channel "${name}" (${channelType}) requires "${field}".`,
       );
     }
+    if (typeof value === 'string' && !KNOWN_CREDENTIAL_FIELDS.has(field)) {
+      resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
+      resolvedPluginFields.add(field);
+    }
+  }
+  for (const field of plugin.envResolvableConfigFields ?? []) {
+    if (resolvedPluginFields.has(field)) continue;
+    const value = rawConfig[field];
+    if (typeof value === 'string' && value !== '') {
+      resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
+    }
   }
 
   // Resolve env vars for known credential fields
-  const token = resolveOptionalStringField(name, rawConfig, 'token') ?? '';
-  const clientId = resolveOptionalStringField(name, rawConfig, 'clientId');
+  const token =
+    resolveOptionalStringField(name, rawConfig, 'token', envResolution) ?? '';
+  const clientId = resolveOptionalStringField(
+    name,
+    rawConfig,
+    'clientId',
+    envResolution,
+  );
   const clientSecret = resolveOptionalStringField(
     name,
     rawConfig,
     'clientSecret',
+    envResolution,
   );
 
   return {
-    ...rawConfig,
+    ...resolvedRawConfig,
     type: channelType,
     token,
     clientId,

@@ -68,6 +68,7 @@ function encodeWav(pcm: Uint8Array): Uint8Array {
 /** Injection seams for unit tests; production uses the reused CLI pipeline. */
 export interface VoiceWsDeps {
   loadContext?: (workspaceCwd: string) => DaemonVoiceContext;
+  env?: Readonly<Record<string, string | undefined>>;
   openStream?: (
     ctx: DaemonVoiceContext,
     callbacks: VoiceStreamCallbacks,
@@ -84,6 +85,7 @@ async function defaultOpenStream(
       config: ctx.models,
       settings: ctx.settings,
       voiceModel: ctx.voiceModel,
+      env: ctx.env,
     });
     await assertVoiceBaseUrlNetworkAllowed(cfg);
     return await openVoiceStreamWithRetry(() =>
@@ -103,7 +105,12 @@ function defaultTranscribe(
 ): Promise<string> {
   return transcribeVoiceAudio(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
-    { config: ctx.models, settings: ctx.settings, voiceModel: ctx.voiceModel },
+    {
+      config: ctx.models,
+      settings: ctx.settings,
+      voiceModel: ctx.voiceModel,
+      env: ctx.env,
+    },
   ).catch((error: unknown) => {
     debugLogger.debug(
       `[voice-ws] batch transcription error: ${errMessage(error)}`,
@@ -171,7 +178,10 @@ export function createVoiceWsConnectionHandler(
   boundWorkspace: string,
   deps: VoiceWsDeps = {},
 ): (ws: WebSocket, req: IncomingMessage) => void {
-  const loadContext = deps.loadContext ?? loadDaemonVoiceContext;
+  const loadContext =
+    deps.loadContext ??
+    ((workspaceCwd: string) =>
+      loadDaemonVoiceContext(workspaceCwd, { env: deps.env }));
   const openStream = deps.openStream ?? defaultOpenStream;
   const transcribe = deps.transcribe ?? defaultTranscribe;
   // Shared across all connections from this daemon (factory closure).

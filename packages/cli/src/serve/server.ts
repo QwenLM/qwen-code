@@ -100,6 +100,10 @@ import {
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import {
+  createTotalSessionAdmissionController,
+  type TotalSessionAdmissionSnapshot,
+} from './total-session-admission.js';
+import {
   sendBridgeError as sendBridgeErrorResponse,
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
   type SendBridgeError,
@@ -125,6 +129,7 @@ import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   type WorkspaceRegistry,
+  type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
 import { registerWorkspaceLifecycleRoutes } from './routes/workspace-lifecycle.js';
 import { registerWorkspaceMcpControlRoutes } from './routes/workspace-mcp-control.js';
@@ -192,6 +197,12 @@ function describeRegistryPrimaryForConflict(
     `registry primary cwd=${JSON.stringify(registry.primary.workspaceCwd)}, ` +
     `workspaceId=${JSON.stringify(registry.primary.workspaceId)}`
   );
+}
+
+function getRuntimeEffectiveEnv(
+  metadata: WorkspaceRuntimeEnvMetadata | undefined,
+): Readonly<Record<string, string | undefined>> | undefined {
+  return metadata?.effectiveEnv;
 }
 
 export interface ServeAppDeps {
@@ -279,6 +290,7 @@ export interface ServeAppDeps {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -319,6 +331,7 @@ export interface ServeAppDeps {
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
   primaryWorkspaceTrusted?: boolean;
+  primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
 }
 
@@ -509,6 +522,9 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.clientMcpSenderRegistry ??
     deps.clientMcpSenderRegistry ??
     new ClientMcpSenderRegistry();
+  const primaryRuntimeEnvMetadata =
+    injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
+  const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
@@ -520,12 +536,28 @@ export function createServeApp(
         deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
       sessionShellCommandEnabled,
     });
-  const statusProvider = deps.statusProvider ?? createDaemonStatusProvider();
+  const statusProvider =
+    deps.statusProvider ??
+    createDaemonStatusProvider(
+      primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
+    );
+  let defaultBridgeForAdmission: AcpSessionBridge | undefined;
+  const totalSessionAdmission =
+    !deps.bridge && !injectedWorkspaceRegistry
+      ? createTotalSessionAdmissionController({
+          maxTotalSessions: opts.maxTotalSessions,
+          getBridges: () =>
+            defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
+        })
+      : undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      ...(totalSessionAdmission
+        ? { freshSessionAdmission: totalSessionAdmission.admit }
+        : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
@@ -541,6 +573,9 @@ export function createServeApp(
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
     });
+  if (!injectedWorkspaceRegistry && !deps.bridge) {
+    defaultBridgeForAdmission = bridge;
+  }
   const archiveCoordinator = new SessionArchiveCoordinator();
 
   installSelfOriginStripMiddleware(app, getPort);
@@ -579,8 +614,9 @@ export function createServeApp(
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider,
-      workspaceProvidersStatusProvider:
-        createWorkspaceProvidersStatusProvider(),
+      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider(
+        primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
+      ),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
@@ -617,7 +653,10 @@ export function createServeApp(
       workspaceCwd: boundWorkspace,
       primary: true,
       trusted: deps.primaryWorkspaceTrusted ?? false,
-      env: { mode: 'parent-process', overlayKeys: [] },
+      env: primaryRuntimeEnvMetadata ?? {
+        mode: 'parent-process',
+        overlayKeys: [],
+      },
       bridge,
       workspaceService: workspace,
       routeFileSystemFactory: fsFactory,
@@ -768,6 +807,8 @@ export function createServeApp(
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
+    getTotalSessionAdmissionSnapshot:
+      deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
   });
 
   registerCapabilitiesRoutes(app, {
@@ -910,6 +951,7 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
+    env: getRuntimeEffectiveEnv(primaryRuntime.env),
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
     getMcpServers: async () => {
@@ -1114,7 +1156,9 @@ export function createServeApp(
     extraWsRoutes: [
       {
         path: '/voice/stream',
-        onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace),
+        onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
+          env: getRuntimeEffectiveEnv(primaryRuntime.env),
+        }),
       },
     ],
   });

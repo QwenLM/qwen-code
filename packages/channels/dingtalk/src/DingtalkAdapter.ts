@@ -976,7 +976,7 @@ export class DingtalkChannel extends ChannelBase {
 
       // Strip first @mention (the bot) from text, keep other @mentions intact
       if (isMentioned) {
-        cleanText = cleanText.replace(/@\S+/, '').trim();
+        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context

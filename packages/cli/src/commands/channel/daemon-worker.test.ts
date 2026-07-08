@@ -5,6 +5,9 @@ const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
 const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
+const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
@@ -108,6 +111,12 @@ const mockSessionRouter = vi.hoisted(() =>
 
 vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
   canonicalizeWorkspace: mockCanonicalizeWorkspace,
+}));
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  appendChannelMemory: mockAppendChannelMemory,
+  clearChannelMemory: mockClearChannelMemory,
+  readChannelMemory: mockReadChannelMemory,
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -493,6 +502,14 @@ describe('runChannelDaemonWorker', () => {
       expect.objectContaining({
         proxy: 'http://settings-proxy:8080',
         router: mockSessionRouter.mock.results[0]!.value,
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
       }),
     );
     expect(mockResolveProxyUrl).toHaveBeenCalledWith(
