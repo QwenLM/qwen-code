@@ -1222,26 +1222,33 @@ export class GitWorktreeService {
    * silently pinning a sub-agent to a possibly-main tree.
    */
   async isRegisteredLinkedWorktree(worktreePath: string): Promise<boolean> {
+    const realpathOr = async (p: string): Promise<string> => {
+      try {
+        return await fs.realpath(p);
+      } catch {
+        return path.resolve(p);
+      }
+    };
     try {
       const target = await fs.realpath(worktreePath);
-      const out = await this.git.raw(['worktree', 'list', '--porcelain']);
-      // Records are blank-line separated and begin with `worktree <path>`.
-      // The FIRST record is the primary working tree; a linked worktree must
-      // match one of the remaining records.
+      // `-z`: each attribute is NUL-terminated, so a worktree path that itself
+      // contains a newline stays one record instead of injecting a fake
+      // `worktree <path>` line into a newline-split parse.
+      const out = await this.git.raw(['worktree', 'list', '--porcelain', '-z']);
       const registered: string[] = [];
-      for (const line of out.split('\n')) {
-        if (line.startsWith('worktree ')) {
-          registered.push(line.slice('worktree '.length).trim());
+      for (const attr of out.split('\0')) {
+        if (attr.startsWith('worktree ')) {
+          registered.push(attr.slice('worktree '.length));
         }
       }
+      if (registered.length === 0) return false;
+      // The FIRST record is the primary working tree. Reject it up front by
+      // canonical path, so a later record whose on-disk path is a symlink
+      // pointing back onto the main checkout cannot smuggle the main tree
+      // through the loop below.
+      if ((await realpathOr(registered[0])) === target) return false;
       for (const candidate of registered.slice(1)) {
-        let resolved: string;
-        try {
-          resolved = await fs.realpath(candidate);
-        } catch {
-          resolved = path.resolve(candidate);
-        }
-        if (resolved === target) return true;
+        if ((await realpathOr(candidate)) === target) return true;
       }
       return false;
     } catch (error) {

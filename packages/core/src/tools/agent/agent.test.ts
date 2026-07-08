@@ -1222,26 +1222,43 @@ describe('AgentTool', () => {
       // the guard keys off the effective decision and does not over-reject the
       // foreground path. A regression back to `backgroundRequested` would flip
       // this to the background-agent error.
-      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
-        ...mockSubagents[0],
-        background: true,
-      });
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation({
-        description: 'Review',
-        prompt: 'Review the diff',
-        subagent_type: 'file-search',
-        working_dir: '/tmp/qwen-not-a-worktree-xyz',
-      });
-      const result = await runWithAgentContext('sub-1', () =>
-        invocation.execute(new AbortController().signal),
+      vi.useRealTimers();
+      // A real, existing directory that is not a git repo — so the
+      // GitWorktreeService probe constructs cleanly and isGitRepository()
+      // returns false (the default '/test/project' mock does not exist on CI,
+      // where simple-git throws at construction).
+      const nonRepo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-nested-')),
       );
+      try {
+        vi.mocked(config.getProjectRoot).mockReturnValue(nonRepo);
+        vi.mocked(config.getTargetDir).mockReturnValue(nonRepo);
+        vi.mocked(config.getCwd).mockReturnValue(nonRepo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(nonRepo);
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          background: true,
+        });
 
-      const text = partToString(result.llmContent);
-      expect(text).not.toMatch(/background agent/i);
-      expect(text).toMatch(/not a git repository|not a registered/i);
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: 'some-worktree',
+        });
+        const result = await runWithAgentContext('sub-1', () =>
+          invocation.execute(new AbortController().signal),
+        );
+
+        const text = partToString(result.llmContent);
+        expect(text).not.toMatch(/background agent/i);
+        expect(text).toMatch(/not a git repository|not a registered/i);
+      } finally {
+        fs.rmSync(nonRepo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
     });
 
     it('strips internal analysis and summary tags from subagent result', async () => {
