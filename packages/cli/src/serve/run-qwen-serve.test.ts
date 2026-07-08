@@ -4054,11 +4054,12 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     const listenError = new Error('listen failed') as NodeJS.ErrnoException;
     listenError.code = 'EADDRINUSE';
-    const fakeServer = createServer();
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
       listen: vi.fn(() => {
-        setImmediate(() => fakeServer.emit('error', listenError));
-        return fakeServer;
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
       }),
     } as unknown as express.Application);
     const worker = makeWorker({
