@@ -88,7 +88,7 @@ export class QQChannel extends ChannelBase {
   private heartbeatInterval: number = 45000;
   private seq: number = 0;
   private reconnectAttempts: number = 0;
-  private readonly maxReconnectAttempts: number = 20;
+  private maxReconnectAttempts: number;
   /** QQ Bot session_id from READY, used for RESUME on reconnect. */
   private sessionId: string = '';
   /** Whether this connection attempt should try RESUME first. */
@@ -133,7 +133,7 @@ export class QQChannel extends ChannelBase {
   /** Idle-flush timeout: buffer is sent after this many ms of silence. */
   private static readonly IDLE_FLUSH_MS = 2000;
   /** Max consecutive send failures before the stream is abandoned. */
-  private static readonly MAX_FLUSH_RETRIES = 3;
+  private maxFlushRetries: number;
   /** Retry delay for subsequent attempts (backoff beyond first retry). */
   private static readonly IDLE_FLUSH_BACKOFF_MS = 4000;
   /** Max buffer length before forcing an immediate flush. */
@@ -237,6 +237,8 @@ export class QQChannel extends ChannelBase {
       registerBridgeEvents: options?.registerBridgeEvents ?? !options?.router,
     });
     this.qqConfig = config as unknown as QQChannelConfig;
+    this.maxReconnectAttempts = this.qqConfig.maxReconnectAttempts ?? 20;
+    this.maxFlushRetries = this.qqConfig.maxFlushRetries ?? 3;
     this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
@@ -988,7 +990,10 @@ export class QQChannel extends ChannelBase {
           if (current === state) {
             current.buffer = buffer;
             current.retryCount++;
-            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+            if (
+              this.maxFlushRetries <= 0 ||
+              current.retryCount < this.maxFlushRetries
+            ) {
               const reconnectId = this._reconnectId;
               const delay =
                 current.retryCount > 1
@@ -1019,7 +1024,10 @@ export class QQChannel extends ChannelBase {
               (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
             ) {
               current.retryCount++;
-              if (current.retryCount >= QQChannel.MAX_FLUSH_RETRIES) {
+              if (
+                this.maxFlushRetries > 0 &&
+                current.retryCount >= this.maxFlushRetries
+              ) {
                 this.streamState.delete(sessionId);
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
@@ -1030,7 +1038,10 @@ export class QQChannel extends ChannelBase {
               }
             } else {
               current.retryCount++;
-              if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+              if (
+                this.maxFlushRetries <= 0 ||
+                current.retryCount < this.maxFlushRetries
+              ) {
                 if (!current.timer) {
                   const reconnectId = this._reconnectId;
                   const delay =
@@ -1616,7 +1627,9 @@ export class QQChannel extends ChannelBase {
 
       const shouldReconnect =
         this.serverRequestedReconnect ||
-        (code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts);
+        (code !== 1000 &&
+          (this.maxReconnectAttempts <= 0 ||
+            this.reconnectAttempts < this.maxReconnectAttempts));
 
       this.serverRequestedReconnect = false;
 
@@ -1636,7 +1649,7 @@ export class QQChannel extends ChannelBase {
         this.reconnectAttempts++;
         const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30000);
         process.stderr.write(
-          `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})\n`,
+          `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}${this.maxReconnectAttempts > 0 ? `/${this.maxReconnectAttempts}` : ''})\n`,
         );
         if (!this.isReconnecting) {
           this.reconnectTimer = setTimeout(
@@ -1645,7 +1658,10 @@ export class QQChannel extends ChannelBase {
           );
           this.reconnectTimer.unref();
         }
-      } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      } else if (
+        this.maxReconnectAttempts > 0 &&
+        this.reconnectAttempts >= this.maxReconnectAttempts
+      ) {
         process.stderr.write(
           `[QQ:${this.name}] FATAL: reconnect exhausted after ${this.maxReconnectAttempts} attempts. Bot is offline until daemon restart.\n`,
         );
@@ -1908,7 +1924,10 @@ export class QQChannel extends ChannelBase {
     this.isReconnecting = true;
     const myReconnectId = this._reconnectId;
 
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    if (
+      this.maxReconnectAttempts > 0 &&
+      this.reconnectAttempts >= this.maxReconnectAttempts
+    ) {
       process.stderr.write(
         `[QQ:${this.name}] RC: reconnect attempts exhausted, giving up\n`,
       );
@@ -1917,8 +1936,13 @@ export class QQChannel extends ChannelBase {
     }
 
     let gwCalled = false;
-    const maxGwRetries = 5;
-    for (let attempt = 0; attempt < maxGwRetries; attempt++) {
+    const maxGwRetries = this.qqConfig.maxGwRetries ?? 5;
+    const unlimitedRetries = maxGwRetries <= 0;
+    for (
+      let attempt = 0;
+      unlimitedRetries || attempt < maxGwRetries;
+      attempt++
+    ) {
       if (this.disposed || this._reconnectId !== myReconnectId) return;
       try {
         try {
@@ -1940,13 +1964,14 @@ export class QQChannel extends ChannelBase {
         const msg = e instanceof Error ? e.message : String(e);
         const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
         process.stderr.write(
-          `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
+          `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}${unlimitedRetries ? '' : `/${maxGwRetries}`})\n`,
         );
-        if (attempt < maxGwRetries - 1) await this.sleep(backoff);
+        if (unlimitedRetries || attempt < maxGwRetries - 1)
+          await this.sleep(backoff);
       }
     }
     process.stderr.write(
-      `[QQ:${this.name}] RC: exhausted ${maxGwRetries} reconnect retries, will retry in 60s\n`,
+      `[QQ:${this.name}] RC: exhausted ${unlimitedRetries ? '∞' : maxGwRetries} reconnect retries, will retry in 60s\n`,
     );
     if (gwCalled) this.reconnectAttempts++;
     this.tryResume = false;
@@ -2367,11 +2392,11 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // Track whether the message passed a non-@-bot policy gate.
-    // isAtBot is true only for @-mentions; messages that pass
-    // keyword or all policy have isAtBot=false but still need
-    // isMentioned=true so GroupGate.requireMention doesn't drop them.
-    const passedPolicyGate = !isAtBot;
+    // Non-@-bot messages pass isMentioned:false, which causes GroupGate.requireMention
+    // to silently drop them before they reach the LLM. This is by core design:
+    // non-@-bot group messages should flow through cron/log only, not trigger AI.
+    // Thread #17's fix (setting isMentioned=true for non-@-bot keyword/all matches)
+    // was intentionally reverted — it violated principle #1.
 
     const senderId =
       event.author.user_openid || event.author.id || event.author.member_openid;
@@ -2382,8 +2407,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
     // Set replyMsgId for all messages that pass the policy gate,
-    // not just @-bot ones. This ensures keyword-triggered non-@
-    // messages get proper msg_id referencing in bot replies.
+    // not just @-bot ones.
     this.setReplyMsgId(chatId, event.id);
     this.handleInbound({
       channelName: this.name,
@@ -2393,7 +2417,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       messageId: event.id,
       isGroup: true,
-      isMentioned: isAtBot || passedPolicyGate,
+      isMentioned: isAtBot,
       isReplyToBot: isAtBot,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) => {
