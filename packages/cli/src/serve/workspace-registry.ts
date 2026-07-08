@@ -13,8 +13,16 @@ import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
-  readonly mode: 'parent-process';
+  readonly mode: 'parent-process' | 'runtime-overlay';
   readonly overlayKeys: readonly string[];
+  readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
+  readonly envFilePaths?: readonly string[];
+  readonly envFileReadFailed?: boolean;
+  readonly envFileReadFailures?: ReadonlyArray<{
+    readonly path: string;
+    readonly error: string;
+  }>;
+  readonly fallbackReason?: string;
 }
 
 export interface WorkspaceRuntime {

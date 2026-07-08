@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -15,6 +16,9 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let sessionsState: any[];
+// Stable across renders (assigned once per test) so SplitView's reload effects,
+// which depend on `reload`'s identity, don't re-fire on every render.
+let reloadMock: ReturnType<typeof vi.fn>;
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
@@ -23,7 +27,18 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     </div>
   ),
   useConnection: () => connectionState,
-  useSessions: () => ({ sessions: sessionsState }),
+  // Stateful, like the real hook: reload() re-renders with the CURRENT module
+  // store. This lets a test prove the picker renders sessions that appeared
+  // only after the reload — not merely that reload() was called.
+  useSessions: () => {
+    const [sessions, setSessions] = React.useState<any[]>(() => sessionsState);
+    const reload = React.useCallback(async () => {
+      reloadMock();
+      setSessions([...sessionsState]);
+      return sessionsState;
+    }, []);
+    return { sessions, reload };
+  },
 }));
 
 vi.mock('./ChatPane', () => ({
@@ -31,7 +46,7 @@ vi.mock('./ChatPane', () => ({
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
     if (props.title === 'BOOM') throw new Error('pane exploded');
     return (
-      <div data-testid="chat-pane" data-current={props.isCurrent ? 'yes' : 'no'}>
+      <div data-testid="chat-pane">
         <span data-testid="pane-title">{props.title}</span>
         {props.onClose && (
           <button data-testid="pane-close" onClick={props.onClose}>
@@ -60,6 +75,7 @@ beforeEach(() => {
     { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
     { sessionId: 's4', workspaceCwd: '/w', displayName: 'Four' },
   ];
+  reloadMock = vi.fn();
 });
 
 afterEach(() => {
@@ -86,8 +102,21 @@ function panes(): HTMLElement[] {
   return Array.from(container!.querySelectorAll('[data-testid="chat-pane"]'));
 }
 function titles(): string[] {
-  return Array.from(container!.querySelectorAll('[data-testid="pane-title"]')).map(
-    (el) => el.textContent ?? '',
+  return Array.from(
+    container!.querySelectorAll('[data-testid="pane-title"]'),
+  ).map((el) => el.textContent ?? '');
+}
+function pickerOptions(): string[] {
+  return Array.from(container!.querySelectorAll('[role="option"] button')).map(
+    (el) => (el.textContent ?? '').trim(),
+  );
+}
+function openPicker(): void {
+  const addButton = container!.querySelector(
+    'button[aria-haspopup="listbox"]',
+  ) as HTMLButtonElement;
+  act(() =>
+    addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
   );
 }
 
@@ -111,7 +140,6 @@ describe('SplitView', () => {
   it('seeds with the current session when no initial sessions are given', () => {
     render({ initialSessionIds: [] });
     expect(titles()).toEqual(['Three']);
-    expect(panes()[0].getAttribute('data-current')).toBe('yes');
   });
 
   it('dedupes initial sessions', () => {
@@ -206,9 +234,7 @@ describe('SplitView', () => {
     render({ initialSessionIds: ['s1'], onExit });
     expect(onExit).not.toHaveBeenCalled();
     const close = container!.querySelector('[data-testid="pane-close"]');
-    act(() =>
-      close!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
-    );
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(onExit).toHaveBeenCalledTimes(1);
   });
 
@@ -242,5 +268,80 @@ describe('SplitView', () => {
     expect(container!.textContent).toContain('This session pane hit an error');
     expect(panes()).toHaveLength(1);
     expect(titles()).toEqual(['Two']);
+  });
+
+  it('reloads the session list when the picker opens (never a stale list)', () => {
+    render({ initialSessionIds: ['s1'] });
+    // `useSessions` only fetches on mount; nothing reloads until the user acts.
+    expect(reloadMock).not.toHaveBeenCalled();
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the refreshed session list on reopen — not the entry snapshot', () => {
+    render({ initialSessionIds: ['s1'] });
+    // First open: the picker offers the sessions present at entry.
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
+    // A session is created elsewhere after the split was entered…
+    sessionsState = [
+      ...sessionsState,
+      { sessionId: 's5', workspaceCwd: '/w', displayName: 'Five' },
+    ];
+    // …reopening the picker reloads and the new session now appears. Without the
+    // reload-on-open the list would be frozen at the entry snapshot (no 'Five').
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    openPicker();
+    expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
+  });
+
+  it('reloads the picker list when the parent bumps the reload token', () => {
+    render({ initialSessionIds: ['s1'], sessionListReloadToken: 0 });
+    // The initial token is not a change, so it does not trigger a reload.
+    expect(reloadMock).not.toHaveBeenCalled();
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            onExit={() => {}}
+            initialSessionIds={['s1']}
+            sessionListReloadToken={1}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('mirrors the live pane set up to the parent as panes change', () => {
+    const onPanesChange = vi.fn();
+    render({ initialSessionIds: ['s1'], onPanesChange });
+    // Reported on mount so the parent's seed reflects the actual panes…
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+    // …and after every add (so switching away and back restores it).
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    act(() =>
+      addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 's2']);
+    // …and after every remove.
+    const close = container!.querySelector('[data-testid="pane-close"]');
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s2']);
   });
 });

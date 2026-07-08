@@ -423,9 +423,8 @@ describe('ReadFileTool', () => {
       });
     });
 
-    it('should return error for a file that is too large', async () => {
+    it('should read and truncate a text file larger than 10MB', async () => {
       const filePath = path.join(tempRootDir, 'largefile.txt');
-      // 11MB of content exceeds 10MB limit
       const largeContent = 'x'.repeat(11 * 1024 * 1024);
       await fsp.writeFile(filePath, largeContent, 'utf-8');
       const params: ReadFileToolParams = { file_path: filePath };
@@ -435,10 +434,28 @@ describe('ReadFileTool', () => {
       >;
 
       const result = await invocation.execute(abortSignal);
-      expect(result).toHaveProperty('error');
-      expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(result.error?.message).toContain(
-        'File size exceeds the 10MB limit',
+      expect(result.error).toBeUndefined();
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from largefile.txt (truncated)',
+      );
+      expect(result.llmContent).toContain(
+        'Showing lines 1-1 of at least 1 total lines',
+      );
+      expect(result.llmContent).toContain('... [truncated]');
+    });
+
+    it('should propagate an aborted signal before reading', async () => {
+      const filePath = path.join(tempRootDir, 'abort.txt');
+      await fsp.writeFile(filePath, 'content', 'utf-8');
+      const invocation = tool.build({ file_path: filePath }) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(invocation.execute(controller.signal)).rejects.toThrow(
+        /abort/i,
       );
     });
 

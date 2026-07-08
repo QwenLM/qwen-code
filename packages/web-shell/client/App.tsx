@@ -68,7 +68,7 @@ import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
-import { parseSplitSessionIds } from './utils/splitUrl';
+import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -172,6 +172,7 @@ import {
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
+  type UserMessageContentRenderer,
   type WelcomeHeaderRenderer,
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
@@ -401,6 +402,8 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
+  /** Custom renderer for the inside of user chat bubbles. Defaults to plain text. */
+  renderUserMessageContent?: UserMessageContentRenderer;
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -792,6 +795,7 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
+  renderUserMessageContent,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -903,6 +907,7 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -917,6 +922,7 @@ export function App({
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      renderUserMessageContent,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -1238,14 +1244,29 @@ export function App({
     setActivePanel(null);
     setMainView('scheduledTasks');
   }, []);
-  // Open the in-window split view showing 2+ sessions side by side. Seeds with
-  // the given sessions (e.g. the overview selection); SplitView falls back to
-  // the current session when the list is empty.
-  const openSplitView = useCallback((sessionIds?: string[]) => {
-    setActivePanel(null);
-    setSplitSessionIds(sessionIds ?? []);
-    setMainView('split');
-  }, []);
+  // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
+  // is the live pane set — SplitView mirrors add/remove back into it via
+  // onPanesChange — so it must be preserved across entries, not blindly reset.
+  const openSplitView = useCallback(
+    (sessionIds?: string[]) => {
+      setActivePanel(null);
+      setSplitSessionIds((prev) => {
+        // An explicit selection (the overview, or a `?split=` URL) replaces the
+        // split with exactly those sessions.
+        const requested = Array.from(
+          new Set((sessionIds ?? []).filter(Boolean)),
+        ).slice(0, MAX_SPLIT_PANES);
+        if (requested.length > 0) return requested;
+        // No selection (the toolbar "Open Split View" button): restore the split
+        // the user already had so switching away and back doesn't clear it; fall
+        // back to the current session when there is nothing to restore.
+        if (prev.length > 0) return prev;
+        return connection.sessionId ? [connection.sessionId] : [];
+      });
+      setMainView('split');
+    },
+    [connection.sessionId],
+  );
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
   // to the Session Overview — the hub the split is launched from.
@@ -4537,29 +4558,38 @@ export function App({
                   : styles.chatPane
               }
             >
-              {sidebarOptions.enabled && (
-                <button
-                  type="button"
-                  className={styles.hamburgerButton}
-                  onClick={() => setMobileDrawerOpen((open) => !open)}
-                  aria-label={t('sidebar.toggleMenu')}
-                  aria-expanded={mobileDrawerOpen}
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
+              {sidebarOptions.enabled &&
+                !activePanel &&
+                mainView === 'chat' && (
+                  <button
+                    type="button"
+                    className={[
+                      styles.hamburgerButton,
+                      isChatEmptyState
+                        ? styles.hamburgerButtonFloating
+                        : undefined,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    onClick={() => setMobileDrawerOpen((open) => !open)}
+                    aria-label={t('sidebar.toggleMenu')}
+                    aria-expanded={mobileDrawerOpen}
                   >
-                    <line x1="3" y1="6" x2="21" y2="6" />
-                    <line x1="3" y1="12" x2="21" y2="12" />
-                    <line x1="3" y1="18" x2="21" y2="18" />
-                  </svg>
-                </button>
-              )}
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <line x1="3" y1="6" x2="21" y2="6" />
+                      <line x1="3" y1="12" x2="21" y2="12" />
+                      <line x1="3" y1="18" x2="21" y2="18" />
+                    </svg>
+                  </button>
+                )}
               {activePanel && (
                 <section
                   className={styles.panelHost}
@@ -4729,6 +4759,14 @@ export function App({
                     <CompactModeContext.Provider value={compactMode}>
                       <SplitView
                         initialSessionIds={splitSessionIds}
+                        // Mirror live pane add/remove back up so switching away
+                        // and re-entering restores the same panes. Pass the
+                        // setter directly — a fresh arrow each render would loop
+                        // SplitView's reporting effect.
+                        onPanesChange={setSplitSessionIds}
+                        // Refresh the "add pane" picker when the session list
+                        // changes elsewhere, matching the sidebar.
+                        sessionListReloadToken={sessionListReloadToken}
                         // Back returns to the Session Overview (the hub the split
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}

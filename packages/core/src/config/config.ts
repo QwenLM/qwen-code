@@ -928,6 +928,11 @@ export interface ConfigParameters {
   accessibility?: AccessibilitySettings;
   showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
+  /**
+   * Delay SDK startup for interactive render paths. Telemetry settings still
+   * remain readable from Config; only the global SDK side effect is deferred.
+   */
+  deferTelemetryInitialization?: boolean;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
@@ -1582,6 +1587,7 @@ export class Config {
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
   private readonly telemetrySettings: ResolvedTelemetrySettings;
+  private readonly telemetryInitializationDeferred: boolean;
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
@@ -1704,7 +1710,7 @@ export class Config {
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
   // re-checks shareability instead of reusing the first repo's result.
   private readonly teamMemoryShareabilityChecked = new Set<string>();
-  private readonly enableAutoSkill: boolean;
+  private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private fastModel?: string;
   private visionModel?: string;
@@ -1822,6 +1828,8 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.telemetryInitializationDeferred =
+      params.deferTelemetryInitialization ?? false;
     this.outboundCorrelationSettings = {
       propagateTraceContext:
         params.outboundCorrelation?.propagateTraceContext ?? false,
@@ -1986,7 +1994,10 @@ export class Config {
       onModelChange: this.handleModelChange.bind(this),
     });
 
-    if (this.telemetrySettings.enabled) {
+    if (
+      this.telemetrySettings.enabled &&
+      !this.telemetryInitializationDeferred
+    ) {
       initializeTelemetry(this);
     }
 
@@ -5002,6 +5013,10 @@ export class Config {
     return this.telemetrySettings.enabled ?? false;
   }
 
+  isTelemetryInitializationDeferred(): boolean {
+    return this.telemetryInitializationDeferred;
+  }
+
   getTelemetryLogPromptsEnabled(): boolean {
     return this.telemetrySettings.logPrompts ?? true;
   }
@@ -5435,6 +5450,19 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
+  }
+
+  /**
+   * Toggle auto-skill for the running session. The startup value is copied from
+   * settings, so persisting a settings change alone would not take effect until
+   * the next launch; the skill-review scheduler reads `getAutoSkillEnabled()`
+   * live, so flipping this stops (or resumes) reviews immediately.
+   *
+   * @remarks `getAutoSkillEnabled()` additionally gates on bare/safe mode, so
+   * it can still return false after `setAutoSkillEnabled(true)`.
+   */
+  setAutoSkillEnabled(enabled: boolean): void {
+    this.enableAutoSkill = enabled;
   }
 
   getAutoSkillConfirmEnabled(): boolean {

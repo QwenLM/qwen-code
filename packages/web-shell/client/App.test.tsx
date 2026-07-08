@@ -361,10 +361,30 @@ mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
 vi.doMock('./components/SplitView', async () => {
   const React = await import('react');
   return {
-    SplitView: (props: { onExit?: () => void }) =>
+    SplitView: (props: {
+      onExit?: () => void;
+      initialSessionIds?: string[];
+      onPanesChange?: (ids: string[]) => void;
+    }) =>
       React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
+        // Surface the seed so a test can assert the App preserved / restored it.
+        React.createElement(
+          'span',
+          { 'data-testid': 'split-initial' },
+          (props.initialSessionIds ?? []).join(','),
+        ),
+        // Simulate the real SplitView reporting its live pane set up to the App.
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-panes',
+            type: 'button',
+            onClick: () => props.onPanesChange?.(['s1', 's2', 's3']),
+          },
+          'report',
+        ),
         React.createElement(
           'button',
           {
@@ -788,6 +808,49 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('allows manual retry after a model stream interrupted turn error', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover this stream',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    mockSessionActions.sendPrompt.mockClear();
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-stream-interrupted',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender();
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'recover this stream',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        retry: true,
+      }),
+    );
+  });
+
   it('gates queued submissions and only enqueues after approval', async () => {
     let approve: (() => void) | undefined;
     const onSubmitBefore = vi.fn(
@@ -1059,6 +1122,49 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('preserves the pane set when leaving the split view and reopening it', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    // Open the split, then let SplitView report a live pane set (s1,s2,s3) back
+    // to the App — the same way real add/remove mirrors up via onPanesChange.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // Leave the split (back to the overview)…
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+
+    // …and reopen it from the toolbar. The reported panes must be restored, not
+    // reset to empty / the current session (the regression this guards).
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3');
+  });
+
   it('enters the split view from a ?split= URL and consumes the param', async () => {
     window.history.pushState({}, '', '/?split=s1,s2');
     try {
@@ -1069,6 +1175,22 @@ describe('App session callbacks', () => {
       ).not.toBeNull();
       // The one-shot param is stripped so a reload/exit doesn't force it back.
       expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('seeds the split from a ?split= URL, deduping and capping the explicit selection', async () => {
+    // Duplicates and more than MAX_SPLIT_PANES (6) ids drive the explicit-
+    // selection branch of openSplitView (dedupe + cap + replace), distinct from
+    // the no-selection restore branch covered above.
+    window.history.pushState({}, '', '/?split=s1,s1,s2,s3,s4,s5,s6,s7');
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s1,s2,s3,s4,s5,s6');
     } finally {
       window.history.pushState({}, '', '/');
     }

@@ -29,6 +29,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
+  initializeTelemetry,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
@@ -586,6 +587,17 @@ describe('Server Config (config.ts)', () => {
           maxSubagentDepth: 5000,
         }).getMaxSubagentDepth(),
       ).toBe(100);
+    });
+  });
+
+  describe('setAutoSkillEnabled', () => {
+    it('flips the live value read by getAutoSkillEnabled', () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+      expect(config.getAutoSkillEnabled()).toBe(true);
+      config.setAutoSkillEnabled(false);
+      expect(config.getAutoSkillEnabled()).toBe(false);
+      config.setAutoSkillEnabled(true);
+      expect(config.getAutoSkillEnabled()).toBe(true);
     });
   });
 
@@ -4111,6 +4123,21 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(false);
+    expect(initializeTelemetry).toHaveBeenCalledWith(config);
+  });
+
+  it('Config constructor should defer telemetry initialization when requested', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+      deferTelemetryInitialization: true,
+    };
+    const config = new Config(paramsWithTelemetry);
+
+    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(true);
+    expect(initializeTelemetry).not.toHaveBeenCalled();
   });
 
   it('Config shutdown should flush telemetry when SDK is initialized', async () => {

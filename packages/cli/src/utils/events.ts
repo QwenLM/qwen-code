@@ -6,6 +6,12 @@
 
 import { EventEmitter } from 'node:events';
 
+export type StartupIdeConnectionStatus =
+  | { state: 'idle' }
+  | { state: 'connecting' }
+  | { state: 'connected' }
+  | { state: 'failed'; message: string };
+
 export enum AppEvent {
   OpenDebugConsole = 'open-debug-console',
   LogError = 'log-error',
@@ -19,6 +25,7 @@ export enum AppEvent {
    */
   McpPendingApprovalChanged = 'mcp-pending-approval-changed',
   LspStatusChanged = 'lsp-status-changed',
+  StartupIdeConnectionStatusChanged = 'startup-ide-connection-status-changed',
 }
 
 export const appEvents = new EventEmitter();

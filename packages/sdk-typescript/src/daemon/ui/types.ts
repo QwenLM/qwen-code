@@ -852,6 +852,7 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   code?: string;
   promptId?: string;
+  errorKind?: DaemonErrorKind;
   source?: string;
   data?: unknown;
 }

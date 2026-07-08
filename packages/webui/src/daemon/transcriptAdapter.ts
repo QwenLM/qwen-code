@@ -10,6 +10,7 @@ import {
   isDaemonUiSensitiveKey,
   sanitizeDaemonTerminalText,
   type DaemonTranscriptBlock,
+  type DaemonStatusTranscriptBlock,
   type DaemonToolTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import type { UnifiedMessage } from '../adapters/types.js';
@@ -42,6 +43,9 @@ export interface DaemonTranscriptAdapterOptions {
    */
   enrichToolDetailsWithPreview?: boolean;
 }
+
+const MODEL_STREAM_INTERRUPTED_MESSAGE =
+  'Model response stream was interrupted. Please retry.';
 
 export function daemonTranscriptToUnifiedMessages(
   blocks: readonly DaemonTranscriptBlock[],
@@ -145,7 +149,8 @@ export function daemonTranscriptToUnifiedMessages(
             isLast,
           },
         ];
-      case 'error':
+      case 'error': {
+        const text = getErrorDisplayText(block);
         return [
           {
             id: block.id,
@@ -156,14 +161,14 @@ export function daemonTranscriptToUnifiedMessages(
               kind: 'system_error',
               title: 'System error',
               status: 'failed',
-              rawOutput: sanitizeDisplayText(block.text),
+              rawOutput: sanitizeDisplayText(text),
               content: [
                 {
                   type: 'content',
                   content: {
                     type: 'error',
-                    text: sanitizeDisplayText(block.text),
-                    error: sanitizeDisplayText(block.text),
+                    text: sanitizeDisplayText(text),
+                    error: sanitizeDisplayText(text),
                   },
                 },
               ],
@@ -172,6 +177,7 @@ export function daemonTranscriptToUnifiedMessages(
             isLast,
           },
         ];
+      }
       case 'status':
         return [
           {
@@ -194,6 +200,17 @@ export function daemonTranscriptToUnifiedMessages(
         return [];
     }
   });
+}
+
+function getErrorDisplayText(block: DaemonStatusTranscriptBlock): string {
+  if (
+    block.errorKind === 'model_stream_interrupted' ||
+    (block.source === 'turn_error' &&
+      block.text.trim().toLowerCase() === 'terminated')
+  ) {
+    return MODEL_STREAM_INTERRUPTED_MESSAGE;
+  }
+  return block.text;
 }
 
 function daemonToolBlockToToolCallData(

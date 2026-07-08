@@ -7,9 +7,11 @@
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   Storage,
+  readCronTasks,
+  SessionService,
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -41,6 +43,15 @@ describe('scheduled-task keepalive', () => {
     },
     loadSession: async (req: { sessionId: string }) => {
       loads.push(req.sessionId);
+    },
+    spawnOrAttach: async () => {
+      throw new Error('spawnOrAttach not mocked');
+    },
+    closeSession: async () => {
+      throw new Error('closeSession not mocked');
+    },
+    updateSessionMetadata: () => {
+      throw new Error('updateSessionMetadata not mocked');
     },
   };
 
@@ -104,6 +115,13 @@ describe('scheduled-task keepalive', () => {
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
       },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
     };
     const ka = startScheduledTaskKeepalive({
       bridge: guarded,
@@ -140,6 +158,13 @@ describe('scheduled-task keepalive', () => {
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
       },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
     };
     const ka = startScheduledTaskKeepalive({
       bridge: reviving,
@@ -168,6 +193,13 @@ describe('scheduled-task keepalive', () => {
         loads.push(req.sessionId);
         if (req.sessionId === 'sess-1') throw new Error('transcript gone');
       },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
     };
     const ka = startScheduledTaskKeepalive({
       bridge: reviving,
@@ -191,6 +223,13 @@ describe('scheduled-task keepalive', () => {
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
         throw new Error('transcript gone');
+      },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
       },
     };
     const ka = startScheduledTaskKeepalive({
@@ -219,6 +258,13 @@ describe('scheduled-task keepalive', () => {
         await new Promise<void>((resolve) => {
           releaseLoad = resolve;
         });
+      },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
       },
     };
     const ka = startScheduledTaskKeepalive({
@@ -350,5 +396,220 @@ describe('scheduled-task keepalive', () => {
     expect(res.failed).toHaveLength(12); // every session recorded failed...
     expect(res.loaded).toHaveLength(0);
     expect(started).toBe(12); // ...and every queued session was still attempted
+  });
+
+  it('binds an unbound task to a dedicated session and writes sessionId to disk', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'unbound-1', prompt: 'check build' }),
+    ]);
+    const spawns: unknown[] = [];
+    const names: Array<[string, { displayName?: string }]> = [];
+    const binding = {
+      ...bridge,
+      spawnOrAttach: async (req: unknown) => {
+        spawns.push(req);
+        return { sessionId: 'new-sess-1' };
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: binding,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0]).toEqual({
+      workspaceCwd: workspace,
+      sessionScope: 'thread',
+    });
+    expect(names).toHaveLength(1);
+    expect(names[0]![0]).toBe('new-sess-1');
+    expect(names[0]![1].displayName).toContain('⏰');
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBe('new-sess-1');
+  });
+
+  it('renames a bound session without ⏰ prefix exactly once', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
+    ]);
+    const names: Array<[string, { displayName?: string }]> = [];
+    const naming = {
+      ...bridge,
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    await ka.tick();
+    ka.stop();
+    expect(names).toHaveLength(1);
+    expect(names[0]![0]).toBe('existing-sess');
+    expect(names[0]![1].displayName).toContain('⏰');
+  });
+
+  it('does not bind disabled unbound tasks', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'disabled-unbound', enabled: false }),
+    ]);
+    let spawnCount = 0;
+    const noSpawn = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        spawnCount++;
+        return { sessionId: 'should-not-spawn' };
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: noSpawn,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(spawnCount).toBe(0);
+  });
+
+  it('still binds a task when updateSessionMetadata fails', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'name-fail', prompt: 'test prompt' }),
+    ]);
+    const naming = {
+      ...bridge,
+      spawnOrAttach: async () => ({ sessionId: 'bound-despite-naming-fail' }),
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('metadata service down');
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBe('bound-despite-naming-fail');
+  });
+
+  it('rolls back the spawned session when the task vanishes before write', async () => {
+    // Seed an unbound task, then replace it with a different task between the
+    // keepalive's read and the updateCronTasks callback — simulating a
+    // concurrent delete. The spawned session must be closed AND its persisted
+    // transcript removed.
+    const closed: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const rollbackBridge = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        // Simulate concurrent deletion: remove the task from disk right after
+        // spawn returns (before updateCronTasks's read-modify-write).
+        await updateCronTasks(workspace, () => []);
+        return { sessionId: 'orphan-sess' };
+      },
+      closeSession: async (id: string) => {
+        closed.push(id);
+      },
+      updateSessionMetadata: () => {},
+    };
+    await updateCronTasks(workspace, () => [
+      task({ id: 'will-vanish', prompt: 'doomed' }),
+    ]);
+    const ka = startScheduledTaskKeepalive({
+      bridge: rollbackBridge,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(closed).toContain('orphan-sess');
+    expect(removeSpy).toHaveBeenCalledWith('orphan-sess');
+    removeSpy.mockRestore();
+  });
+
+  it('rolls back when another process binds the task before write', async () => {
+    // Another keepalive/process binds the same task between our spawn and
+    // our updateCronTasks lock. Our spawned session must be rolled back.
+    const closed: string[] = [];
+    const removeSpy = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const raceBridge = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        // Simulate another process binding the task.
+        await updateCronTasks(workspace, (list) =>
+          list.map((t) =>
+            t.id === 'raced' ? { ...t, sessionId: 'other-sess' } : t,
+          ),
+        );
+        return { sessionId: 'our-orphan' };
+      },
+      closeSession: async (id: string) => {
+        closed.push(id);
+      },
+      updateSessionMetadata: () => {},
+    };
+    await updateCronTasks(workspace, () => [
+      task({ id: 'raced', prompt: 'contested' }),
+    ]);
+    const ka = startScheduledTaskKeepalive({
+      bridge: raceBridge,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(closed).toContain('our-orphan');
+    // The other process's sessionId is preserved.
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBe('other-sess');
+    removeSpy.mockRestore();
+  });
+
+  it('a hung spawnOrAttach does not stall subsequent ticks', async () => {
+    // spawnOrAttach is not abortable — if it hangs, the keepalive must time
+    // out and move on so later ticks can still heartbeat/revive other
+    // sessions. Use a tiny interval so the backoff expires fast.
+    await updateCronTasks(workspace, () => [
+      task({ id: 'hung', prompt: 'will hang' }),
+      task({ id: 'ok', sessionId: 'healthy-sess', prompt: 'fine' }),
+    ]);
+    let releaseSpawn: (() => void) | undefined;
+    const hungBridge = {
+      ...bridge,
+      spawnOrAttach: () =>
+        new Promise<{ sessionId: string }>((resolve) => {
+          releaseSpawn = () => resolve({ sessionId: 'late-sess' });
+        }),
+      closeSession: async () => {},
+      updateSessionMetadata: () => {},
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: hungBridge,
+      boundWorkspace: workspace,
+      intervalMs: 50,
+      spawnTimeoutMs: 50,
+    });
+    // First tick: spawn hangs → timeout fires → tick completes.
+    await ka.tick();
+    // healthy-sess should still get heartbeated despite the hung spawn.
+    expect(beats).toContain('healthy-sess');
+    ka.stop();
+    // Clean up the hung spawn.
+    releaseSpawn?.();
   });
 });
