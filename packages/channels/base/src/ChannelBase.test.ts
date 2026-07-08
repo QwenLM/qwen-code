@@ -333,9 +333,12 @@ describe('ChannelBase', () => {
           response_url: 'https://example.invalid/hook?token=secret',
           open_id: 'ou_123',
           union_id: 'on_123',
+          userid: 'wecom-user-123',
           user_id: { open_id: 'nested-ou' },
           senderStaffId: 'staff-123',
           senderId: 'sender-123',
+          senderNick: 'Alice',
+          senderName: 'Bob',
           nested: { aeskey: 'media-key' },
         });
         logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
@@ -358,9 +361,12 @@ describe('ChannelBase', () => {
       expect(logged).toContain('"response_url": "[redacted]"');
       expect(logged).toContain('"open_id": "[redacted]"');
       expect(logged).toContain('"union_id": "[redacted]"');
+      expect(logged).toContain('"userid": "[redacted]"');
       expect(logged).toContain('"user_id": "[redacted]"');
       expect(logged).toContain('"senderStaffId": "[redacted]"');
       expect(logged).toContain('"senderId": "[redacted]"');
+      expect(logged).toContain('"senderNick": "[redacted]"');
+      expect(logged).toContain('"senderName": "[redacted]"');
       expect(logged).toContain('"aeskey": "[redacted]"');
       expect(logged).not.toContain('secret-token');
       expect(logged).not.toContain('secret-password');
@@ -370,6 +376,9 @@ describe('ChannelBase', () => {
       expect(logged).not.toContain('media-key');
       expect(logged).not.toContain('ou_123');
       expect(logged).not.toContain('on_123');
+      expect(logged).not.toContain('wecom-user-123');
+      expect(logged).not.toContain('Alice');
+      expect(logged).not.toContain('Bob');
       expect(logged).not.toContain('nested-ou');
       expect(logged).not.toContain('staff-123');
       expect(logged).not.toContain('sender-123');

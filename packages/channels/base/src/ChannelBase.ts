@@ -87,10 +87,12 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
     'staff_id',
     'open_id',
     'union_id',
-    'user_id',
+    'user_?id',
     'sender_id',
     'senderStaffId',
     'senderId',
+    'senderNick',
+    'senderName',
   ].join('|'),
   'i',
 );
