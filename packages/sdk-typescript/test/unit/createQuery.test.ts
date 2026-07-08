@@ -135,5 +135,30 @@ describe('query()', () => {
     expect(transportOptions.insecure).toBe(false);
     expect(transportOptions.worktree).toBe(false);
     expect(transportOptions.disabledSlashCommands).toEqual(['cmd1']);
+    expect(transportOptions.sessionId).not.toBe(
+      '123e4567-e89b-12d3-a456-426614174000',
+    );
+    expect(transportOptions.sessionId).toMatch(/^[0-9a-f]{8}-/);
+  });
+
+  it('uses explicit sessionId when forkSession is true', async () => {
+    const { query } = await import('../../src/query/createQuery.js');
+
+    query({
+      prompt: 'hello',
+      options: {
+        forkSession: true,
+        resume: '123e4567-e89b-12d3-a456-426614174000',
+        sessionId: '234e5678-e89b-12d3-a456-426614174001',
+      } satisfies QueryOptions,
+    });
+
+    const transportOptions = mockProcessTransport.mock.calls[0]?.[0];
+    expect(transportOptions.sessionId).toBe(
+      '234e5678-e89b-12d3-a456-426614174001',
+    );
+    expect(transportOptions.sessionId).not.toBe(
+      '123e4567-e89b-12d3-a456-426614174000',
+    );
   });
 });

@@ -153,6 +153,11 @@ def validate_query_options(options: QueryOptions) -> None:
                         f"agents[{i}] is missing required field: {field}"
                     )
 
+    if options.mcp_servers:
+        for name, config in options.mcp_servers.items():
+            if not isinstance(config, dict):
+                raise ValidationError(f"mcp_servers['{name}'] must be a mapping")
+
     if options.extra_args:
         for arg in options.extra_args:
             if not arg:
