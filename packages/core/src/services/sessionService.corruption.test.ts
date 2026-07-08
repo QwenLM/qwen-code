@@ -21,6 +21,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
+import type { HistoryGap } from '../utils/conversation-chain.js';
 
 let tmpRoot: string;
 
@@ -231,5 +232,55 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     );
 
     expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
+  });
+});
+
+describe('SessionService.reconstructHistory (history-gap bridging)', () => {
+  // reconstructHistory is private; cast to reach it directly, matching the
+  // pattern above. Integration point under test: the sessionService delegate
+  // to buildOrderedUuidChain + aggregateRecords, plus the returned gaps.
+  type Privates = {
+    reconstructHistory: (
+      records: ChatRecord[],
+      opts?: { leafUuid?: string; bridgeGaps?: boolean },
+    ) => { messages: ChatRecord[]; gaps: HistoryGap[] };
+  };
+  let svc: Privates;
+
+  beforeEach(() => {
+    svc = new SessionService('/tmp/x') as unknown as Privates;
+  });
+
+  // Two disconnected islands, the 965867 shape: island A (older) is a clean
+  // root chain; island B (newer) begins with a record whose parentUuid points
+  // at a record that is not in the file at all.
+  const twoIslands: ChatRecord[] = [
+    recordFor('a1', 'user', null),
+    recordFor('a2', 'assistant', 'a1'),
+    recordFor('b1', 'user', 'missing-parent-uuid'),
+    recordFor('b2', 'assistant', 'b1'),
+  ];
+
+  it('stitches both islands and reports the gap when bridgeGaps is on', () => {
+    const { messages, gaps } = svc.reconstructHistory(twoIslands, {
+      bridgeGaps: true,
+    });
+    expect(messages.map((m) => m.uuid)).toEqual(['a1', 'a2', 'b1', 'b2']);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatchObject({
+      childUuid: 'b1',
+      missingParentUuid: 'missing-parent-uuid',
+      bridgedToUuid: 'a2',
+    });
+    // The gap child's parentUuid is rewritten to the bridged record so the
+    // chain is valid for rebuildTurnBoundaries / rewind (not left dangling).
+    const child = messages.find((m) => m.uuid === 'b1');
+    expect(child?.parentUuid).toBe('a2');
+  });
+
+  it('preserves today truncation behavior when bridgeGaps is off', () => {
+    const { messages, gaps } = svc.reconstructHistory(twoIslands);
+    expect(messages.map((m) => m.uuid)).toEqual(['b1', 'b2']);
+    expect(gaps).toEqual([]);
   });
 });

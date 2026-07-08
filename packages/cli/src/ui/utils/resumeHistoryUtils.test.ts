@@ -44,6 +44,45 @@ describe('resumeHistoryUtils', () => {
     } as unknown as AnyDeclarativeTool;
   });
 
+  it('inserts a history-gap divider before the bridged gap child', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          uuid: 'u-old',
+          message: { parts: [{ text: 'old turn' } as Part] },
+        },
+        {
+          type: 'user',
+          uuid: 'u-new',
+          message: { parts: [{ text: 'new turn' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [
+        {
+          childUuid: 'u-new',
+          missingParentUuid: 'gone',
+          bridgedToUuid: 'u-old',
+          approxLostMs: 3 * 86_400_000,
+        },
+      ],
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({ type: 'user', text: 'old turn' });
+    expect(items[1].type).toBe(MessageType.INFO);
+    // Test locale has no translations loaded → t() returns the English source.
+    expect((items[1] as { text: string }).text).toContain('History gap');
+    expect((items[1] as { text: string }).text).toContain('3 day');
+    expect(items[2]).toMatchObject({ type: 'user', text: 'new turn' });
+  });
+
   it('converts conversation into history items with incremental ids', () => {
     const conversation = {
       messages: [

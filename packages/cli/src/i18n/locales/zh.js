@@ -2347,4 +2347,8 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  '⚠️ History gap: about {{days}} day(s) of earlier conversation were lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.':
+    '⚠️ 历史记录缺口：此处约 {{days}} 天的较早会话记录已丢失（存储中断，无法恢复）。以上为系统找回的更早历史，以下为该缺口之后的对话。',
+  '⚠️ History gap: an earlier segment of conversation was lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.':
+    '⚠️ 历史记录缺口：此处一段较早的会话记录已丢失（存储中断，无法恢复）。以上为系统找回的更早历史，以下为该缺口之后的对话。',
 };

@@ -7866,8 +7866,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
     // load semantic: history MUST be replayed so SSE subscribers see
-    // the persisted turns.
-    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(messages);
+    // the persisted turns. Second arg is the bridged history gaps
+    // (undefined here — this fixture session has an intact chain).
+    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(
+      messages,
+      undefined,
+    );
 
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);

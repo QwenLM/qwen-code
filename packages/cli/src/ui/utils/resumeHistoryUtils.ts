@@ -14,6 +14,7 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
+  HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -23,6 +24,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { formatHistoryGapNotice } from './history-gap-notice.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -148,11 +150,28 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
  * @param config The config object for accessing tool registry
  * @returns Array of history items for UI display
  */
+/**
+ * INFO divider shown at a bridged history gap: an earlier segment of the
+ * session was physically lost and the older history above was stitched back on
+ * during load. Mirrors the ACP replay notice so both surfaces read the same.
+ */
+function createHistoryGapItem(gap: HistoryGap): HistoryItemInfo {
+  return {
+    type: MessageType.INFO,
+    text: formatHistoryGapNotice(gap),
+  };
+}
+
 function convertToHistoryItems(
   conversation: ConversationRecord,
   config: Config | null,
+  historyGaps?: HistoryGap[],
 ): HistoryItemWithoutId[] {
   const items: HistoryItemWithoutId[] = [];
+  const gapByChildUuid = new Map<string, HistoryGap>();
+  for (const gap of historyGaps ?? []) {
+    gapByChildUuid.set(gap.childUuid, gap);
+  }
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
 
@@ -224,6 +243,19 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    // A bridged history gap begins at this record — surface a visible divider
+    // so the restored older history above is not read as contiguous with the
+    // turns below. Flush any pending tool group first so the divider is not
+    // swallowed into it.
+    const gap = gapByChildUuid.get(record.uuid);
+    if (gap) {
+      if (currentToolGroup.length > 0) {
+        items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+        currentToolGroup = [];
+      }
+      items.push(createHistoryGapItem(gap));
+    }
+
     if (record.type === 'system') {
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
@@ -498,7 +530,11 @@ export function buildResumedHistoryItems(
   const getNextId = (): number => baseTimestamp + idCounter++;
 
   // Convert conversation directly to history items
-  const historyItems = convertToHistoryItems(sessionData.conversation, config);
+  const historyItems = convertToHistoryItems(
+    sessionData.conversation,
+    config,
+    sessionData.historyGaps,
+  );
   for (const item of historyItems) {
     items.push({
       ...item,

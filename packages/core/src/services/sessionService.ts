@@ -12,6 +12,10 @@ import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  buildOrderedUuidChain,
+  type HistoryGap,
+} from '../utils/conversation-chain.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -179,6 +183,13 @@ export interface ResumedSessionData {
   lastCompletedUuid: string | null;
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
+  /**
+   * Breaks in the persisted parentUuid chain that were bridged during
+   * reconstruction (an earlier segment of history was physically lost). Lets
+   * the surface render a visible gap divider. Undefined when the chain was
+   * intact.
+   */
+  historyGaps?: HistoryGap[];
 }
 
 /**
@@ -931,12 +942,18 @@ export class SessionService {
 
   /**
    * Reconstructs a linear conversation from tree-structured records.
+   *
+   * Delegates the parentUuid walk to {@link buildOrderedUuidChain}. With
+   * `bridgeGaps`, a walk that stops on a physically-missing parent is stitched
+   * back onto the newest still-present earlier island instead of truncating,
+   * and the breaks are surfaced via the returned `gaps` (see {@link HistoryGap}).
+   * Without `bridgeGaps` the result is identical to the historical walk.
    */
   private reconstructHistory(
     records: ChatRecord[],
-    leafUuid?: string,
-  ): ChatRecord[] {
-    if (records.length === 0) return [];
+    opts?: { leafUuid?: string; bridgeGaps?: boolean },
+  ): { messages: ChatRecord[]; gaps: HistoryGap[] } {
+    if (records.length === 0) return { messages: [], gaps: [] };
 
     const recordsByUuid = new Map<string, ChatRecord[]>();
     for (const record of records) {
@@ -945,29 +962,34 @@ export class SessionService {
       recordsByUuid.set(record.uuid, existing);
     }
 
-    let currentUuid: string | null =
-      leafUuid ?? records[records.length - 1].uuid;
-    const uuidChain: string[] = [];
-    const visited = new Set<string>();
+    const { uuids, gaps } = buildOrderedUuidChain(records, opts);
 
-    while (currentUuid && !visited.has(currentUuid)) {
-      visited.add(currentUuid);
-      uuidChain.push(currentUuid);
-      const recordsForUuid = recordsByUuid.get(currentUuid);
-      if (!recordsForUuid || recordsForUuid.length === 0) break;
-      currentUuid = recordsForUuid[0].parentUuid;
-    }
-
-    uuidChain.reverse();
     const messages: ChatRecord[] = [];
-    for (const uuid of uuidChain) {
+    for (const uuid of uuids) {
       const recordsForUuid = recordsByUuid.get(uuid);
       if (recordsForUuid && recordsForUuid.length > 0) {
         messages.push(this.aggregateRecords(recordsForUuid));
       }
     }
 
-    return messages;
+    // Make the reconstructed chain self-consistent: a bridged gap child still
+    // carries the physically-missing parentUuid. Rewrite it (on the aggregated
+    // copy, never the on-disk record) to the record we bridged onto, so every
+    // parentUuid consumer — `rebuildTurnBoundaries`, `/rewind` re-rooting — sees
+    // a valid ancestor. Without this, a rewind to that turn would re-create the
+    // dangling pointer and drop the recovered island on the next resume.
+    if (gaps.length > 0) {
+      const bridgeByChild = new Map<string, string>();
+      for (const g of gaps) {
+        if (g.bridgedToUuid) bridgeByChild.set(g.childUuid, g.bridgedToUuid);
+      }
+      for (const m of messages) {
+        const bridged = bridgeByChild.get(m.uuid);
+        if (bridged) m.parentUuid = bridged;
+      }
+    }
+
+    return { messages, gaps };
   }
 
   /**
@@ -1001,9 +1023,25 @@ export class SessionService {
     }
 
     // Reconstruct linear history
-    const messages = this.reconstructHistory(records);
+    const { messages, gaps } = this.reconstructHistory(records, {
+      bridgeGaps: true,
+    });
     if (messages.length === 0) {
       return;
+    }
+
+    if (gaps.length > 0) {
+      debugLogger.warn(
+        `loadSession: bridged ${gaps.length} history gap(s) for session ` +
+          `${sessionId}: ` +
+          gaps
+            .map(
+              (g) =>
+                `child=${g.childUuid} missingParent=${g.missingParentUuid} ` +
+                `bridgedTo=${g.bridgedToUuid ?? 'none'}`,
+            )
+            .join('; '),
+      );
     }
 
     const lastMessage = messages[messages.length - 1];
@@ -1059,6 +1097,7 @@ export class SessionService {
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      historyGaps: gaps.length > 0 ? gaps : undefined,
     };
   }
 
@@ -1411,7 +1450,8 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    const sourceRecords = this.reconstructHistory(records);
+    // bridgeGaps stays off here so a fork copies exactly the active branch.
+    const { messages: sourceRecords } = this.reconstructHistory(records);
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
