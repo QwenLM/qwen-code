@@ -271,6 +271,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   // instead of on every request that needs the downgrade.
   private effortClampWarned = false;
   private budgetDropWarned = false;
+  private temperatureDropWarned = false;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -747,12 +748,24 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Claude 4.8+ deprecated temperature — the server rejects it with a 400.
     // Omit the parameter entirely for those models; older models keep the
     // default of 1 (Anthropic's documented neutral value).
-    const temperatureValue =
-      getParam<number>('temperature', 'temperature') ?? 1;
+    const temperatureDropped = this.modelRejectsTemperature();
+    if (temperatureDropped && !this.temperatureDropWarned) {
+      const userTemp = getParam<number>('temperature', 'temperature');
+      if (userTemp !== undefined) {
+        debugLogger.warn(
+          `temperature=${userTemp} is not supported by '${
+            this.contentGeneratorConfig.model ?? 'unknown'
+          }' (deprecated on 4.8+); ignoring.`,
+        );
+      }
+      this.temperatureDropWarned = true;
+    }
 
     return {
       max_tokens: maxTokens,
-      ...(!this.modelRejectsTemperature() && { temperature: temperatureValue }),
+      ...(temperatureDropped
+        ? {}
+        : { temperature: getParam<number>('temperature', 'temperature') ?? 1 }),
       top_p: getParam<number>('top_p', 'topP'),
       top_k: getParam<number>('top_k', 'topK'),
     };
