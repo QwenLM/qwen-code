@@ -479,7 +479,7 @@ do not mutate state, and do not change the serve protocol version. Workspace
 status routes intentionally do **not** start the ACP child process just because
 a client polls a GET route: if the daemon is idle, they return
 `initialized: false` with an empty snapshot. Session status routes require a
-live session and use the standard `404 SessionNotFoundError` shape for unknown
+live session and return `404 { code: "session_not_found", ... }` for unknown
 ids.
 
 Capability tags:
@@ -1329,7 +1329,7 @@ Use `/load` when the client has no history rendered (cold reconnect, picker → 
 
 ### `GET /workspace/:id/sessions` and `GET /workspaces/:workspace/sessions`
 
-List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. `GET /workspaces/:workspace/sessions` is a plural alias with the same response shape. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Non-primary workspaces are live-only in the current multi-workspace sessions surface and reject archived, organized, or grouped queries. `archiveState=all` is not supported in v1. The default response and numeric `cursor` semantics are unchanged by `session_organization`.
+List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. `GET /workspaces/:workspace/sessions` is a plural alias with the same response shape. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Non-primary workspaces are live-only in the current multi-workspace sessions surface and reject archived, organized, or grouped queries. Untrusted non-primary workspaces return `403 { code: "untrusted_workspace" }`. `archiveState=all` is not supported in v1. The default response and numeric `cursor` semantics are unchanged by `session_organization`.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions

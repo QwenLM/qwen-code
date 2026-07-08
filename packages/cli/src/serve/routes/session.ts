@@ -230,7 +230,7 @@ export function registerSessionRoutes(
     if (byId) return byId;
     if (!path.isAbsolute(workspaceParam)) {
       res.status(400).json({
-        error: `:${paramName} must decode to a workspace id or absolute path`,
+        error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
       });
       return null;
     }

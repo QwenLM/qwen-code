@@ -744,6 +744,19 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.body.workspaceCount).toBe(2);
   });
 
+  it('preserves the legacy invalid workspace selector message', async () => {
+    const { app } = makeHarness();
+
+    const res = await request(app)
+      .get('/workspace/not:an:absolute:path/sessions')
+      .set('Host', host());
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(
+      '`:id` must decode to a workspace id or absolute path',
+    );
+  });
+
   it('rejects untrusted non-primary workspace session listing', async () => {
     const daemonLog = makeDaemonLog();
     const { app, secondaryBridge } = makeHarness({
