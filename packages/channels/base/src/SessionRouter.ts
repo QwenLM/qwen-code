@@ -29,6 +29,7 @@ export class SessionRouter {
   private defaultCwd: string;
   private defaultScope: SessionScope;
   private channelScopes: Map<string, SessionScope> = new Map();
+  private channelApprovalModes: Map<string, string> = new Map();
   private persistPath: string | undefined;
 
   constructor(
@@ -53,6 +54,17 @@ export class SessionRouter {
     this.channelScopes.set(channelName, scope);
   }
 
+  setChannelApprovalMode(
+    channelName: string,
+    approvalMode: string | undefined,
+  ): void {
+    if (approvalMode) {
+      this.channelApprovalModes.set(channelName, approvalMode);
+    } else {
+      this.channelApprovalModes.delete(channelName);
+    }
+  }
+
   private routingKey(
     channelName: string,
     senderId: string,
@@ -69,6 +81,13 @@ export class SessionRouter {
       default:
         return `${channelName}:${senderId}:${chatId}`;
     }
+  }
+
+  private sessionOptions(
+    channelName: string,
+  ): { approvalMode?: string } | undefined {
+    const approvalMode = this.channelApprovalModes.get(channelName);
+    return approvalMode ? { approvalMode } : undefined;
   }
 
   async resolve(
@@ -116,6 +135,7 @@ export class SessionRouter {
             sessionCwd,
             loadWindow,
             key,
+            this.sessionOptions(channelName),
           );
           this.toSession.set(key, sessionId);
           this.toTarget.set(sessionId, {
@@ -327,10 +347,10 @@ export class SessionRouter {
         const reservation = reservations.get(key);
         if (!reservation) continue;
         try {
-          const sessionId = await this.bridge.loadSession(
-            entry.sessionId,
-            entry.cwd,
-          );
+          const options = this.sessionOptions(entry.target.channelName);
+          const sessionId = options
+            ? await this.bridge.loadSession(entry.sessionId, entry.cwd, options)
+            : await this.bridge.loadSession(entry.sessionId, entry.cwd);
           if (typeof sessionId !== 'string' || sessionId.length === 0) {
             throw new Error('Invalid restored session ID');
           }
@@ -416,11 +436,14 @@ export class SessionRouter {
     cwd: string,
     loadWindow: SessionLoadWindow,
     routingKey: string,
+    options: { approvalMode?: string } | undefined,
   ): Promise<string> {
     const maxAttempts = 2;
     let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const sessionId = await this.bridge.newSession(cwd);
+      const sessionId = options
+        ? await this.bridge.newSession(cwd, options)
+        : await this.bridge.newSession(cwd);
       if (typeof sessionId !== 'string' || sessionId.length === 0) {
         throw new Error('Invalid session ID from bridge');
       }

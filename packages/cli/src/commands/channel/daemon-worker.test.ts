@@ -97,6 +97,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
   })),
 );
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
+const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockSessionRouter = vi.hoisted(() =>
   vi.fn(
@@ -107,6 +108,7 @@ const mockSessionRouter = vi.hoisted(() =>
       _persistPath?: string,
     ) => ({
       setChannelScope: mockRouterSetChannelScope,
+      setChannelApprovalMode: mockRouterSetChannelApprovalMode,
       clearAll: mockRouterClearAll,
     }),
   ),
@@ -314,6 +316,45 @@ describe('createDaemonSessionFactory', () => {
       {
         workspaceCwd: '/workspace',
         modelServiceId: 'qwen-plus',
+        sessionScope: 'thread',
+      },
+      'qwen-channel-worker',
+    );
+  });
+
+  it('passes channel approval mode to daemon session requests', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({
+      workspaceCwd: '/workspace',
+      approvalMode: 'yolo',
+    });
+    await factory({
+      workspaceCwd: '/workspace',
+      sessionId: 'existing-session',
+      approvalMode: 'yolo',
+    });
+
+    expect(sdk.DaemonSessionClient.createOrAttach).toHaveBeenCalledWith(
+      sdk.client,
+      {
+        workspaceCwd: '/workspace',
+        approvalMode: 'yolo',
+        sessionScope: 'thread',
+      },
+      'qwen-channel-worker',
+    );
+    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+      sdk.client,
+      'existing-session',
+      {
+        workspaceCwd: '/workspace',
+        approvalMode: 'yolo',
         sessionScope: 'thread',
       },
       'qwen-channel-worker',
@@ -589,7 +630,10 @@ describe('runChannelDaemonWorker', () => {
   it('selects all configured channels in one shared router', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([
-      parsedTelegram,
+      {
+        ...parsedTelegram,
+        config: { ...parsedTelegram.config, approvalMode: 'yolo' },
+      },
       parsedFeishu,
     ]);
 
@@ -611,6 +655,10 @@ describe('runChannelDaemonWorker', () => {
       'thread',
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('feishu', 'single');
+    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
+      'telegram',
+      'yolo',
+    );
   });
 
   it('sanitizes channel names before writing connected logs', async () => {

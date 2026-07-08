@@ -1922,6 +1922,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function doSpawn(
     modelServiceId: string | undefined,
     effectiveScope: 'single' | 'thread',
+    approvalMode: ApprovalMode | undefined,
     requestedClientId?: string,
     onSessionRegistered?: () => void,
   ): Promise<BridgeSession> {
@@ -2030,10 +2031,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       }
 
+      if (approvalMode) {
+        await applyApprovalMode(entry, approvalMode, false, clientId);
+      }
+
       // Bd1zc: re-check that the entry is still live before returning.
-      // The model-switch call yields and races against
+      // The model/approval-mode calls yield and race against
       // `channel.exited` — if the child crashed during the model
-      // switch, the exited handler already removed the entry from
+      // or approval-mode initialization, the exited handler already removed the entry from
       // byId. Without this check, the caller would get HTTP 200 with
       // a sessionId that already 404s on every subsequent request.
       if (!byId.has(entry.sessionId)) {
@@ -2156,6 +2161,141 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       () => undefined,
     );
     return work;
+  }
+
+  async function applyApprovalMode(
+    entry: SessionEntry,
+    mode: ApprovalMode,
+    persist: boolean,
+    originatorClientId?: string,
+  ): Promise<{
+    sessionId: string;
+    mode: ApprovalMode;
+    previous: ApprovalMode;
+    persisted: boolean;
+  }> {
+    if (persist && !persistApprovalMode) {
+      throw new Error(
+        'setSessionApprovalMode called with `persist: true` but no ' +
+          '`persistApprovalMode` callback wired in BridgeOptions. ' +
+          'runQwenServe wires the production callback; direct embeds ' +
+          'and tests must opt in or omit `persist`.',
+      );
+    }
+
+    const approvalWork = entry.approvalModeQueue.then(async () => {
+      entry.approvalModeRoundtripInFlight = true;
+      let succeeded = false;
+      try {
+        const response = (await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+              { sessionId: entry.sessionId, mode },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          ),
+          getTransportClosedReject(entry),
+        ])) as { previous: ApprovalMode; current: ApprovalMode };
+
+        if (
+          typeof response.current !== 'string' ||
+          !KNOWN_APPROVAL_MODES.has(response.current)
+        ) {
+          throw new Error(
+            `Agent returned unknown approval mode: ${JSON.stringify(response.current)}`,
+          );
+        }
+
+        let persisted = false;
+        if (persist) {
+          try {
+            await withTimeout(
+              persistApprovalMode?.(boundWorkspace, mode) ?? Promise.resolve(),
+              PERSIST_TIMEOUT_MS,
+              'persistApprovalMode',
+            );
+            persisted = persistApprovalMode !== undefined;
+          } catch (err) {
+            writeStderrLine(
+              `setSessionApprovalMode: persist failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+        publishApprovalModeChanged(
+          entry,
+          {
+            previous: response.previous,
+            next: response.current,
+            persisted,
+          },
+          originatorClientId,
+        );
+        if (persisted) {
+          broadcastWorkspaceEvent(
+            {
+              type: 'approval_mode_changed',
+              data: {
+                sessionId: entry.sessionId,
+                previous: response.previous,
+                next: response.current,
+                persisted,
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            },
+            entry.sessionId,
+          );
+          for (const peer of byId.values()) {
+            if (peer.sessionId === entry.sessionId) {
+              continue;
+            }
+            peer.currentApprovalMode = response.current;
+          }
+        }
+        succeeded = true;
+        return {
+          sessionId: entry.sessionId,
+          mode: response.current,
+          previous: response.previous,
+          persisted,
+        };
+      } finally {
+        entry.approvalModeRoundtripInFlight = false;
+        if (succeeded) {
+          void reconcileAfterRoundtrip(entry, 'approvalMode');
+        } else {
+          writeStderrLine(
+            `[reconcile] session=${entry.sessionId} target=approvalMode action=skipped reason=roundtrip_failed`,
+          );
+        }
+      }
+    });
+    entry.approvalModeQueue = approvalWork.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await approvalWork;
+    } catch (err) {
+      const data = (err as { data?: unknown })?.data;
+      if (
+        data &&
+        typeof data === 'object' &&
+        'errorKind' in data &&
+        (data as { errorKind?: unknown }).errorKind === 'trust_gate'
+      ) {
+        const rawMessage = (err as { message?: unknown })?.message;
+        const message =
+          typeof rawMessage === 'string'
+            ? rawMessage
+            : 'Trust-gate rejection from ACP child';
+        throw new TrustGateError(message);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -2839,6 +2979,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+    if (
+      req.approvalMode !== undefined &&
+      !KNOWN_APPROVAL_MODES.has(req.approvalMode)
+    ) {
+      throw new Error(
+        `Invalid approvalMode: ${JSON.stringify(req.approvalMode)}`,
+      );
+    }
     const historyReplay =
       action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
 
@@ -2846,6 +2994,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (existing) {
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
+      if (req.approvalMode) {
+        await applyApprovalMode(existing, req.approvalMode, false, clientId);
+      }
       return {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
@@ -2908,10 +3059,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // when the IIFE registered the entry. Spread `restored` so the
       // ACP state propagates to coalesced waiters (BQ9tV-equivalent
       // for restore waiter consistency).
+      const clientId = registerClient(entry, req.clientId);
+      if (req.approvalMode) {
+        await applyApprovalMode(entry, req.approvalMode, false, clientId);
+      }
       return {
         ...restored,
         attached: true,
-        clientId: registerClient(entry, req.clientId),
+        clientId,
         createdAt: entry.createdAt,
         hasActivePrompt: entry.promptActive,
       };
@@ -3093,6 +3248,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
       const clientId = registerClient(entry, req.clientId);
+      if (req.approvalMode) {
+        await applyApprovalMode(entry, req.approvalMode, false, clientId);
+      }
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
       // have hit the inFlightRestores branch and bumped
@@ -3415,6 +3573,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new InvalidSessionScopeError(req.sessionScope);
       }
       const effectiveScope = req.sessionScope ?? defaultSessionScope;
+      if (
+        req.approvalMode !== undefined &&
+        !KNOWN_APPROVAL_MODES.has(req.approvalMode)
+      ) {
+        throw new Error(
+          `Invalid approvalMode: ${JSON.stringify(req.approvalMode)}`,
+        );
+      }
 
       if (effectiveScope === 'single') {
         const existing = defaultEntry;
@@ -3460,6 +3626,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               initTimeoutMs,
               clientId,
             ).catch(() => {});
+          }
+          if (req.approvalMode) {
+            await applyApprovalMode(
+              existing,
+              req.approvalMode,
+              false,
+              clientId,
+            );
           }
           return {
             sessionId: existing.sessionId,
@@ -3516,6 +3690,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          if (req.approvalMode) {
+            await applyApprovalMode(
+              attachedEntry,
+              req.approvalMode,
+              false,
+              clientId,
+            );
+          }
           return {
             ...session,
             attached: true,
@@ -3549,6 +3731,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const promise = doSpawn(
         req.modelServiceId,
         effectiveScope,
+        req.approvalMode,
         req.clientId,
         releaseAdmissionOnce,
       );
@@ -5315,166 +5498,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
-      // Validate the persist contract BEFORE the ACP roundtrip changes
-      // the in-process mode. A missing `persistApprovalMode` callback
-      // would otherwise produce a 500 after the ACP child already
-      // applied the mode change.
-      if (opts.persist && !persistApprovalMode) {
-        throw new Error(
-          'setSessionApprovalMode called with `persist: true` but no ' +
-            '`persistApprovalMode` callback wired in BridgeOptions. ' +
-            'runQwenServe wires the production callback; direct embeds ' +
-            'and tests must opt in or omit `persist`.',
-        );
-      }
-      // Serialize the WHOLE change — ACP roundtrip + persist + publish — through
-      // `entry.approvalModeQueue` (A3). Covering only the `extMethod` call (the
-      // earlier shape) left persist+publish OUTSIDE the queue: two concurrent
-      // `persist:true` calls could interleave their persist phases and publish
-      // out of order, so the bus's last `approval_mode_changed` disagreed with
-      // the mode the ACP child actually settled on. Keeping persist+publish in
-      // the queued work means the next change can't start its `extMethod` until
-      // this change's side effects are fully done. Mirrors `modelChangeQueue`.
-      const approvalWork = entry.approvalModeQueue.then(async () => {
-        // A2: suppress the agent's current_mode_update notification while
-        // the bridge owns the change. Mirrors `modelRoundtripInFlight`.
-        // The flag stays true through persist + publish so the notification
-        // cannot slip through during the persist phase (review finding #3).
-        entry.approvalModeRoundtripInFlight = true;
-        // See setSessionModel: only reconcile after a change that landed, so
-        // a rejected roundtrip can't pair a corrective event with the failure.
-        let succeeded = false;
-        try {
-          const response = (await Promise.race([
-            withTimeout(
-              entry.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-                { sessionId, mode },
-              ),
-              initTimeoutMs,
-              SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
-            ),
-            getTransportClosedReject(entry),
-          ])) as { previous: ApprovalMode; current: ApprovalMode };
-
-          if (
-            typeof response.current !== 'string' ||
-            !KNOWN_APPROVAL_MODES.has(response.current)
-          ) {
-            // Throw so the HTTP caller sees a 500 instead of a misleading
-            // 200 OK with the requested mode echoed back. Without this,
-            // the HTTP client thinks the mode changed while the cache and
-            // SSE bus still show the old value.
-            throw new Error(
-              `Agent returned unknown approval mode: ${JSON.stringify(response.current)}`,
-            );
-          }
-
-          let persisted = false;
-          if (opts.persist) {
-            try {
-              await withTimeout(
-                persistApprovalMode?.(boundWorkspace, mode) ??
-                  Promise.resolve(),
-                PERSIST_TIMEOUT_MS,
-                'persistApprovalMode',
-              );
-              persisted = persistApprovalMode !== undefined;
-            } catch (err) {
-              writeStderrLine(
-                `setSessionApprovalMode: persist failed: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            }
-          }
-          publishApprovalModeChanged(
-            entry,
-            {
-              previous: response.previous,
-              next: response.current,
-              persisted,
-            },
-            originatorClientId,
-          );
-          // #4282 fold-in 4 (S2): a persisted change becomes the workspace
-          // default, so fan out a workspace-scoped mirror for peer sessions.
-          // #4297 fold-in 1: skip the requesting session (its own bus already
-          // got the publish above) to avoid double-counting in the reducer.
-          if (persisted) {
-            broadcastWorkspaceEvent(
-              {
-                type: 'approval_mode_changed',
-                data: {
-                  sessionId: entry.sessionId,
-                  previous: response.previous,
-                  next: response.current,
-                  persisted,
-                },
-                ...(originatorClientId ? { originatorClientId } : {}),
-              },
-              entry.sessionId,
-            );
-            // F3Qgp: a persisted change rewrites the workspace default, so the
-            // peers we just notified now hold a stale `currentApprovalMode` in
-            // their SessionEntry cache. Their GET status / session_snapshot
-            // would report the pre-change mode until their own next roundtrip.
-            // `byId` is the per-workspace session map (the bridge is bound per
-            // workspace), so mirror the new default into every peer's cache;
-            // skip the originator, whose cache `publishApprovalModeChanged`
-            // already updated.
-            for (const peer of byId.values()) {
-              if (peer.sessionId === entry.sessionId) {
-                continue;
-              }
-              peer.currentApprovalMode = response.current;
-            }
-          }
-          succeeded = true;
-          return {
-            sessionId: entry.sessionId,
-            mode: response.current,
-            previous: response.previous,
-            persisted,
-          };
-        } finally {
-          entry.approvalModeRoundtripInFlight = false;
-          if (succeeded) {
-            void reconcileAfterRoundtrip(entry, 'approvalMode');
-          } else {
-            writeStderrLine(
-              `[reconcile] session=${entry.sessionId} target=approvalMode action=skipped reason=roundtrip_failed`,
-            );
-          }
-        }
-      });
-      // Tail-swallow so a failed change doesn't poison subsequent ones.
-      entry.approvalModeQueue = approvalWork.then(
-        () => undefined,
-        () => undefined,
+      return await applyApprovalMode(
+        entry,
+        mode,
+        opts.persist,
+        originatorClientId,
       );
-      try {
-        return await approvalWork;
-      } catch (err) {
-        // The ACP child rethrows `TrustGateError` as a JSON-RPC error whose
-        // `data.errorKind` is `'trust_gate'`; re-instantiate the typed class so
-        // the HTTP route maps it to 403 with the `auth_env_error` errorKind.
-        const data = (err as { data?: unknown })?.data;
-        if (
-          data &&
-          typeof data === 'object' &&
-          'errorKind' in data &&
-          (data as { errorKind?: unknown }).errorKind === 'trust_gate'
-        ) {
-          const rawMessage = (err as { message?: unknown })?.message;
-          const message =
-            typeof rawMessage === 'string'
-              ? rawMessage
-              : 'Trust-gate rejection from ACP child';
-          throw new TrustGateError(message);
-        }
-        throw err;
-      }
     },
 
     async generateSessionRecap(sessionId, _context) {

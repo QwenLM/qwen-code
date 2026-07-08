@@ -281,6 +281,7 @@ describe('channel webhook routes', () => {
     'Channel worker is not running.',
     'Channel worker exited.',
     'Channel worker stopped.',
+    'Channel worker IPC send failed.',
   ])('returns 503 when the worker is unavailable: %s', async (message) => {
     const h = appHarness({
       enqueueWebhookTask: vi.fn(async () => {

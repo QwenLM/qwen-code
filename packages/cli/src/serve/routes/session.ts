@@ -116,6 +116,28 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
   return true;
 }
 
+function parseOptionalApprovalMode(
+  body: Record<string, unknown>,
+  res: Response,
+): ApprovalMode | undefined | null {
+  const rawApprovalMode = body['approvalMode'];
+  if (rawApprovalMode === undefined) {
+    return undefined;
+  }
+  if (
+    typeof rawApprovalMode !== 'string' ||
+    !APPROVAL_MODES.includes(rawApprovalMode as ApprovalMode)
+  ) {
+    res.status(400).json({
+      error: '`approvalMode` must be a known approval mode when provided',
+      code: 'invalid_approval_mode',
+      allowed: APPROVAL_MODES,
+    });
+    return null;
+  }
+  return rawApprovalMode as ApprovalMode;
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -435,6 +457,8 @@ export function registerSessionRoutes(
       }
       sessionScope = rawSessionScope;
     }
+    const approvalMode = parseOptionalApprovalMode(body, res);
+    if (approvalMode === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
@@ -443,6 +467,7 @@ export function registerSessionRoutes(
         modelServiceId,
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
+        ...(approvalMode !== undefined ? { approvalMode } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -531,6 +556,8 @@ export function registerSessionRoutes(
         `POST /session/:id/${action}`,
       );
       if (primaryCwd === undefined) return;
+      const approvalMode = parseOptionalApprovalMode(body, res);
+      if (approvalMode === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
@@ -544,11 +571,13 @@ export function registerSessionRoutes(
                   workspaceCwd: primaryCwd,
                   historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
                 })
               : await bridge.resumeSession({
                   sessionId,
                   workspaceCwd: primaryCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
                 });
           },
         );

@@ -65,6 +65,7 @@ interface DaemonSessionClientStaticLike {
       workspaceCwd: string;
       modelServiceId?: string;
       sessionScope: 'thread';
+      approvalMode?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -75,6 +76,7 @@ interface DaemonSessionClientStaticLike {
       workspaceCwd: string;
       modelServiceId?: string;
       sessionScope: 'thread';
+      approvalMode?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -129,6 +131,7 @@ export function createDaemonSessionFactory({
     const daemonReq = {
       workspaceCwd: req.workspaceCwd,
       ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+      ...(req.approvalMode ? { approvalMode: req.approvalMode } : {}),
       // Channel-level user/thread/single routing stays in SessionRouter; daemon
       // sessions remain thread-scoped so different channels never share the
       // daemon's default single session.
@@ -346,6 +349,7 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
+      createdRouter.setChannelApprovalMode(name, config.approvalMode);
     }
 
     for (const { name, config } of parsed) {

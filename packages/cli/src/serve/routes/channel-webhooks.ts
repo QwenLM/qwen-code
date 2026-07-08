@@ -259,6 +259,7 @@ function classifyChannelWebhookEnqueueError(error: unknown): {
     message === 'Channel worker is not running.' ||
     message === 'Channel worker exited.' ||
     message === 'Channel worker stopped.' ||
+    message === 'Channel worker IPC send failed.' ||
     /^Channel ".+" is not running\.$/u.test(message)
   ) {
     return { status: 503, code: 'channel_worker_unavailable' };

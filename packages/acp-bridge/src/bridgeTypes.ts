@@ -81,6 +81,7 @@ export interface BridgeSpawnRequest {
    * omitted, the bridge-wide default applies.
    */
   sessionScope?: 'single' | 'thread';
+  approvalMode?: ApprovalMode;
 }
 
 export interface BridgeSession {
@@ -109,6 +110,7 @@ export interface BridgeRestoreSessionRequest {
   clientId?: string;
   /** Internal replay transport for `session/load`; defaults to ACP streaming. */
   historyReplay?: 'stream' | 'response';
+  approvalMode?: ApprovalMode;
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';

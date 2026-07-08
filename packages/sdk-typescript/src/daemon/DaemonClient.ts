@@ -349,6 +349,7 @@ export interface CreateSessionRequest {
    * `caps.features.session_scope_override` before sending.
    */
   sessionScope?: 'single' | 'thread';
+  approvalMode?: string;
 }
 
 export interface RestoreSessionRequest {
@@ -357,6 +358,7 @@ export interface RestoreSessionRequest {
    * its advertised primary workspace, mirroring `createOrAttachSession`.
    */
   workspaceCwd?: string;
+  approvalMode?: string;
 }
 
 export interface PromptRequest {
@@ -1423,6 +1425,9 @@ export class DaemonClient {
           ...(req.sessionScope !== undefined
             ? { sessionScope: req.sessionScope }
             : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
         }),
       },
       async (res) => {
@@ -1800,7 +1805,12 @@ export class DaemonClient {
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ cwd: req.workspaceCwd }),
+        body: JSON.stringify({
+          cwd: req.workspaceCwd,
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {

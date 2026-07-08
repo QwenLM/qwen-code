@@ -54,6 +54,7 @@ export interface DaemonChannelSessionFactoryRequest {
   modelServiceId?: string;
   sessionId?: string;
   sessionScope?: SessionScope;
+  approvalMode?: string;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -247,22 +248,31 @@ export class DaemonChannelBridge
     this.connected = true;
   }
 
-  async newSession(cwd: string): Promise<string> {
+  async newSession(
+    cwd: string,
+    options?: { approvalMode?: string },
+  ): Promise<string> {
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
     this.attachSession(session);
     return session.sessionId;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<string> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: { approvalMode?: string },
+  ): Promise<string> {
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
+      ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
     if (session.sessionId !== sessionId) {
       throw new Error(
