@@ -5424,7 +5424,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.hasMore).toBe(true);
     expect(result.nextCursor).toBeUndefined();
     expect(result.partial).toBe(true);
-    expect(result.replayError).toContain('replay boom');
+    expect(result.replayError).toBe('Replay conversion failed for this page');
 
     mockConnectionState.resolve();
     await agentPromise;

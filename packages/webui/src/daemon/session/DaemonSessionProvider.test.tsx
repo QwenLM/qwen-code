@@ -2893,7 +2893,7 @@ describe('DaemonSessionProvider', () => {
               truncatedEvents: 4,
               retainedEvents: 2,
               maxBytes: 512,
-              fullTranscriptAvailable: false,
+              fullTranscriptAvailable: true,
             },
           },
           {

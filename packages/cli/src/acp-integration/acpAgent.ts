@@ -459,14 +459,17 @@ async function collectHistoryReplayUpdatesPage({
     });
     return { updates, pendingToolCalls: state.pendingToolCalls };
   } catch (error) {
-    const replayError = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
       '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
       sessionId,
       updates.length,
       error,
     );
-    return { updates, pendingToolCalls, replayError };
+    return {
+      updates,
+      pendingToolCalls,
+      replayError: 'Replay conversion failed for this page',
+    };
   }
 }
 

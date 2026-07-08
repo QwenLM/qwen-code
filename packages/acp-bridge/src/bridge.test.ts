@@ -1378,7 +1378,7 @@ describe('createAcpSessionBridge', () => {
       truncatedEvents: 1,
       retainedEvents: 1,
       maxBytes: 512,
-      fullTranscriptAvailable: false,
+      fullTranscriptAvailable: true,
     });
     const retained = loaded.compactedReplay?.[1]?.data as {
       update?: { content?: { text?: string } };

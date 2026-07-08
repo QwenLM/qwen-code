@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
+  encodeSessionTranscriptCursor,
   InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptReader,
@@ -93,17 +94,17 @@ describe('SessionTranscriptReader', () => {
 
     const reader = new SessionTranscriptReader(workspaceDir);
     const first = await reader.readPage(sessionId, { limit: 2 });
+    expect(first.nextCursorState).toBeDefined();
     const second = await reader.readPage(sessionId, {
-      cursor: first.nextCursor,
+      cursor: encodeSessionTranscriptCursor(first.nextCursorState!),
       limit: 2,
     });
 
     expect(first.records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
     expect(first.hasMore).toBe(true);
-    expect(first.nextCursor).toBeDefined();
     expect(second.records.map((r) => r.uuid)).toEqual(['u2-new', 'a2-new']);
     expect(second.hasMore).toBe(false);
-    expect(second.nextCursor).toBeUndefined();
+    expect(second.nextCursorState).toBeUndefined();
   });
 
   it('continues a frozen snapshot after new records are appended', async () => {
@@ -122,7 +123,7 @@ describe('SessionTranscriptReader', () => {
     );
 
     const second = await reader.readPage(sessionId, {
-      cursor: first.nextCursor,
+      cursor: encodeSessionTranscriptCursor(first.nextCursorState!),
       limit: 2,
     });
 
@@ -189,7 +190,10 @@ describe('SessionTranscriptReader', () => {
     const reader = new SessionTranscriptReader(workspaceDir);
     const first = await reader.readPage(sessionId, { limit: 1 });
     const decoded = JSON.parse(
-      Buffer.from(first.nextCursor ?? '', 'base64url').toString('utf8'),
+      Buffer.from(
+        encodeSessionTranscriptCursor(first.nextCursorState!),
+        'base64url',
+      ).toString('utf8'),
     ) as Record<string, unknown>;
     const tampered = Buffer.from(
       JSON.stringify({

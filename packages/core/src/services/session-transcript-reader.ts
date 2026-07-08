@@ -67,7 +67,6 @@ export interface SessionTranscriptRecordPage {
   filePath: string;
   records: ChatRecord[];
   hasMore: boolean;
-  nextCursor?: string;
   nextCursorState?: SessionTranscriptCursorState;
   replay?: unknown;
   startTime: string;
@@ -633,12 +632,7 @@ export class SessionTranscriptReader {
       filePath,
       records,
       hasMore,
-      ...(nextCursorState
-        ? {
-            nextCursorState,
-            nextCursor: encodeCursorState(nextCursorState),
-          }
-        : {}),
+      ...(nextCursorState ? { nextCursorState } : {}),
       ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,

@@ -270,7 +270,7 @@ transient signals, and produces O(turns) replay logs instead of O(tokens) logs
 from that byte window, `compactedReplay[0]` is a synthetic id-less
 `history_truncated` marker with `{reason: 'replay_window_exceeded',
 truncatedEvents, retainedEvents, maxBytes, truncatedTurns?,
-fullTranscriptAvailable: false}`. Clients should render it as status and apply
+fullTranscriptAvailable: true}`. Clients should render it as status and apply
 the retained replay normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
