@@ -352,7 +352,7 @@ export function registerSessionRoutes(
     try {
       key = canonicalizeWorkspace(cwd);
     } catch (err) {
-      if (workspaceRegistry.list().length > 1 && 'cwd' in body) {
+      if ('cwd' in body) {
         logSessionRoutingFailure(route, 'workspace_mismatch', {
           requestedWorkspace: cwd,
         });

@@ -6161,6 +6161,27 @@ describe('createServeApp', () => {
       }
     });
 
+    it('400s unknown explicit cwd before touching the bridge', async () => {
+      const missingCwd = path.join(
+        os.tmpdir(),
+        `qwen-missing-workspace-${Date.now()}`,
+      );
+      for (const action of ['load', 'resume'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post(`/session/persisted-unknown/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: missingCwd });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('workspace_mismatch');
+        expect(res.body.requestedWorkspace).toBe(missingCwd);
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      }
+    });
+
     it('400s a non-string cwd before touching the bridge', async () => {
       // Mirrors the `POST /session` malformed-`cwd`-shape test: a
       // client/orchestrator serialization bug (`cwd: null`,

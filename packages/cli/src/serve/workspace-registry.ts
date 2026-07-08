@@ -50,13 +50,11 @@ export type WorkspaceSessionLifecycleEvent =
       readonly type: 'registered';
       readonly sessionId: string;
       readonly workspaceCwd: string;
-      readonly reason?: string;
     }
   | {
       readonly type: 'removed';
       readonly sessionId: string;
       readonly workspaceCwd: string;
-      readonly reason?: string;
     };
 
 export interface WorkspaceSessionOwnerIndex {
