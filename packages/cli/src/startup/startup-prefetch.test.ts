@@ -24,6 +24,10 @@ const mockRecordStartupEvent = vi.hoisted(() => vi.fn());
 const mockCheckForUpdates = vi.hoisted(() => vi.fn());
 const mockHandleAutoUpdate = vi.hoisted(() => vi.fn());
 const mockConnectIdeForStartup = vi.hoisted(() => vi.fn());
+const mockDisconnectIde = vi.hoisted(() => vi.fn());
+const mockGetIdeClientInstance = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ disconnect: mockDisconnectIde }),
+);
 const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
 
@@ -32,6 +36,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     debug: mockDebug,
     warn: mockWarn,
   }),
+  IdeClient: { getInstance: () => mockGetIdeClientInstance() },
   initializeTelemetry: (...args: unknown[]) => mockInitializeTelemetry(...args),
 }));
 
@@ -91,6 +96,10 @@ describe('startupPrefetch', () => {
     vi.useRealTimers();
     mockCheckForUpdates.mockResolvedValue(null);
     mockConnectIdeForStartup.mockResolvedValue(undefined);
+    mockDisconnectIde.mockResolvedValue(undefined);
+    mockGetIdeClientInstance.mockResolvedValue({
+      disconnect: mockDisconnectIde,
+    });
   });
 
   afterEach(() => {
@@ -270,13 +279,13 @@ describe('startupPrefetch', () => {
       startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
       await vi.dynamicImportSettled();
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(15_000);
 
       expect(statuses).toEqual([
         { state: 'connecting' },
         {
           state: 'failed',
-          message: 'ide_connect timed out after 10000ms',
+          message: 'ide_connect timed out after 15000ms',
         },
       ]);
       expect(mockRecordStartupEvent).toHaveBeenCalledWith(
@@ -286,9 +295,65 @@ describe('startupPrefetch', () => {
       expect(mockWarn).toHaveBeenCalledWith(
         'ide_connect failed:',
         expect.objectContaining({
-          message: 'ide_connect timed out after 10000ms',
+          message: 'ide_connect timed out after 15000ms',
         }),
       );
+      expect(mockDisconnectIde).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
+  });
+
+  it('disconnects IDE again if startup connect succeeds after timeout', async () => {
+    vi.useFakeTimers();
+    const config = makeConfig();
+    let resolveConnect!: () => void;
+    const delayedSuccess = new Promise<void>((resolve) => {
+      resolveConnect = resolve;
+    });
+    mockConnectIdeForStartup.mockReturnValue(delayedSuccess);
+
+    startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
+
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.dynamicImportSettled();
+
+    expect(mockDisconnectIde).toHaveBeenCalledTimes(1);
+
+    resolveConnect();
+    await vi.dynamicImportSettled();
+
+    expect(mockDisconnectIde).toHaveBeenCalledTimes(2);
+    expect(mockWarn).toHaveBeenCalledWith(
+      'ide_connect failed:',
+      expect.objectContaining({
+        message: 'ide_connect timed out after 15000ms',
+      }),
+    );
+  });
+
+  it('fails deferred IDE connection when the startup connect rejects quickly', async () => {
+    const config = makeConfig();
+    const error = new Error('connection refused');
+    mockConnectIdeForStartup.mockRejectedValue(error);
+    const { statuses, stop } = captureIdeConnectionStatuses();
+
+    try {
+      startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
+
+      await vi.dynamicImportSettled();
+
+      expect(statuses).toEqual([
+        { state: 'connecting' },
+        { state: 'failed', message: 'connection refused' },
+      ]);
+      expect(mockRecordStartupEvent).toHaveBeenCalledWith(
+        'startup_prefetch_failed',
+        { name: 'ide_connect' },
+      );
+      expect(mockWarn).toHaveBeenCalledWith('ide_connect failed:', error);
+      expect(mockDisconnectIde).not.toHaveBeenCalled();
     } finally {
       stop();
     }
@@ -306,7 +371,7 @@ describe('startupPrefetch', () => {
     startPostRenderPrefetches(config, makeSettings(), { connectIde: true });
 
     await vi.dynamicImportSettled();
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(15_000);
 
     const underlyingError = new Error('socket closed');
     rejectConnect(underlyingError);
@@ -315,7 +380,7 @@ describe('startupPrefetch', () => {
     expect(mockWarn).toHaveBeenCalledWith(
       'ide_connect failed:',
       expect.objectContaining({
-        message: 'ide_connect timed out after 10000ms',
+        message: 'ide_connect timed out after 15000ms',
       }),
     );
     expect(mockDebug).toHaveBeenCalledWith(
