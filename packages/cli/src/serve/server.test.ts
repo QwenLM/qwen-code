@@ -596,6 +596,7 @@ interface FakeBridgeOpts {
       filePath: string;
     }>;
     touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+    touchedScopes: Array<'user' | 'project'>;
   }>;
   workspaceMemoryDreamImpl?: () => Promise<{
     summary?: string;
@@ -883,6 +884,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summary: 'forgot',
       removedEntries: [],
       touchedTopics: [],
+      touchedScopes: [],
     }));
   const workspaceMemoryDreamImpl =
     opts.workspaceMemoryDreamImpl ??
@@ -10654,15 +10656,11 @@ describe('createServeApp', () => {
       await writeSession(sid);
       let firstCloseStarted!: () => void;
       let releaseFirstClose!: () => void;
-      let secondCloseStarted!: () => void;
       const firstCloseStartedPromise = new Promise<void>((resolve) => {
         firstCloseStarted = resolve;
       });
       const firstCloseReleasedPromise = new Promise<void>((resolve) => {
         releaseFirstClose = resolve;
-      });
-      const secondCloseStartedPromise = new Promise<void>((resolve) => {
-        secondCloseStarted = resolve;
       });
       let closeCount = 0;
       const bridge = fakeBridge({
@@ -10671,8 +10669,6 @@ describe('createServeApp', () => {
           if (closeCount === 1) {
             firstCloseStarted();
             await firstCloseReleasedPromise;
-          } else {
-            secondCloseStarted();
           }
         },
       });
@@ -10694,23 +10690,19 @@ describe('createServeApp', () => {
         .send({ sessionIds: [sid] })
         .then((res) => res);
 
-      const raceResult = await Promise.race([
-        secondCloseStartedPromise.then(() => 'archive-started'),
-        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
-      ]);
+      const archiveRes = await archivePromise;
 
       releaseFirstClose();
       try {
-        expect(raceResult).toBe('blocked');
-        const deleteRes = await deletePromise;
-        expect(deleteRes.status).toBe(200);
-        expect(deleteRes.body.removed).toEqual([sid]);
-        const archiveRes = await archivePromise;
+        expect(closeCount).toBe(1);
         expect(archiveRes.status).toBe(409);
         expect(archiveRes.body).toMatchObject({
           code: 'session_archiving',
           sessionId: sid,
         });
+        const deleteRes = await deletePromise;
+        expect(deleteRes.status).toBe(200);
+        expect(deleteRes.body.removed).toEqual([sid]);
       } finally {
         await Promise.allSettled([deletePromise, archivePromise]);
       }

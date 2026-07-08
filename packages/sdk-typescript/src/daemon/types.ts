@@ -1086,6 +1086,7 @@ export interface DaemonWorkspaceMemoryForgetResult {
   summary?: string;
   removedEntries: DaemonWorkspaceMemoryForgetMatch[];
   touchedTopics: DaemonWorkspaceMemoryTopic[];
+  touchedScopes: Array<'user' | 'project'>;
 }
 
 export interface DaemonWorkspaceMemoryForgetTask {

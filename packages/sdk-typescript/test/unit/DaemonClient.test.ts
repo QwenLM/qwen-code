@@ -3942,6 +3942,7 @@ describe('DaemonClient', () => {
           summary: 'forgot',
           removedEntries: [],
           touchedTopics: ['project' as const],
+          touchedScopes: ['project' as const],
         },
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));

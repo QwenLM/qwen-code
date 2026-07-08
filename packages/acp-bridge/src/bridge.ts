@@ -637,6 +637,20 @@ function isBridgeAutoMemoryTopic(
   );
 }
 
+function touchedScopesFromTopics(
+  topics: BridgeAutoMemoryTopic[],
+): Array<'user' | 'project'> {
+  const scopes = new Set<'user' | 'project'>();
+  for (const topic of topics) {
+    scopes.add(topic === 'user' || topic === 'feedback' ? 'user' : 'project');
+  }
+  return (['user', 'project'] as const).filter((scope) => scopes.has(scope));
+}
+
+function isBridgeMemoryScope(value: unknown): value is 'user' | 'project' {
+  return value === 'user' || value === 'project';
+}
+
 function parseWorkspaceMemoryForgetMatch(
   value: unknown,
 ): BridgeWorkspaceMemoryForgetMatch | null {
@@ -672,6 +686,7 @@ function parseWorkspaceMemoryForgetResult(
   const summary = record['summary'];
   const removedEntries = record['removedEntries'];
   const touchedTopics = record['touchedTopics'];
+  const touchedScopes = record['touchedScopes'];
   const parsedRemovedEntries = Array.isArray(removedEntries)
     ? removedEntries.map(parseWorkspaceMemoryForgetMatch)
     : [];
@@ -680,14 +695,22 @@ function parseWorkspaceMemoryForgetResult(
     !Array.isArray(removedEntries) ||
     parsedRemovedEntries.some((entry) => entry === null) ||
     !Array.isArray(touchedTopics) ||
-    !touchedTopics.every(isBridgeAutoMemoryTopic)
+    !touchedTopics.every(isBridgeAutoMemoryTopic) ||
+    (touchedScopes !== undefined &&
+      (!Array.isArray(touchedScopes) ||
+        !touchedScopes.every(isBridgeMemoryScope)))
   ) {
     throw new Error('Malformed workspace memory forget response');
   }
+  const parsedTouchedTopics = touchedTopics as BridgeAutoMemoryTopic[];
   return {
     ...(summary === undefined ? {} : { summary }),
     removedEntries: parsedRemovedEntries as BridgeWorkspaceMemoryForgetMatch[],
-    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+    touchedTopics: parsedTouchedTopics,
+    touchedScopes:
+      touchedScopes === undefined
+        ? touchedScopesFromTopics(parsedTouchedTopics)
+        : (touchedScopes as Array<'user' | 'project'>),
   };
 }
 

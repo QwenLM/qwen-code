@@ -132,6 +132,7 @@ function cloneTask(
               ...entry,
             })),
             touchedTopics: [...task.result.touchedTopics],
+            touchedScopes: [...task.result.touchedScopes],
           }
         : undefined,
     };
@@ -392,6 +393,7 @@ export class WorkspaceRememberTaskLane {
             formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
           removedEntries: result.removedEntries,
           touchedTopics: result.touchedTopics,
+          touchedScopes: result.touchedScopes,
         };
         task.updatedAt = nowIso();
       } catch (err) {
@@ -413,7 +415,7 @@ export class WorkspaceRememberTaskLane {
           this.publishManagedMemoryChanged({
             source: 'workspace_memory_forget',
             taskId: task.taskId,
-            touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
+            touchedScopes: task.result.touchedScopes,
             ...(params.originatorClientId
               ? { originatorClientId: params.originatorClientId }
               : {}),
