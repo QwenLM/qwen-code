@@ -1255,6 +1255,18 @@ export function KeypressProvider({
     // only forward non-paste bytes to readline.
     const pasteModePrefixBuf = Buffer.from(PASTE_MODE_PREFIX);
     const pasteModeSuffixBuf = Buffer.from(PASTE_MODE_SUFFIX);
+
+    function partialMarkerTailLength(chunk: Buffer, marker: Buffer): number {
+      const maxCheck = Math.min(chunk.length, marker.length - 1);
+      for (let len = maxCheck; len >= 1; len--) {
+        const tail = chunk.subarray(chunk.length - len);
+        if (marker.subarray(0, len).equals(tail)) {
+          return len;
+        }
+      }
+      return 0;
+    }
+    let rawStdinTail = Buffer.alloc(0);
     let rawPasteAccumulating = false;
     let rawPasteChunks: Buffer[] = [];
     let rawPasteReceivedBytes = 0;
@@ -1273,6 +1285,7 @@ export function KeypressProvider({
       const content = Buffer.concat(rawPasteChunks);
       rawPasteChunks = [];
       rawPasteAccumulating = false;
+      pasteAlreadyFlushed = true;
       broadcastPasteFromRaw(content);
     };
 
@@ -1313,7 +1326,10 @@ export function KeypressProvider({
     };
 
     const handleStdinData = (data: Buffer) => {
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+      const raw = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+      const buf =
+        rawStdinTail.length > 0 ? Buffer.concat([rawStdinTail, raw]) : raw;
+      rawStdinTail = Buffer.alloc(0);
       let cursor = 0;
 
       while (cursor < buf.length) {
@@ -1332,6 +1348,7 @@ export function KeypressProvider({
             clearRawPasteIdleTimeout();
             rawPasteAccumulating = false;
             rawPasteChunks = [];
+            pasteAlreadyFlushed = true;
             setPasteProgress({
               active: false,
               receivedBytes: 0,
@@ -1341,14 +1358,26 @@ export function KeypressProvider({
             keypressStream.write(buf.subarray(ctrlCIdx, ctrlCIdx + 1));
             cursor = ctrlCIdx + 1;
           } else if (suffixIdx === -1) {
-            // No paste-end in this chunk — accumulate the rest
-            const chunk = buf.subarray(cursor);
-            rawPasteChunks.push(chunk);
-            rawPasteReceivedBytes += chunk.length;
-            setPasteProgress((prev) => ({
-              ...prev,
-              receivedBytes: rawPasteReceivedBytes,
-            }));
+            // No paste-end in this chunk. Check for partial suffix at
+            // the tail that might complete in the next chunk.
+            const remaining = buf.subarray(cursor);
+            const tailLen = partialMarkerTailLength(
+              remaining,
+              pasteModeSuffixBuf,
+            );
+            const contentEnd = remaining.length - tailLen;
+            if (contentEnd > 0) {
+              const chunk = remaining.subarray(0, contentEnd);
+              rawPasteChunks.push(chunk);
+              rawPasteReceivedBytes += chunk.length;
+              setPasteProgress((prev) => ({
+                ...prev,
+                receivedBytes: rawPasteReceivedBytes,
+              }));
+            }
+            if (tailLen > 0) {
+              rawStdinTail = Buffer.from(remaining.subarray(contentEnd));
+            }
             startRawPasteIdleTimeout();
             cursor = buf.length;
           } else {
@@ -1366,10 +1395,23 @@ export function KeypressProvider({
         } else {
           const prefixIdx = buf.indexOf(pasteModePrefixBuf, cursor);
           if (prefixIdx === -1) {
-            // No paste-start — forward the rest to readline
+            // No paste-start found. Check if the chunk ends with a
+            // partial prefix marker that might complete in the next chunk.
             const remaining = buf.subarray(cursor);
             if (remaining.length > 0) {
-              keypressStream.write(remaining);
+              const tailLen = partialMarkerTailLength(
+                remaining,
+                pasteModePrefixBuf,
+              );
+              if (tailLen > 0) {
+                const safe = remaining.subarray(0, remaining.length - tailLen);
+                if (safe.length > 0) keypressStream.write(safe);
+                rawStdinTail = Buffer.from(
+                  remaining.subarray(remaining.length - tailLen),
+                );
+              } else {
+                keypressStream.write(remaining);
+              }
             }
             cursor = buf.length;
           } else {
@@ -1393,7 +1435,7 @@ export function KeypressProvider({
                 ? 'pbpaste | wc -c'
                 : process.platform === 'win32'
                   ? 'powershell.exe -command "(Get-Clipboard -Raw).Length"'
-                  : 'xclip -selection clipboard -o 2>/dev/null | wc -c || xsel --clipboard --output 2>/dev/null | wc -c || wl-paste 2>/dev/null | wc -c';
+                  : 'command -v xclip >/dev/null 2>&1 && xclip -selection clipboard -o | wc -c || command -v xsel >/dev/null 2>&1 && xsel --clipboard --output | wc -c || command -v wl-paste >/dev/null 2>&1 && wl-paste | wc -c';
             exec(sizeCmd, { timeout: 2000 }, (err, stdout) => {
               if (err || !rawPasteAccumulating) return;
               const bytes = parseInt(stdout.trim(), 10);
