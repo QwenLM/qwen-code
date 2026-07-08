@@ -572,12 +572,17 @@ async def test_set_effort_sends_control_request() -> None:
             "response": {
                 "subtype": "success",
                 "request_id": request["request_id"],
-                "response": {"subtype": "set_effort", "effort": "high"},
+                "response": {
+                    "subtype": "set_effort",
+                    "effort": "high",
+                    "applied": True,
+                },
             },
         }
     )
 
-    await task
+    result = await task
+    assert result is True
     await query.close()
 
 

@@ -1300,10 +1300,12 @@ describe('Query', () => {
         createControlResponse(setEffortMsg.request_id, true, {
           subtype: 'set_effort',
           effort: 'high',
+          applied: true,
         }),
       );
 
-      await setEffortPromise;
+      const result = await setEffortPromise;
+      expect(result).toBe(true);
 
       await query.close();
     });

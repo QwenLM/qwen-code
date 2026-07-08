@@ -988,12 +988,16 @@ export class Query implements AsyncIterable<SDKMessage> {
    * Set the reasoning effort tier at runtime.
    *
    * @param effort - One of 'low', 'medium', 'high', 'xhigh', 'max'
-   * @throws Error if query is closed or effort is invalid
+   * @returns `true` if the effort was applied, `false` if it was a no-op (e.g. thinking disabled)
    */
   async setEffort(
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max',
-  ): Promise<void> {
-    await this.sendControlRequest(ControlRequestType.SET_EFFORT, { effort });
+  ): Promise<boolean> {
+    const response = await this.sendControlRequest(
+      ControlRequestType.SET_EFFORT,
+      { effort },
+    );
+    return Boolean((response as Record<string, unknown> | null)?.applied);
   }
 
   /**

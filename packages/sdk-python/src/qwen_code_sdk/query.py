@@ -485,9 +485,12 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
-    async def set_effort(self, effort: Effort) -> None:
+    async def set_effort(self, effort: Effort) -> bool:
         await self._ensure_started()
-        await self._send_control_request("set_effort", {"effort": effort})
+        response = await self._send_control_request("set_effort", {"effort": effort})
+        if response is None:
+            return False
+        return bool(response.get("applied", False))
 
     async def get_available_models(self) -> dict[str, Any] | None:
         await self._ensure_started()

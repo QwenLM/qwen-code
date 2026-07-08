@@ -172,6 +172,34 @@ export class SystemController extends BaseController {
       this.context.sdkCanUseToolTimeoutMs = canUseToolTimeout;
     }
 
+    if (payload.effort) {
+      const normalized = normalizeReasoningEffort(payload.effort);
+      if (normalized) {
+        try {
+          this.context.config.setReasoningEffort(normalized);
+
+          if (this.context.config.getReasoningEffort() !== normalized) {
+            debugLogger.warn(
+              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
+            );
+          } else {
+            debugLogger.info(
+              `[SystemController] Set reasoning effort to: ${normalized}`,
+            );
+          }
+        } catch (error) {
+          debugLogger.error(
+            '[SystemController] Failed to set reasoning effort:',
+            error,
+          );
+        }
+      } else {
+        throw new Error(
+          'Invalid effort value. Supported: low, medium, high, xhigh, max',
+        );
+      }
+    }
+
     // Process SDK MCP servers
     if (
       payload.sdkMcpServers &&
@@ -268,34 +296,6 @@ export class SystemController extends BaseController {
         debugLogger.error(
           '[SystemController] Failed to add session subagents:',
           error,
-        );
-      }
-    }
-
-    if (payload.effort) {
-      const normalized = normalizeReasoningEffort(payload.effort);
-      if (normalized) {
-        try {
-          this.context.config.setReasoningEffort(normalized);
-
-          if (this.context.config.getReasoningEffort() !== normalized) {
-            debugLogger.warn(
-              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
-            );
-          } else {
-            debugLogger.info(
-              `[SystemController] Set reasoning effort to: ${normalized}`,
-            );
-          }
-        } catch (error) {
-          debugLogger.error(
-            '[SystemController] Failed to set reasoning effort:',
-            error,
-          );
-        }
-      } else {
-        throw new Error(
-          'Invalid effort value. Supported: low, medium, high, xhigh, max',
         );
       }
     }
@@ -618,8 +618,8 @@ export class SystemController extends BaseController {
       const dashboard = await loadUsageDashboard(range ? { range } : undefined);
 
       return {
-        subtype: 'get_usage_info',
         ...dashboard,
+        subtype: 'get_usage_info',
       };
     } catch (error) {
       const errorMessage =
