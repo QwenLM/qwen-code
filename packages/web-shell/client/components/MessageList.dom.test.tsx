@@ -251,6 +251,10 @@ const toggleRow = (c: HTMLElement, turnId: string) =>
   toggle(c, turnId).closest('[role="button"]') as HTMLElement;
 const click = (el: Element) =>
   act(() => el.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+const focusIn = (el: Element) =>
+  act(() => el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })));
+const focusOut = (el: Element) =>
+  act(() => el.dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
 const nextFrame = () =>
   act(
     () =>
@@ -397,11 +401,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(entries[0]?.getAttribute('data-node-kinds')).toBe(
       'thought,commentary,tool,plan',
     );
-    const details = Array.from(
+    expect(
       c.querySelectorAll('[data-testid="session-timeline-detail"]'),
-    );
-    expect(details).toHaveLength(4);
-    expect(details[0]?.getAttribute('data-detail')).toBe('answer');
+    ).toHaveLength(0);
     const buttons = Array.from(
       c.querySelectorAll<HTMLButtonElement>(
         '[data-testid="session-timeline-entry"] button',
@@ -421,6 +423,64 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('keeps a long session timeline scrollable and preserves first-entry selection', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    const c = mount(simpleTurns(80));
+    await nextFrame();
+
+    const viewport = c.querySelector(
+      '[data-testid="session-timeline-viewport"]',
+    );
+    expect(viewport).not.toBeNull();
+    const entries = Array.from(
+      c.querySelectorAll('[data-testid="session-timeline-entry"]'),
+    );
+    expect(entries).toHaveLength(80);
+    expect(entries[0]?.getAttribute('data-turn-id')).toBe('u1');
+    expect(entries[0]?.getAttribute('data-timeline-index')).toBe('0');
+    expect(entries[79]?.getAttribute('data-turn-id')).toBe('u80');
+    expect(entries[79]?.getAttribute('data-timeline-index')).toBe('79');
+    expect(
+      entries[0]?.closest('[data-testid="session-timeline-viewport"]'),
+    ).toBe(viewport);
+
+    click(entries[0]!.querySelector('button')!);
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    scrollIntoView.mockRestore();
+    rectSpy.mockRestore();
+  });
+
+  it('renders timeline details as one floating tooltip outside the scroll viewport', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    const firstEntryButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    expect(firstEntryButton).not.toBeNull();
+    focusIn(firstEntryButton!);
+
+    const detail = c.querySelector('[data-testid="session-timeline-detail"]');
+    expect(detail).not.toBeNull();
+    expect(detail?.getAttribute('data-detail')).toBe('answer');
+    expect(
+      detail?.closest('[data-testid="session-timeline-viewport"]'),
+    ).toBeNull();
+    expect(detail?.closest('[data-testid="session-timeline"]')).not.toBeNull();
+
+    focusOut(firstEntryButton!);
+
+    expect(
+      c.querySelector('[data-testid="session-timeline-detail"]'),
+    ).toBeNull();
+    rectSpy.mockRestore();
+  });
+
   it('renders scheduled task marker when source is present', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount([
@@ -437,8 +497,14 @@ describe('MessageList — turn collapse (DOM)', () => {
     ]);
     await nextFrame();
 
+    const scheduledButton = c.querySelector<HTMLButtonElement>(
+      '[data-turn-id="u1"] button',
+    );
+    expect(scheduledButton).not.toBeNull();
+    focusIn(scheduledButton!);
+
     const scheduledDetail = c.querySelector(
-      '[data-turn-id="u1"] [data-testid="session-timeline-detail"]',
+      '[data-testid="session-timeline-detail"]',
     );
     expect(scheduledDetail?.getAttribute('data-scheduled-task')).toBe('true');
     expect(

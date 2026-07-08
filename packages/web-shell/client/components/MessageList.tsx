@@ -10,6 +10,7 @@ import {
   useMemo,
   useState,
   type ReactNode,
+  type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
 } from 'react';
@@ -1641,6 +1642,13 @@ const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
   none: 'turn',
 };
 
+type SessionTimelineTooltip = {
+  entry: SessionTimelineEntry;
+  top: number;
+  left: number;
+  clamped: boolean;
+};
+
 const SessionTimeline = memo(function SessionTimeline({
   entries,
   currentTurnId,
@@ -1654,80 +1662,169 @@ const SessionTimeline = memo(function SessionTimeline({
   hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
+  const panelRef = useRef<HTMLElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [tooltip, setTooltip] = useState<SessionTimelineTooltip | null>(null);
+
+  const currentIndex =
+    currentRange !== null
+      ? currentRange.currentIndex
+      : entries.findIndex((entry) => entry.id === currentTurnId);
+
+  const hideTooltip = useCallback(() => setTooltip(null), []);
+
+  const showTooltip = useCallback(
+    (entry: SessionTimelineEntry, el: HTMLElement) => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const panelRect = panel.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
+      setTooltip({
+        entry,
+        top: rect.top + rect.height / 2 - panelRect.top,
+        left: rect.right + 8 - panelRect.left,
+        clamped: false,
+      });
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || currentIndex < 0) return;
+    const item = viewport.querySelector<HTMLElement>(
+      `[data-timeline-index="${currentIndex}"]`,
+    );
+    if (!item) return;
+    const itemCenter = item.offsetTop + item.offsetHeight / 2;
+    const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
+    viewport.scrollTop = Math.max(
+      0,
+      Math.min(itemCenter - viewport.clientHeight / 2, maxScrollTop),
+    );
+  }, [currentIndex, entries.length]);
+
+  useLayoutEffect(() => {
+    if (!tooltip || tooltip.clamped) return;
+    const panel = panelRef.current;
+    const tooltipEl = tooltipRef.current;
+    if (!panel || !tooltipEl || typeof window === 'undefined') return;
+    const rect = tooltipEl.getBoundingClientRect();
+    const margin = 12;
+    let nextTop = tooltip.top;
+    if (rect.top < margin) {
+      nextTop += margin - rect.top;
+    } else if (rect.bottom > window.innerHeight - margin) {
+      nextTop -= rect.bottom - (window.innerHeight - margin);
+    }
+    if (nextTop === tooltip.top) return;
+    setTooltip((current) =>
+      current?.entry.id === tooltip.entry.id
+        ? { ...current, top: nextTop, clamped: true }
+        : current,
+    );
+  }, [tooltip]);
+
   if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
+        ref={panelRef}
         className={styles.sessionTimelinePanel}
         aria-label="Session timeline"
         data-testid="session-timeline"
+        onMouseLeave={hideTooltip}
       >
-        <ol className={styles.sessionTimelineList}>
-          {entries.map((entry, index) => {
-            const isInCurrentRange =
-              currentRange !== null &&
-              index >= currentRange.startIndex &&
-              index <= currentRange.endIndex;
-            const isCurrent =
-              currentRange !== null
-                ? index === currentRange.currentIndex
-                : entry.id === currentTurnId;
-            const nodeKinds = entry.nodeKinds.join(',');
-            const ariaLabel = [
-              `Turn ${index + 1}: ${entry.label}`,
-              isCurrent ? 'Current turn' : null,
-            ]
-              .filter(Boolean)
-              .join('. ');
-            return (
-              <li
-                key={entry.id}
-                className={styles.sessionTimelineItem}
-                data-testid="session-timeline-entry"
-                data-turn-id={entry.id}
-                data-node-kinds={nodeKinds}
-                data-in-current-range={isInCurrentRange ? 'true' : undefined}
-              >
-                <button
-                  type="button"
-                  className={joinClassNames(
-                    styles.sessionTimelineButton,
-                    isInCurrentRange
-                      ? styles.sessionTimelineButtonInRange
-                      : undefined,
-                    isCurrent ? styles.sessionTimelineButtonCurrent : undefined,
-                  )}
-                  aria-current={isCurrent ? 'step' : undefined}
-                  aria-label={ariaLabel}
-                  onClick={() => onSelect(entry.id)}
+        <div
+          ref={viewportRef}
+          className={styles.sessionTimelineViewport}
+          data-testid="session-timeline-viewport"
+          onScroll={hideTooltip}
+        >
+          <ol className={styles.sessionTimelineList}>
+            {entries.map((entry, index) => {
+              const isInCurrentRange =
+                currentRange !== null &&
+                index >= currentRange.startIndex &&
+                index <= currentRange.endIndex;
+              const isCurrent =
+                currentRange !== null
+                  ? index === currentRange.currentIndex
+                  : entry.id === currentTurnId;
+              const nodeKinds = entry.nodeKinds.join(',');
+              const ariaLabel = [
+                `Turn ${index + 1}: ${entry.label}`,
+                isCurrent ? 'Current turn' : null,
+              ]
+                .filter(Boolean)
+                .join('. ');
+              const revealTooltip = (
+                event:
+                  | ReactMouseEvent<HTMLButtonElement>
+                  | ReactFocusEvent<HTMLButtonElement>,
+              ) => showTooltip(entry, event.currentTarget);
+              return (
+                <li
+                  key={entry.id}
+                  className={styles.sessionTimelineItem}
+                  data-testid="session-timeline-entry"
+                  data-turn-id={entry.id}
+                  data-timeline-index={index}
+                  data-node-kinds={nodeKinds}
+                  data-in-current-range={isInCurrentRange ? 'true' : undefined}
                 >
-                  <span className={styles.sessionTimelineTick} />
-                  <span
-                    className={styles.sessionTimelineDetails}
-                    data-testid="session-timeline-detail"
-                    data-title={entry.label}
-                    data-detail={entry.detail}
-                    data-scheduled-task={
-                      entry.isScheduledTask ? 'true' : undefined
-                    }
-                    aria-hidden="true"
+                  <button
+                    type="button"
+                    className={joinClassNames(
+                      styles.sessionTimelineButton,
+                      isInCurrentRange
+                        ? styles.sessionTimelineButtonInRange
+                        : undefined,
+                      isCurrent
+                        ? styles.sessionTimelineButtonCurrent
+                        : undefined,
+                    )}
+                    aria-current={isCurrent ? 'step' : undefined}
+                    aria-label={ariaLabel}
+                    onClick={() => onSelect(entry.id)}
+                    onFocus={revealTooltip}
+                    onBlur={hideTooltip}
+                    onMouseEnter={revealTooltip}
+                    onMouseLeave={hideTooltip}
                   >
-                    <span className={styles.sessionTimelineDetailsTitle}>
-                      {entry.isScheduledTask && <TimelineClockIcon />}
-                      <span className={styles.sessionTimelineDetailsTitleText}>
-                        {entry.label}
-                      </span>
-                    </span>
-                    <span className={styles.sessionTimelineDetailsDetail}>
-                      {entry.detail}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ol>
+                    <span className={styles.sessionTimelineTick} />
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+        {tooltip && (
+          <div
+            ref={tooltipRef}
+            className={styles.sessionTimelineDetails}
+            data-testid="session-timeline-detail"
+            data-title={tooltip.entry.label}
+            data-detail={tooltip.entry.detail}
+            data-scheduled-task={
+              tooltip.entry.isScheduledTask ? 'true' : undefined
+            }
+            role="tooltip"
+            style={{ top: tooltip.top, left: tooltip.left }}
+          >
+            <span className={styles.sessionTimelineDetailsTitle}>
+              {tooltip.entry.isScheduledTask && <TimelineClockIcon />}
+              <span className={styles.sessionTimelineDetailsTitleText}>
+                {tooltip.entry.label}
+              </span>
+            </span>
+            <span className={styles.sessionTimelineDetailsDetail}>
+              {tooltip.entry.detail}
+            </span>
+          </div>
+        )}
       </nav>
     </div>
   );
