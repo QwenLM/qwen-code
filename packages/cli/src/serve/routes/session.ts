@@ -1706,7 +1706,7 @@ export function registerSessionRoutes(
 
   app.post(
     '/session/:id/approval-mode',
-    mutate({ strict: true }),
+    mutate(),
     withMutableSession(
       'POST /session/:id/approval-mode',
       async (req, res, sessionId) => {
