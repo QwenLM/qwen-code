@@ -373,6 +373,7 @@ export class WeComChannel extends ChannelBase {
       );
       return;
     }
+    this.logDebugPayload('WeCom', body);
 
     const rawMessageId = getString(body, 'msgid') || undefined;
     const messageId = rawMessageId ?? `synthetic-${randomUUID()}`;

@@ -99,6 +99,10 @@ class TestChannel extends ChannelBase {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
   }
 
+  debugPayloadForTest(platform: string, payload: unknown): void {
+    this.logDebugPayload(platform, payload);
+  }
+
   protected override onPromptStart(
     chatId: string,
     sessionId: string,
@@ -252,6 +256,136 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ isGroup: true }));
       expect(ch.sent).toEqual([]);
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs the preflight rejection reason for group gates', async () => {
+      const ch = createChannel();
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true }));
+
+      const logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=group_disabled',
+      );
+    });
+
+    it('does not log debug payloads by default', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        ch.debugPayloadForTest('Test', { token: 'secret-token' });
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(writeSpy).not.toHaveBeenCalled();
+    });
+
+    it('logs sanitized debug payloads when enabled', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', {
+          msgId: 'm1',
+          token: 'secret-token',
+          password: 'secret-password',
+          cookie: 'session-cookie',
+          signature: 'message-signature',
+          encrypt: 'encrypted-body',
+          response_url: 'https://example.invalid/hook?token=secret',
+          nested: { aeskey: 'media-key' },
+        });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('"msgId": "m1"');
+      expect(logged).toContain('"token": "[redacted]"');
+      expect(logged).toContain('"password": "[redacted]"');
+      expect(logged).toContain('"cookie": "[redacted]"');
+      expect(logged).toContain('"signature": "[redacted]"');
+      expect(logged).toContain('"encrypt": "[redacted]"');
+      expect(logged).toContain('"response_url": "[redacted]"');
+      expect(logged).toContain('"aeskey": "[redacted]"');
+      expect(logged).not.toContain('secret-token');
+      expect(logged).not.toContain('secret-password');
+      expect(logged).not.toContain('session-cookie');
+      expect(logged).not.toContain('message-signature');
+      expect(logged).not.toContain('encrypted-body');
+      expect(logged).not.toContain('media-key');
+    });
+
+    it('logs debug payloads for global enable values', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'all';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+    });
+
+    it('matches debug payload channel names exactly', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      try {
+        ch.debugPayloadForTest('Test', { msgId: 'm1' });
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(writeSpy).not.toHaveBeenCalled();
     });
 
     it('allows DM messages through', async () => {

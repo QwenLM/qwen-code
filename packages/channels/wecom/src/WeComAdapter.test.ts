@@ -1703,6 +1703,53 @@ describe('WeComChannel', () => {
     expect(channel.envelopes).toHaveLength(0);
   });
 
+  it('logs sanitized payloads only when debug payload logging is enabled', async () => {
+    const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+    process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'bot';
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let logged = '';
+    try {
+      await channel.connect();
+      lastClient().emit('message.text', {
+        msgid: 'msg-debug-payload',
+        msgtype: 'text',
+        chattype: 'single',
+        from: { userid: 'alice' },
+        secret: 'bot-secret',
+        token: 'access-token',
+        response_url: 'https://example.invalid/hook?token=secret',
+        image: {
+          url: 'https://example.invalid/media',
+          aeskey: 'media-key',
+        },
+        text: { content: 'hello' },
+      });
+
+      await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+      logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+    } finally {
+      if (oldDebugPayload === undefined) {
+        delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      } else {
+        process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+      }
+      writeSpy.mockRestore();
+    }
+
+    expect(logged).toContain('[WeCom:bot] debug payload');
+    expect(logged).toContain('"secret": "[redacted]"');
+    expect(logged).toContain('"token": "[redacted]"');
+    expect(logged).toContain('"response_url": "[redacted]"');
+    expect(logged).toContain('"url": "[redacted]"');
+    expect(logged).toContain('"aeskey": "[redacted]"');
+    expect(logged).not.toContain('bot-secret');
+    expect(logged).not.toContain('access-token');
+    expect(logged).not.toContain('media-key');
+  });
+
   it('treats missing group mention metadata as unmentioned', async () => {
     const channel = new TestWeComChannel(
       'bot',
