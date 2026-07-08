@@ -982,11 +982,11 @@ function Remove-LegacyInstall {
         # Force-kill via taskkill — handles High-IL processes that
         # Stop-Process can't touch from a Medium-IL caller.
         & taskkill.exe /F /IM "qwen-cua-driver.exe" /T 2>$null | Out-Null
-        & taskkill.exe /F /IM "qwen-cua-driver-uia.exe" /T 2>$null | Out-Null
+        & taskkill.exe /F /IM "cua-driver-uia.exe" /T 2>$null | Out-Null
     } finally {
         $ErrorActionPreference = $prevEAP
     }
-    $procs = Get-Process -Name "qwen-cua-driver","qwen-cua-driver-uia" -ErrorAction SilentlyContinue
+    $procs = Get-Process -Name "qwen-cua-driver","cua-driver-uia" -ErrorAction SilentlyContinue
     if ($procs) {
         foreach ($p in $procs) {
             try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
@@ -1225,7 +1225,7 @@ else {
     }
 }
 
-# Kill any qwen-cua-driver / qwen-cua-driver-uia process still running off the
+# Kill any qwen-cua-driver / cua-driver-uia process still running off the
 # OLD binary, so the next time the daemon is invoked (autostart kick,
 # manual `qwen-cua-driver mcp`, MCP client startup) it picks up the freshly-
 # installed code. Without this, in-memory daemons keep serving old
