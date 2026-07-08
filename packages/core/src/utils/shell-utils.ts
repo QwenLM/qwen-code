@@ -1112,7 +1112,10 @@ function killCommandTargetsSelf(segment: string): boolean {
   for (const match of segment.matchAll(/\$\(([^()]*)\)|<\s*<\(([^()]*)\)/g)) {
     const innerCommand = match[1] ?? match[2] ?? '';
     if (
-      (/[;&|]/.test(innerCommand) || /^\s*sudo\b/i.test(innerCommand)) &&
+      (/[;&|]/.test(innerCommand) ||
+        /^\s*(?:command|sudo|env|nohup|timeout|strace)\b/i.test(
+          innerCommand,
+        )) &&
       pgrepCommandTargetsSelf(innerCommand)
     ) {
       return true;

@@ -691,6 +691,10 @@ describe('detectSelfKillCommand', () => {
     expect(detectSelfKillCommand('kill -9 $(sudo -u root pgrep node)')).toBe(
       true,
     );
+    expect(detectSelfKillCommand('kill -9 $(env -i pgrep node)')).toBe(true);
+    expect(
+      detectSelfKillCommand('kill -9 $(timeout -s KILL 5 pgrep node)'),
+    ).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(true; pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(true && pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill -9 $(true | pgrep node)')).toBe(true);
