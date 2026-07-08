@@ -12,7 +12,6 @@ name: 'Qwen Autofix'
 #   • every 12h (00/12 UTC)      → also the issue phase (locate + fix one new bug)
 #   • issues:labeled             → issue phase when ready label, state, and sender match
 #   • pull_request_review        → review phase (real-time feedback loop for bot PRs)
-#   • pull_request_review_comment → review phase (real-time inline feedback loop)
 #   • workflow_dispatch          → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
@@ -26,9 +25,6 @@ on:
   pull_request_review:
     types:
       - 'submitted'
-  pull_request_review_comment:
-    types:
-      - 'created'
   schedule:
     - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
     - cron: '0 4,8,16,20 * * *' # Review only between issue runs
@@ -156,10 +152,12 @@ jobs:
                 DO_ISSUE=true
               fi
               # Real-time review triggers: only process in-repo bot PRs with
-              # reviews/comments from trusted senders (collaborators or the
-              # review bot). This prevents arbitrary commenters from forcing
-              # expensive review-scan runs.
-              if [[ "${EVENT_NAME}" == 'pull_request_review' || "${EVENT_NAME}" == 'pull_request_review_comment' ]]; then
+              # reviews from trusted senders (collaborators or the review bot).
+              # This prevents arbitrary commenters from forcing expensive
+              # review-scan runs. Only pull_request_review:submitted triggers
+              # (not per-comment events) to avoid redundant runs on multi-comment
+              # reviews.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' ]]; then
                 DO_ISSUE=false
                 if [[ "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
                   echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
