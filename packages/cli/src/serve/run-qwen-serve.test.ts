@@ -464,7 +464,7 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('uses each workspace settings policy when constructing its bridge', async () => {
+  it('uses the daemon-wide settings policy when constructing workspace bridges', async () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -528,8 +528,86 @@ describe('runQwenServe telemetry validation', () => {
         permissionPolicy: 'local-only',
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
-        permissionPolicy: 'consensus',
-        permissionConsensusQuorum: 2,
+        permissionPolicy: 'local-only',
+      });
+      expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
+        'permissionConsensusQuorum',
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not validate policy settings for untrusted secondary workspaces', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const secondaryCwd = canonicalizeWorkspace(secondary);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      )
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (workspace) => {
+        const workspaceCwd =
+          typeof workspace === 'string' ? canonicalizeWorkspace(workspace) : '';
+        return {
+          merged:
+            workspaceCwd === secondaryCwd
+              ? { policy: { permissionStrategy: 'bogus' } }
+              : {},
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(
+      trustedFoldersRuntime,
+      'getWorkspaceTrustStatus',
+    ).mockImplementation(
+      (_settings, workspace) =>
+        ({
+          effective: {
+            state:
+              canonicalizeWorkspace(workspace) === secondaryCwd
+                ? 'untrusted'
+                : 'trusted',
+          },
+        }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        bootSettings: { policy: { permissionStrategy: 'local-only' } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        permissionPolicy: 'local-only',
       });
     } finally {
       await handle.close();

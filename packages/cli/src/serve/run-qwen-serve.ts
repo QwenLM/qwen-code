@@ -2766,9 +2766,6 @@ export async function runQwenServe(
         workspaceInput.cwd,
         secondarySettings,
       );
-      const secondaryPolicy = validatePolicyConfig(
-        secondarySettings?.merged.policy ?? {},
-      );
       const secondaryWorkspaceHash = core.hashDaemonWorkspace(
         workspaceInput.cwd,
       );
@@ -2828,13 +2825,10 @@ export async function runQwenServe(
         channelFactory: secondaryChannelFactory,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
-        ...(secondaryPolicy.permissionPolicy !== undefined
-          ? { permissionPolicy: secondaryPolicy.permissionPolicy }
-          : {}),
-        ...(secondaryPolicy.permissionConsensusQuorum !== undefined
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(permissionConsensusQuorum !== undefined
           ? {
-              permissionConsensusQuorum:
-                secondaryPolicy.permissionConsensusQuorum,
+              permissionConsensusQuorum,
             }
           : {}),
         permissionAudit: permissionAuditPublisher,

@@ -74,7 +74,7 @@ interface OrganizedCursorKey {
 }
 
 interface LiveSessionCursorKey {
-  createdTime: number;
+  activityTime: number;
   sessionId: string;
 }
 
@@ -133,8 +133,8 @@ function parseLiveSessionCursor(
       typeof parsed !== 'object' ||
       parsed === null ||
       Array.isArray(parsed) ||
-      typeof (parsed as LiveSessionCursorKey).createdTime !== 'number' ||
-      !Number.isFinite((parsed as LiveSessionCursorKey).createdTime) ||
+      typeof (parsed as LiveSessionCursorKey).activityTime !== 'number' ||
+      !Number.isFinite((parsed as LiveSessionCursorKey).activityTime) ||
       typeof (parsed as LiveSessionCursorKey).sessionId !== 'string' ||
       (parsed as LiveSessionCursorKey).sessionId.length === 0
     ) {
@@ -214,9 +214,8 @@ function getSummaryActivityTime(session: BridgeSessionSummary): number {
 function getLiveSessionCursorKey(
   session: BridgeSessionSummary,
 ): LiveSessionCursorKey {
-  const createdTime = Date.parse(session.createdAt);
   return {
-    createdTime: Number.isFinite(createdTime) ? createdTime : 0,
+    activityTime: getSummaryActivityTime(session),
     sessionId: session.sessionId,
   };
 }
@@ -225,7 +224,7 @@ function compareLiveSessionCursorKeys(
   a: LiveSessionCursorKey,
   b: LiveSessionCursorKey,
 ): number {
-  const byTime = b.createdTime - a.createdTime;
+  const byTime = b.activityTime - a.activityTime;
   if (byTime !== 0) return byTime;
   return a.sessionId.localeCompare(b.sessionId);
 }
