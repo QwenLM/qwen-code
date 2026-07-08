@@ -286,8 +286,9 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ isGroup: true, isMentioned: false }));
 
+      const callCount = writeSpy.mock.calls.length;
       writeSpy.mockRestore();
-      expect(writeSpy).not.toHaveBeenCalled();
+      expect(callCount).toBe(0);
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
@@ -298,10 +299,12 @@ describe('ChannelBase', () => {
       const writeSpy = vi
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
+      let callCount = 0;
 
       try {
         ch.debugPayloadForTest('Test', { token: 'secret-token' });
       } finally {
+        callCount = writeSpy.mock.calls.length;
         if (oldDebugPayload === undefined) {
           delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
         } else {
@@ -310,7 +313,7 @@ describe('ChannelBase', () => {
         writeSpy.mockRestore();
       }
 
-      expect(writeSpy).not.toHaveBeenCalled();
+      expect(callCount).toBe(0);
     });
 
     it('logs sanitized debug payloads when enabled', () => {
@@ -442,10 +445,12 @@ describe('ChannelBase', () => {
       const writeSpy = vi
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
+      let callCount = 0;
 
       try {
         ch.debugPayloadForTest('Test', { msgId: 'm1' });
       } finally {
+        callCount = writeSpy.mock.calls.length;
         if (oldDebugPayload === undefined) {
           delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
         } else {
@@ -454,7 +459,7 @@ describe('ChannelBase', () => {
         writeSpy.mockRestore();
       }
 
-      expect(writeSpy).not.toHaveBeenCalled();
+      expect(callCount).toBe(0);
     });
 
     it('allows DM messages through', async () => {

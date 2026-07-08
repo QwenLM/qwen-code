@@ -2979,6 +2979,7 @@ export abstract class ChannelBase {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
       if (groupResult.reason === 'mention_required') {
+        // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
       } else {
         this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
