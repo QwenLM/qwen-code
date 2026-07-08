@@ -9887,6 +9887,17 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).not.toHaveBeenCalled();
       });
 
+      it('rejects unsupported proactive webhook targets before prompting', async () => {
+        const ch = createChannel({ approvalMode: 'yolo', webhooks });
+        ch.proactiveSupported = true;
+        ch.proactiveTargetSupported = false;
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'Channel does not support proactive webhook messages for this chat target.',
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      });
+
       it('rejects prompt approval mode before prompting', async () => {
         const ch = createChannel({ approvalMode: 'prompt', webhooks });
         ch.proactiveSupported = true;

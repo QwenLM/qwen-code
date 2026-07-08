@@ -2114,7 +2114,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } else if (sessionRegistered && hasNoChannelWork(ci) && !ci.isDying) {
         await startIdleTimer(
           ci,
-          `orphaned after approval-mode initialization failure "${initializedSessionId}"`,
+          `session orphaned during initialization "${initializedSessionId}"`,
         );
       }
     }
