@@ -500,11 +500,6 @@ export interface QueryOptions {
   maxSubagentDepth?: number;
 
   /**
-   * Sub-agent definitions that can be invoked during the session.
-   */
-  agents?: SubagentConfig[];
-
-  /**
    * Additional directories to include in the workspace.
    * Equivalent to CLI's `--include-directories` flag.
    */

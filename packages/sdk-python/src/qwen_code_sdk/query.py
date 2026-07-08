@@ -111,7 +111,7 @@ class Query:
         try:
             payload: dict[str, Any] = {"hooks": None}
             if self._options.mcp_servers:
-                payload["mcp_servers"] = self._options.mcp_servers
+                payload["mcpServers"] = self._options.mcp_servers
             if self._options.agents:
                 payload["agents"] = self._options.agents
             await self._send_control_request("initialize", payload)

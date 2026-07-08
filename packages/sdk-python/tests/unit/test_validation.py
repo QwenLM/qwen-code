@@ -194,7 +194,8 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "--auth-type",
         "--approval-mode",
         "--insecure",
-        "--dangerously-skip-permissions",
+        "--yolo",
+        "-y",
         "--allowed-tools",
         "--exclude-tools",
         "--resume",
@@ -202,9 +203,31 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "--proxy",
         "--channel",
         "--output-format",
+        "--openai-base-url",
+        "--openai-api-key",
+        "--mcp-config",
+        "--prompt",
+        "--add-dir",
+        "--input-file",
     ],
 )
 def test_rejects_extra_args_with_security_sensitive_flags(flag: str) -> None:
+    with pytest.raises(ValidationError, match="reserved flag"):
+        validate_query_options(QueryOptions(extra_args=[flag]))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--model=qwen-max",
+        "--auth-type=openai",
+        "--approval-mode=yolo",
+        "--insecure=true",
+        "--yolo=true",
+        "--proxy=http://localhost:8080",
+    ],
+)
+def test_rejects_extra_args_with_flag_value_syntax(flag: str) -> None:
     with pytest.raises(ValidationError, match="reserved flag"):
         validate_query_options(QueryOptions(extra_args=[flag]))
 

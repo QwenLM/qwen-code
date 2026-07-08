@@ -10,8 +10,8 @@ const RESERVED_CLI_FLAGS = new Set([
   '--auth-type',
   '--fallback-model',
   '--approval-mode',
-  '--dangerously-skip-permissions',
-  '--allow-dangerously-skip-permissions',
+  '--yolo',
+  '-y',
   '--insecure',
   '--core-tools',
   '--exclude-tools',
@@ -26,6 +26,7 @@ const RESERVED_CLI_FLAGS = new Set([
   '--system-prompt',
   '--append-system-prompt',
   '--include-directories',
+  '--add-dir',
   '--allowed-mcp-server-names',
   '--extensions',
   '--proxy',
@@ -37,6 +38,15 @@ const RESERVED_CLI_FLAGS = new Set([
   '--chat-recording',
   '--openai-logging',
   '--openai-logging-dir',
+  '--openai-base-url',
+  '--openai-api-key',
+  '--mcp-config',
+  '--prompt',
+  '--prompt-interactive',
+  '--json-schema',
+  '--json-fd',
+  '--json-file',
+  '--input-file',
 ]);
 
 /**
@@ -207,10 +217,11 @@ export const QueryOptionsSchema = z
           (val) =>
             val &&
             typeof val === 'object' &&
-            'name' in val &&
-            'description' in val &&
-            'systemPrompt' in val && {
-              message: 'agents must be an array of SubagentConfig objects',
+            val.name &&
+            val.description &&
+            val.systemPrompt && {
+              message:
+                'agents must be an array of SubagentConfig objects with non-empty name, description, and systemPrompt',
             },
         ),
       )
@@ -219,29 +230,18 @@ export const QueryOptionsSchema = z
     resume: z.string().optional(),
     sessionId: z.string().optional(),
     forkSession: z.boolean().optional(),
-    maxToolCalls: z.number().optional(),
+    maxToolCalls: z.number().int().min(-1).optional(),
     maxSubagentDepth: z.number().int().min(1).max(100).optional(),
-    agents: z
-      .array(
-        z.custom<SubagentConfig>(
-          (val) =>
-            val &&
-            typeof val === 'object' &&
-            'name' in val &&
-            'description' in val &&
-            'systemPrompt' in val && {
-              message: 'agents must be an array of SubagentConfig objects',
-            },
-        ),
-      )
-      .optional(),
     includeDirectories: z.array(z.string()).optional(),
     extraArgs: z
       .array(z.string())
       .refine(
-        (args) => !args.some((arg) => RESERVED_CLI_FLAGS.has(arg)),
+        (args) =>
+          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0])),
         (args) => {
-          const blocked = args.find((arg) => RESERVED_CLI_FLAGS.has(arg));
+          const blocked = args.find((arg) =>
+            RESERVED_CLI_FLAGS.has(arg.split('=')[0]),
+          );
           return {
             message: `extraArgs cannot contain reserved flag: ${blocked}`,
           };

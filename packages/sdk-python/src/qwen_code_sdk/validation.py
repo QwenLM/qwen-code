@@ -25,8 +25,8 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--auth-type",
         "--fallback-model",
         "--approval-mode",
-        "--dangerously-skip-permissions",
-        "--allow-dangerously-skip-permissions",
+        "--yolo",
+        "-y",
         "--insecure",
         "--core-tools",
         "--exclude-tools",
@@ -41,6 +41,7 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--system-prompt",
         "--append-system-prompt",
         "--include-directories",
+        "--add-dir",
         "--allowed-mcp-server-names",
         "--extensions",
         "--proxy",
@@ -52,6 +53,15 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--chat-recording",
         "--openai-logging",
         "--openai-logging-dir",
+        "--openai-base-url",
+        "--openai-api-key",
+        "--mcp-config",
+        "--prompt",
+        "--prompt-interactive",
+        "--json-schema",
+        "--json-fd",
+        "--json-file",
+        "--input-file",
     }
 )
 
@@ -122,8 +132,11 @@ def validate_query_options(options: QueryOptions) -> None:
 
     if options.extra_args:
         for arg in options.extra_args:
-            if arg in _RESERVED_CLI_FLAGS:
-                raise ValidationError(f"extra_args cannot contain reserved flag: {arg}")
+            flag = arg.split("=", 1)[0]
+            if flag in _RESERVED_CLI_FLAGS:
+                raise ValidationError(
+                    f"extra_args cannot contain reserved flag: {flag}"
+                )
 
     if options.fallback_model and len(options.fallback_model) > 3:
         raise ValidationError(
