@@ -293,6 +293,7 @@ export interface DaemonStatusReport {
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
+    compactedReplayMaxBytes: number;
   };
   capabilities: {
     protocolVersions: DaemonProtocolVersions;
