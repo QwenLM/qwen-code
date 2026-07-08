@@ -1325,6 +1325,8 @@ export function App({
     return requested.join('\0');
   }, [externalSplitSessionIds]);
   const externalSplitControlled = externalSplitSessionIds !== undefined;
+  const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
+  onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
   useEffect(() => {
     if (!externalSplitControlled) return;
     const requested = externalSplitSignature
@@ -1334,8 +1336,8 @@ export function App({
       areSessionIdsEqual(prev, requested) ? prev : requested,
     );
     if (requested.length > 0) {
-      setActivePanel(null);
-      setMainView('split');
+      setActivePanel((prev) => (prev === null ? prev : null));
+      setMainView((prev) => (prev === 'split' ? prev : 'split'));
     } else {
       setMainView((prev) => (prev === 'split' ? 'chat' : prev));
     }
@@ -1345,9 +1347,9 @@ export function App({
       if (!externalSplitControlled) {
         setSplitSessionIds(sessionIds);
       }
-      onSplitSessionIdsChange?.(sessionIds);
+      onSplitSessionIdsChangeRef.current?.(sessionIds);
     },
-    [externalSplitControlled, onSplitSessionIdsChange],
+    [externalSplitControlled],
   );
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
@@ -1357,13 +1359,14 @@ export function App({
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
   useEffect(() => {
+    if (externalSplitControlled) return;
     const ids = parseSplitSessionIds(window.location.search);
     if (ids.length === 0) return;
     openSplitView(ids);
     const url = new URL(window.location.href);
     url.searchParams.delete('split');
     window.history.replaceState(null, '', url);
-  }, [openSplitView]);
+  }, [externalSplitControlled, openSplitView]);
   // If the viewport shrinks below the large-screen breakpoint, close the Session
   // Overview panel and the split view — both are large-screen-only surfaces
   // whose entry points are hidden on small screens, so leaving them up would
@@ -4842,9 +4845,9 @@ export function App({
                       <SplitView
                         sessionIds={splitSessionIds}
                         // Mirror live pane add/remove back up so switching away
-                        // and re-entering restores the same panes. Pass the
-                        // setter directly — a fresh arrow each render would loop
-                        // SplitView's reporting effect.
+                        // and re-entering restores the same panes. Keep this
+                        // callback stable to avoid looping SplitView's reporting
+                        // effect.
                         onPanesChange={handleSplitPanesChange}
                         // Refresh the "add pane" picker when the session list
                         // changes elsewhere, matching the sidebar.

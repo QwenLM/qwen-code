@@ -1131,6 +1131,18 @@ describe('App session callbacks', () => {
     ).toBe('s1,s2');
   });
 
+  it('dedupes and caps external split session ids', async () => {
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's1', 's2', 's3', 's4', 's5', 's6', 's7'],
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3,s4,s5,s6');
+  });
+
   it('does not reopen controlled split view when the same ids get a new array reference', async () => {
     const { container, rerender } = renderApp({
       sidebar: false,
@@ -1328,6 +1340,23 @@ describe('App session callbacks', () => {
       ).not.toBeNull();
       // The one-shot param is stripped so a reload/exit doesn't force it back.
       expect(window.location.search).toBe('');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
+  it('lets controlled split session ids take precedence over a ?split= URL', async () => {
+    window.history.pushState({}, '', '/?split=s1,s2');
+    try {
+      const { container } = renderApp({
+        sidebar: false,
+        splitSessionIds: ['s3'],
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe('s3');
+      expect(window.location.search).toBe('?split=s1,s2');
     } finally {
       window.history.pushState({}, '', '/');
     }

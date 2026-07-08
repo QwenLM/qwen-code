@@ -170,8 +170,39 @@ describe('SplitView', () => {
     expect(panes()).toHaveLength(0);
   });
 
+  it('requests pane changes without mutating local panes when controlled', () => {
+    const onPanesChange = vi.fn();
+    render({ sessionIds: ['s1'], onPanesChange });
+
+    openPicker();
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onPanesChange).toHaveBeenCalledWith(['s1', 's2']);
+    expect(titles()).toEqual(['One']);
+
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            onExit={() => {}}
+            sessionIds={['s1', 's2']}
+            onPanesChange={onPanesChange}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(titles()).toEqual(['One', 'Two']);
+
+    const close = container!.querySelector('[data-testid="pane-close"]');
+    act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onPanesChange).toHaveBeenCalledWith(['s2']);
+    expect(titles()).toEqual(['One', 'Two']);
+  });
+
   it('adds a pane from the picker', () => {
-    render({ sessionIds: ['s1'] });
+    render();
     expect(panes()).toHaveLength(1);
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
@@ -179,7 +210,7 @@ describe('SplitView', () => {
     act(() =>
       addButton.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
-    // Picker lists sessions not already shown (s2, s3, s4).
+    // Picker lists sessions not already shown (s1, s2, s4).
     const options = container!.querySelectorAll('[role="option"] button');
     expect(options).toHaveLength(3);
     act(() =>
@@ -244,17 +275,24 @@ describe('SplitView', () => {
   });
 
   it('removes a pane via its close button', () => {
-    render({ sessionIds: ['s1', 's2'] });
+    render();
+    openPicker();
+    const options = container!.querySelectorAll('[role="option"] button');
+    act(() =>
+      options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(panes()).toHaveLength(2);
+
     const closes = container!.querySelectorAll('[data-testid="pane-close"]');
     act(() =>
       closes[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
-    expect(titles()).toEqual(['Two']);
+    expect(titles()).toEqual(['One']);
   });
 
   it('auto-exits to the overview when the last pane is closed', () => {
     const onExit = vi.fn();
-    render({ sessionIds: ['s1'], onExit });
+    render({ onExit });
     expect(onExit).not.toHaveBeenCalled();
     const close = container!.querySelector('[data-testid="pane-close"]');
     act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -347,9 +385,9 @@ describe('SplitView', () => {
 
   it('mirrors the live pane set up to the parent as panes change', () => {
     const onPanesChange = vi.fn();
-    render({ sessionIds: ['s1'], onPanesChange });
+    render({ onPanesChange });
     // Reported on mount so the parent's seed reflects the actual panes…
-    expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s3']);
     // …and after every add (so switching away and back restores it).
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
@@ -361,10 +399,10 @@ describe('SplitView', () => {
     act(() =>
       options[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
-    expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 's2']);
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s3', 's1']);
     // …and after every remove.
     const close = container!.querySelector('[data-testid="pane-close"]');
     act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(onPanesChange).toHaveBeenLastCalledWith(['s2']);
+    expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
   });
 });

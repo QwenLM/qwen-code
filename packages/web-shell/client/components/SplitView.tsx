@@ -167,14 +167,22 @@ export function SplitView({
     return map;
   }, [sessions]);
 
-  const addPane = useCallback((sessionId: string) => {
-    setPaneIds((prev) =>
-      prev.includes(sessionId) || prev.length >= MAX_PANES
-        ? prev
-        : [...prev, sessionId],
-    );
-    setPickerOpen(false);
-  }, []);
+  const addPane = useCallback(
+    (sessionId: string) => {
+      if (paneIds.includes(sessionId) || paneIds.length >= MAX_PANES) {
+        setPickerOpen(false);
+        return;
+      }
+      const next = [...paneIds, sessionId];
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+      setPickerOpen(false);
+    },
+    [onPanesChange, paneIds, sessionIdsControlled],
+  );
 
   // Closing the last pane is a natural "I'm done" gesture — return to the
   // overview instead of stranding the user on an empty split. Guarded so an
@@ -192,12 +200,21 @@ export function SplitView({
   // unmounting when the user switches views. On re-entry the parent reseeds
   // `sessionIds` from it, restoring the exact panes instead of clearing.
   useEffect(() => {
-    onPanesChange?.(paneIds);
-  }, [paneIds, onPanesChange]);
+    if (!sessionIdsControlled) onPanesChange?.(paneIds);
+  }, [paneIds, onPanesChange, sessionIdsControlled]);
 
-  const removePane = useCallback((sessionId: string) => {
-    setPaneIds((prev) => prev.filter((id) => id !== sessionId));
-  }, []);
+  const removePane = useCallback(
+    (sessionId: string) => {
+      if (!paneIds.includes(sessionId)) return;
+      const next = paneIds.filter((id) => id !== sessionId);
+      if (sessionIdsControlled) {
+        onPanesChange?.(next);
+      } else {
+        setPaneIds(next);
+      }
+    },
+    [onPanesChange, paneIds, sessionIdsControlled],
+  );
 
   const available = useMemo(
     () => sessions.filter((session) => !paneIds.includes(session.sessionId)),
