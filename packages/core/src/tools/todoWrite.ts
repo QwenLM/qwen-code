@@ -247,9 +247,41 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
 `;
 
 function getTodoFilePath(todoDir: string, sessionId?: string): string {
-  // Use sessionId if provided, otherwise fall back to 'default'
-  const filename = `${sessionId || 'default'}.json`;
+  const filename = `${Storage.sanitizePlanSessionId(
+    sessionId || 'default',
+  )}.json`;
   return path.join(todoDir, filename);
+}
+
+function isConfiguredTodoDir(todoDir: string): boolean {
+  return path.resolve(todoDir) !== path.resolve(Storage.getTodosDir());
+}
+
+function assertTodoPathWithinAllowedDirectory(
+  todoDir: string,
+  todoFilePath: string,
+  projectRoot?: string,
+): void {
+  Storage.assertPathWithinDirectory(
+    todoFilePath,
+    todoDir,
+    `todosDirectory must resolve within the project root.`,
+  );
+
+  if (!projectRoot || !isConfiguredTodoDir(todoDir)) {
+    return;
+  }
+
+  Storage.assertPathWithinDirectory(
+    todoDir,
+    projectRoot,
+    `todosDirectory must resolve within the project root.`,
+  );
+  Storage.assertPathWithinDirectory(
+    todoFilePath,
+    projectRoot,
+    `todosDirectory must resolve within the project root.`,
+  );
 }
 
 /**
@@ -258,9 +290,11 @@ function getTodoFilePath(todoDir: string, sessionId?: string): string {
 async function readTodosFromFile(
   todoDir: string,
   sessionId?: string,
+  projectRoot?: string,
 ): Promise<TodoItem[]> {
   try {
     const todoFilePath = getTodoFilePath(todoDir, sessionId);
+    assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
     const content = await fs.readFile(todoFilePath, 'utf-8');
     const data = JSON.parse(content);
     return Array.isArray(data.todos) ? data.todos : [];
@@ -280,10 +314,12 @@ async function writeTodosToFile(
   todoDir: string,
   todos: TodoItem[],
   sessionId?: string,
+  projectRoot?: string,
 ): Promise<void> {
   const todoFilePath = getTodoFilePath(todoDir, sessionId);
   const todoFileDir = path.dirname(todoFilePath);
 
+  assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
   await fs.mkdir(todoFileDir, { recursive: true });
 
   const data = {
@@ -291,7 +327,9 @@ async function writeTodosToFile(
     sessionId: sessionId || 'default',
   };
 
-  await atomicWriteFile(todoFilePath, JSON.stringify(data, null, 2), {
+  const contents = JSON.stringify(data, null, 2);
+  assertTodoPathWithinAllowedDirectory(todoDir, todoFilePath, projectRoot);
+  await atomicWriteFile(todoFilePath, contents, {
     encoding: 'utf-8',
   });
 }
@@ -333,10 +371,11 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     const { todos, modified_by_user, modified_content } = this.params;
     const sessionId = this.config.getSessionId();
     const todoDir = this.config.getTodosDir();
+    const projectRoot = this.config.getTargetDir?.();
 
     try {
       // 1. Read current todos (for change detection)
-      const oldTodos = await readTodosFromFile(todoDir, sessionId);
+      const oldTodos = await readTodosFromFile(todoDir, sessionId, projectRoot);
 
       let finalTodos: TodoItem[];
 
@@ -419,7 +458,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       }
 
       // 4. Write new todos AFTER all validation passes
-      await writeTodosToFile(todoDir, finalTodos, sessionId);
+      await writeTodosToFile(todoDir, finalTodos, sessionId, projectRoot);
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
@@ -533,17 +572,18 @@ Todo list modification failed with error: ${errorMessage}. You may need to retry
  */
 export async function readTodosForSession(
   sessionId?: string,
+  todoDir?: string,
 ): Promise<TodoItem[]> {
-  return readTodosFromFile(Storage.getTodosDir(), sessionId);
+  return readTodosFromFile(todoDir ?? Storage.getTodosDir(), sessionId);
 }
 
 /**
  * Utility function to list all todo files in the todos directory
  */
-export async function listTodoSessions(): Promise<string[]> {
+export async function listTodoSessions(todoDir?: string): Promise<string[]> {
   try {
-    const todoDir = Storage.getTodosDir();
-    const files = await fs.readdir(todoDir);
+    const resolvedTodoDir = todoDir ?? Storage.getTodosDir();
+    const files = await fs.readdir(resolvedTodoDir);
     return files
       .filter((file: string) => file.endsWith('.json'))
       .map((file: string) => file.replace('.json', ''));
