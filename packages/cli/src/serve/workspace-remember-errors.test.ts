@@ -222,6 +222,15 @@ describe('extractRememberErrorDetails', () => {
     expect(details).not.toContain('eyJhbGciOiABCDEFGHIJKLMN');
   });
 
+  it('redacts QQBot tokens separated by invisible characters', () => {
+    const details = extractRememberErrorDetails(
+      new Error('QQBot\u200Bsecret-token-value'),
+    );
+
+    expect(details).toBe('QQBot <redacted>');
+    expect(details).not.toContain('secret-token-value');
+  });
+
   it('normalizes line separators before redacting credentials', () => {
     for (const separator of ['\u2028', '\u2029']) {
       const details = extractRememberErrorDetails(
@@ -320,6 +329,15 @@ describe('extractRememberErrorStack', () => {
     expect(stack).toContain('\n\tat handler');
     expect(stack).not.toContain('secret-token-value');
     expect(stack).toHaveLength(1000);
+  });
+
+  it('preserves CRLF stack line endings before logging', () => {
+    const err = new Error('boom');
+    err.stack = 'Error: boom\r\n\tat handler (/workspace/file.ts:1:1)';
+
+    const stack = extractRememberErrorStack(err);
+
+    expect(stack).toBe('Error: boom\r\n\tat handler (/workspace/file.ts:1:1)');
   });
 });
 

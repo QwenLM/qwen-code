@@ -153,7 +153,7 @@ function replaceStackControlChars(stack: string): string {
     .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
     .replace(REMEMBER_ERROR_SEPARATOR_RE, '')
     .replace(REMEMBER_ERROR_CONTROL_RE, (char) =>
-      char === '\n' || char === '\t' ? char : ' ',
+      char === '\n' || char === '\r' || char === '\t' ? char : ' ',
     );
 }
 
