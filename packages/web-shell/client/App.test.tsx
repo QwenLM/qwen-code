@@ -1356,6 +1356,33 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('notifies controlled callers when leaving the split view', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Session Overview');
+  });
+
   it('preserves the pane set when leaving the split view and reopening it', async () => {
     const { container } = renderApp();
     await flush();
@@ -1554,6 +1581,49 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     // Shrinking below the large-screen breakpoint folds the split back to chat.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('notifies controlled callers when a screen shrink closes the split view', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('min-width')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const onSplitSessionIdsChange = vi.fn();
+
+    const { container } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith([]);
     expect(
       container.querySelector('[data-testid="split-view-page"]'),
     ).toBeNull();

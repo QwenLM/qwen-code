@@ -1371,10 +1371,18 @@ export function App({
     },
     [externalSplitControlled],
   );
+  const notifyControlledSplitClose = useCallback(() => {
+    if (externalSplitControlled) {
+      onSplitSessionIdsChangeRef.current?.([]);
+    }
+  }, [externalSplitControlled]);
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
   // to the Session Overview — the hub the split is launched from.
-  const handleSplitExit = useCallback(() => openPanel('sessions'), [openPanel]);
+  const handleSplitExit = useCallback(() => {
+    notifyControlledSplitClose();
+    openPanel('sessions');
+  }, [notifyControlledSplitClose, openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -1400,10 +1408,11 @@ export function App({
       setActivePanel(null);
     }
     if (!isLargeScreen && mainView === 'split') {
+      notifyControlledSplitClose();
       setMainView('chat');
       focusComposerAfterSplitCloseRef.current = true;
     }
-  }, [isLargeScreen, activePanel, mainView]);
+  }, [isLargeScreen, activePanel, mainView, notifyControlledSplitClose]);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (its Back self-focuses).
