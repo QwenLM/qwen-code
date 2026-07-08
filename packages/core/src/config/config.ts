@@ -2056,13 +2056,17 @@ export class Config {
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.visionModel = params.visionModel || undefined;
-    // Guard: schema validation only runs on interactive edit paths, so a
-    // non-positive value in settings.json would otherwise abort every bridge
-    // call instantly.
+    // Guard: nothing validates settings.json on the load path, so this is the
+    // only real gate. `AbortSignal.timeout()` requires an integer in
+    // [0, 2^31-1] — a fractional or out-of-range value (which the number-typed
+    // schema still accepts via /config) would throw RangeError or silently
+    // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
+    // timer can't take and fall back to the built-in default.
     this.visionBridgeTimeoutMs =
       params.visionBridgeTimeoutMs !== undefined &&
-      Number.isFinite(params.visionBridgeTimeoutMs) &&
-      params.visionBridgeTimeoutMs > 0
+      Number.isInteger(params.visionBridgeTimeoutMs) &&
+      params.visionBridgeTimeoutMs > 0 &&
+      params.visionBridgeTimeoutMs <= 2_147_483_647
         ? params.visionBridgeTimeoutMs
         : undefined;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);

@@ -332,12 +332,18 @@ export async function runVisionBridge(params: {
 
   for (let attempt = 1; attempt <= VISION_BRIDGE_MAX_ATTEMPTS; attempt++) {
     // The vision call gets its own timeout, linked to the turn's abort signal.
-    // Created per attempt so a retry starts with a full budget instead of the
-    // few seconds left over from the attempt that just timed out.
-    const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
+    // Declared here so the catch can classify a timeout, but created INSIDE the
+    // try: `AbortSignal.timeout` throws on a value the timer can't take, and we
+    // want that to become a failure() rather than an escaped rejection — the TUI
+    // caller has no try/catch and would otherwise swallow the whole turn. Fresh
+    // per attempt so a retry starts with a full budget instead of the few
+    // seconds left over from the attempt that just timed out.
+    let timeoutSignal: AbortSignal | undefined;
+    let combinedSignal: AbortSignal | undefined;
 
     try {
+      timeoutSignal = AbortSignal.timeout(timeoutMs);
+      combinedSignal = AbortSignal.any([signal, timeoutSignal]);
       debugLogger.debug(`calling ${modelId} for ${toConvert.length} image(s)`);
       const { text } = await runSideQuery(config, {
         contents: requestContents,
@@ -407,7 +413,10 @@ export async function runVisionBridge(params: {
           ...egress,
         };
       }
-      const timedOut = combinedSignal.aborted && timeoutSignal.aborted;
+      // `?.` because AbortSignal creation itself can throw (a bad timeout
+      // value) before these are assigned — that lands here as a non-timeout
+      // failure, which is the safe classification.
+      const timedOut = !!combinedSignal?.aborted && !!timeoutSignal?.aborted;
       if (timedOut && attempt < VISION_BRIDGE_MAX_ATTEMPTS) {
         debugLogger.warn(
           `conversion attempt ${attempt} via ${modelId} timed out after ${timeoutMs}ms; retrying`,

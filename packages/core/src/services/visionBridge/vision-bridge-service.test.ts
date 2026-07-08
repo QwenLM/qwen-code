@@ -492,6 +492,36 @@ describe('runVisionBridge', () => {
     }
   });
 
+  it('turns an unusable timeout value into a failure instead of throwing', async () => {
+    // Config normally rejects such values, but if one ever reaches the bridge
+    // (a future caller, a direct call), AbortSignal.timeout throws RangeError.
+    // Its creation lives inside the try, so it must surface as failure() — the
+    // TUI caller has no try/catch and would otherwise swallow the whole turn.
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => {
+        throw new RangeError('timeout value is out of range');
+      });
+    try {
+      const result = await runVisionBridge({
+        config: {
+          getDefaultVisionBridgeModel: () => ({ id: 'qwen3-vl-plus' }),
+          getVisionBridgeTimeoutMs: () => 30_000.5,
+        } as unknown as Config,
+        parts: ['look', image()],
+        signal: signal(),
+      });
+      expect(result.status).toBe('failed');
+      expect(result.egressOccurred).toBe(true);
+      // Classified as a generic failure, not a timeout.
+      expect(textOf(result.parts)).not.toMatch(/timed out/i);
+      // No model call — the signal blew up before dispatch.
+      expect(mockSideQuery).not.toHaveBeenCalled();
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('bounds bridge output and skips output-language preference injection', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
 

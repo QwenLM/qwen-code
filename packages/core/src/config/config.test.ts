@@ -585,6 +585,35 @@ describe('Server Config (config.ts)', () => {
         }).getVisionBridgeTimeoutMs(),
       ).toBeUndefined();
     });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // These pass the number-typed schema's `minimum: 1` via /config but would
+      // make AbortSignal.timeout throw RangeError or degrade to a 1ms timer.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            visionBridgeTimeoutMs: bad,
+          }).getVisionBridgeTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 2_147_483_647,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
   });
 
   describe('getMaxSubagentDepth', () => {
