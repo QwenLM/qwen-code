@@ -545,23 +545,23 @@ export class QQChannel extends ChannelBase {
     let nextSeq = 0;
     let rollbackApplied = false;
     try {
-      // Try markdown first (msg_type: 2)
-      const body: Record<string, unknown> = {
+      // ── STEP 1: Passive markdown attempt ──
+      const passiveBody: Record<string, unknown> = {
         msg_type: 2,
         markdown: { content: text },
       };
       nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
       if (msgId) {
         this.msgSeqMap.set(msgId, nextSeq);
-        body['msg_id'] = msgId;
-        body['msg_seq'] = nextSeq;
+        passiveBody['msg_id'] = msgId;
+        passiveBody['msg_seq'] = nextSeq;
       }
 
       const resp = await sendQQMessage(
         route.base,
         route.path,
         this.accessToken,
-        body,
+        passiveBody,
       );
 
       if (!resp.ok) {
@@ -589,43 +589,52 @@ export class QQChannel extends ChannelBase {
           );
         }
 
-        // Active retry when we have a reply context (msgId)
+        // Passive markdown failed (non-429). If we have msgId, roll back
+        // and try active retries (no msg_id/msg_seq).
         if (msgId) {
           this.msgSeqMap.set(msgId, nextSeq - 1);
           rollbackApplied = true;
-          const activeBody: Record<string, unknown> = {
-            content: text,
-            msg_type: 0,
-            msg_id: msgId,
-            msg_seq: nextSeq,
+
+          // Check if active messages are allowed for this chat
+          if (this.groupActiveMsgEnabled.get(chatId) === false) {
+            process.stderr.write(
+              `[QQ:${this.name}] MESSAGE DROPPED: active messages disabled for ${sanitizeLogText(chatId, 64)}, cannot retry\n`,
+            );
+            this.saveQQState();
+            throw new DeliveryError(
+              'ACTIVE_MSG_DISABLED',
+              `Active messages disabled for ${sanitizeLogText(chatId, 64)}`,
+            );
+          }
+
+          // ── STEP 2: Active markdown (msg_type: 2, NO msg_id/msg_seq) ──
+          const activeMdBody: Record<string, unknown> = {
+            msg_type: 2,
+            markdown: { content: text },
           };
-          const activeResp = await sendQQMessage(
+          const activeMdResp = await sendQQMessage(
             route.base,
             route.path,
             this.accessToken,
-            activeBody,
+            activeMdBody,
           );
 
-          if (activeResp.ok) {
+          if (activeMdResp.ok) {
             process.stderr.write(
-              `[QQ:${this.name}] Active retry succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+              `[QQ:${this.name}] Active markdown retry succeeded for ${sanitizeLogText(chatId, 64)}\n`,
             );
-            const current = this.replyMsgId.get(chatId);
-            if (current?.msgId === msgId) {
-              this.msgSeqMap.set(msgId, nextSeq);
-            }
             this.saveQQState();
-            await activeResp.text().catch(() => '');
+            await activeMdResp.text().catch(() => '');
             return;
           }
 
-          process.stderr.write(
-            `[QQ:${this.name}] Active retry also failed (HTTP ${activeResp.status}: ${sanitizeLogText(await activeResp.text().catch(() => ''), 200)})\n`,
+          const mdErrBody = sanitizeLogText(
+            await activeMdResp.text().catch(() => ''),
+            200,
           );
-
-          if (activeResp.status === 429) {
+          if (activeMdResp.status === 429) {
             process.stderr.write(
-              `[QQ:${this.name}] MESSAGE DROPPED: active retry rate-limited (HTTP 429) for ${sanitizeLogText(chatId, 64)}\n`,
+              `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on active markdown retry for ${sanitizeLogText(chatId, 64)}\n`,
             );
             this.saveQQState();
             throw new DeliveryError(
@@ -633,19 +642,56 @@ export class QQChannel extends ChannelBase {
               `Message blocked by rate limit for ${sanitizeLogText(chatId, 64)}`,
             );
           }
-
-          // Active retry failed with non-429 — don't fall through to plain-text
           process.stderr.write(
-            `[QQ:${this.name}] MESSAGE DROPPED: both passive and active send failed for ${sanitizeLogText(chatId, 64)}\n`,
+            `[QQ:${this.name}] Active markdown retry failed (HTTP ${activeMdResp.status}: ${mdErrBody}) for ${sanitizeLogText(chatId, 64)}\n`,
+          );
+
+          // ── STEP 3: Active plain-text (msg_type: 0, NO msg_id/msg_seq) ──
+          const activeTextBody: Record<string, unknown> = {
+            content: text,
+            msg_type: 0,
+          };
+          const activeTextResp = await sendQQMessage(
+            route.base,
+            route.path,
+            this.accessToken,
+            activeTextBody,
+          );
+
+          if (activeTextResp.ok) {
+            process.stderr.write(
+              `[QQ:${this.name}] Active text fallback succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+            this.saveQQState();
+            await activeTextResp.text().catch(() => '');
+            return;
+          }
+
+          const textErrBody = sanitizeLogText(
+            await activeTextResp.text().catch(() => ''),
+            200,
+          );
+          if (activeTextResp.status === 429) {
+            process.stderr.write(
+              `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on active text fallback for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+            this.saveQQState();
+            throw new DeliveryError(
+              'RATE_LIMITED',
+              `Message blocked by rate limit for ${sanitizeLogText(chatId, 64)}`,
+            );
+          }
+          process.stderr.write(
+            `[QQ:${this.name}] MESSAGE DROPPED: active text fallback failed (HTTP ${activeTextResp.status}: ${textErrBody}) for ${sanitizeLogText(chatId, 64)}\n`,
           );
           this.saveQQState();
           throw new DeliveryError(
-            'RETRY_EXHAUSTED',
+            'FALLBACK_FAILED',
             `All delivery attempts exhausted for ${sanitizeLogText(chatId, 64)}`,
           );
         }
 
-        // Plain-text fallback for active messages (no reply context)
+        // Plain-text fallback for pure active messages (no reply context)
         const plainBody: Record<string, unknown> = {
           content: text,
           msg_type: 0,

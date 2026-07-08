@@ -584,11 +584,11 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 1 },
+      { msg_type: 2, markdown: { content: '**bold**' } },
     );
 
-    // Post-success state: sequence reflects successful send (not rolled back)
-    expect(msgSeqMap.get('msg-001')).toBe(1);
+    // Post-success state: sequence rolled back since active retry has no msg_seq
+    expect(msgSeqMap.get('msg-001')).toBe(0);
     // saveQQState was called to persist
     expect(saveSpy).toHaveBeenCalled();
 
@@ -907,17 +907,18 @@ describe('sendMessage', () => {
     );
   });
 
-  it('skips plain-text fallback when active retry fails (msgId present)', async () => {
+  it('falls through active markdown and active text when passive and active retries fail (msgId present)', async () => {
     const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-001' });
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
-      .mockResolvedValueOnce(mockResponse(false, 500, 'server error'));
+      .mockResolvedValueOnce(mockResponse(false, 500, 'active md failed'))
+      .mockResolvedValueOnce(mockResponse(false, 500, 'active text failed'));
 
     await expect(
       ch.sendMessage('test-chat-id', '**bold**'),
     ).rejects.toBeInstanceOf(DeliveryError);
 
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(3);
   });
 
   it('stops at 429 early return after active retry rate-limited', async () => {
@@ -935,7 +936,10 @@ describe('sendMessage', () => {
       string,
       unknown
     >;
-    expect(secondBody['msg_type']).toBe(0);
+    expect(secondBody['msg_type']).toBe(2);
+    expect(secondBody['markdown']).toEqual({ content: '**bold**' });
+    expect(secondBody['msg_id']).toBeUndefined();
+    expect(secondBody['msg_seq']).toBeUndefined();
   });
 
   it('rolls back msgSeqMap when sendQQMessage throws with replyMsgId set', async () => {
