@@ -609,7 +609,13 @@ describe('detectSelfKillCommand', () => {
   it('detects kill commands using pgrep selectors for qwen-code hosts', () => {
     expect(detectSelfKillCommand('kill -9 $(pgrep node)')).toBe(true);
     expect(detectSelfKillCommand('kill $(pgrep -f node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep node | head -1)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 `pgrep node | head -1`')).toBe(true);
     expect(detectSelfKillCommand('pgrep node | xargs kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs sudo kill')).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs -I {} kill -9 {}')).toBe(
+      true,
+    );
   });
 
   it('detects taskkill inline and dash-prefixed image options', () => {
