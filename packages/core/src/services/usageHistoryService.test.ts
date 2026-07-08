@@ -752,6 +752,29 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon-only']);
     expect(fs.existsSync(usagePath)).toBe(false);
   });
+
+  it('withLive: all sessions persisted (empty rebuild) returns the persisted records as-is', async () => {
+    // Common case: no live transcripts at all, only the persisted file.
+    seedPersisted([persistedRec('sess-only', 500)]);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.sessionId).toBe('sess-only');
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(500);
+  });
+
+  it('withLive: a corrupt usage_record.jsonl falls back to a full transcript replay', async () => {
+    // No usable persisted base (garbage file) — the loader must still surface
+    // the daemon transcript rather than returning nothing.
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+      '{ this is not valid json\nalso broken}\n',
+    );
+    plantChatJsonl('sess-daemon', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
+  });
 });
 
 describe('aggregateUsage — skills', () => {

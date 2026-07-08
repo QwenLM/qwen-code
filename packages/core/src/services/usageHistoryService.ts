@@ -239,8 +239,8 @@ interface RebuildFromSessionJsonlOptions {
   sinceMs?: number;
   /**
    * Session ids already covered by the persisted history. Their transcripts are
-   * skipped after a cheap first-line `sessionId` read, avoiding a full replay of
-   * sessions the persisted file already records authoritatively.
+   * skipped by filename (`{sessionId}.jsonl`) with no file read, avoiding a full
+   * replay of sessions the persisted file already records authoritatively.
    */
   skipSessionIds?: ReadonlySet<string>;
 }
@@ -305,13 +305,13 @@ async function rebuildFromSessionJsonl(
           if (mtimeMs < sinceMs) continue;
         }
 
-        // Skip sessions the persisted history already records, reading only the
-        // transcript's first line (which carries the sessionId) rather than
-        // replaying the whole file.
+        // Skip sessions the persisted history already records, before any file
+        // read: the transcript filename is `{sessionId}.jsonl`
+        // (chatRecordingService.ts), so the sessionId — the same value the
+        // full-read path below derives from the first record — needs no I/O.
         if (skipSessionIds && skipSessionIds.size > 0) {
-          const head = await jsonl.readLines<ChatRecord>(filePath, 1);
-          const headSessionId = head[0]?.sessionId;
-          if (headSessionId && skipSessionIds.has(headSessionId)) continue;
+          const fileSessionId = path.basename(file, '.jsonl');
+          if (skipSessionIds.has(fileSessionId)) continue;
         }
 
         const records = await jsonl.read<ChatRecord>(filePath);
