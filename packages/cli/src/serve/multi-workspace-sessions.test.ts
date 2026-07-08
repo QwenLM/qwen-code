@@ -17,6 +17,7 @@ import {
   type BridgeSpawnRequest,
 } from './acp-session-bridge.js';
 import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
+import type { DaemonLogger } from './daemon-logger.js';
 import { createServeApp } from './server.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { ServeOptions } from './types.js';
@@ -283,9 +284,22 @@ function makeRuntime(input: {
   };
 }
 
+function makeDaemonLog(): DaemonLogger {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    raw: vi.fn(),
+    getLogPath: () => '',
+    getDaemonId: () => 'test-daemon',
+    flush: vi.fn(async () => {}),
+  };
+}
+
 function makeHarness(opts?: {
   secondaryTrusted?: boolean;
   secondaryChannelLive?: boolean;
+  daemonLog?: DaemonLogger;
 }) {
   const primaryBridge = makeBridge(
     PRIMARY_CWD,
@@ -316,7 +330,10 @@ function makeHarness(opts?: {
   const app = createServeApp(
     { ...baseOpts, workspace: PRIMARY_CWD },
     undefined,
-    { workspaceRegistry: registry },
+    {
+      workspaceRegistry: registry,
+      ...(opts?.daemonLog ? { daemonLog: opts.daemonLog } : {}),
+    },
   );
   return { app, registry, primaryBridge, secondaryBridge };
 }
@@ -419,7 +436,8 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.primaryBridge.spawnCalls).toEqual([]);
     expect(unknown.secondaryBridge.spawnCalls).toEqual([]);
 
-    const untrusted = makeHarness({ secondaryTrusted: false });
+    const daemonLog = makeDaemonLog();
+    const untrusted = makeHarness({ secondaryTrusted: false, daemonLog });
     const untrustedRes = await request(untrusted.app)
       .post('/session')
       .set('Host', host())
@@ -428,6 +446,14 @@ describe('multi-workspace session dispatch', () => {
     expect(untrustedRes.status).toBe(403);
     expect(untrustedRes.body.code).toBe('untrusted_workspace');
     expect(untrusted.secondaryBridge.spawnCalls).toEqual([]);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /session',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
   });
 
   it('dispatches live session routes by owner runtime', async () => {
@@ -536,6 +562,52 @@ describe('multi-workspace session dispatch', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('session_not_found');
+  });
+
+  it('logs live session owner misses for session, SSE, and permission routes', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app } = makeHarness({ daemonLog });
+
+    await request(app)
+      .post('/session/missing-session/prompt')
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'hello' }] })
+      .expect(404);
+    await request(app)
+      .get('/session/missing-session/events')
+      .set('Host', host())
+      .expect(404);
+    await request(app)
+      .post('/session/missing-session/permission/perm-1')
+      .set('Host', host())
+      .send({ outcome: { outcome: 'cancelled' } })
+      .expect(404);
+
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /session/:id/prompt',
+        resolutionKind: 'not_found',
+        sessionId: 'missing-session',
+      }),
+    );
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'GET /session/:id/events',
+        resolutionKind: 'not_found',
+        sessionId: 'missing-session',
+      }),
+    );
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /session/:id/permission/:requestId',
+        resolutionKind: 'not_found',
+        sessionId: 'missing-session',
+        requestId: 'perm-1',
+      }),
+    );
   });
 
   it('keeps persisted load and resume primary-only before touching a bridge', async () => {

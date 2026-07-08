@@ -1062,6 +1062,7 @@ export function createServeApp(
   registerPermissionRoutes(app, {
     bridge: primaryBridge,
     workspaceRegistry,
+    daemonLog,
     mutate,
     sendPermissionVoteError,
   });

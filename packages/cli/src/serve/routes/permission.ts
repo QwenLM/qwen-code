@@ -6,6 +6,7 @@
 
 import type { Application, RequestHandler, Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { DaemonLogger } from '../daemon-logger.js';
 import {
   detectFromLoopback,
   parseClientIdHeader,
@@ -22,6 +23,7 @@ type SendPermissionVoteError = (
 interface RegisterPermissionRoutesDeps {
   bridge: AcpSessionBridge;
   workspaceRegistry: WorkspaceRegistry;
+  daemonLog?: DaemonLogger;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendPermissionVoteError: SendPermissionVoteError;
 }
@@ -30,7 +32,13 @@ export function registerPermissionRoutes(
   app: Application,
   deps: RegisterPermissionRoutesDeps,
 ): void {
-  const { bridge, workspaceRegistry, mutate, sendPermissionVoteError } = deps;
+  const {
+    bridge,
+    workspaceRegistry,
+    daemonLog,
+    mutate,
+    sendPermissionVoteError,
+  } = deps;
 
   app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
@@ -53,6 +61,12 @@ export function registerPermissionRoutes(
           ? { kind: 'found' as const, runtime: workspaceRegistry.primary }
           : workspaceRegistry.resolveLiveSessionOwner(sessionId);
       if (owner.kind === 'not_found') {
+        daemonLog?.warn('session routing failed', {
+          route: 'POST /session/:id/permission/:requestId',
+          resolutionKind: 'not_found',
+          sessionId,
+          requestId,
+        });
         res.status(404).json({
           error: `No session with id "${sessionId}"`,
           code: 'session_not_found',
@@ -61,6 +75,13 @@ export function registerPermissionRoutes(
         return;
       }
       if (owner.kind === 'ambiguous') {
+        daemonLog?.warn('session routing failed', {
+          route: 'POST /session/:id/permission/:requestId',
+          resolutionKind: 'ambiguous',
+          sessionId,
+          requestId,
+          workspaceIds: owner.runtimes.map((runtime) => runtime.workspaceId),
+        });
         res.status(500).json({
           error: `Session owner is ambiguous for "${sessionId}"`,
           code: 'ambiguous_session_owner',

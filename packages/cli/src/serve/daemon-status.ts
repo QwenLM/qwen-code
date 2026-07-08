@@ -327,18 +327,27 @@ export async function buildDaemonStatusResponse(
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   let pendingPrompts = 0;
   let derivedQueuedPrompts = 0;
-  for (const { snapshot } of workspaceSnapshots) {
+  const derivedQueuedPromptsByWorkspace: number[] = [];
+  for (const [index, { snapshot }] of workspaceSnapshots.entries()) {
+    let derivedQueuedPromptsForWorkspace = 0;
     for (const session of snapshot.sessions) {
       pendingPrompts += session.pendingPromptCount;
-      derivedQueuedPrompts += Math.max(
+      const sessionQueuedPrompts = Math.max(
         0,
         session.pendingPromptCount - (session.hasActivePrompt ? 1 : 0),
       );
+      derivedQueuedPrompts += sessionQueuedPrompts;
+      derivedQueuedPromptsForWorkspace += sessionQueuedPrompts;
     }
+    derivedQueuedPromptsByWorkspace[index] = derivedQueuedPromptsForWorkspace;
   }
   const queuedPrompts =
     workspaceRuntimes?.reduce(
-      (sum, runtime) => sum + (runtime.bridge.pendingPromptTotal ?? 0),
+      (sum, runtime, index) =>
+        sum +
+        (runtime.bridge.pendingPromptTotal ??
+          derivedQueuedPromptsByWorkspace[index] ??
+          0),
       0,
     ) ??
     input.bridge.pendingPromptTotal ??

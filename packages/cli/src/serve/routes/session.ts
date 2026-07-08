@@ -132,6 +132,18 @@ export function registerSessionRoutes(
   } = deps;
   const LANGUAGE_CODES = deps.languageCodes;
 
+  const logSessionRoutingFailure = (
+    route: string,
+    resolutionKind: string,
+    details: Record<string, unknown> = {},
+  ): void => {
+    daemonLog?.warn('session routing failed', {
+      route,
+      resolutionKind,
+      ...details,
+    });
+  };
+
   const sendWorkspaceMismatch = (
     res: Response,
     requestedWorkspace: string,
@@ -155,6 +167,9 @@ export function registerSessionRoutes(
       key = canonicalizeWorkspace(cwd);
     } catch (err) {
       if (workspaceRegistry.list().length > 1 && 'cwd' in body) {
+        logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
+          requestedWorkspace: cwd,
+        });
         sendWorkspaceMismatch(res, cwd);
         return undefined;
       }
@@ -172,10 +187,17 @@ export function registerSessionRoutes(
       'cwd' in body ? key : undefined,
     );
     if (!runtime) {
+      logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
+        requestedWorkspace: key,
+      });
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
     if (!runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure('POST /session', 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
       res.status(403).json({
         error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
         code: 'untrusted_workspace',
@@ -244,6 +266,7 @@ export function registerSessionRoutes(
     const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
     if (resolution.kind === 'found') return resolution.runtime;
     if (resolution.kind === 'not_found') {
+      logSessionRoutingFailure(route, 'not_found', { sessionId });
       res.status(404).json({
         error: `No session with id "${sessionId}"`,
         code: 'session_not_found',
@@ -251,6 +274,10 @@ export function registerSessionRoutes(
       });
       return undefined;
     }
+    logSessionRoutingFailure(route, 'ambiguous', {
+      sessionId,
+      workspaceIds: resolution.runtimes.map((runtime) => runtime.workspaceId),
+    });
     res.status(500).json({
       error: `Session owner is ambiguous for "${sessionId}"`,
       code: 'ambiguous_session_owner',
