@@ -262,6 +262,40 @@ describe('extractRememberErrorDetails', () => {
     expect(details).not.toContain('BBBBBBBBBBBBBBB');
   });
 
+  it('redacts AWS access keys split by credential separators', () => {
+    for (const separator of ['\x01', '\u00a0', '\u200b']) {
+      const details = extractRememberErrorDetails(
+        new Error(`AWS key AKIA12345678${separator}90123456`),
+      );
+
+      expect(details).toBe('AWS key <redacted>');
+      expect(details).not.toContain('12345678');
+      expect(details).not.toContain('90123456');
+    }
+  });
+
+  it('redacts secret assignments split by credential separators', () => {
+    for (const separator of ['\x01', '\u00a0', '\u200b']) {
+      const details = extractRememberErrorDetails(
+        new Error(`token=aaaaaaaaaa${separator}bbbbbbbb`),
+      );
+
+      expect(details).toBe('token=<redacted>');
+      expect(details).not.toContain('aaaaaaaaaa');
+      expect(details).not.toContain('bbbbbbbb');
+    }
+  });
+
+  it('redacts env secret assignments split by credential separators', () => {
+    const details = extractRememberErrorDetails(
+      new Error('QWEN_DAEMON_TOKEN=AAAAAAAAAA\u00a0BBBBBBBB'),
+    );
+
+    expect(details).toBe('QWEN_DAEMON_TOKEN=<redacted>');
+    expect(details).not.toContain('AAAAAAAAAA');
+    expect(details).not.toContain('BBBBBBBB');
+  });
+
   it('redacts bare bearer tokens separated by invisible characters', () => {
     const details = extractRememberErrorDetails(
       new Error('Bearer\u200BeyJhbGciOiABCDEFGHIJKLMN'),
