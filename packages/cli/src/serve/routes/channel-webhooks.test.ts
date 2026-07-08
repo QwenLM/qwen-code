@@ -9,7 +9,12 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { registerChannelWebhookRoutes } from './channel-webhooks.js';
 
-function appHarness(opts?: { enqueueWebhookTask?: ReturnType<typeof vi.fn> }) {
+function appHarness(opts?: {
+  enqueueWebhookTask?: ReturnType<typeof vi.fn>;
+  rateLimiter?: {
+    checkRate: ReturnType<typeof vi.fn>;
+  };
+}) {
   const app = express();
   let jsonCallCount = 0;
   app.use((_req, res, next) => {
@@ -48,6 +53,7 @@ function appHarness(opts?: { enqueueWebhookTask?: ReturnType<typeof vi.fn> }) {
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     enqueueWebhookTask,
+    rateLimiter: opts?.rateLimiter,
   });
 
   return {
@@ -134,6 +140,30 @@ describe('channel webhook routes', () => {
     });
   });
 
+  it('rejects deeply nested payload objects', async () => {
+    const h = appHarness();
+    let payload: Record<string, unknown> = {};
+    for (let i = 0; i < 65; i++) {
+      payload = { next: payload };
+    }
+
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'Body field "payload" exceeds maximum nesting depth (64)',
+    });
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
   it.each(['string payload', 123, true, ['array']])(
     'rejects non-object payload values: %s',
     async (payload) => {
@@ -155,6 +185,29 @@ describe('channel webhook routes', () => {
       expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
     },
   );
+
+  it('rate limits by channel and source', async () => {
+    const rateLimiter = {
+      checkRate: vi.fn(() => true),
+    };
+    const h = appHarness({ rateLimiter });
+
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(202);
+    expect(rateLimiter.checkRate).toHaveBeenCalledWith(
+      'webhook:dingtalk-main:github-ci',
+      'mutation',
+    );
+  });
 
   it('rejects invalid secrets', async () => {
     const h = appHarness();

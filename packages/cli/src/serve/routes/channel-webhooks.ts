@@ -21,6 +21,7 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
   'constructor',
   'prototype',
 ]);
+const MAX_PAYLOAD_DEPTH = 64;
 
 export interface ChannelWebhookRouteDeps {
   channelsConfig: Record<string, { webhooks?: ChannelWebhookConfig }>;
@@ -172,7 +173,7 @@ function createWebhookRateLimitMiddleware(
       next();
       return;
     }
-    const key = `webhook:${req.socket.remoteAddress ?? 'unknown'}`;
+    const key = `webhook:${req.params['channelName'] ?? 'unknown'}:${req.params['source'] ?? 'unknown'}`;
     if (deps.rateLimiter.checkRate(key, 'mutation')) {
       next();
       return;
@@ -238,6 +239,12 @@ function readPayload(
     payload !== null &&
     !Array.isArray(payload)
   ) {
+    if (!isWithinPayloadDepth(payload, MAX_PAYLOAD_DEPTH)) {
+      res.status(400).json({
+        error: `Body field "payload" exceeds maximum nesting depth (${MAX_PAYLOAD_DEPTH})`,
+      });
+      return undefined;
+    }
     return Object.fromEntries(
       Object.entries(payload).filter(
         ([key]) => !PROTOTYPE_POLLUTION_KEYS.has(key),
@@ -248,6 +255,23 @@ function readPayload(
     error: 'Body field "payload" must be an object when provided',
   });
   return undefined;
+}
+
+function isWithinPayloadDepth(value: unknown, maxDepth: number): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    if (current.depth > maxDepth) return false;
+    if (typeof current.value !== 'object' || current.value === null) continue;
+    const children = Array.isArray(current.value)
+      ? current.value
+      : Object.values(current.value as Record<string, unknown>);
+    for (const child of children) {
+      stack.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  return true;
 }
 
 function classifyChannelWebhookEnqueueError(error: unknown): {
