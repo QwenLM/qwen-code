@@ -992,8 +992,8 @@ export class Query implements AsyncIterable<SDKMessage> {
    */
   async setEffort(
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max',
-  ): Promise<Record<string, unknown> | null> {
-    return this.sendControlRequest(ControlRequestType.SET_EFFORT, { effort });
+  ): Promise<void> {
+    await this.sendControlRequest(ControlRequestType.SET_EFFORT, { effort });
   }
 
   /**

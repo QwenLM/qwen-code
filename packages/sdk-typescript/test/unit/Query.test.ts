@@ -1303,8 +1303,7 @@ describe('Query', () => {
         }),
       );
 
-      const result = await setEffortPromise;
-      expect(result).toMatchObject({ subtype: 'set_effort', effort: 'high' });
+      await setEffortPromise;
 
       await query.close();
     });
@@ -1407,6 +1406,22 @@ describe('Query', () => {
         'Query is closed',
       );
       await expect(query.getUsageInfo()).rejects.toThrow('Query is closed');
+    });
+
+    it('should send effort in initialize payload when provided in options', async () => {
+      const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+      await respondToInitialize(transport, query);
+
+      const messages = transport.getAllWrittenMessages();
+      const initMsg = findControlRequest(
+        messages,
+        ControlRequestType.INITIALIZE,
+      );
+      expect(initMsg).toBeDefined();
+      expect((initMsg!.request as Record<string, unknown>).effort).toBe('high');
+
+      await query.close();
     });
   });
 

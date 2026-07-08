@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import AsyncIterable, Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from .errors import AbortError, ControlRequestTimeoutError
@@ -29,6 +29,7 @@ from .protocol import (
 from .transport import ProcessTransport
 from .types import (
     CanUseToolContext,
+    Effort,
     PermissionDenyResult,
     QueryOptions,
     QueryOptionsDict,
@@ -484,9 +485,9 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
-    async def set_effort(self, effort: str) -> dict[str, Any] | None:
+    async def set_effort(self, effort: Effort) -> None:
         await self._ensure_started()
-        return await self._send_control_request("set_effort", {"effort": effort})
+        await self._send_control_request("set_effort", {"effort": effort})
 
     async def get_available_models(self) -> dict[str, Any] | None:
         await self._ensure_started()
@@ -500,11 +501,14 @@ class Query:
             "get_context_usage", {"show_details": show_details}
         )
 
-    async def get_usage_info(self, range: str | None = None) -> dict[str, Any] | None:
+    async def get_usage_info(
+        self,
+        time_range: Literal["today", "week", "month", "all"] | None = None,
+    ) -> dict[str, Any] | None:
         await self._ensure_started()
         data: dict[str, Any] = {}
-        if range is not None:
-            data["range"] = range
+        if time_range is not None:
+            data["range"] = time_range
         return await self._send_control_request("get_usage_info", data)
 
     @property

@@ -577,8 +577,7 @@ async def test_set_effort_sends_control_request() -> None:
         }
     )
 
-    result = await task
-    assert result == {"subtype": "set_effort", "effort": "high"}
+    await task
     await query.close()
 
 
@@ -641,7 +640,7 @@ async def test_get_usage_info_sends_control_request() -> None:
     transport = FakeTransport()
     query = await _start_query(transport)
 
-    task = asyncio.create_task(query.get_usage_info(range="week"))
+    task = asyncio.create_task(query.get_usage_info(time_range="week"))
     request = await _wait_for_request(transport, "get_usage_info")
 
     assert request["request"]["range"] == "week"

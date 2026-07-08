@@ -46,7 +46,6 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
-  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 };
 
 export interface QuerySystemPromptPreset {

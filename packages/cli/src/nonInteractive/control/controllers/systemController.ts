@@ -275,13 +275,20 @@ export class SystemController extends BaseController {
     if (payload.effort) {
       const normalized = normalizeReasoningEffort(payload.effort);
       if (normalized) {
-        this.context.config.setReasoningEffort(normalized);
-        debugLogger.info(
-          `[SystemController] Set reasoning effort to: ${normalized}`,
-        );
+        try {
+          this.context.config.setReasoningEffort(normalized);
+          debugLogger.info(
+            `[SystemController] Set reasoning effort to: ${normalized}`,
+          );
+        } catch (error) {
+          debugLogger.error(
+            '[SystemController] Failed to set reasoning effort:',
+            error,
+          );
+        }
       } else {
-        debugLogger.warn(
-          `[SystemController] Invalid effort value: ${payload.effort}`,
+        throw new Error(
+          `Invalid effort value: ${payload.effort}. Supported: low, medium, high, xhigh, max`,
         );
       }
     }
@@ -555,7 +562,14 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const models = this.context.config.getAvailableModels();
+      const models = this.context.config
+        .getAvailableModels()
+        .map(({ id, label, capabilities, contextWindowSize }) => ({
+          id,
+          label,
+          capabilities,
+          contextWindowSize,
+        }));
 
       return {
         subtype: 'get_available_models',
