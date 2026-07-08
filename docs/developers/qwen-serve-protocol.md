@@ -1313,6 +1313,8 @@ Response:
 
 The first page freezes the current JSONL snapshot size. Later pages read only that byte prefix, so appends after page 1 do not change the result set. If the file disappears, is truncated below the frozen size, is replaced with a different inode, or is moved to archive, the next page returns `409` and the client should restart from page 1 or ask the user to reopen the transcript.
 
+To protect daemon memory and latency, snapshots above the transcript indexing cap fail before the daemon scans the JSONL. Clients receive `413 transcript_too_large` and should fall back to export/offline processing or ask the user to shorten/archive older history.
+
 `partial: true` and `replayError` may appear if replay conversion fails after producing some frames. Treat the page as incomplete and do not continue with the cursor.
 
 **Errors:**
@@ -1321,6 +1323,7 @@ The first page freezes the current JSONL snapshot size. Later pages read only th
 - `404` — active persisted session id does not exist.
 - `409` — `session_archived`, `session_archiving`, or `session_conflict` from the same loadability checks as `/load`.
 - `409` — transcript snapshot is unavailable because the file was deleted, truncated, replaced, or archived after the cursor was issued.
+- `413` — `transcript_too_large` when the frozen transcript snapshot exceeds the daemon indexing cap.
 
 ### `POST /session/:id/resume`
 

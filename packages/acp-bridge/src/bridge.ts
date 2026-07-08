@@ -1024,6 +1024,7 @@ const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
+const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // Per-session cap on undrained mid-turn messages: a busy turn with no drain
@@ -4944,7 +4945,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ),
               getChannelClosedReject(info),
             ]),
-            initTimeoutMs,
+            Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
             SERVE_STATUS_EXT_METHODS.sessionTranscript,
           ),
         );

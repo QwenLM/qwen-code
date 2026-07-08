@@ -15,6 +15,7 @@ import type { ChatRecord } from './chatRecordingService.js';
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
+export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
 
 export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
@@ -27,6 +28,19 @@ export class SessionTranscriptSnapshotUnavailableError extends Error {
   constructor(sessionId: string) {
     super(`Transcript snapshot is unavailable for session ${sessionId}`);
     this.name = 'SessionTranscriptSnapshotUnavailableError';
+  }
+}
+
+export class SessionTranscriptTooLargeError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly snapshotSize: number,
+    readonly maxBytes: number,
+  ) {
+    super(
+      `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`,
+    );
+    this.name = 'SessionTranscriptTooLargeError';
   }
 }
 
@@ -371,6 +385,14 @@ async function buildIndex(params: {
   lastUpdated: string;
 }): Promise<TranscriptIndex> {
   const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
+  const sessionId = path.basename(filePath, '.jsonl');
+  if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    );
+  }
   const byUuid = new Map<string, UuidIndexEntry>();
   let sequence = 0;
   let leafUuid: string | undefined;
@@ -411,9 +433,7 @@ async function buildIndex(params: {
   );
 
   if (!leafUuid || !startTime) {
-    throw new SessionTranscriptSnapshotUnavailableError(
-      path.basename(filePath, '.jsonl'),
-    );
+    throw new SessionTranscriptSnapshotUnavailableError(sessionId);
   }
 
   const activeUuids: string[] = [];

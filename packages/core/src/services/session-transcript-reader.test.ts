@@ -10,7 +10,10 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
-import { SessionTranscriptReader } from './session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptReader,
+} from './session-transcript-reader.js';
 
 describe('SessionTranscriptReader', () => {
   let runtimeDir: string;
@@ -161,5 +164,18 @@ describe('SessionTranscriptReader', () => {
       { text: 'hello' },
       { text: ' world' },
     ]);
+  });
+
+  it('rejects oversized snapshots before indexing', async () => {
+    const filePath = await writeRecords([record('u1', null, 'hello')]);
+    await fs.truncate(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    await expect(reader.readPage(sessionId)).rejects.toMatchObject({
+      name: 'SessionTranscriptTooLargeError',
+      sessionId,
+      snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
+      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    });
   });
 });

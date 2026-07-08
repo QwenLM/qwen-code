@@ -156,6 +156,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SESSION_TRANSCRIPT_MAX_LIMIT: 500,
   InvalidSessionTranscriptCursorError: class InvalidSessionTranscriptCursorError extends Error {},
   SessionTranscriptSnapshotUnavailableError: class SessionTranscriptSnapshotUnavailableError extends Error {},
+  SessionTranscriptTooLargeError: class SessionTranscriptTooLargeError extends Error {
+    constructor(
+      readonly sessionId: string,
+      readonly snapshotSize: number,
+      readonly maxBytes: number,
+    ) {
+      super('Transcript snapshot is too large');
+    }
+  },
   encodeSessionTranscriptCursor: vi.fn((state: unknown) =>
     Buffer.from(JSON.stringify(state), 'utf8').toString('base64url'),
   ),
@@ -639,6 +648,7 @@ import {
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
+  SessionTranscriptTooLargeError,
   unregisterGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
@@ -5335,7 +5345,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         limit: 2,
       },
     )) as {
-      events: Array<{ id?: number; type: string; data: { timestamp?: number } }>;
+      events: Array<{
+        id?: number;
+        type: string;
+        data: { timestamp?: number };
+      }>;
       nextCursor?: string;
       hasMore: boolean;
     };
@@ -5358,6 +5372,40 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.events[0]).not.toHaveProperty('id');
     expect(result.hasMore).toBe(true);
     expect(result.nextCursor).toBeDefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/status/session/transcript maps oversized snapshots to structured errors', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi
+      .fn()
+      .mockRejectedValue(
+        new SessionTranscriptTooLargeError(VALID_SESSION_ID, 300, 200),
+      );
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+      }),
+    ).rejects.toMatchObject({
+      code: -32011,
+      data: {
+        errorKind: 'transcript_too_large',
+        sessionId: VALID_SESSION_ID,
+        snapshotSize: 300,
+        maxBytes: 200,
+      },
+    });
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {});
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -59,6 +59,7 @@ import {
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
   type SessionTranscriptCursorState,
   subagentGenerator,
@@ -5898,6 +5899,14 @@ class QwenAgent implements Agent {
             throw new RequestError(-32010, error.message, {
               errorKind: 'transcript_snapshot_unavailable',
               sessionId,
+            });
+          }
+          if (error instanceof SessionTranscriptTooLargeError) {
+            throw new RequestError(-32011, error.message, {
+              errorKind: 'transcript_too_large',
+              sessionId,
+              snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
             });
           }
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
