@@ -5841,7 +5841,7 @@ class QwenAgent implements Agent {
               cwd,
               [],
               settings,
-              sessionId,
+              undefined,
               false,
             );
             const replayState = parseTranscriptReplayState(page.replay);
@@ -5863,7 +5863,7 @@ class QwenAgent implements Agent {
                   cumulativeUsage: replayState.cumulativeUsage,
                 },
               };
-              nextCursor = encodeSessionTranscriptCursor(nextCursorState);
+              nextCursor = encodeSessionTranscriptCursor(nextCursorState, cwd);
             }
             return {
               v: 1,
@@ -8261,9 +8261,13 @@ class QwenAgent implements Agent {
 
     const mergedSettings = settings.merged;
 
+    const sessionArg =
+      resume === true
+        ? { resume: sessionId, sessionId: undefined }
+        : { sessionId, resume: undefined };
     const argvForSession = {
       ...this.argv,
-      ...(resume ? { resume: sessionId } : { sessionId }),
+      ...sessionArg,
       continue: false,
     };
 

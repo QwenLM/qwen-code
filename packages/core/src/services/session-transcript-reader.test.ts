@@ -14,6 +14,7 @@ import {
   encodeSessionTranscriptCursor,
   InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  resetSessionTranscriptIndexCacheForTest,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
 
@@ -32,6 +33,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   afterEach(async () => {
+    resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
   });
@@ -82,6 +84,12 @@ describe('SessionTranscriptReader', () => {
     };
   }
 
+  function encodeCursor(
+    state: Parameters<typeof encodeSessionTranscriptCursor>[0],
+  ): string {
+    return encodeSessionTranscriptCursor(state, workspaceDir);
+  }
+
   it('pages only the active parentUuid chain and skips abandoned branches', async () => {
     await writeRecords([
       record('u1', null, 'root'),
@@ -96,7 +104,7 @@ describe('SessionTranscriptReader', () => {
     const first = await reader.readPage(sessionId, { limit: 2 });
     expect(first.nextCursorState).toBeDefined();
     const second = await reader.readPage(sessionId, {
-      cursor: encodeSessionTranscriptCursor(first.nextCursorState!),
+      cursor: encodeCursor(first.nextCursorState!),
       limit: 2,
     });
 
@@ -123,7 +131,7 @@ describe('SessionTranscriptReader', () => {
     );
 
     const second = await reader.readPage(sessionId, {
-      cursor: encodeSessionTranscriptCursor(first.nextCursorState!),
+      cursor: encodeCursor(first.nextCursorState!),
       limit: 2,
     });
 
@@ -148,6 +156,29 @@ describe('SessionTranscriptReader', () => {
       { text: ' world' },
     ]);
     expect(page.hasMore).toBe(true);
+  });
+
+  it('keeps cursors valid after the in-memory key cache is reset', async () => {
+    await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+      record('u2', 'a1', 'next'),
+    ]);
+
+    const firstReader = new SessionTranscriptReader(workspaceDir);
+    const first = await firstReader.readPage(sessionId, { limit: 1 });
+    const cursor = encodeCursor(first.nextCursorState!);
+
+    resetSessionTranscriptIndexCacheForTest();
+
+    const secondReader = new SessionTranscriptReader(workspaceDir);
+    const second = await secondReader.readPage(sessionId, {
+      cursor,
+      limit: 1,
+    });
+
+    expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
+    expect(second.hasMore).toBe(true);
   });
 
   it('does not duplicate same-uuid fragments parsed from one glued JSONL line', async () => {
@@ -190,10 +221,9 @@ describe('SessionTranscriptReader', () => {
     const reader = new SessionTranscriptReader(workspaceDir);
     const first = await reader.readPage(sessionId, { limit: 1 });
     const decoded = JSON.parse(
-      Buffer.from(
-        encodeSessionTranscriptCursor(first.nextCursorState!),
-        'base64url',
-      ).toString('utf8'),
+      Buffer.from(encodeCursor(first.nextCursorState!), 'base64url').toString(
+        'utf8',
+      ),
     ) as Record<string, unknown>;
     const tampered = Buffer.from(
       JSON.stringify({

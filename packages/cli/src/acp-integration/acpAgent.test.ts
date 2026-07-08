@@ -5372,6 +5372,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.events[0]).not.toHaveProperty('id');
     expect(result.hasMore).toBe(true);
     expect(result.nextCursor).toBeDefined();
+    const transcriptConfigArgv = vi
+      .mocked(loadCliConfig)
+      .mock.calls.at(-1)?.[1] as CliArgs | undefined;
+    expect(transcriptConfigArgv?.sessionId).toBeUndefined();
+    expect(transcriptConfigArgv?.resume).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -110,9 +110,11 @@ interface CacheEntry {
 const INDEX_CACHE_MAX_ENTRIES = 32;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const READ_CHUNK_SIZE = 64 * 1024;
-let cursorHmacKey: Buffer | undefined;
+const CURSOR_HMAC_KEY_BYTES = 32;
+const CURSOR_HMAC_KEY_FILENAME = 'session-transcript-cursor-key';
 
 const indexCache = new Map<string, CacheEntry>();
+const cursorHmacKeys = new Map<string, Buffer>();
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -141,14 +143,69 @@ function cursorPayload(
   };
 }
 
-function getCursorHmacKey(): Buffer {
-  cursorHmacKey ??= crypto.randomBytes(32);
-  return cursorHmacKey;
+function getCursorHmacKeyPath(workspaceCwd: string): string {
+  return path.join(
+    new Storage(workspaceCwd).getProjectDir(),
+    CURSOR_HMAC_KEY_FILENAME,
+  );
 }
 
-function signCursorPayload(payload: Record<string, unknown>): string {
+function readCursorHmacKey(keyPath: string): Buffer | undefined {
+  try {
+    const key = Buffer.from(
+      fs.readFileSync(keyPath, 'utf8').trim(),
+      'base64url',
+    );
+    return key.length === CURSOR_HMAC_KEY_BYTES ? key : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function writeCursorHmacKey(keyPath: string, key: Buffer): Buffer {
+  const encoded = `${key.toString('base64url')}\n`;
+  fs.mkdirSync(path.dirname(keyPath), { recursive: true, mode: 0o700 });
+  try {
+    const fd = fs.openSync(keyPath, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, encoded, 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      const existing = readCursorHmacKey(keyPath);
+      if (existing) {
+        return existing;
+      }
+      fs.writeFileSync(keyPath, encoded, { encoding: 'utf8', mode: 0o600 });
+    } else {
+      throw error;
+    }
+  }
+  return key;
+}
+
+function getCursorHmacKey(workspaceCwd: string): Buffer {
+  const keyPath = getCursorHmacKeyPath(workspaceCwd);
+  const cached = cursorHmacKeys.get(keyPath);
+  if (cached) return cached;
+  const key =
+    readCursorHmacKey(keyPath) ??
+    writeCursorHmacKey(keyPath, crypto.randomBytes(CURSOR_HMAC_KEY_BYTES));
+  cursorHmacKeys.set(keyPath, key);
+  return key;
+}
+
+function signCursorPayload(
+  payload: Record<string, unknown>,
+  workspaceCwd: string,
+): string {
   return crypto
-    .createHmac('sha256', getCursorHmacKey())
+    .createHmac('sha256', getCursorHmacKey(workspaceCwd))
     .update(JSON.stringify(payload))
     .digest('base64url');
 }
@@ -156,8 +213,12 @@ function signCursorPayload(payload: Record<string, unknown>): string {
 function hasValidCursorMac(
   payload: Record<string, unknown>,
   mac: string,
+  workspaceCwd: string,
 ): boolean {
-  const expected = Buffer.from(signCursorPayload(payload), 'utf8');
+  const expected = Buffer.from(
+    signCursorPayload(payload, workspaceCwd),
+    'utf8',
+  );
   const actual = Buffer.from(mac, 'utf8');
   return (
     expected.length === actual.length &&
@@ -165,12 +226,15 @@ function hasValidCursorMac(
   );
 }
 
-function encodeCursorState(state: SessionTranscriptCursorState): string {
+function encodeCursorState(
+  state: SessionTranscriptCursorState,
+  workspaceCwd: string,
+): string {
   const payload = cursorPayload(state);
   return Buffer.from(
     JSON.stringify({
       ...payload,
-      mac: signCursorPayload(payload),
+      mac: signCursorPayload(payload, workspaceCwd),
     }),
     'utf8',
   ).toString('base64url');
@@ -178,12 +242,14 @@ function encodeCursorState(state: SessionTranscriptCursorState): string {
 
 export function encodeSessionTranscriptCursor(
   state: SessionTranscriptCursorState,
+  workspaceCwd: string,
 ): string {
-  return encodeCursorState(state);
+  return encodeCursorState(state, workspaceCwd);
 }
 
 export function decodeSessionTranscriptCursor(
   cursor: string,
+  workspaceCwd: string,
 ): SessionTranscriptCursorState {
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -221,7 +287,7 @@ export function decodeSessionTranscriptCursor(
       lastUpdated: parsed['lastUpdated'],
       ...(parsed['replay'] !== undefined ? { replay: parsed['replay'] } : {}),
     };
-    if (!hasValidCursorMac(cursorPayload(state), parsed['mac'])) {
+    if (!hasValidCursorMac(cursorPayload(state), parsed['mac'], workspaceCwd)) {
       throw new InvalidSessionTranscriptCursorError();
     }
     return state;
@@ -559,7 +625,7 @@ async function getCachedIndex(params: {
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
-  constructor(workspaceCwd: string) {
+  constructor(private readonly workspaceCwd: string) {
     this.storage = new Storage(workspaceCwd);
   }
 
@@ -578,7 +644,7 @@ export class SessionTranscriptReader {
     const limit = normalizeLimit(options.limit);
     const cursor =
       options.cursor !== undefined
-        ? decodeSessionTranscriptCursor(options.cursor)
+        ? decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd)
         : undefined;
     if (cursor && cursor.sessionId !== sessionId) {
       throw new InvalidSessionTranscriptCursorError();
@@ -642,4 +708,5 @@ export class SessionTranscriptReader {
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCache.clear();
+  cursorHmacKeys.clear();
 }
