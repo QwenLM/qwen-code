@@ -7661,6 +7661,13 @@ Other open files:
         await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DEBOUNCE_MS);
         releaseSecondChunk();
         await consumed;
+        // fireMessageDisplayHook chains requests for the same message_id through
+        // a promise so a slow hook can't run concurrently with itself — that
+        // chain settles a few microtask ticks after the generator itself
+        // finishes, since it's deliberately not awaited by the caller.
+        for (let i = 0; i < 10; i++) {
+          await Promise.resolve();
+        }
 
         expect(mockMessageBus.request).toHaveBeenCalledTimes(2);
         const [midStreamCall, finalCall] = mockMessageBus.request.mock.calls;
