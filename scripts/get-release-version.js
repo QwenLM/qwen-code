@@ -21,7 +21,7 @@ function getVersionFromNPM(distTag) {
   try {
     return execSync(command).toString().trim();
   } catch (error) {
-    if (error.message?.includes('E404') || error.message?.includes('404')) {
+    if (error.message?.includes('E404')) {
       return '';
     }
     throw error;
@@ -34,7 +34,7 @@ function getAllVersionsFromNPM() {
     const versionsJson = execSync(command).toString().trim();
     return JSON.parse(versionsJson);
   } catch (error) {
-    if (error.message?.includes('E404') || error.message?.includes('404')) {
+    if (error.message?.includes('E404')) {
       return [];
     }
     throw error;
@@ -60,7 +60,18 @@ function detectRollbackAndGetBaseline(npmDistTag) {
   const distTagVersion = getVersionFromNPM(npmDistTag);
 
   // Get all published versions
-  const allVersions = getAllVersionsFromNPM();
+  let allVersions;
+  try {
+    allVersions = getAllVersionsFromNPM();
+  } catch (error) {
+    if (distTagVersion) {
+      console.error(
+        `Could not fetch versions list, proceeding with dist-tag: ${error.message}`,
+      );
+      return { baseline: distTagVersion, isRollback: false };
+    }
+    throw error;
+  }
 
   if (!distTagVersion) {
     // Dist-tag is missing — try to derive baseline from published versions

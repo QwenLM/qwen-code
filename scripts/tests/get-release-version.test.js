@@ -325,7 +325,7 @@ describe('getVersion', () => {
       expect(() => getVersion({ type: 'stable' })).toThrow('ETIMEDOUT');
     });
 
-    it('should propagate transient NPM errors from versions list lookup', () => {
+    it('should fall back to dist-tag when versions list lookup fails transiently', () => {
       const mockWithTransientVersionsError = (command) => {
         if (
           command.includes('npm view') &&
@@ -337,6 +337,31 @@ describe('getVersion', () => {
         return mockExecSync(command);
       };
       vi.mocked(execSync).mockImplementation(mockWithTransientVersionsError);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should propagate transient NPM errors from versions list when dist-tag is also missing', () => {
+      const mockWithBothFailing = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (
+          command.includes('npm view') &&
+          command.includes('versions --json')
+        ) {
+          throw new Error('npm error code ECONNRESET');
+        }
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithBothFailing);
 
       expect(() => getVersion({ type: 'stable' })).toThrow('ECONNRESET');
     });
@@ -361,6 +386,26 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.6.2');
       expect(result.npmTag).toBe('latest');
       expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should fall back to package.json when all matching versions are deprecated (no dist-tag)', () => {
+      const mockWithAllDeprecated = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=nightly') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.7.0-nightly.1', '0.7.0-nightly.2']);
+        if (command.includes('deprecated')) return 'Deprecated';
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithAllDeprecated);
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.0-preview.0');
     });
   });
 });
