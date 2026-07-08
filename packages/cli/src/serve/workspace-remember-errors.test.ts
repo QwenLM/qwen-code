@@ -203,6 +203,14 @@ describe('extractRememberErrorDetails', () => {
     }
   });
 
+  it('normalizes unicode space separators without collapsing words', () => {
+    const details = extractRememberErrorDetails(
+      new Error('missing column\u00a0name'),
+    );
+
+    expect(details).toBe('missing column name');
+  });
+
   it('redacts bare tokens split by invisible characters', () => {
     const details = extractRememberErrorDetails(
       new Error('OpenAI key sk-AAAAAAAAAA\u2062BBBBBBBBBBBBBBB'),
@@ -338,6 +346,18 @@ describe('extractRememberErrorStack', () => {
     const stack = extractRememberErrorStack(err);
 
     expect(stack).toBe('Error: boom\r\n\tat handler (/workspace/file.ts:1:1)');
+  });
+
+  it('normalizes unicode space separators in stacks without collapsing words', () => {
+    const err = new Error('boom');
+    err.stack =
+      'Error: missing column\u202fname\n\tat handler (/workspace/file.ts:1:1)';
+
+    const stack = extractRememberErrorStack(err);
+
+    expect(stack).toBe(
+      'Error: missing column name\n\tat handler (/workspace/file.ts:1:1)',
+    );
   });
 });
 

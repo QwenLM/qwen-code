@@ -8,10 +8,13 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 
 const MAX_REMEMBER_ERROR_DETAILS_CHARS = 1000;
 const MAX_REMEMBER_ERROR_CAUSE_DEPTH = 50;
-const REMEMBER_ERROR_SEPARATOR_RE =
-  /[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector}/gu;
+const REMEMBER_ERROR_FORMAT_RE = /[\p{Cf}]|\p{Variation_Selector}/gu;
+const REMEMBER_ERROR_SPACE_SEPARATOR_RE =
+  /[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/gu;
 const REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE =
   /\b(Bearer|QQBot)(?:[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
+const REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE =
+  /(\b(?:Bearer|QQBot)\s+[A-Za-z0-9._~+/=-]*|\bsk-[A-Za-z0-9-]*)(?:[\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+(?=[A-Za-z0-9._~+/=-])/giu;
 // eslint-disable-next-line no-control-regex
 const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
 const DETAIL_SUPPRESSED_REMEMBER_ERROR_CODES = new Set([
@@ -144,17 +147,31 @@ function rawRememberErrorDetails(
 function replaceControlChars(details: string): string {
   return details
     .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
-    .replace(REMEMBER_ERROR_SEPARATOR_RE, '')
+    .replace(REMEMBER_ERROR_FORMAT_RE, '')
+    .replace(REMEMBER_ERROR_SPACE_SEPARATOR_RE, ' ')
     .replace(REMEMBER_ERROR_CONTROL_RE, ' ');
 }
 
 function replaceStackControlChars(stack: string): string {
   return stack
     .replace(REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE, '$1 ')
-    .replace(REMEMBER_ERROR_SEPARATOR_RE, '')
+    .replace(REMEMBER_ERROR_FORMAT_RE, '')
+    .replace(REMEMBER_ERROR_SPACE_SEPARATOR_RE, ' ')
     .replace(REMEMBER_ERROR_CONTROL_RE, (char) =>
       char === '\n' || char === '\r' || char === '\t' ? char : ' ',
     );
+}
+
+function collapseCredentialSeparators(details: string): string {
+  let normalized = details;
+  while (true) {
+    const next = normalized.replace(
+      REMEMBER_ERROR_CREDENTIAL_SEPARATOR_RE,
+      '$1',
+    );
+    if (next === normalized) return normalized;
+    normalized = next;
+  }
 }
 
 function isHighSurrogate(codeUnit: number): boolean {
@@ -194,13 +211,17 @@ function redactAndCapRememberErrorText(normalized: string): string | undefined {
 }
 
 function sanitizeRememberErrorDetails(details: string): string | undefined {
-  // Keep separator normalization before credential redaction: auth schemes like
-  // `Bearer` and `QQBot` may otherwise be split by invisible characters.
-  return redactAndCapRememberErrorText(replaceControlChars(details));
+  // Keep credential normalization before redaction; auth schemes and token
+  // values may otherwise be split by invisible characters.
+  return redactAndCapRememberErrorText(
+    replaceControlChars(collapseCredentialSeparators(details)),
+  );
 }
 
 function sanitizeRememberErrorStack(stack: string): string | undefined {
-  return redactAndCapRememberErrorText(replaceStackControlChars(stack));
+  return redactAndCapRememberErrorText(
+    replaceStackControlChars(collapseCredentialSeparators(stack)),
+  );
 }
 
 export function extractRememberErrorDetails(err: unknown): string | undefined {
