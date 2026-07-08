@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import {
   useActions,
   useConnection,
@@ -77,6 +77,11 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
+  // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
+  // the approval current when setApprovalMode *resolves*, not a stale one
+  // captured at click time — mirrors App's pendingApprovalRef.
+  const pendingToolApprovalRef = useRef(pendingToolApproval);
+  pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
   const isResponding = streamingState !== 'idle';
@@ -169,6 +174,27 @@ export function ChatPane({ title, onClose, onError }: ChatPaneProps) {
       }
       actions
         .setApprovalMode(modeId)
+        .then(() => {
+          // Mirror App's handleSetMode: switching THIS pane to yolo (or
+          // auto-edit for an edit tool) auto-approves a tool call already
+          // awaiting approval in this pane, so the shortcut behaves the same as
+          // in the single-session chat.
+          const approval = pendingToolApprovalRef.current;
+          if (!approval) return;
+          const autoApprove =
+            modeId === 'yolo' ||
+            (modeId === 'auto-edit' && approval.toolKind === 'edit');
+          if (!autoApprove) return;
+          const allowOnce = approval.options.find(
+            (option) => option.kind === 'allow_once',
+          );
+          if (!allowOnce) return;
+          actions
+            .submitPermission(approval.id, allowOnce.id)
+            .catch((error: unknown) =>
+              reportError(error, 'Failed to auto-approve tool call'),
+            );
+        })
         .catch((error: unknown) =>
           reportError(error, 'Failed to set approval mode'),
         );

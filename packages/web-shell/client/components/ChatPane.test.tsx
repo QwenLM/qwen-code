@@ -93,6 +93,12 @@ vi.mock('./ChatEditor', () => ({
           mode
         </button>
         <button
+          data-testid="pane-pick-badmode"
+          onClick={() => props.onSelectMode?.('totally-bogus')}
+        >
+          badmode
+        </button>
+        <button
           data-testid="pane-pick-model"
           onClick={() => props.onSelectModel?.('gpt-x')}
         >
@@ -477,5 +483,51 @@ describe('ChatPane', () => {
       await Promise.resolve();
     });
     expect(onError).toHaveBeenCalled();
+  });
+
+  it('reports a failed approval mode switch to onError', async () => {
+    const onError = vi.fn();
+    setApprovalMode.mockRejectedValueOnce(new Error('mode switch failed'));
+    render({ onError });
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it('rejects an invalid approval mode without calling the daemon', () => {
+    const onError = vi.fn();
+    render({ onError });
+    act(() =>
+      testid('pane-pick-badmode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it('auto-approves a pending tool call when the pane switches to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-yolo',
+      toolName: 'write_file',
+      toolKind: 'edit',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: {},
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+    expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 });
