@@ -7,6 +7,8 @@ export type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
   ChannelLoopToolResult,
+  PermissionRequestEvent,
+  PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -61,6 +63,8 @@ export type {
   BlockStreamingCoalesceConfig,
   ChannelConfig,
   ChannelIdentityConfig,
+  ChannelMemoryIntentClassifier,
+  ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
   ChannelPlugin,

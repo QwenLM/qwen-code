@@ -72,6 +72,32 @@ describe('voice-transcriber', () => {
     });
   });
 
+  it('uses the supplied env snapshot for model API keys', () => {
+    vi.stubEnv('DASHSCOPE_API_KEY', 'process-key');
+    const config = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Qwen ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.example/v1',
+        envKey: 'DASHSCOPE_API_KEY',
+      },
+    ]);
+
+    expect(
+      resolveVoiceTranscriptionConfig({
+        config,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+        env: { DASHSCOPE_API_KEY: 'runtime-key' },
+      }),
+    ).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://dashscope.example/v1',
+      apiKey: 'runtime-key',
+    });
+  });
+
   it('routes known voice models by model id instead of user protocol', () => {
     expect(resolveVoiceTransport('qwen3-asr-flash')).toBe('qwen-asr-chat');
     expect(resolveVoiceTransport('qwen3-asr-flash-2026-02-10')).toBe(

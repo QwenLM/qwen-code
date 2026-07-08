@@ -379,12 +379,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           //   store.dispatch() appends to existing blocks. No reset, no
           //   load(), minimal re-render.
           //
-          // PATH B — Full reload (session cleared, terminal/auth errors,
+          // PATH B — Snapshot reload (session cleared, terminal/auth errors,
           //   ring eviction):
           //   `session` is null → enter this block → DaemonSessionClient
           //   .load() fetches compactedReplay + liveJournal → deferred
           //   store.reset() + store.dispatch(replayEvents) rebuilds the
-          //   full transcript in a single synchronous batch.
+          //   current bounded replay window in a single synchronous batch.
           //
           // The `needsStoreReset` flag defers store.reset() to avoid an
           // intermediate empty-blocks state that causes virtualizer
@@ -1142,7 +1142,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
-                  // compactedReplay/liveJournal rebuild the full transcript.
+                  // compactedReplay/liveJournal rebuild the bounded replay
+                  // window.
                   console.warn(
                     '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
                     activeSession.sessionId,

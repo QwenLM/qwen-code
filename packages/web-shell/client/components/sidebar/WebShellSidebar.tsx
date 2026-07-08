@@ -35,6 +35,12 @@ const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_FOOTER_COMPACT_WIDTH = 344;
+const SIDEBAR_FOOTER_TIGHT_WIDTH = 250;
+const SIDEBAR_DRAG_VISUAL_MIN_WIDTH = 200;
+const SIDEBAR_COLLAPSE_DRAG_THRESHOLD = 56;
+const SIDEBAR_COLLAPSE_DRAG_WIDTH =
+  SIDEBAR_DRAG_VISUAL_MIN_WIDTH - SIDEBAR_COLLAPSE_DRAG_THRESHOLD;
 const ACTIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
@@ -168,6 +174,13 @@ function getGroupColorClass(color: DaemonSessionGroupColor): string {
 
 function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
+}
+
+function clampSidebarVisualWidth(width: number): number {
+  return Math.min(
+    SIDEBAR_MAX_WIDTH,
+    Math.max(SIDEBAR_DRAG_VISUAL_MIN_WIDTH, width),
+  );
 }
 
 function readSidebarWidth(): number {
@@ -600,6 +613,9 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
+  const footerCompact =
+    !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
+  const footerTight = !collapsed && sidebarWidth < SIDEBAR_FOOTER_TIGHT_WIDTH;
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
   } as CSSProperties;
@@ -1479,6 +1495,8 @@ export function WebShellSidebar({
       const startWidth = sidebarWidth;
       const previousCursor = document.body.style.cursor;
       const previousUserSelect = document.body.style.userSelect;
+      let collapsedByDrag = false;
+      let teardown: (updateState: boolean) => void = () => undefined;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
       try {
@@ -1486,13 +1504,30 @@ export function WebShellSidebar({
       } catch {
         // Pointer capture is best-effort; window listeners still handle drag.
       }
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + moveEvent.clientX - startX,
-        );
-        setSidebarWidth(nextWidth);
-      };
-      const teardown = (updateState: boolean) => {
+      function getRawWidth(clientX: number) {
+        return startWidth + clientX - startX;
+      }
+      function restoreExpandedWidth() {
+        const restoredWidth = clampSidebarWidth(startWidth);
+        setSidebarWidth(restoredWidth);
+        writeSidebarWidth(restoredWidth);
+      }
+      function collapseFromDrag() {
+        if (collapsedByDrag) return;
+        collapsedByDrag = true;
+        restoreExpandedWidth();
+        teardown(true);
+        onCollapsedChange(true);
+      }
+      function handlePointerMove(moveEvent: PointerEvent) {
+        const rawWidth = getRawWidth(moveEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        setSidebarWidth(clampSidebarVisualWidth(rawWidth));
+      }
+      teardown = function resizeTeardown(updateState: boolean) {
         document.body.style.cursor = previousCursor;
         document.body.style.userSelect = previousUserSelect;
         window.removeEventListener('pointermove', handlePointerMove);
@@ -1503,17 +1538,20 @@ export function WebShellSidebar({
           setIsResizing(false);
         }
       };
-      const handlePointerUp = (upEvent: PointerEvent) => {
-        const nextWidth = clampSidebarWidth(
-          startWidth + upEvent.clientX - startX,
-        );
+      function handlePointerUp(upEvent: PointerEvent) {
+        const rawWidth = getRawWidth(upEvent.clientX);
+        if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
+          collapseFromDrag();
+          return;
+        }
+        const nextWidth = clampSidebarWidth(rawWidth);
         setSidebarWidth(nextWidth);
         writeSidebarWidth(nextWidth);
         teardown(true);
-      };
-      const handlePointerCancel = () => {
+      }
+      function handlePointerCancel() {
         teardown(true);
-      };
+      }
       resizeTeardownRef.current = teardown;
       window.addEventListener('pointermove', handlePointerMove);
       window.addEventListener('pointerup', handlePointerUp, { once: true });
@@ -1521,7 +1559,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, sidebarWidth],
+    [collapsed, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -2506,7 +2544,13 @@ export function WebShellSidebar({
         </div>
       </div>
 
-      <div className={styles.footer}>
+      <div
+        className={cx(
+          styles.footer,
+          footerCompact && styles.footerCompact,
+          footerTight && styles.footerTight,
+        )}
+      >
         <button
           className={styles.footerButton}
           type="button"
@@ -2517,9 +2561,13 @@ export function WebShellSidebar({
           <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
             <IconSettings />
           </span>
-          {!collapsed && <span>{t('sidebar.settings')}</span>}
+          {!collapsed && !footerCompact && (
+            <span className={styles.footerButtonLabel}>
+              {t('sidebar.settings')}
+            </span>
+          )}
         </button>
-        {!collapsed && versionLabel && (
+        {!collapsed && !footerTight && versionLabel && (
           <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
             {versionLabel}
           </span>

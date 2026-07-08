@@ -10,6 +10,7 @@ function ensureBuiltins(): Promise<void> {
         { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
         { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
         { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+        { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
       ];
