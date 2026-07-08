@@ -221,13 +221,13 @@ function reconstructHistory(
 
   const { uuids, gaps } = buildOrderedUuidChain(records, {
     leafUuid,
-    bridgeGaps: true,
+    detectGaps: true,
   });
 
   if (gaps.length > 0) {
     debugLogger.warn(
-      `reconstructHistory: bridged ${gaps.length} history gap(s) ` +
-        `(childUuids: ${gaps.map((g) => g.childUuid).join(', ')})`,
+      `reconstructHistory: detected ${gaps.length} unrecoverable history ` +
+        `gap(s) (childUuids: ${gaps.map((g) => g.childUuid).join(', ')})`,
     );
   }
 

@@ -12,29 +12,28 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
  *
  * This happens when a middle segment of the session log is physically lost
  * (storage rollback, relocation, or a dropped write) while later turns keep
- * referencing the now-missing tail. Walking the chain from the newest leaf
- * stops dead at such a break, silently dropping every record before it.
+ * referencing the now-missing tail. Walking from the newest leaf stops at the
+ * break, so everything before it is unreachable.
  *
- * When gap bridging is enabled, {@link buildOrderedUuidChain} stitches the
- * newest still-present *earlier* island back on and records the break here so
- * the surface can render a visible "history gap" marker instead of pretending
- * the two halves are contiguous.
+ * The chain walk records the break here (with `detectGaps`) so the surface can
+ * render a visible "history incomplete" marker instead of silently truncating.
+ * It deliberately does NOT reconstruct the earlier records: read-side, a
+ * missing parent is indistinguishable from a lost `/rewind` marker (where the
+ * "earlier" turns are ones the user deliberately discarded), so stitching them
+ * back could resurrect deleted content. Safe recovery requires durable
+ * write-side metadata and is tracked separately.
  */
 export interface HistoryGap {
-  /** The record whose parent was missing (the UI anchors the divider here). */
+  /** The record whose parent was missing (the UI anchors the marker here). */
   childUuid: string;
   /** The parentUuid value that could not be found in the file. */
   missingParentUuid: string;
-  /** Leaf uuid of the island we bridged onto, or null if none was available. */
-  bridgedToUuid: string | null;
-  /** Absolute time delta between the two islands, for UI copy. */
-  approxLostMs?: number;
 }
 
 export interface OrderedChainResult {
-  /** Uuids in root→leaf order. */
+  /** Uuids in root→leaf order (the reachable tail island only). */
   uuids: string[];
-  /** Detected chain breaks, in root→leaf order. Empty for healthy sessions. */
+  /** Detected chain breaks. Empty for healthy sessions. */
   gaps: HistoryGap[];
 }
 
@@ -42,32 +41,22 @@ export interface BuildOrderedChainOptions {
   /** Start the walk from this uuid instead of the last physical record. */
   leafUuid?: string;
   /**
-   * When true, a walk that terminates on a *missing* parent is repaired by
-   * stitching the newest still-present earlier connected component on, rather
-   * than truncating. Off by default so callers that want the raw active
-   * branch (e.g. fork) keep today's behavior exactly.
+   * When true, a walk that stops on a physically-missing parent records a
+   * {@link HistoryGap} so the surface can surface a marker. It does NOT stitch
+   * an earlier island back on — see the HistoryGap docstring for why that is
+   * unsafe read-side. Off by default so callers that want the raw active branch
+   * (e.g. fork) keep today's behavior exactly.
    */
-  bridgeGaps?: boolean;
+  detectGaps?: boolean;
 }
 
 /**
  * Linearizes tree-structured session records into an ordered uuid chain by
- * walking `parentUuid` back from the newest leaf.
+ * walking `parentUuid` back from the newest leaf to a null root.
  *
- * The healthy path is byte-for-byte identical to the historical walk: start at
- * the last physical record (= newest append), follow `parentUuid` to a null
- * root. Connected components are only computed if a gap is actually hit, so
- * there is zero added cost for well-formed sessions.
- *
- * Safety (only stitches genuine data-loss gaps, never rewind branches):
- *  - Stitching triggers ONLY when the walk stops on a non-null parent that is
- *    absent from the record set. A rewind abandoned-branch's records are all
- *    present, so the walk reaches a null root and never enters this path.
- *  - The stitch target must live in a *different connected component* than the
- *    tail. Abandoned rewind branches share an ancestor with the tail (same
- *    component) and are therefore excluded.
- *  - Selection is by file position (append order), consistent with the
- *    last-physical-record leaf choice and immune to clock skew.
+ * On a genuinely missing parent the walk stops (as it always has). With
+ * `detectGaps` it additionally records the break so the caller can mark it;
+ * it never guesses an earlier island to reconnect.
  */
 export function buildOrderedUuidChain(
   records: ChatRecord[],
@@ -75,10 +64,10 @@ export function buildOrderedUuidChain(
 ): OrderedChainResult {
   if (records.length === 0) return { uuids: [], gaps: [] };
 
-  const bridgeGaps = opts?.bridgeGaps ?? false;
+  const detectGaps = opts?.detectGaps ?? false;
 
   // First record per uuid (matches the historical `recordsForUuid[0]`
-  // semantics). Needed for the healthy walk, so built eagerly.
+  // selection semantics).
   const firstByUuid = new Map<string, ChatRecord>();
   for (const r of records) {
     if (!firstByUuid.has(r.uuid)) firstByUuid.set(r.uuid, r);
@@ -88,25 +77,10 @@ export function buildOrderedUuidChain(
   const gaps: HistoryGap[] = [];
   const visited = new Set<string>();
 
-  // All lazily computed on the first gap; healthy sessions never pay for these.
-  // posByUuid = highest (last) file index per uuid; lastByUuid = that last
-  // record, so a gap duration uses the target's most-recent timestamp rather
-  // than its first occurrence (a uuid can span several streamed records).
-  let components: Map<string, number> | null = null;
-  let posByUuid: Map<string, number> | null = null;
-  let lastByUuid: Map<string, ChatRecord> | null = null;
-  const stitchedComps = new Set<number>();
-
   const startUuid = opts?.leafUuid ?? records[records.length - 1].uuid;
   // A caller-supplied leafUuid not backed by any record yields no chain.
   if (!firstByUuid.has(startUuid)) return { uuids: [], gaps: [] };
   let currentUuid: string | null = startUuid;
-
-  // The tail's sidechain-ness. Stitch targets must match it (see
-  // pickStitchTarget) so a main session never bridges onto a subagent leaf,
-  // while a pure-sidechain transcript (e.g. a background-agent JSONL, where
-  // every record is isSidechain) can still bridge within itself.
-  const leafIsSidechain = !!firstByUuid.get(currentUuid)?.isSidechain;
 
   while (currentUuid) {
     if (visited.has(currentUuid)) break; // cycle guard (partial transcript)
@@ -114,7 +88,7 @@ export function buildOrderedUuidChain(
     uuids.push(currentUuid);
 
     const rec = firstByUuid.get(currentUuid);
-    if (!rec) break; // leaf uuid not backed by a record (e.g. bad leafUuid)
+    if (!rec) break;
 
     const parent = rec.parentUuid;
     if (!parent) break; // reached a real root
@@ -124,152 +98,14 @@ export function buildOrderedUuidChain(
       continue;
     }
 
-    // GAP: parent is set but physically missing from the file.
-    if (!bridgeGaps) break;
-
-    // A `rewind` record deliberately re-roots the chain. If a rewind is
-    // performed on an already-corrupted session, the rewind record can inherit
-    // the missing parentUuid and itself become the gap child. Bridging here
-    // would stitch the previous physical branch — i.e. resurrect exactly the
-    // turns the user rewound away. Treat a rewind gap child as a clean barrier
-    // instead: stop without stitching and without emitting a gap marker (the
-    // re-root is intentional, not lost history).
-    if (rec.subtype === 'rewind') break;
-
-    if (components === null) {
-      components = computeComponents(records, firstByUuid);
-      posByUuid = new Map();
-      lastByUuid = new Map();
-      for (let i = 0; i < records.length; i++) {
-        posByUuid.set(records[i].uuid, i);
-        lastByUuid.set(records[i].uuid, records[i]);
-      }
-      const tailComp = components.get(uuids[0]);
-      if (tailComp !== undefined) stitchedComps.add(tailComp);
+    // GAP: parent is set but physically missing. Record it (so the surface can
+    // mark the break) but never stitch across it — see HistoryGap docstring.
+    if (detectGaps) {
+      gaps.push({ childUuid: currentUuid, missingParentUuid: parent });
     }
-
-    const childPos = posByUuid!.get(currentUuid) ?? records.length;
-    const targetUuid = pickStitchTarget(
-      records,
-      components,
-      stitchedComps,
-      childPos,
-      leafIsSidechain,
-    );
-
-    if (!targetUuid) {
-      gaps.push({
-        childUuid: currentUuid,
-        missingParentUuid: parent,
-        bridgedToUuid: null,
-      });
-      break;
-    }
-
-    // Duration spans the target island's *last* timestamp (when it ended) to
-    // the child's first (when the newer island started) — not the target's
-    // first occurrence, which would overstate the gap.
-    const targetRec =
-      lastByUuid!.get(targetUuid) ?? firstByUuid.get(targetUuid)!;
-    gaps.push({
-      childUuid: currentUuid,
-      missingParentUuid: parent,
-      bridgedToUuid: targetUuid,
-      approxLostMs: absTimeDeltaMs(targetRec, rec),
-    });
-
-    const targetComp = components.get(targetUuid);
-    if (targetComp !== undefined) stitchedComps.add(targetComp);
-    currentUuid = targetUuid; // walk into the stitched island
+    break;
   }
 
   uuids.reverse();
-  gaps.reverse();
   return { uuids, gaps };
-}
-
-/**
- * Highest-position record strictly below `childPos` whose connected component
- * has not already been consumed. Because everything between that record and
- * the child is in an already-stitched (or tail) component, this record is
- * exactly the preceding island's tail. Only records whose sidechain-ness
- * matches the tail are eligible, so a main session never bridges onto a
- * subagent leaf, while a pure-sidechain transcript can still bridge internally.
- */
-function pickStitchTarget(
-  records: ChatRecord[],
-  components: Map<string, number>,
-  stitchedComps: Set<number>,
-  childPos: number,
-  leafIsSidechain: boolean,
-): string | null {
-  for (let i = Math.min(childPos, records.length) - 1; i >= 0; i--) {
-    const r = records[i];
-    if (!!r.isSidechain !== leafIsSidechain) continue;
-    const comp = components.get(r.uuid);
-    if (comp === undefined || stitchedComps.has(comp)) continue;
-    return r.uuid;
-  }
-  return null;
-}
-
-/**
- * Union-find over present parent edges. Two records are in the same component
- * iff they are connected through parentUuid links that both exist in the file.
- * Returns a uuid→componentId map.
- */
-function computeComponents(
-  records: ChatRecord[],
-  firstByUuid: Map<string, ChatRecord>,
-): Map<string, number> {
-  const parent = new Map<string, string>();
-  for (const r of records) {
-    if (!parent.has(r.uuid)) parent.set(r.uuid, r.uuid);
-  }
-
-  const find = (x: string): string => {
-    let root = x;
-    let hop = parent.get(root)!;
-    while (hop !== root) {
-      root = hop;
-      hop = parent.get(root)!;
-    }
-    // Path compression.
-    let cur = x;
-    while (parent.get(cur)! !== root) {
-      const next = parent.get(cur)!;
-      parent.set(cur, root);
-      cur = next;
-    }
-    return root;
-  };
-
-  for (const r of records) {
-    if (r.parentUuid && firstByUuid.has(r.parentUuid)) {
-      const ra = find(r.uuid);
-      const rb = find(r.parentUuid);
-      if (ra !== rb) parent.set(ra, rb);
-    }
-  }
-
-  const comp = new Map<string, number>();
-  const idByRoot = new Map<string, number>();
-  let nextId = 0;
-  for (const r of records) {
-    const root = find(r.uuid);
-    let id = idByRoot.get(root);
-    if (id === undefined) {
-      id = nextId++;
-      idByRoot.set(root, id);
-    }
-    comp.set(r.uuid, id);
-  }
-  return comp;
-}
-
-function absTimeDeltaMs(a: ChatRecord, b: ChatRecord): number | undefined {
-  const ta = Date.parse(a.timestamp);
-  const tb = Date.parse(b.timestamp);
-  if (Number.isNaN(ta) || Number.isNaN(tb)) return undefined;
-  return Math.abs(tb - ta);
 }

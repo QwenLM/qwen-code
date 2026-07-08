@@ -5250,9 +5250,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('qwen/session/loadUpdates threads bridged historyGaps to the replayer', async () => {
     const settings = makeCoreSettings();
-    const gaps = [
-      { childUuid: 'c', missingParentUuid: 'gone', bridgedToUuid: 'p' },
-    ];
+    const gaps = [{ childUuid: 'c', missingParentUuid: 'gone' }];
     mockSessionServiceLoad({
       conversation: {
         messages: [{ role: 'user' }],

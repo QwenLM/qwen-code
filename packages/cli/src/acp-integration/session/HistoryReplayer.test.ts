@@ -906,7 +906,7 @@ describe('HistoryReplayer', () => {
         userRec('new', 'newer turn'),
       ];
       const gaps: HistoryGap[] = [
-        { childUuid: 'new', missingParentUuid: 'gone', bridgedToUuid: 'old' },
+        { childUuid: 'new', missingParentUuid: 'gone' },
       ];
 
       await replayer.replay(records, gaps);

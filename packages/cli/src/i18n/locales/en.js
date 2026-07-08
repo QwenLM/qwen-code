@@ -2552,10 +2552,6 @@ export default {
   reqs: 'reqs',
   in: 'in',
   out: 'out',
-  '⚠️ History gap: about {{days}} day(s) of earlier conversation were lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.':
-    '⚠️ History gap: about {{days}} day(s) of earlier conversation were lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.',
-  '⚠️ History gap: an earlier segment of conversation was lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.':
-    '⚠️ History gap: an earlier segment of conversation was lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 };

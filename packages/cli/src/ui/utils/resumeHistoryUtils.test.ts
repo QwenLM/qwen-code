@@ -44,48 +44,9 @@ describe('resumeHistoryUtils', () => {
     } as unknown as AnyDeclarativeTool;
   });
 
-  it('inserts a history-gap divider before the bridged gap child', () => {
-    const conversation = {
-      messages: [
-        {
-          type: 'user',
-          uuid: 'u-old',
-          message: { parts: [{ text: 'old turn' } as Part] },
-        },
-        {
-          type: 'user',
-          uuid: 'u-new',
-          message: { parts: [{ text: 'new turn' } as Part] },
-        },
-      ],
-    } as unknown as ConversationRecord;
-
-    const session: ResumedSessionData = {
-      conversation,
-      historyGaps: [
-        {
-          childUuid: 'u-new',
-          missingParentUuid: 'gone',
-          bridgedToUuid: 'u-old',
-          approxLostMs: 3 * 86_400_000,
-        },
-      ],
-    } as ResumedSessionData;
-
-    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
-
-    expect(items).toHaveLength(3);
-    expect(items[0]).toMatchObject({ type: 'user', text: 'old turn' });
-    expect(items[1].type).toBe(MessageType.INFO);
-    // Test locale has no translations loaded → t() returns the English source.
-    expect((items[1] as { text: string }).text).toContain('History gap');
-    expect((items[1] as { text: string }).text).toContain('3 day');
-    expect(items[2]).toMatchObject({ type: 'user', text: 'new turn' });
-  });
-
-  it('uses non-recovered copy for a gap with no bridged island', () => {
-    // childUuid is the first record; nothing was recovered above it, so the
-    // notice must not claim recovered history is shown above.
+  it('inserts a history-gap divider before the gap child record', () => {
+    // The gap child is the first reachable record; the notice sits above it and
+    // states the earlier history could not be recovered.
     const conversation = {
       messages: [
         {
@@ -98,18 +59,17 @@ describe('resumeHistoryUtils', () => {
 
     const session: ResumedSessionData = {
       conversation,
-      historyGaps: [
-        { childUuid: 'b1', missingParentUuid: 'gone', bridgedToUuid: null },
-      ],
+      historyGaps: [{ childUuid: 'b1', missingParentUuid: 'gone' }],
     } as ResumedSessionData;
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
 
     expect(items).toHaveLength(2);
     expect(items[0].type).toBe(MessageType.INFO);
+    // Test locale has no translations loaded → t() returns the English source.
     const text = (items[0] as { text: string }).text;
+    expect(text).toContain('History gap');
     expect(text).toContain('could not be recovered');
-    expect(text).not.toContain('shown above');
     expect(items[1]).toMatchObject({
       type: 'user',
       text: 'first surviving turn',

@@ -944,14 +944,15 @@ export class SessionService {
    * Reconstructs a linear conversation from tree-structured records.
    *
    * Delegates the parentUuid walk to {@link buildOrderedUuidChain}. With
-   * `bridgeGaps`, a walk that stops on a physically-missing parent is stitched
-   * back onto the newest still-present earlier island instead of truncating,
-   * and the breaks are surfaced via the returned `gaps` (see {@link HistoryGap}).
-   * Without `bridgeGaps` the result is identical to the historical walk.
+   * `detectGaps`, a walk that stops on a physically-missing parent records the
+   * break in the returned `gaps` (see {@link HistoryGap}) so the surface can
+   * mark it — the earlier records are NOT reconstructed (reconnecting them
+   * could resurrect turns the user rewound away). Without `detectGaps` the
+   * result is identical to the historical walk.
    */
   private reconstructHistory(
     records: ChatRecord[],
-    opts?: { leafUuid?: string; bridgeGaps?: boolean },
+    opts?: { leafUuid?: string; detectGaps?: boolean },
   ): { messages: ChatRecord[]; gaps: HistoryGap[] } {
     if (records.length === 0) return { messages: [], gaps: [] };
 
@@ -969,23 +970,6 @@ export class SessionService {
       const recordsForUuid = recordsByUuid.get(uuid);
       if (recordsForUuid && recordsForUuid.length > 0) {
         messages.push(this.aggregateRecords(recordsForUuid));
-      }
-    }
-
-    // Make the reconstructed chain self-consistent: a bridged gap child still
-    // carries the physically-missing parentUuid. Rewrite it (on the aggregated
-    // copy, never the on-disk record) to the record we bridged onto, so every
-    // parentUuid consumer — `rebuildTurnBoundaries`, `/rewind` re-rooting — sees
-    // a valid ancestor. Without this, a rewind to that turn would re-create the
-    // dangling pointer and drop the recovered island on the next resume.
-    if (gaps.length > 0) {
-      const bridgeByChild = new Map<string, string>();
-      for (const g of gaps) {
-        if (g.bridgedToUuid) bridgeByChild.set(g.childUuid, g.bridgedToUuid);
-      }
-      for (const m of messages) {
-        const bridged = bridgeByChild.get(m.uuid);
-        if (bridged) m.parentUuid = bridged;
       }
     }
 
@@ -1024,7 +1008,7 @@ export class SessionService {
 
     // Reconstruct linear history
     const { messages, gaps } = this.reconstructHistory(records, {
-      bridgeGaps: true,
+      detectGaps: true,
     });
     if (messages.length === 0) {
       return;
@@ -1032,13 +1016,12 @@ export class SessionService {
 
     if (gaps.length > 0) {
       debugLogger.warn(
-        `loadSession: bridged ${gaps.length} history gap(s) for session ` +
-          `${sessionId}: ` +
+        `loadSession: detected ${gaps.length} unrecoverable history gap(s) ` +
+          `for session ${sessionId}: ` +
           gaps
             .map(
               (g) =>
-                `child=${g.childUuid} missingParent=${g.missingParentUuid} ` +
-                `bridgedTo=${g.bridgedToUuid ?? 'none'}`,
+                `child=${g.childUuid} missingParent=${g.missingParentUuid}`,
             )
             .join('; '),
       );
@@ -1450,7 +1433,7 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    // bridgeGaps stays off here so a fork copies exactly the active branch.
+    // detectGaps stays off here so a fork copies exactly the active branch.
     const { messages: sourceRecords } = this.reconstructHistory(records);
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);

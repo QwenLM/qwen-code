@@ -235,14 +235,14 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
   });
 });
 
-describe('SessionService.reconstructHistory (history-gap bridging)', () => {
+describe('SessionService.reconstructHistory (history-gap detection)', () => {
   // reconstructHistory is private; cast to reach it directly, matching the
   // pattern above. Integration point under test: the sessionService delegate
   // to buildOrderedUuidChain + aggregateRecords, plus the returned gaps.
   type Privates = {
     reconstructHistory: (
       records: ChatRecord[],
-      opts?: { leafUuid?: string; bridgeGaps?: boolean },
+      opts?: { leafUuid?: string; detectGaps?: boolean },
     ) => { messages: ChatRecord[]; gaps: HistoryGap[] };
   };
   let svc: Privates;
@@ -261,24 +261,21 @@ describe('SessionService.reconstructHistory (history-gap bridging)', () => {
     recordFor('b2', 'assistant', 'b1'),
   ];
 
-  it('stitches both islands and reports the gap when bridgeGaps is on', () => {
+  it('reports the gap but does NOT reconstruct the earlier island (detectGaps on)', () => {
     const { messages, gaps } = svc.reconstructHistory(twoIslands, {
-      bridgeGaps: true,
+      detectGaps: true,
     });
-    expect(messages.map((m) => m.uuid)).toEqual(['a1', 'a2', 'b1', 'b2']);
-    expect(gaps).toHaveLength(1);
-    expect(gaps[0]).toMatchObject({
-      childUuid: 'b1',
-      missingParentUuid: 'missing-parent-uuid',
-      bridgedToUuid: 'a2',
-    });
-    // The gap child's parentUuid is rewritten to the bridged record so the
-    // chain is valid for rebuildTurnBoundaries / rewind (not left dangling).
+    // Only the reachable tail island — the earlier island is not stitched back.
+    expect(messages.map((m) => m.uuid)).toEqual(['b1', 'b2']);
+    expect(gaps).toEqual([
+      { childUuid: 'b1', missingParentUuid: 'missing-parent-uuid' },
+    ]);
+    // The gap child's parentUuid is left as-is (not rewritten to a guess).
     const child = messages.find((m) => m.uuid === 'b1');
-    expect(child?.parentUuid).toBe('a2');
+    expect(child?.parentUuid).toBe('missing-parent-uuid');
   });
 
-  it('preserves today truncation behavior when bridgeGaps is off', () => {
+  it('preserves today truncation behavior when detectGaps is off', () => {
     const { messages, gaps } = svc.reconstructHistory(twoIslands);
     expect(messages.map((m) => m.uuid)).toEqual(['b1', 'b2']);
     expect(gaps).toEqual([]);
