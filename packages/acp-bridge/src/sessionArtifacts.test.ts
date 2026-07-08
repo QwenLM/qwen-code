@@ -351,6 +351,9 @@ describe('SessionArtifactStore', () => {
       },
     ]);
 
+    expect(result.warnings).toEqual([
+      `artifact ${ownedId} is owned by a different client`,
+    ]);
     expect(result.changes).toMatchObject([
       {
         action: 'created',
@@ -609,8 +612,12 @@ describe('SessionArtifactStore', () => {
       { trustedPublisher: true },
     );
 
-    expect(upgraded.changes).toHaveLength(1);
+    expect(upgraded.changes).toHaveLength(2);
     expect(upgraded.changes[0]).toMatchObject({
+      action: 'removed',
+      reason: 'explicit',
+    });
+    expect(upgraded.changes[1]).toMatchObject({
       action: 'updated',
       artifact: {
         title: 'Published',
@@ -618,7 +625,7 @@ describe('SessionArtifactStore', () => {
         managedId: 'managed-1',
       },
     });
-    expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
+    expect(upgraded.changes[1]?.artifact).not.toHaveProperty('workspacePath');
   });
 
   it('uses managedId as identity when published artifacts also include a url', async () => {
@@ -725,11 +732,15 @@ describe('SessionArtifactStore', () => {
       { strict: true, trustedPublisher: true },
     );
 
-    const publishedId = upgraded.changes[0]?.artifact?.id;
+    const publishedId = upgraded.changes[1]?.artifact?.id;
     expect(publishedId).toBeDefined();
     expect(publishedId).not.toBe(created.changes[0]?.artifactId);
-    expect(upgraded.changes).toHaveLength(1);
+    expect(upgraded.changes).toHaveLength(2);
     expect(upgraded.changes[0]).toMatchObject({
+      action: 'removed',
+      reason: 'explicit',
+    });
+    expect(upgraded.changes[1]).toMatchObject({
       action: 'updated',
       artifactId: publishedId,
       artifact: {
@@ -739,7 +750,7 @@ describe('SessionArtifactStore', () => {
         url: artifactUrl,
       },
     });
-    expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
+    expect(upgraded.changes[1]?.artifact).not.toHaveProperty('workspacePath');
     expect((await store.list()).artifacts).toMatchObject([{ id: publishedId }]);
 
     const republished = await store.upsertMany(
@@ -796,7 +807,7 @@ describe('SessionArtifactStore', () => {
       ],
       { strict: true, trustedPublisher: true },
     );
-    const publishedId = upgraded.changes[0]?.artifactId;
+    const publishedId = upgraded.changes[1]?.artifactId;
 
     const repeated = await store.upsertMany(
       [{ title: 'Draft again', workspacePath: 'reports/dashboard.html' }],
@@ -3046,6 +3057,54 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+  });
+
+  it('does not mark restored ephemeral artifacts as sticky without a sticky marker', async () => {
+    const sessionId = 's11-restore-ephemeral';
+    const url = 'https://example.com/restored-ephemeral';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [
+          {
+            id: artifactId,
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Ephemeral',
+            url,
+            retention: 'ephemeral',
+            clientRetained: false,
+            createdAt: '2026-07-04T00:00:00.000Z',
+            updatedAt: '2026-07-04T00:00:00.000Z',
+          },
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'ephemeral',
+        },
+      ],
+    });
+    expect((await restored.list()).artifacts[0]).not.toHaveProperty(
+      'persistenceWarning',
+    );
   });
 
   it('downgrades non-strict durable artifacts when persistence is unavailable', async () => {

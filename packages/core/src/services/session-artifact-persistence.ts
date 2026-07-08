@@ -629,6 +629,7 @@ function normalizeMetadata(
   for (const [key, item] of Object.entries(value)) {
     if (isPrototypeMetadataKey(key)) continue;
     if (key.length > 120) continue;
+    if (hasControlCharacter(key) || hasUnsafeDisplayPayload(key)) continue;
     if (
       item === null ||
       typeof item === 'string' ||
@@ -638,6 +639,12 @@ function normalizeMetadata(
       if (
         isReservedWorkspaceMetadataKey(key) &&
         !isWorkspaceContentMetadataEntry(key, item)
+      ) {
+        continue;
+      }
+      if (
+        typeof item === 'string' &&
+        (hasControlCharacter(item) || hasUnsafeDisplayPayload(item))
       ) {
         continue;
       }
@@ -660,6 +667,33 @@ export function isReservedWorkspaceMetadataKey(key: string): boolean {
   return (
     key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
     key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
+  );
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      (code >= 0x200b && code <= 0x200f) ||
+      code === 0x2028 ||
+      code === 0x2029 ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
+      code === 0xfeff
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasUnsafeDisplayPayload(value: string): boolean {
+  return (
+    /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript|image\/svg\+xml)/i.test(
+      value,
+    ) || /(?:^|[\s"'`<])on[a-z][a-z0-9-]*\s*=/i.test(value)
   );
 }
 

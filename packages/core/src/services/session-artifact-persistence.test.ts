@@ -326,6 +326,33 @@ describe('session artifact persistence records', () => {
     );
   });
 
+  it('filters unsafe persisted metadata during restore normalization', () => {
+    const restored = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'created',
+            artifactId: 'unsafe-metadata',
+            artifact: artifact('s1', 'https://example.com/unsafe-metadata', {
+              metadata: {
+                safe: 'ok',
+                '<script>': 'blocked',
+                title: 'javascript:alert(1)',
+                hidden: 'zero\u200bwidth',
+              },
+            }),
+          },
+        ],
+      }),
+    ]);
+
+    expect(restored?.artifacts[0]?.metadata).toEqual({ safe: 'ok' });
+  });
+
   it('drops malformed content refs during restore normalization', () => {
     const pinned = artifact('s1', 'https://example.com/pinned', {
       retention: 'pinned',

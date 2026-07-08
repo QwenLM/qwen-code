@@ -3192,9 +3192,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           )}`,
         );
       }
+      const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+        isArtifactRestoreFailureWarning(warning),
+      );
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
-          ingestArtifacts: restoredArtifactSnapshot === undefined,
+          ingestArtifacts:
+            restoredArtifactSnapshot === undefined || artifactRestoreFailed,
         });
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }

@@ -142,6 +142,7 @@ export interface SessionArtifactChange {
   artifactId: string;
   artifact?: DaemonSessionArtifact;
   reason?: SessionArtifactRemovalReason;
+  durableTombstoneRequired?: boolean;
 }
 
 export interface SessionArtifactsEnvelope {
@@ -359,6 +360,7 @@ export class SessionArtifactStore {
               throw error;
             }
             if (error instanceof SessionArtifactAuthorizationError) {
+              warnings.push(error.message);
               continue;
             }
             throw error;
@@ -366,6 +368,15 @@ export class SessionArtifactStore {
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
             if (updated.artifact.id !== existing.id) {
+              changes.push({
+                action: 'removed',
+                artifactId: existing.id,
+                artifact: toPublicArtifact(existing),
+                reason: 'explicit',
+                durableTombstoneRequired:
+                  existing.durableTombstoneRequired ||
+                  existing.persistedAt !== undefined,
+              });
               this.artifacts.delete(existing.id);
             }
             this.artifacts.set(updated.artifact.id, updated.artifact);
@@ -569,13 +580,15 @@ export class SessionArtifactStore {
               persistenceWarning: 'sticky_override_active',
             };
           }
+          const stickyApplied =
+            normalized.persistenceWarning === 'sticky_override_active';
           if (normalized.id !== artifact.id) {
             warnings.push(`skipped artifact with mismatched id ${artifact.id}`);
             continue;
           }
           const retention = normalized.retention;
           let persistenceWarning: SessionArtifactPersistenceWarning | undefined;
-          if (retention === 'ephemeral') {
+          if (stickyApplied) {
             persistenceWarning = 'sticky_override_active';
           } else if (normalized.status !== 'available') {
             persistenceWarning = 'metadata_only_restore';
@@ -803,7 +816,9 @@ export class SessionArtifactStore {
           artifactIds,
         )} reason=${JSON.stringify(reason)}`,
       );
-      return this.downgradeDurableChanges(durableChanges);
+      const warnings = this.downgradeDurableChanges(durableChanges);
+      this.applyDurableMarkers(durableChanges);
+      return warnings;
     }
   }
 
@@ -1829,9 +1844,7 @@ function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
   if (!change.artifact) return false;
   return (
     change.artifact.retention !== 'ephemeral' ||
-    (change.action === 'removed' &&
-      (change as { durableTombstoneRequired?: boolean })
-        .durableTombstoneRequired === true)
+    (change.action === 'removed' && change.durableTombstoneRequired === true)
   );
 }
 
