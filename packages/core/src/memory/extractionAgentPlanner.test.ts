@@ -44,6 +44,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     getApprovalMode: vi.fn(),
+    getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -102,6 +103,38 @@ describe('runAutoMemoryExtractionByAgent', () => {
         maxTurns: 5,
         maxTimeMinutes: 2,
       }),
+    );
+  });
+
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(30);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('passes 0 through to disable the time limit', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(0);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 0 }),
     );
   });
 

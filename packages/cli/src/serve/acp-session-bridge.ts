@@ -58,6 +58,8 @@ export type {
   BridgeFreshSessionAdmission,
   BridgeFreshSessionAdmissionContext,
   BridgeFreshSessionReservation,
+  BridgeSessionLifecycle,
+  BridgeSessionLifecycleEvent,
   BridgeOptions,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';

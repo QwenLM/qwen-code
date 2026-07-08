@@ -799,6 +799,8 @@ async function loadServeRuntimeModules() {
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
+    createWorkspaceSessionOwnerIndex:
+      workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
   };
 }
 
@@ -2456,6 +2458,7 @@ export async function runQwenServe(
               : [],
       },
     );
+    const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -2536,6 +2539,7 @@ export async function runQwenServe(
         clientMcpSender: clientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2803,6 +2807,7 @@ export async function runQwenServe(
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
+        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -2933,7 +2938,9 @@ export async function runQwenServe(
     }
 
     const workspaceRegistry: WorkspaceRegistry =
-      runtime.createWorkspaceRegistry(workspaceRuntimes);
+      runtime.createWorkspaceRegistry(workspaceRuntimes, {
+        sessionOwnerIndex,
+      });
 
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>

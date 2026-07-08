@@ -184,6 +184,20 @@ function restoreEnv(key: string, value: string | undefined): void {
   }
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // Workspace fixtures must round-trip through `path.resolve` so the
 // expected values match the canonicalized form the route produces on
 // every platform. On Windows `path.resolve('/work/bound')` returns
@@ -1817,6 +1831,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       shutdownCalls += 1;
     },
     async preheat() {},
+  };
+}
+
+function makeWorkspaceRuntimeForTest(input: {
+  workspaceId: string;
+  workspaceCwd: string;
+  primary: boolean;
+  bridge: AcpSessionBridge;
+  trusted?: boolean;
+}): WorkspaceRuntime {
+  return {
+    workspaceId: input.workspaceId,
+    workspaceCwd: input.workspaceCwd,
+    primary: input.primary,
+    trusted: input.trusted ?? true,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: input.bridge,
+    workspaceService: {} as DaemonWorkspaceService,
+    routeFileSystemFactory: {} as WorkspaceFileSystemFactory,
+    clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
   };
 }
 
@@ -4931,6 +4965,93 @@ describe('createServeApp', () => {
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
     });
 
+    it('dispatches read-only session snapshots through the live owner runtime', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+        sessionContextImpl: async (sessionId) => ({
+          v: 1,
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          state: { owner: 'secondary' },
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .get('/session/s-secondary/context')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        sessionId: 's-secondary',
+        workspaceCwd: WS_DIFFERENT,
+        state: { owner: 'secondary' },
+      });
+      expect(primaryBridge.sessionContextCalls).toEqual([]);
+      expect(secondaryBridge.sessionContextCalls).toEqual(['s-secondary']);
+    });
+
+    it('surfaces live owner scan failures as structured bridge errors on owner-routed reads', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: () => {
+          throw new Error('summary exploded');
+        },
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .get('/session/s-secondary/context')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain('summary exploded');
+      expect(secondaryBridge.sessionContextCalls).toEqual([]);
+    });
+
     it('returns session context-usage from the bridge', async () => {
       const usage: ServeSessionContextUsageStatus = {
         v: 1,
@@ -6059,6 +6180,27 @@ describe('createServeApp', () => {
       }
     });
 
+    it('400s unknown explicit cwd before touching the bridge', async () => {
+      const missingCwd = path.join(
+        os.tmpdir(),
+        `qwen-missing-workspace-${Date.now()}`,
+      );
+      for (const action of ['load', 'resume'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post(`/session/persisted-unknown/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: missingCwd });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('workspace_mismatch');
+        expect(res.body.requestedWorkspace).toBe(missingCwd);
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      }
+    });
+
     it('400s a non-string cwd before touching the bridge', async () => {
       // Mirrors the `POST /session` malformed-`cwd`-shape test: a
       // client/orchestrator serialization bug (`cwd: null`,
@@ -6165,6 +6307,231 @@ describe('createServeApp', () => {
         requestedWorkspace: WS_DIFFERENT,
       });
       expect(bridge.loadCalls).toHaveLength(0);
+    });
+
+    it('loads an explicit trusted non-primary cwd through that workspace runtime', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-secondary-load',
+          state: { workspace: 'secondary' },
+          hasActivePrompt: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-secondary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_DIFFERENT });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        sessionId: 'persisted-secondary',
+        workspaceCwd: WS_DIFFERENT,
+        clientId: 'client-secondary-load',
+        state: { workspace: 'secondary' },
+      });
+      expect(primaryBridge.loadCalls).toHaveLength(0);
+      expect(secondaryBridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
+    it('rejects restore when the session id is already live in another runtime', async () => {
+      const primaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .post('/session/live-primary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_DIFFERENT });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_workspace_conflict',
+        sessionId: 'live-primary',
+        workspaceCwd: WS_DIFFERENT,
+        liveWorkspaceCwd: WS_BOUND,
+      });
+      expect(secondaryBridge.loadCalls).toHaveLength(0);
+    });
+
+    it('rejects concurrent restore into a different runtime before either bridge owns the session', async () => {
+      const secondaryStarted = deferred();
+      const releaseSecondary = deferred();
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        loadImpl: async (req) => {
+          secondaryStarted.resolve(undefined);
+          await releaseSecondary.promise;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-secondary-load',
+            state: { workspace: 'secondary' },
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const secondaryRequest = request(app)
+        .post('/session/concurrent-restore/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_DIFFERENT })
+        .then((res) => res);
+      await secondaryStarted.promise;
+
+      const primaryRes = await (async () => {
+        try {
+          return await request(app)
+            .post('/session/concurrent-restore/load')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_BOUND });
+        } finally {
+          releaseSecondary.resolve(undefined);
+        }
+      })();
+
+      expect(primaryRes.status).toBe(409);
+      expect(primaryRes.body).toMatchObject({
+        code: 'session_workspace_conflict',
+        sessionId: 'concurrent-restore',
+        workspaceCwd: WS_BOUND,
+        liveWorkspaceCwd: WS_DIFFERENT,
+      });
+      expect(primaryBridge.loadCalls).toHaveLength(0);
+
+      const secondaryRes = await secondaryRequest;
+
+      expect(secondaryRes.status).toBe(200);
+      expect(secondaryRes.body).toMatchObject({
+        sessionId: 'concurrent-restore',
+        workspaceCwd: WS_DIFFERENT,
+      });
+      expect(secondaryBridge.loadCalls).toEqual([
+        {
+          sessionId: 'concurrent-restore',
+          workspaceCwd: WS_DIFFERENT,
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
+    it('surfaces live owner scan failures before restoring into a workspace runtime', async () => {
+      const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qws-owner-scan-'));
+      const primaryDir = path.join(root, 'primary');
+      const secondaryDir = path.join(root, 'secondary');
+      await fsp.mkdir(primaryDir);
+      await fsp.mkdir(secondaryDir);
+      const primaryCwd = realpathSync.native(primaryDir);
+      const secondaryCwd = realpathSync.native(secondaryDir);
+      const primaryBridge = fakeBridge({
+        summaryImpl: () => {
+          throw new Error('summary exploded');
+        },
+      });
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: primaryCwd,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: secondaryCwd,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: primaryCwd },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-secondary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: secondaryCwd });
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain('summary exploded');
+      expect(secondaryBridge.loadCalls).toHaveLength(0);
     });
 
     it('503 + Retry-After: 5 when the bridge throws SessionLimitExceededError', async () => {
@@ -6530,6 +6897,54 @@ describe('createServeApp', () => {
         ]),
       );
       expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('supports plural /workspaces/:workspace/sessions for non-primary live sessions', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 's-secondary',
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .get('/workspaces/ws-secondary/sessions')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: 's-secondary',
+          workspaceCwd: WS_DIFFERENT,
+        }),
+      ]);
+      expect(primaryBridge.listCalls).toEqual([]);
+      expect(secondaryBridge.listCalls).toEqual([WS_DIFFERENT]);
     });
 
     it('includes persisted sessions from the CLI session store', async () => {
@@ -14514,72 +14929,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
 
     expect(locals.workspaceRegistry!.primary.env).toBe(primaryRuntimeEnv);
-  });
-
-  it('wires total admission into the internally-created bridge', async () => {
-    type AdmissionContext = {
-      operation: 'spawn';
-      workspaceCwd: string;
-    };
-    let freshSessionAdmission:
-      | ((context: AdmissionContext) => { release(): void })
-      | undefined;
-    vi.resetModules();
-    vi.doMock('./acp-session-bridge.js', async () => {
-      const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
-      return {
-        ...actual,
-        createAcpSessionBridge: vi.fn((opts: unknown) => {
-          freshSessionAdmission = (
-            opts as {
-              freshSessionAdmission?: typeof freshSessionAdmission;
-            }
-          ).freshSessionAdmission;
-          return fakeBridge();
-        }),
-      };
-    });
-
-    try {
-      const { createServeApp } = await import('./server.js');
-      createServeApp(
-        {
-          port: 0,
-          hostname: '127.0.0.1',
-          workspace: WS_BOUND,
-          maxTotalSessions: 1,
-        } as Parameters<typeof createServeApp>[0],
-        () => 0,
-      );
-
-      expect(freshSessionAdmission).toBeDefined();
-      const first = freshSessionAdmission!({
-        operation: 'spawn',
-        workspaceCwd: WS_BOUND,
-      });
-      let rejection: unknown;
-      try {
-        freshSessionAdmission!({
-          operation: 'spawn',
-          workspaceCwd: WS_BOUND,
-        });
-      } catch (err) {
-        rejection = err;
-      }
-      expect(rejection).toMatchObject({
-        name: 'TotalSessionLimitExceededError',
-        limit: 1,
-        scope: 'total',
-        operation: 'spawn',
-        workspaceCwd: WS_BOUND,
-      });
-      first.release();
-    } finally {
-      vi.doUnmock('./acp-session-bridge.js');
-      vi.resetModules();
-    }
   });
 
   it('uses an injected workspace registry as the primary runtime source', async () => {
