@@ -1944,6 +1944,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               body: 'display stale body',
               filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
             },
+            {
+              name: 'gsd-config-only',
+              description: 'Config-only extension skill',
+              level: 'extension',
+              disableModelInvocation: false,
+              body: 'config only body',
+              filePath: '/ext/gsd-core/skills/gsd-config-only/SKILL.md',
+            },
           ],
         },
       ]),
@@ -2154,6 +2162,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           extensionName: 'GSD Core',
           modelInvocable: true,
         }),
+        expect.objectContaining({
+          kind: 'skill',
+          status: 'disabled',
+          name: 'gsd-config-only',
+          description: 'Config-only extension skill',
+          level: 'extension',
+          extensionName: 'GSD Core',
+          modelInvocable: true,
+        }),
       ]),
     });
     expect(
@@ -2162,11 +2179,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       skills.skills.filter((skill) => skill.name === 'gsd-display-stale'),
     ).toHaveLength(1);
+    expect(
+      skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
+    ).toHaveLength(1);
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
     expect(JSON.stringify(skills)).not.toContain('manual secret body');
     expect(JSON.stringify(skills)).not.toContain('disabled secret body');
     expect(JSON.stringify(skills)).not.toContain('extension secret body');
     expect(JSON.stringify(skills)).not.toContain('display stale body');
+    expect(JSON.stringify(skills)).not.toContain('config only body');
     expect(JSON.stringify(skills)).not.toContain('/secret');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 
