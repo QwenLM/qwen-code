@@ -915,8 +915,8 @@ describe('群管理事件', () => {
     });
   });
 
-  describe('handleGroupMsgReject', () => {
-    it('设置 groupActiveMsgEnabled=false', () => {
+  describe('handleGroupMsgToggle', () => {
+    it('设置 groupActiveMsgEnabled=false (reject)', () => {
       const ch = makeChannel();
       const pvt = ch as unknown as QQChannelRaw;
 
@@ -930,13 +930,11 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt['handleGroupMsgReject'](evt);
+      pvt['handleGroupMsgToggle'](evt, false);
       expect(groupActiveMsgEnabled.get('group-reject-1')).toBe(false);
     });
-  });
 
-  describe('handleGroupMsgReceive', () => {
-    it('设置 groupActiveMsgEnabled=true', () => {
+    it('设置 groupActiveMsgEnabled=true (receive)', () => {
       const ch = makeChannel();
       const pvt = ch as unknown as QQChannelRaw;
 
@@ -950,7 +948,7 @@ describe('群管理事件', () => {
         op_member_openid: 'admin-1',
         timestamp: Date.now(),
       };
-      pvt['handleGroupMsgReceive'](evt);
+      pvt['handleGroupMsgToggle'](evt, true);
       expect(groupActiveMsgEnabled.get('group-recv-1')).toBe(true);
     });
   });
@@ -1026,7 +1024,7 @@ describe('群管理事件', () => {
       );
     });
 
-    it('excludes GROUP_MESSAGE intent when groupAllPolicy=log', () => {
+    it('includes GROUP_MESSAGE intent when groupAllPolicy=log', () => {
       const ch = makeChannel({ groupAllPolicy: 'log' });
       const pvt = ch as unknown as QQChannelRaw;
       let sentPayload: string | null = null;
@@ -1239,6 +1237,91 @@ describe('Gateway message handling', () => {
     // After INVALID_SESSION, tryResume=false, so it sends IDENTIFY (op=2)
     expect(parsed.op).toBe(2);
 
+    ch.disconnect();
+  });
+
+  it('READY cold start: calls restoreQQState and restoreSessions', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    expect(chp['coldStart']).toBe(true);
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockResolvedValue(undefined);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    expect(restoreQQSpy).toHaveBeenCalled();
+    expect(restoreSessionsSpy).toHaveBeenCalled();
+    expect(chp['_ready']).toBe(true);
+    expect(chp['reconnectAttempts']).toBe(0);
+    expect(chp['isReconnecting']).toBe(false);
+    expect(chp['coldStart']).toBe(false);
+
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY warm reconnect: skips restore but calls finalizeReady', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    chp['coldStart'] = false;
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockResolvedValue(undefined);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-warm' } }, () => {});
+
+    expect(restoreQQSpy).not.toHaveBeenCalled();
+    expect(restoreSessionsSpy).not.toHaveBeenCalled();
+    expect(chp['_ready']).toBe(true);
+    expect(chp['reconnectAttempts']).toBe(0);
+    expect(chp['isReconnecting']).toBe(false);
+    expect(chp['coldStart']).toBe(false);
+
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
     ch.disconnect();
   });
 });

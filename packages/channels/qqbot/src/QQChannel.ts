@@ -262,6 +262,7 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] WARNING: invalid bufferFlushLength=${raw}, using default ${QQChannel.MAX_BUFFER_LENGTH}\n`,
       );
+      this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
     this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
@@ -280,98 +281,94 @@ export class QQChannel extends ChannelBase {
     // bridge.prompt(). Cron messages bypass prompt() so their textChunk
     // events arrive without a listener. This permanent listener catches them.
     if (this.qqConfig['cron-msg-experimental']) {
-      this._cronTextHandler = (sessionId: string, text: string) => {
-        // Capture _inCronFlow BEFORE setImmediate to avoid a race:
-        // if the flag is cleared in the same event-loop turn, the
-        // deferred callback would see false and silently drop chunks.
-        const wasInCronFlow = this._inCronFlow > 0;
-        setImmediate(() => {
-          if (!this._ready) return;
-          if (!wasInCronFlow) return;
-          if (this.streamState.has(sessionId)) return; // prompt path handles it
-          let entry = this.cronBuffer.get(sessionId);
-          if (!entry) {
-            entry = { buffer: '', timer: null };
-            this.cronBuffer.set(sessionId, entry);
-          }
-          if (entry.timer) {
-            clearTimeout(entry.timer);
-            entry.timer = null;
-            // Recover text from a cancelled retry attempt
-            if (entry.pendingRetry) {
-              entry.buffer = entry.pendingRetry + entry.buffer;
-              entry.pendingRetry = '';
-            }
-          }
-          entry.buffer += text;
-          // Size-cap flush: when buffer exceeds configurable limit, flush immediately.
-          const limit =
-            this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
-          const delay = entry.buffer.length >= limit ? 0 : 2000;
-          entry.timer = setTimeout(() => {
-            const toFlush = entry!.buffer;
-            entry!.buffer = '';
-            entry!.timer = null;
-            if (toFlush) {
-              const target = this.router.getTarget(sessionId);
-              if (target) {
-                this.sendMessage(target.chatId, toFlush)
-                  .then(() => {
-                    if (!entry!.buffer) this.cronBuffer.delete(sessionId);
-                  })
-                  .catch((err) => {
-                    const code = err instanceof DeliveryError ? err.code : null;
-                    const codeStr = code ? ` (${code})` : '';
-                    process.stderr.write(
-                      `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-                    );
-                    if (
-                      code === 'RETRY_EXHAUSTED' ||
-                      code === 'ACTIVE_MSG_DISABLED'
-                    ) {
-                      this.cronBuffer.delete(sessionId);
-                      return;
-                    }
-                    // Transient (RATE_LIMITED, FALLBACK_FAILED, etc.) — re-schedule flush
-                    entry!.pendingRetry = toFlush;
-                    entry!.timer = setTimeout(() => {
-                      entry!.timer = null;
-                      entry!.pendingRetry = '';
-                      const retryTarget = this.router.getTarget(sessionId);
-                      if (!retryTarget) {
-                        process.stderr.write(
-                          `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
-                        );
-                        this.cronBuffer.delete(sessionId);
-                        return;
-                      }
-                      this.sendMessage(retryTarget.chatId, toFlush)
-                        .then(() => {
-                          entry!.pendingRetry = '';
-                          if (!entry!.buffer) this.cronBuffer.delete(sessionId);
-                        })
-                        .catch((retryErr) => {
-                          process.stderr.write(
-                            `[QQ:${this.name}] Cron flush retry failed: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
-                          );
-                          entry!.pendingRetry = '';
-                          this.cronBuffer.delete(sessionId);
-                        });
-                    }, 5000);
-                    entry!.timer.unref();
-                  });
-                return;
-              }
-            }
-            process.stderr.write(
-              `[QQ:${this.name}] Cron flush dropped: no target for session ${sanitizeLogText(sessionId, 32)}, lost ${toFlush.length} chars\n`,
-            );
-            this.cronBuffer.delete(sessionId);
-          }, delay).unref();
-        });
-      };
+      this._cronTextHandler = (sid, t) => this.handleCronTextChunk(sid, t);
       this.attachCronHandler();
     }
+  }
+
+  private handleCronTextChunk(sessionId: string, text: string): void {
+    const wasInCronFlow = this._inCronFlow > 0;
+    setImmediate(() => {
+      if (!this._ready) return;
+      if (!wasInCronFlow) return;
+      if (this.streamState.has(sessionId)) return;
+      let entry = this.cronBuffer.get(sessionId);
+      if (!entry) {
+        entry = { buffer: '', timer: null };
+        this.cronBuffer.set(sessionId, entry);
+      }
+      if (entry.timer) {
+        clearTimeout(entry.timer);
+        entry.timer = null;
+        if (entry.pendingRetry) {
+          entry.buffer = entry.pendingRetry + entry.buffer;
+          entry.pendingRetry = '';
+        }
+      }
+      entry.buffer += text;
+      const limit =
+        this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
+      const delay = entry.buffer.length >= limit ? 0 : 2000;
+      entry.timer = setTimeout(() => {
+        const toFlush = entry!.buffer;
+        entry!.buffer = '';
+        entry!.timer = null;
+        if (toFlush) {
+          const target = this.router.getTarget(sessionId);
+          if (target) {
+            this.sendMessage(target.chatId, toFlush)
+              .then(() => {
+                if (!entry!.buffer) this.cronBuffer.delete(sessionId);
+              })
+              .catch((err) => {
+                const code = err instanceof DeliveryError ? err.code : null;
+                const codeStr = code ? ` (${code})` : '';
+                process.stderr.write(
+                  `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+                );
+                if (
+                  code === 'RETRY_EXHAUSTED' ||
+                  code === 'ACTIVE_MSG_DISABLED'
+                ) {
+                  this.cronBuffer.delete(sessionId);
+                  return;
+                }
+                entry!.pendingRetry = toFlush;
+                entry!.timer = setTimeout(() => {
+                  entry!.timer = null;
+                  entry!.pendingRetry = '';
+                  const retryTarget = this.router.getTarget(sessionId);
+                  if (!retryTarget) {
+                    process.stderr.write(
+                      `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
+                    );
+                    this.cronBuffer.delete(sessionId);
+                    return;
+                  }
+                  this.sendMessage(retryTarget.chatId, toFlush)
+                    .then(() => {
+                      entry!.pendingRetry = '';
+                      if (!entry!.buffer) this.cronBuffer.delete(sessionId);
+                    })
+                    .catch((retryErr) => {
+                      process.stderr.write(
+                        `[QQ:${this.name}] Cron flush retry failed: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
+                      );
+                      entry!.pendingRetry = '';
+                      this.cronBuffer.delete(sessionId);
+                    });
+                }, 5000);
+                entry!.timer.unref();
+              });
+            return;
+          }
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] Cron flush dropped: no target for session ${sanitizeLogText(sessionId, 32)}, lost ${toFlush.length} chars\n`,
+        );
+        this.cronBuffer.delete(sessionId);
+      }, delay).unref();
+    });
   }
 
   /**
@@ -784,6 +781,7 @@ export class QQChannel extends ChannelBase {
       );
     }
     this.cronBuffer.clear();
+    this._lastKeywordNoMatchLog.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.readyTimeout) {
@@ -1705,7 +1703,6 @@ export class QQChannel extends ChannelBase {
         );
         this.connectReject = null;
       } else if (shouldReconnect) {
-        this.reconnectAttempts++;
         const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30000);
         process.stderr.write(
           `[QQ:${this.name}] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}${this.maxReconnectAttempts > 0 ? `/${this.maxReconnectAttempts}` : ''})\n`,
@@ -1829,6 +1826,9 @@ export class QQChannel extends ChannelBase {
                 onReady();
               })
               .catch(() => {
+                process.stderr.write(
+                  `[QQ:${this.name}] WARNING: router session restore failed — cron messages will be dropped until sessions re-establish\n`,
+                );
                 this.finalizeReady();
                 this._checkGroupAllPolicyRequireMention();
                 onReady();
@@ -1852,10 +1852,14 @@ export class QQChannel extends ChannelBase {
         } else if (t === 'GROUP_DEL_ROBOT') {
           this.handleGroupDelRobot(msg['d'] as unknown as GroupDelRobotEvent);
         } else if (t === 'GROUP_MSG_REJECT') {
-          this.handleGroupMsgReject(msg['d'] as unknown as GroupMsgToggleEvent);
-        } else if (t === 'GROUP_MSG_RECEIVE') {
-          this.handleGroupMsgReceive(
+          this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
+            false,
+          );
+        } else if (t === 'GROUP_MSG_RECEIVE') {
+          this.handleGroupMsgToggle(
+            msg['d'] as unknown as GroupMsgToggleEvent,
+            true,
           );
         } else if (t === 'RESUMED') {
           // RESUME success — the process did NOT restart, all in-memory
@@ -1986,6 +1990,7 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     if (this.isReconnecting) return;
     this.isReconnecting = true;
+    this.reconnectAttempts++;
     try {
       const myReconnectId = this._reconnectId;
 
@@ -2155,10 +2160,7 @@ export class QQChannel extends ChannelBase {
     isAtBot: boolean;
     isSlash: boolean;
     safeName: string;
-    senderOpenId: string;
-    botTag: string;
     cleanText: string;
-    openIdSuffix: string;
     text: string;
     senderName: string;
   } | null {
@@ -2197,12 +2199,10 @@ export class QQChannel extends ChannelBase {
     // would prevent intentional bot-to-bot interactions that the operator
     // explicitly configures. The [bot] prefix gives the model enough context
     // to ignore irrelevant bot traffic.
-    const isBot = event.author?.bot === true;
-    const botTag = isBot ? '[bot] ' : '';
     // NOTE: Both callers (handleGroup, handleGroupAll) guard against bot
     // messages before reaching prepareGroupMessage, so isBot is always false
-    // and botTag always '' here. The code is retained as defense-in-depth
-    // in case a future caller skips the guard.
+    // here. The check is retained as defense-in-depth in case a future
+    // caller skips the guard.
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
@@ -2217,10 +2217,7 @@ export class QQChannel extends ChannelBase {
       isAtBot: effectiveIsAtBot,
       isSlash,
       safeName,
-      senderOpenId,
-      botTag,
       cleanText,
-      openIdSuffix,
       text,
       senderName,
     };
@@ -2299,6 +2296,12 @@ export class QQChannel extends ChannelBase {
       return;
     }
     const chatId = event.group_openid;
+    if (!isValidChatId(chatId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group message dropped: invalid group_openid\n`,
+      );
+      return;
+    }
     const isNewGroup = !this.chatTypeMap.has(chatId);
     this.chatTypeMap.set(chatId, 'group');
     if (isNewGroup) this.saveQQState();
@@ -2382,7 +2385,6 @@ export class QQChannel extends ChannelBase {
     }
 
     const chatId = event.group_openid;
-    if (!chatId) return;
     if (!isValidChatId(chatId)) {
       process.stderr.write(
         `[QQ:${this.name}] Group all-message dropped: invalid group_openid\n`,
@@ -2542,6 +2544,7 @@ export class QQChannel extends ChannelBase {
     if (replyEntry) this.msgSeqMap.delete(replyEntry.msgId);
     this.replyMsgId.delete(groupId);
     this.botOpenIdByGroup.delete(groupId);
+    this._lastKeywordNoMatchLog.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {
@@ -2574,7 +2577,10 @@ export class QQChannel extends ChannelBase {
     );
   }
 
-  private handleGroupMsgReject(event: GroupMsgToggleEvent): void {
+  private handleGroupMsgToggle(
+    event: GroupMsgToggleEvent,
+    enabled: boolean,
+  ): void {
     if (!event.group_openid) {
       process.stderr.write(
         `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
@@ -2582,25 +2588,10 @@ export class QQChannel extends ChannelBase {
       return;
     }
     if (!isValidChatId(event.group_openid)) return;
-    this.groupActiveMsgEnabled.set(event.group_openid, false);
+    this.groupActiveMsgEnabled.set(event.group_openid, enabled);
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Active msg disabled for group ${sanitizeLogText(event.group_openid, 64)}\n`,
-    );
-  }
-
-  private handleGroupMsgReceive(event: GroupMsgToggleEvent): void {
-    if (!event.group_openid) {
-      process.stderr.write(
-        `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
-      );
-      return;
-    }
-    if (!isValidChatId(event.group_openid)) return;
-    this.groupActiveMsgEnabled.set(event.group_openid, true);
-    this.saveQQState();
-    process.stderr.write(
-      `[QQ:${this.name}] Active msg enabled for group ${sanitizeLogText(event.group_openid, 64)}\n`,
+      `[QQ:${this.name}] Active msg ${enabled ? 'enabled' : 'disabled'} for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
   }
 }

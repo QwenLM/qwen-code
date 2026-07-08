@@ -750,7 +750,7 @@ describe('sendMessage', () => {
 
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    chp['reconnectAttempts'] = 19;
+    chp['reconnectAttempts'] = 18;
     mockFetchGatewayUrl.mockRejectedValue(new Error('gateway down'));
 
     const reconnect = (chp['reconnectWithRetry'] as () => Promise<void>).call(
@@ -776,7 +776,7 @@ describe('sendMessage', () => {
 
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    chp['reconnectAttempts'] = 19;
+    chp['reconnectAttempts'] = 18;
     mockFetchAccessToken.mockRejectedValue(new Error('token endpoint down'));
 
     const reconnect = (chp['reconnectWithRetry'] as () => Promise<void>).call(
@@ -1948,6 +1948,131 @@ describe('replyMsgId cleanup timer', () => {
 
       sendSpy.mockRestore();
       vi.useRealTimers();
+    });
+
+    describe('flushAndTrack permanent errors', () => {
+      function makeChannelForPerm(): QQChannelInstance {
+        const ch = new QQChannel(
+          'test-bot',
+          {
+            type: 'qq',
+            token: '',
+            senderPolicy: 'open' as const,
+            allowedUsers: [],
+            sessionScope: 'user' as const,
+            cwd: '/tmp',
+            groupPolicy: 'disabled' as const,
+            groups: {},
+            appID: 'test-app-id',
+            appSecret: 'test-secret',
+          },
+          {} as unknown as ChannelAgentBridge,
+        );
+        return ch;
+      }
+
+      it('keeps streamState on RETRY_EXHAUSTED (permanent error)', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+          }
+        >;
+        streamState.set('session-perm', state);
+
+        const sendSpy = vi
+          .spyOn(
+            QQChannel.prototype as unknown as {
+              sendMessage: () => Promise<void>;
+            },
+            'sendMessage',
+          )
+          .mockRejectedValue(
+            new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+          );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-perm', 'test buffer', state, 'test');
+
+        await Promise.resolve();
+
+        expect(streamState.has('session-perm')).toBe(true);
+
+        sendSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      it('keeps streamState on ACTIVE_MSG_DISABLED (permanent error)', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+          }
+        >;
+        streamState.set('session-ads', state);
+
+        const sendSpy = vi
+          .spyOn(
+            QQChannel.prototype as unknown as {
+              sendMessage: () => Promise<void>;
+            },
+            'sendMessage',
+          )
+          .mockRejectedValue(
+            new DeliveryError(
+              'ACTIVE_MSG_DISABLED',
+              'active messages disabled',
+            ),
+          );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-ads', 'test buffer', state, 'test');
+
+        await Promise.resolve();
+
+        expect(streamState.has('session-ads')).toBe(true);
+
+        sendSpy.mockRestore();
+        vi.useRealTimers();
+      });
     });
   });
 
