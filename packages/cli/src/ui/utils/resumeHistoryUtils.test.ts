@@ -83,6 +83,39 @@ describe('resumeHistoryUtils', () => {
     expect(items[2]).toMatchObject({ type: 'user', text: 'new turn' });
   });
 
+  it('uses non-recovered copy for a gap with no bridged island', () => {
+    // childUuid is the first record; nothing was recovered above it, so the
+    // notice must not claim recovered history is shown above.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          uuid: 'b1',
+          message: { parts: [{ text: 'first surviving turn' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [
+        { childUuid: 'b1', missingParentUuid: 'gone', bridgedToUuid: null },
+      ],
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    expect(items).toHaveLength(2);
+    expect(items[0].type).toBe(MessageType.INFO);
+    const text = (items[0] as { text: string }).text;
+    expect(text).toContain('could not be recovered');
+    expect(text).not.toContain('shown above');
+    expect(items[1]).toMatchObject({
+      type: 'user',
+      text: 'first surviving turn',
+    });
+  });
+
   it('converts conversation into history items with incremental ids', () => {
     const conversation = {
       messages: [
