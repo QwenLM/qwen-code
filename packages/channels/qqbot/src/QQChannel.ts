@@ -229,6 +229,19 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
+    // groupAllPolicy 'keyword' or 'all' requires 'single' session scope
+    // because all group messages share one conversation context.
+    const qqCfg = config as unknown as QQChannelConfig;
+    if (
+      (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
+      config.sessionScope !== 'single'
+    ) {
+      process.stderr.write(
+        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'single'). Forcing sessionScope to 'single' to ensure shared group context.\n`,
+      );
+      config.sessionScope = 'single';
+    }
+
     const router =
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
