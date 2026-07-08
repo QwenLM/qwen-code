@@ -194,6 +194,8 @@ function redactAndCapRememberErrorText(normalized: string): string | undefined {
 }
 
 function sanitizeRememberErrorDetails(details: string): string | undefined {
+  // Keep separator normalization before credential redaction: auth schemes like
+  // `Bearer` and `QQBot` may otherwise be split by invisible characters.
   return redactAndCapRememberErrorText(replaceControlChars(details));
 }
 

@@ -3681,6 +3681,64 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('suppresses details for timed out workspace memory remember unavailable errors', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+    mockRunManagedRememberByAgent.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      const error = await agent
+        .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+          content: 'Remember me.',
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: -32009,
+        message: 'Managed memory is unavailable for this daemon workspace',
+        data: { errorKind: 'managed_memory_unavailable' },
+      });
+      expect(
+        (error as { data?: Record<string, unknown> }).data,
+      ).not.toHaveProperty('details');
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        'Workspace memory remember timed out:',
+        expect.objectContaining({
+          code: 'managed_memory_unavailable',
+          details: 'memory service stopped',
+        }),
+      );
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('omits details for workspace memory failures without a detail source', async () => {
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -3862,6 +3920,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects workspace memory forget when the bridge reports managed memory unavailable', async () => {
+    const forget = vi.fn().mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: 'old preference',
+      })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32009,
+      message: 'Managed memory is unavailable for this daemon workspace',
+      data: { errorKind: 'managed_memory_unavailable' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory forget failed:',
+      expect.objectContaining({
+        code: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('uses forget-specific error codes for workspace memory forget timeouts', async () => {
     const forget = vi.fn().mockRejectedValue(new Error('late abort'));
     Object.assign(mockConfig, {
@@ -4005,6 +4118,58 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         code: 'dream_failed',
         details: 'boom',
         stack: expect.stringContaining('boom'),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects workspace memory dream when the bridge reports managed memory unavailable', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockRejectedValue({
+      data: {
+        errorKind: 'managed_memory_unavailable',
+        details: 'memory service stopped',
+      },
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const error = await agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {})
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: -32009,
+      message: 'Managed memory is unavailable for this daemon workspace',
+      data: { errorKind: 'managed_memory_unavailable' },
+    });
+    expect(
+      (error as { data?: Record<string, unknown> }).data,
+    ).not.toHaveProperty('details');
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory dream failed:',
+      expect.objectContaining({
+        code: 'managed_memory_unavailable',
+        details: 'memory service stopped',
       }),
     );
 
