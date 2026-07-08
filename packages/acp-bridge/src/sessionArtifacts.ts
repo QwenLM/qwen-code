@@ -932,6 +932,11 @@ export class SessionArtifactStore {
     while (this.tombstonedIds.size > MAX_TOMBSTONED_IDS) {
       const oldest = this.tombstonedIds.values().next().value;
       if (oldest === undefined) break;
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=tombstone_evicted artifactId=${JSON.stringify(
+          oldest,
+        )} limit=${MAX_TOMBSTONED_IDS}`,
+      );
       this.tombstonedIds.delete(oldest);
       this.tombstonedClientIds.delete(oldest);
     }

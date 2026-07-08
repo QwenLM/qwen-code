@@ -2679,6 +2679,44 @@ describe('SessionArtifactStore', () => {
     ]);
   });
 
+  it('logs when tombstone LRU eviction drops the oldest id', async () => {
+    const sessionId = 's11-tombstone-lru-log';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      for (let index = 0; index < 501; index++) {
+        const url = `https://example.com/tombstone-lru-${index}`;
+        const created = await store.upsertMany(
+          [{ title: `Deleted ${index}`, url }],
+          { strict: true },
+        );
+        await store.remove(created.changes[0]!.artifactId);
+      }
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('action=tombstone_evicted');
+      expect(logged).toContain('limit=500');
+      expect(logged).toContain(
+        stableSessionArtifactId(
+          sessionId,
+          'url:https://example.com/tombstone-lru-0',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('allows tool reruns to supersede restored delete tombstones', async () => {
     const sessionId = 's11-restored-tombstone';
     const input = {
