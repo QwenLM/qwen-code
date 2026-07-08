@@ -141,16 +141,6 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
 }
 
 /**
- * Converts ChatRecord messages to UI history items for display.
- *
- * This function transforms the raw ChatRecords into a format suitable
- * for the CLI's HistoryItemDisplay component.
- *
- * @param conversation The conversation record from a resumed session
- * @param config The config object for accessing tool registry
- * @returns Array of history items for UI display
- */
-/**
  * INFO divider shown at a bridged history gap: an earlier segment of the
  * session was physically lost and the older history above was stitched back on
  * during load. Mirrors the ACP replay notice so both surfaces read the same.
@@ -162,6 +152,16 @@ function createHistoryGapItem(gap: HistoryGap): HistoryItemInfo {
   };
 }
 
+/**
+ * Converts ChatRecord messages to UI history items for display.
+ *
+ * This function transforms the raw ChatRecords into a format suitable
+ * for the CLI's HistoryItemDisplay component.
+ *
+ * @param conversation The conversation record from a resumed session
+ * @param config The config object for accessing tool registry
+ * @returns Array of history items for UI display
+ */
 function convertToHistoryItems(
   conversation: ConversationRecord,
   config: Config | null,

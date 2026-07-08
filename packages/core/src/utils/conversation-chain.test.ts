@@ -87,6 +87,22 @@ describe('buildOrderedUuidChain', () => {
     expect(res.gaps[0].approxLostMs).toBeGreaterThan(0);
   });
 
+  it('measures the gap from the target island last-occurrence timestamp', () => {
+    // uuid 'a2' spans two streamed records (early + late). The gap duration
+    // must use the late one (island end), not the first occurrence.
+    const records = [
+      rec('a1', null, { ts: '2026-06-25T00:00:00.000Z' }),
+      rec('a2', 'a1', { ts: '2026-06-25T00:00:01.000Z' }), // first occurrence
+      rec('a2', 'a1', { ts: '2026-06-26T00:00:00.000Z' }), // last occurrence
+      rec('b1', 'MISSING', { ts: '2026-06-27T00:00:00.000Z' }),
+      rec('b2', 'b1', { ts: '2026-06-27T01:00:00.000Z' }),
+    ];
+    const res = buildOrderedUuidChain(records, { bridgeGaps: true });
+    expect(res.gaps[0].bridgedToUuid).toBe('a2');
+    // 6/26 → 6/27 = 1 day. Using a2's first occurrence (6/25) would give ~2.
+    expect(res.gaps[0].approxLostMs).toBe(86_400_000);
+  });
+
   it('does NOT resurrect an abandoned rewind branch when bridging a gap', () => {
     // Tail component {r0,x1,c1,c2}: r0 dangles (parent missing), x1 is an
     // abandoned rewind branch off r0, c1<-c2 is the active branch.

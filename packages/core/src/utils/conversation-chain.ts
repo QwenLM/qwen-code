@@ -78,26 +78,29 @@ export function buildOrderedUuidChain(
   const bridgeGaps = opts?.bridgeGaps ?? false;
 
   // First record per uuid (matches the historical `recordsForUuid[0]`
-  // semantics) and the file position of each uuid (append order → highest
-  // index is the most recent write).
+  // semantics). Needed for the healthy walk, so built eagerly.
   const firstByUuid = new Map<string, ChatRecord>();
-  const posByUuid = new Map<string, number>();
-  for (let i = 0; i < records.length; i++) {
-    const r = records[i];
+  for (const r of records) {
     if (!firstByUuid.has(r.uuid)) firstByUuid.set(r.uuid, r);
-    posByUuid.set(r.uuid, i);
   }
 
   const uuids: string[] = [];
   const gaps: HistoryGap[] = [];
   const visited = new Set<string>();
 
-  // Lazily computed on the first gap; healthy sessions never pay for this.
+  // All lazily computed on the first gap; healthy sessions never pay for these.
+  // posByUuid = highest (last) file index per uuid; lastByUuid = that last
+  // record, so a gap duration uses the target's most-recent timestamp rather
+  // than its first occurrence (a uuid can span several streamed records).
   let components: Map<string, number> | null = null;
+  let posByUuid: Map<string, number> | null = null;
+  let lastByUuid: Map<string, ChatRecord> | null = null;
   const stitchedComps = new Set<number>();
 
-  let currentUuid: string | null =
-    opts?.leafUuid ?? records[records.length - 1].uuid;
+  const startUuid = opts?.leafUuid ?? records[records.length - 1].uuid;
+  // A caller-supplied leafUuid not backed by any record yields no chain.
+  if (!firstByUuid.has(startUuid)) return { uuids: [], gaps: [] };
+  let currentUuid: string | null = startUuid;
 
   // The tail's sidechain-ness. Stitch targets must match it (see
   // pickStitchTarget) so a main session never bridges onto a subagent leaf,
@@ -135,11 +138,17 @@ export function buildOrderedUuidChain(
 
     if (components === null) {
       components = computeComponents(records, firstByUuid);
+      posByUuid = new Map();
+      lastByUuid = new Map();
+      for (let i = 0; i < records.length; i++) {
+        posByUuid.set(records[i].uuid, i);
+        lastByUuid.set(records[i].uuid, records[i]);
+      }
       const tailComp = components.get(uuids[0]);
       if (tailComp !== undefined) stitchedComps.add(tailComp);
     }
 
-    const childPos = posByUuid.get(currentUuid) ?? records.length;
+    const childPos = posByUuid!.get(currentUuid) ?? records.length;
     const targetUuid = pickStitchTarget(
       records,
       components,
@@ -157,7 +166,11 @@ export function buildOrderedUuidChain(
       break;
     }
 
-    const targetRec = firstByUuid.get(targetUuid)!;
+    // Duration spans the target island's *last* timestamp (when it ended) to
+    // the child's first (when the newer island started) — not the target's
+    // first occurrence, which would overstate the gap.
+    const targetRec =
+      lastByUuid!.get(targetUuid) ?? firstByUuid.get(targetUuid)!;
     gaps.push({
       childUuid: currentUuid,
       missingParentUuid: parent,
