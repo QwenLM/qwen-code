@@ -366,6 +366,40 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should use new session ID when forkSession is true', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const query = new Query(transport, {
+        cwd: '/test',
+        forkSession: true,
+        resume: resumeId,
+      });
+
+      expect(query.getSessionId()).not.toBe(resumeId);
+      expect(query.getSessionId()).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
+    it('should use explicit sessionId when forkSession is true', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const forkId = '234e5678-e89b-12d3-a456-426614174001';
+      const query = new Query(transport, {
+        cwd: '/test',
+        forkSession: true,
+        resume: resumeId,
+        sessionId: forkId,
+      });
+
+      expect(query.getSessionId()).toBe(forkId);
+      expect(query.getSessionId()).not.toBe(resumeId);
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
     it('should handle initialization errors', async () => {
       const query = new Query(transport, {
         cwd: '/test',
