@@ -976,6 +976,15 @@ describe('detectSelfKillCommand', () => {
   it('parallel with -P value argument skips correctly', () => {
     expect(detectSelfKillCommand('pgrep node | parallel -P 4 kill')).toBe(true);
   });
+
+  it('pgrep -fx combined flags (full + exact)', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep -fx node)')).toBe(true);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -fx nod)')).toBe(false);
+  });
+
+  it('strace prefix in command substitution', () => {
+    expect(detectSelfKillCommand('kill -9 $(strace pgrep node)')).toBe(true);
+  });
 });
 
 describe('hasNonFinalTopLevelBackgroundOperator', () => {

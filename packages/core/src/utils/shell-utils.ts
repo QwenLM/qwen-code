@@ -827,13 +827,13 @@ function pkillTargetsSelf(tokens: string[]): boolean {
 }
 
 const KILL_COMMAND_SUBSTITUTION_PGREP =
-  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
+  /\$\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)|`\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^`"']*(?:"[^"]*"[^`"']*|'[^']*'[^`"']*)*)`/gi;
 
 const SHELL_WRAPPER_COMMAND_SUBSTITUTION =
   /\$\(\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')[^)]*\)|`\s*(?:[\w./-]+\/)?(?:bash|sh|zsh)\s+-c\s+(?:"([^"]*)"|'([^']*)')[^`]*`/gi;
 
 const PROCESS_SUBSTITUTION_PGREP =
-  /<\s*<\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)/gi;
+  /<\s*<\(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+|sudo\s+|exec\s+|env\s+|timeout\s+\S+\s+|nice\s+|nohup\s+|strace\s+)*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:[\w./-]+\/)?\\?(pgrep|pidof)\b([^)"']*(?:"[^"]*"[^)"']*|'[^']*'[^)"']*)*)\)/gi;
 
 const BARE_SELF_PROCESS_PATTERN = new RegExp(`^(${SELF_PROCESS_NAMES})$`, 'i');
 
@@ -900,7 +900,6 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
       shortOptionBundleHasFlag(token, '-f')
     ) {
       usesFullCommandLine = true;
-      continue;
     }
 
     if (isOptionToken(token)) {
@@ -922,12 +921,13 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
 
   let result: boolean;
   if (usesFullCommandLine) {
-    result = args.some(
-      (arg) =>
-        matchesQwenProcessPattern(arg) ||
-        isBroadNodeFullPattern(arg) ||
-        argMatchesSelfAsRegex(arg) ||
-        isSubstringSelfTarget(arg),
+    result = args.some((arg) =>
+      usesExactMatch
+        ? isBareSelfProcessName(arg) || argMatchesSelfAsRegex(arg)
+        : matchesQwenProcessPattern(arg) ||
+          isBroadNodeFullPattern(arg) ||
+          argMatchesSelfAsRegex(arg) ||
+          isSubstringSelfTarget(arg),
     );
   } else {
     result = args.some((arg) =>
