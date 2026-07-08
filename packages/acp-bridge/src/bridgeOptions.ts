@@ -33,6 +33,21 @@ export type DiagnosticLineSink = (
   level?: 'info' | 'warn' | 'error',
 ) => void;
 
+export interface BridgeFreshSessionAdmissionContext {
+  readonly operation: 'spawn' | 'load' | 'resume' | 'branch';
+  readonly workspaceCwd: string;
+  readonly sessionId?: string;
+  readonly sourceSessionId?: string;
+}
+
+export interface BridgeFreshSessionReservation {
+  release(): void;
+}
+
+export type BridgeFreshSessionAdmission = (
+  context: BridgeFreshSessionAdmissionContext,
+) => BridgeFreshSessionReservation | undefined;
+
 /**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
@@ -147,6 +162,12 @@ export interface BridgeOptions {
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;
+  /**
+   * Host-level admission hook for fresh session creation across runtimes.
+   * Must be synchronous so callers can reserve before any async child or ACP
+   * side effect starts. Attaches bypass this hook.
+   */
+  freshSessionAdmission?: BridgeFreshSessionAdmission;
   /**
    * Per-session SSE replay ring depth. Sets `ringSize` on every
    * `new EventBus(...)` the bridge constructs (both fresh sessions
@@ -398,6 +419,4 @@ export interface BridgeOptions {
  */
 export type ClientMcpMessageSender = (
   serverName: string,
-) =>
-  | ((payload: unknown) => Promise<unknown>)
-  | undefined;
+) => ((payload: unknown) => Promise<unknown>) | undefined;
