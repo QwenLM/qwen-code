@@ -2458,6 +2458,7 @@ describe('showFallbackMessage', () => {
       configurable: true,
     });
     process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
 
     showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
 
@@ -2562,6 +2563,7 @@ describe('showFallbackMessage', () => {
       configurable: true,
     });
     process.env['TERM_PROGRAM'] = 'vscode';
+    process.env['TERM_PROGRAM_VERSION'] = '1.85.0';
 
     showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
 
