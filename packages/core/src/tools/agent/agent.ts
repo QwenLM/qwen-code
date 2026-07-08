@@ -1075,6 +1075,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // command for the same reason.
     return {
       subagent_type: params.subagent_type,
+      // Include working_dir: it rebinds the child's cwd to another registered
+      // worktree, which the AUTO-mode classifier must be able to see — a
+      // launch that looks benign from subagent_type + prompt alone could be
+      // pinning the child to a different tree.
+      working_dir: params.working_dir,
       prompt: params.prompt ?? '',
     };
   }
@@ -2299,6 +2304,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.params.run_in_background === true ||
         subagentConfig.background === true;
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
+      if (this.params.working_dir !== undefined && shouldRunInBackground) {
+        // A caller-owned worktree has no lifecycle coupling to a backgrounded
+        // agent — the caller could reap the worktree while the detached agent
+        // is still running in it. validateToolParams rejects an explicit
+        // run_in_background up front; this covers the other route into the
+        // background: a subagent config with `background: true`. Guarding on
+        // the resolved shouldRunInBackground catches both and avoids
+        // over-rejecting a nested call that downgrades to the foreground.
+        return this.buildSpawnBlockedResult(
+          'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
+          'working_dir is incompatible with a background agent',
+        );
+      }
       if (backgroundRequested && !shouldRunInBackground) {
         debugLogger.debug(
           `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,

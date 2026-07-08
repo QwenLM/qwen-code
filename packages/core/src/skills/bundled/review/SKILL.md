@@ -121,7 +121,7 @@ Launch review agents by invoking all `agent` tools in a **single response**. The
 
 **Every agent MUST be an awaitable subagent: set `subagent_type: "general-purpose"` on every `agent` call.** Do NOT fork them — do not omit `subagent_type`, and never set `subagent_type: "fork"`. A fork runs fire-and-forget and its findings never come back to you, so the review would stall in Step 4 with nothing to aggregate. You need every agent's findings returned to you inline.
 
-**For same-repo PR reviews (worktree mode), every `agent` call MUST also set `working_dir: "<worktreePath>"`** — the `worktreePath` from the Step 1 fetch report (a repo-relative path like `.qwen/tmp/review-pr-<n>`; pass it through as-is). This sets each agent's working directory to the PR worktree, so its `git diff`, `grep_search`, file reads, and Agent 7's build/test **resolve against the PR's code, not the user's main checkout**. It is a deterministic, harness-level cwd pin — it does NOT depend on the agent remembering to `cd`, and it is what makes reviewing multiple PRs concurrently safe. (It pins the working directory; it is not a hard filesystem sandbox — an absolute path could still reach elsewhere — but normal review operations stay inside the worktree.) Do NOT set `working_dir` for **local-diff, file-path, or cross-repo lightweight** reviews — those have no worktree, so the agents run in the main project directory.
+**For same-repo PR reviews (worktree mode), every `agent` call MUST also set `working_dir: "<worktreePath>"`** — the `worktreePath` from the Step 1 fetch report (a repo-relative path like `.qwen/tmp/review-pr-<n>`; pass it through as-is). This sets each agent's working directory to the PR worktree, so its `git diff`, `grep_search`, file reads, and Agent 7's build/test **resolve against the PR's code, not the user's main checkout**. It is a deterministic, harness-level cwd pin — it does NOT depend on the agent remembering to `cd`, and it is what makes reviewing multiple PRs concurrently safe. (It pins the working directory; it is not a hard filesystem sandbox — an absolute path could still reach elsewhere — but normal review operations stay inside the worktree.) This rule applies to **every** agent the review workflow launches — not just the Step 3 dimension agents, but also the Step 4 verification agent and the Step 5 reverse-audit agents (both restated below). Do NOT set `working_dir` for **local-diff, file-path, or cross-repo lightweight** reviews — those have no worktree, so the agents run in the main project directory.
 
 **IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
 
@@ -301,6 +301,7 @@ Launch a **single verification agent** that receives **all** non-pre-confirmed f
 - The complete list of findings to verify (with file, line, issue description for each)
 - The command to obtain the diff (as determined in Step 1)
 - Access to read files and search the codebase
+- **For same-repo PR (worktree-mode) reviews, `working_dir: "<worktreePath>"`** — the verifier reads files and re-checks the diff, so it MUST be pinned to the PR worktree too (same rule as Step 3); otherwise it verifies against the user's main checkout
 - **For Agent 0 (Issue Fidelity) findings, the issue evidence those findings quoted** (issue body + comments) — a root-cause-ownership or issue-fidelity claim rests on linked-issue evidence the codebase alone does not contain, so the verifier must be handed that evidence to check it against
 
 The verification agent must, for each finding:
@@ -346,6 +347,7 @@ For each round, launch a **single reverse audit agent** that receives:
 - The cumulative list of all confirmed findings so far (from Steps 3-4 plus all prior reverse audit rounds — so it knows what's already covered)
 - The command to obtain the diff
 - Access to read files and search the codebase
+- **For same-repo PR (worktree-mode) reviews, `working_dir: "<worktreePath>"`** — same rule as Step 3, so the reverse audit reads the PR worktree, not the user's main checkout
 
 The reverse audit agent must:
 

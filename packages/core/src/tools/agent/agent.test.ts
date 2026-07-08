@@ -1191,6 +1191,29 @@ describe('AgentTool', () => {
       expect(display.subagentName).toBe('file-search');
     });
 
+    it('rejects working_dir when the resolved subagent config runs in the background', async () => {
+      // The explicit run_in_background param is caught in validateToolParams;
+      // this covers the other route into the background — a subagent config
+      // with background: true — which is only known after loadSubagent.
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        background: true,
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Review',
+        prompt: 'Review the diff',
+        subagent_type: 'file-search',
+        working_dir: '.qwen/tmp/review-pr-1',
+      });
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toMatch(/background agent/i);
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
     it('strips internal analysis and summary tags from subagent result', async () => {
       vi.mocked(mockAgent.getFinalText).mockReturnValue(
         [
