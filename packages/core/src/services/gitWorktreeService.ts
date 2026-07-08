@@ -1220,12 +1220,18 @@ export class GitWorktreeService {
    */
   async isLinkedWorktree(worktreePath: string): Promise<boolean> {
     try {
-      const probeGit = simpleGit(worktreePath);
+      // Canonicalize first. `--absolute-git-dir` returns a realpath'd path,
+      // so comparing it against `--git-common-dir` resolved from a symlinked
+      // input (macOS `/var → /private/var`, `os.tmpdir()`, …) would diverge
+      // for the MAIN tree and misreport it as linked. Mirrors the realpath
+      // handling in `getRegisteredWorktreeBranch`.
+      const realPath = await fs.realpath(worktreePath);
+      const probeGit = simpleGit(realPath);
       const [gitDir, commonDir] = await Promise.all([
         probeGit.raw(['rev-parse', '--absolute-git-dir']),
         probeGit.raw(['rev-parse', '--git-common-dir']),
       ]);
-      const resolve = (p: string) => path.resolve(worktreePath, p.trim());
+      const resolve = (p: string) => path.resolve(realPath, p.trim());
       return resolve(gitDir) !== resolve(commonDir);
     } catch (error) {
       debugLogger.debug(

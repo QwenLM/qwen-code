@@ -1627,6 +1627,73 @@ describe('AgentTool', () => {
       }
     }, 20000);
 
+    it('resolves a repo-relative working_dir against the subdirectory cwd, not the repo root (monorepo)', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-monorel-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        // fetch-pr creates the worktree cwd-relative (git resolves a relative
+        // worktree path against the process cwd), so when the CLI runs from a
+        // package subdirectory the worktree lands under the SUBDIR's .qwen,
+        // NOT the repo root's. Mimic that exactly.
+        const subdir = path.join(repo, 'packages', 'core');
+        fs.mkdirSync(subdir, { recursive: true });
+        const wt = path.join(subdir, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          [
+            'worktree',
+            'add',
+            '-b',
+            'review-pr-1',
+            path.join('.qwen', 'tmp', 'review-pr-1'),
+            'HEAD',
+          ],
+          { cwd: subdir },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(subdir);
+        vi.mocked(config.getTargetDir).mockReturnValue(subdir);
+        vi.mocked(config.getCwd).mockReturnValue(subdir);
+        vi.mocked(config.getWorkingDir).mockReturnValue(subdir);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          // Relative form, resolved against the subdir cwd — must land on the
+          // subdir worktree, not <repo>/.qwen/tmp/review-pr-1.
+          working_dir: path.join('.qwen', 'tmp', 'review-pr-1'),
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
     it('should handle subagent not found error', async () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
 
