@@ -11,6 +11,7 @@ import {
   type CompactionEngine,
   type SessionReplaySnapshot,
 } from './eventBus.js';
+import { writeStderrLine } from './internal/stderrLine.js';
 import { normalizeCompactedReplayMaxBytes } from './replayWindowLimits.js';
 
 export type { CompactionEngine, SessionReplaySnapshot };
@@ -44,6 +45,7 @@ const LATEST_WINS_UPDATES = new Set([
   'available_commands_update',
   'current_mode_update',
 ]);
+const REPLAY_SEGMENT_COMPACT_THRESHOLD = 64;
 
 type CompactedSlot =
   | {
@@ -82,6 +84,7 @@ export interface TurnBoundaryCompactionEngineOptions {
 export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private readonly maxReplayBytes: number;
   private replaySegments: ReplaySegment[] = [];
+  private replaySegmentStart = 0;
   private replayBytes = 0;
   private liveJournal: BridgeEvent[] = [];
   private lastEventId = 0;
@@ -365,19 +368,54 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   }
 
   private enforceReplayWindow(): void {
+    let droppedSegmentCount = 0;
+    let droppedBytes = 0;
+    let droppedEvents = 0;
+    let droppedTurns = 0;
+
     while (
       this.replayBytes > this.maxReplayBytes &&
-      this.replaySegments.length > 1
+      this.activeReplaySegmentCount() > 1
     ) {
-      const dropped = this.replaySegments.shift()!;
+      const dropped = this.replaySegments[this.replaySegmentStart]!;
+      this.replaySegmentStart += 1;
+      droppedSegmentCount += 1;
+      droppedBytes += dropped.bytes;
+      droppedEvents += dropped.events.length;
+      droppedTurns += dropped.turnCount;
       this.replayBytes -= dropped.bytes;
       this.truncatedEvents += dropped.events.length;
       this.truncatedTurns += dropped.turnCount;
     }
+
+    if (droppedSegmentCount > 0) {
+      this.compactReplaySegmentQueueIfNeeded();
+      writeReplayWindowEvictionDebugLine({
+        droppedBytes,
+        droppedEvents,
+        droppedSegments: droppedSegmentCount,
+        droppedTurns,
+        maxBytes: this.maxReplayBytes,
+        retainedBytes: this.replayBytes,
+        retainedEvents: this.flattenReplaySegments().length,
+      });
+    }
   }
 
   private flattenReplaySegments(): BridgeEvent[] {
-    return this.replaySegments.flatMap((segment) => segment.events);
+    return this.replaySegments
+      .slice(this.replaySegmentStart)
+      .flatMap((segment) => segment.events);
+  }
+
+  private activeReplaySegmentCount(): number {
+    return this.replaySegments.length - this.replaySegmentStart;
+  }
+
+  private compactReplaySegmentQueueIfNeeded(): void {
+    if (this.replaySegmentStart < REPLAY_SEGMENT_COMPACT_THRESHOLD) return;
+    this.replaySegments.splice(0, this.replaySegmentStart);
+    this.replaySegmentStart = 0;
   }
 
   private makeHistoryTruncatedEvent(retainedEvents: number): BridgeEvent {
@@ -399,10 +437,32 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   private resetReplayWindow(): void {
     this.replaySegments = [];
+    this.replaySegmentStart = 0;
     this.replayBytes = 0;
     this.truncatedEvents = 0;
     this.truncatedTurns = 0;
   }
+}
+
+function writeReplayWindowEvictionDebugLine(data: {
+  droppedBytes: number;
+  droppedEvents: number;
+  droppedSegments: number;
+  droppedTurns: number;
+  maxBytes: number;
+  retainedBytes: number;
+  retainedEvents: number;
+}): void {
+  if (!isServeDebugLoggingEnabled()) return;
+  writeStderrLine(
+    `qwen serve debug: replay window evicted ${JSON.stringify(data)}`,
+  );
+}
+
+function isServeDebugLoggingEnabled(): boolean {
+  const value = process.env['QWEN_SERVE_DEBUG'];
+  if (!value) return false;
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
 }
 
 function makeMergedSessionUpdateEvent(
