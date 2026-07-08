@@ -8,6 +8,7 @@ import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
@@ -231,6 +232,19 @@ describe('<Footer />', () => {
       unmount?.();
       vi.useRealTimers();
     }
+  });
+
+  it('shows the default approval mode badge when in DEFAULT mode', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        showAutoAcceptIndicator: ApprovalMode.DEFAULT,
+      }),
+    );
+    const frame = lastFrame()!;
+    expect(frame).toContain('⏸');
+    expect(frame).toContain('Ask permissions');
+    expect(frame).not.toContain('? for shortcuts');
   });
 
   it('does not display the working directory or branch name', () => {
