@@ -7402,6 +7402,7 @@ class QwenAgent implements Agent {
           sessionId,
           config: this.config,
           records: sessionData.conversation.messages,
+          gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
         });
 

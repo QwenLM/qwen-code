@@ -468,7 +468,8 @@ const { mockHistoryReplay } = vi.hoisted(() => ({
 }));
 vi.mock('./session/HistoryReplayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
-    replay: (messages: unknown) => mockHistoryReplay(context, messages),
+    replay: (messages: unknown, gaps: unknown) =>
+      mockHistoryReplay(context, messages, gaps),
   })),
 }));
 
@@ -5242,6 +5243,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.updates).toHaveLength(1);
     expect(result.updates[0]!.timestamp).toBe(4242);
     expect(result).not.toHaveProperty('partial');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates threads bridged historyGaps to the replayer', async () => {
+    const settings = makeCoreSettings();
+    const gaps = [
+      { childUuid: 'c', missingParentUuid: 'gone', bridgedToUuid: 'p' },
+    ];
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [{ role: 'user' }],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      historyGaps: gaps,
+    });
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    });
+    // 3rd arg to the replayer is the historyGaps threaded through
+    // collectHistoryReplayUpdates — without it this ACP surface renders a
+    // bridged (recovered) history as contiguous, with no gap divider.
+    expect(mockHistoryReplay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      gaps,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
