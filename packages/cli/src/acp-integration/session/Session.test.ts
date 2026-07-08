@@ -469,6 +469,7 @@ describe('Session', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      getExtensions: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockClient = {
@@ -1637,6 +1638,120 @@ describe('Session', () => {
       expect(meta.availableSkillDetails.map((detail) => detail.name)).toEqual([
         'enabled-skill',
       ]);
+    });
+
+    it('omits inactive extension skills from availableSkills and details', async () => {
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          displayName: 'Disabled Extension',
+          isActive: false,
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'active-extension-skill',
+            description: 'Active extension skill',
+            body: 'Visible instructions',
+            filePath: '/skills/active/SKILL.md',
+            level: 'extension',
+            extensionName: 'active-ext',
+          },
+          {
+            name: 'display-name-collision-skill',
+            description: 'Active extension skill with colliding name',
+            body: 'Visible collision instructions',
+            filePath: '/skills/collision/SKILL.md',
+            level: 'extension',
+            extensionName: 'Disabled Extension',
+          },
+          {
+            name: 'disabled-extension-skill',
+            description: 'Disabled extension skill',
+            body: 'Hidden instructions',
+            filePath: '/skills/disabled/SKILL.md',
+            level: 'extension',
+            extensionName: 'disabled-ext',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          _meta: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      const meta = update.update._meta;
+      expect(meta.availableSkills).toEqual([
+        'active-extension-skill',
+        'display-name-collision-skill',
+      ]);
+      expect(meta.availableSkillDetails.map((detail) => detail.name)).toEqual([
+        'active-extension-skill',
+        'display-name-collision-skill',
+      ]);
+    });
+
+    it('does not restore inactive extension skills from skill slash commands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'disabled-extension-skill',
+          description: 'Disabled extension skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'disabled-extension-skill',
+            description: 'Disabled extension skill',
+            body: 'Hidden instructions',
+            level: 'extension',
+          },
+        },
+      ]);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          isActive: false,
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'disabled-extension-skill',
+            description: 'Disabled extension skill',
+            body: 'Hidden instructions',
+            filePath: '/skills/disabled/SKILL.md',
+            level: 'extension',
+            extensionName: 'disabled-ext',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          _meta?: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      expect(update.update._meta).toBeUndefined();
     });
 
     it('swallows errors and does not throw', async () => {

@@ -711,6 +711,15 @@ function collectMcpServerMentionRefs(
   }
 }
 
+function inactiveExtensionSkillKeys(config: Config): Set<string> {
+  const names = new Set<string>();
+  for (const extension of config.getExtensions()) {
+    if (extension.isActive) continue;
+    names.add(extension.name);
+  }
+  return names;
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -736,6 +745,7 @@ export async function buildAvailableCommandsSnapshot(
     settings,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
+  const inactiveExtensionNames = inactiveExtensionSkillKeys(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
@@ -782,7 +792,13 @@ export async function buildAvailableCommandsSnapshot(
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
-        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+        (skill) =>
+          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          !(
+            skill.level === 'extension' &&
+            skill.extensionName !== undefined &&
+            inactiveExtensionNames.has(skill.extensionName)
+          ),
       );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
@@ -805,6 +821,9 @@ export async function buildAvailableCommandsSnapshot(
       continue;
     }
     const existing = skillDetailsByName.get(command.skillDetail.name);
+    if (command.skillDetail.level === 'extension' && !existing) {
+      continue;
+    }
     skillDetailsByName.set(command.skillDetail.name, {
       ...existing,
       ...command.skillDetail,

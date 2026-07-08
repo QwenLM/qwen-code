@@ -529,10 +529,22 @@ describe('DaemonClient', () => {
           },
         ],
       };
+      const preheat = {
+        ready: true,
+        channelLive: true,
+        durationMs: 12,
+      };
+      const acpStatus = { channelLive: true };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
         if (req.url.endsWith('/workspace/skills')) {
           return jsonResponse(200, skills);
+        }
+        if (req.url.endsWith('/workspace/acp/preheat?timeoutMs=1234')) {
+          return jsonResponse(200, preheat);
+        }
+        if (req.url.endsWith('/workspace/acp/status')) {
+          return jsonResponse(200, acpStatus);
         }
         if (req.url.endsWith('/workspace/providers')) {
           return jsonResponse(200, providers);
@@ -543,12 +555,53 @@ describe('DaemonClient', () => {
 
       await expect(client.workspaceMcp()).resolves.toEqual(mcp);
       await expect(client.workspaceSkills()).resolves.toEqual(skills);
+      await expect(client.workspaceAcpPreheat(1234)).resolves.toEqual(preheat);
+      await expect(client.workspaceAcpStatus()).resolves.toEqual(acpStatus);
       await expect(client.workspaceProviders()).resolves.toEqual(providers);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspace/mcp'],
         ['GET', 'http://daemon/workspace/skills'],
+        ['POST', 'http://daemon/workspace/acp/preheat?timeoutMs=1234'],
+        ['GET', 'http://daemon/workspace/acp/status'],
         ['GET', 'http://daemon/workspace/providers'],
       ]);
+    });
+
+    it('lets ACP preheat wait longer than the client default timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      const inflight = client.workspaceAcpPreheat(50);
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            ready: true,
+            channelLive: true,
+            durationMs: 5,
+          }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
     });
 
     it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {

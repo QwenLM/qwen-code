@@ -198,6 +198,8 @@ export {
   type DaemonFollowupSuggestionEvent,
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceMcpStatus,
+  type DaemonWorkspaceAcpStatusResult,
+  type DaemonWorkspaceAcpPreheatResult,
   type DaemonWorkspaceProviderCurrent,
   type DaemonWorkspaceProviderModel,
   type DaemonWorkspaceProviderStatus,
