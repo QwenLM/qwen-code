@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -111,7 +111,7 @@ interface CacheEntry {
 const INDEX_CACHE_MAX_ENTRIES = 32;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const READ_CHUNK_SIZE = 64 * 1024;
-const CURSOR_HMAC_KEY = randomBytes(32);
+let cursorHmacKey: Buffer | undefined;
 
 const indexCache = new Map<string, CacheEntry>();
 
@@ -142,8 +142,14 @@ function cursorPayload(
   };
 }
 
+function getCursorHmacKey(): Buffer {
+  cursorHmacKey ??= crypto.randomBytes(32);
+  return cursorHmacKey;
+}
+
 function signCursorPayload(payload: Record<string, unknown>): string {
-  return createHmac('sha256', CURSOR_HMAC_KEY)
+  return crypto
+    .createHmac('sha256', getCursorHmacKey())
     .update(JSON.stringify(payload))
     .digest('base64url');
 }
@@ -154,7 +160,10 @@ function hasValidCursorMac(
 ): boolean {
   const expected = Buffer.from(signCursorPayload(payload), 'utf8');
   const actual = Buffer.from(mac, 'utf8');
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  return (
+    expected.length === actual.length &&
+    crypto.timingSafeEqual(expected, actual)
+  );
 }
 
 function encodeCursorState(state: SessionTranscriptCursorState): string {
