@@ -1725,7 +1725,13 @@ describe('daemonWorkerCommand', () => {
     const send = vi.fn();
     const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
     const validateWebhookTask = vi.fn();
-    const runWebhookTask = vi.fn(() => new Promise<void>(() => {}));
+    const taskResolves: Array<() => void> = [];
+    const runWebhookTask = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          taskResolves.push(resolve);
+        }),
+    );
     mockCreateChannel.mockResolvedValueOnce({
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn(),
@@ -1772,6 +1778,9 @@ describe('daemonWorkerCommand', () => {
       });
       expect(runWebhookTask).toHaveBeenCalledTimes(16);
 
+      for (const resolve of taskResolves) {
+        resolve();
+      }
       process.emit('SIGTERM', 'SIGTERM');
       await handler;
       expect(exit).toHaveBeenCalledWith(0);
@@ -1836,6 +1845,78 @@ describe('daemonWorkerCommand', () => {
 
       process.emit('SIGTERM', 'SIGTERM');
       await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('drains acknowledged webhook tasks before shutting down', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const validateWebhookTask = vi.fn();
+    let resolveTask!: () => void;
+    const runWebhookTask = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveTask = resolve;
+        }),
+    );
+    const disconnect = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      name: 'telegram',
+      validateWebhookTask,
+      runWebhookTask,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const webhookListener = process
+        .listeners('message')
+        .find((listener) => !existingMessageListeners.includes(listener));
+      expect(webhookListener).toBeDefined();
+      (webhookListener as ((message: unknown) => void) | undefined)?.({
+        type: 'webhook_task',
+        id: 'webhook-1',
+        expiresAt: Date.now() + 1000,
+        task: webhookTask,
+      });
+
+      expect(send).toHaveBeenCalledWith({
+        type: 'webhook_task_result',
+        id: 'webhook-1',
+        ok: true,
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await vi.waitFor(() => {
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          '[Channel] shutdown: draining 1 webhook task(s)...',
+        );
+      });
+      expect(disconnect).not.toHaveBeenCalled();
+
+      resolveTask();
+      await handler;
+      expect(disconnect).toHaveBeenCalled();
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       restoreSend();

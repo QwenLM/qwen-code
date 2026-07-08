@@ -7,6 +7,8 @@ import type {
 import { resolvePath } from '@qwen-code/channel-base';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
+const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+
 export { findCliEntryPath } from './cli-entry-path.js';
 
 export function resolveEnvVars(value: string): string {
@@ -236,13 +238,11 @@ function parseWebhookSource(
     ? resolveEnvVars(
         requireStringField(channelName, `${path}.secret`, record['secret']),
       )
-    : resolveEnvVars(
-        normalizeSecretEnvRef(
-          requireStringField(
-            channelName,
-            `${path}.secretEnv`,
-            record['secretEnv'],
-          ),
+    : resolveWebhookSecretEnv(
+        requireStringField(
+          channelName,
+          `${path}.secretEnv`,
+          record['secretEnv'],
         ),
       );
   if (secret.length === 0) {
@@ -256,6 +256,17 @@ function parseWebhookSource(
 
 function normalizeSecretEnvRef(secretEnv: string): string {
   return secretEnv.startsWith('$') ? secretEnv : `$${secretEnv}`;
+}
+
+function resolveWebhookSecretEnv(secretEnv: string): string {
+  try {
+    return resolveEnvVars(normalizeSecretEnvRef(secretEnv));
+  } catch (err) {
+    if (!secretEnv.startsWith('$') && !ENV_VAR_NAME_PATTERN.test(secretEnv)) {
+      return secretEnv;
+    }
+    throw err;
+  }
 }
 
 function parseWebhookConfig(

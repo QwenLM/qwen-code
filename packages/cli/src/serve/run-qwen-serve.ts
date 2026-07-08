@@ -767,10 +767,15 @@ function loadChannelWebhookConfigRuntime(): Promise<ChannelWebhookConfigRuntime>
   channelWebhookConfigRuntimePromise ??= Promise.all([
     import('../commands/channel/runtime.js'),
     import('../commands/channel/config-utils.js'),
-  ]).then(([channelRuntime, configUtils]) => ({
-    loadChannelsConfig: channelRuntime.loadChannelsConfig,
-    parseChannelWebhookConfig: configUtils.parseChannelWebhookConfig,
-  }));
+  ])
+    .then(([channelRuntime, configUtils]) => ({
+      loadChannelsConfig: channelRuntime.loadChannelsConfig,
+      parseChannelWebhookConfig: configUtils.parseChannelWebhookConfig,
+    }))
+    .catch((err: unknown) => {
+      channelWebhookConfigRuntimePromise = undefined;
+      throw err;
+    });
   return channelWebhookConfigRuntimePromise;
 }
 

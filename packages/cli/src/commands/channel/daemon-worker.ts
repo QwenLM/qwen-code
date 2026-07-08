@@ -49,6 +49,7 @@ import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
+const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -573,7 +574,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           ...result,
         });
       };
-      const activeWebhookTasks = new Set<string>();
+      const activeWebhookTasks = new Map<string, Promise<void>>();
       const onMessage = (message: unknown) => {
         if (!isChannelWebhookTaskMessage(message)) return;
         if (message.expiresAt <= Date.now()) {
@@ -607,9 +608,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         const safeId = sanitizeLogText(taskId, 128);
         const safeChannel = sanitizeLogText(task.channelName, 128);
         const safeSource = sanitizeLogText(task.source, 128);
-        activeWebhookTasks.add(taskId);
         sendWebhookTaskResult(message.id, { ok: true });
-        void handle
+        const taskPromise = handle
           .runWebhookTask(task, { timeoutMs: 5 * 60_000 })
           .catch((err: unknown) => {
             const safeMessage = sanitizeLogText(
@@ -625,6 +625,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           .finally(() => {
             activeWebhookTasks.delete(taskId);
           });
+        activeWebhookTasks.set(taskId, taskPromise);
       };
       const clearHeartbeat = () => {
         if (!heartbeatTimer) return;
@@ -659,6 +660,21 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           clearHeartbeat();
           process.removeListener('message', onMessage);
           try {
+            if (activeWebhookTasks.size > 0) {
+              writeStderrLine(
+                `[Channel] shutdown: draining ${activeWebhookTasks.size} webhook task(s)...`,
+              );
+              await Promise.race([
+                Promise.allSettled(activeWebhookTasks.values()),
+                new Promise<void>((resolve) => {
+                  const timer = setTimeout(
+                    resolve,
+                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
+                  );
+                  timer.unref();
+                }),
+              ]);
+            }
             await handle.close();
           } catch (err) {
             exitCode = 1;
