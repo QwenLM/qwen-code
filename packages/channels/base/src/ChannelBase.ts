@@ -2996,6 +2996,7 @@ export abstract class ChannelBase {
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
+        this.logPreflightRejected('sender_pairing_required');
         return this.onPairingRequired(envelope.chatId, result.pairingCode)
           .then(() => false)
           .catch((err: unknown) => {

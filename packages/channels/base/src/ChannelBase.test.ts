@@ -7946,6 +7946,24 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('logs pairing-required preflight rejections', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_pairing_required',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('treats pairing notification failures as preflight rejection', async () => {
       class PairingFailureChannel extends TestChannel {
         override async sendMessage(): Promise<void> {
