@@ -736,13 +736,95 @@ function pkillTargetsSelf(tokens: string[]): boolean {
   return args.some((arg) => matchesSelfProcessPattern(arg));
 }
 
+function pgrepTargetsSelf(tokens: string[]): boolean {
+  return pkillTargetsSelf(['pkill', ...tokens.slice(1)]);
+}
+
+function pgrepSubstitutionArgs(segment: string): string[] {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  const args: string[] = [];
+
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index]!;
+
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      quote = quote === '"' ? '' : '"';
+      continue;
+    }
+
+    if (char === "'" && quote === '') {
+      quote = "'";
+      continue;
+    }
+
+    if (char !== '$' || segment[index + 1] !== '(') {
+      continue;
+    }
+
+    const end = segment.indexOf(')', index + 2);
+    if (end === -1) {
+      break;
+    }
+
+    const inner = segment.slice(index + 2, end).trim();
+    const match = inner.match(/^pgrep\b(.*)$/i);
+    if (match) {
+      args.push(match[1] ?? '');
+    }
+    index = end;
+  }
+
+  return args;
+}
+
+function killCommandTargetsSelf(segment: string): boolean {
+  return pgrepSubstitutionArgs(segment).some((args) => {
+    const parsed = parseShellSegment(`pgrep ${args}`);
+    return parsed !== null && pgrepTargetsSelf(parsed);
+  });
+}
+
+function xargsInvokesKill(segment: string | undefined): boolean {
+  if (!segment) {
+    return false;
+  }
+  const parsed = parseShellSegment(segment);
+  if (!parsed) {
+    return false;
+  }
+  const tokens = unwrapExecutionPrefixes(parsed);
+  if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') {
+    return false;
+  }
+
+  const command = tokens.slice(1).find((token) => !isOptionToken(token));
+  return normalizeExecutableName(command ?? '') === 'kill';
+}
+
 export function detectSelfKillCommand(command: string): boolean {
   if (!/kill/i.test(command)) {
     return false;
   }
 
   const segments = getCommandSegments(command);
-  for (const segment of segments) {
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
     const parsed = parseShellSegment(segment);
     if (!parsed) {
       continue;
@@ -762,6 +844,16 @@ export function detectSelfKillCommand(command: string): boolean {
     }
     if (root === 'pkill' && pkillTargetsSelf(tokens)) {
       return true;
+    }
+    if (root === 'kill' && killCommandTargetsSelf(segment)) {
+      return true;
+    }
+    if (root === 'pgrep' && pgrepTargetsSelf(tokens)) {
+      for (let j = index + 1; j < segments.length; j++) {
+        if (xargsInvokesKill(segments[j])) {
+          return true;
+        }
+      }
     }
   }
 
