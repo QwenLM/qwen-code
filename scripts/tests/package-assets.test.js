@@ -275,23 +275,30 @@ describe('package asset scripts', () => {
     );
   });
 
-  it('fails packaging when prepared dist contains scanner-sensitive literals', () => {
-    const rootDir = createFixtureRoot();
-    createBundleArtifacts(rootDir);
-    const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
-    writeFile(
-      rootDir,
-      'dist/web-shell/assets/icon.svg',
-      `<svg>${browserMcpPackageName}</svg>\n`,
-    );
-    stubConsole();
+  it.each([
+    ['dist/web-shell/assets/icon.svg', '<svg>chrome-devtools-mcp</svg>\n'],
+    ['dist/chunks/server.js.map', '{"sources":["Chrome-Devtools-MCP"]}\n'],
+  ])(
+    'fails packaging when prepared dist contains scanner-sensitive literals in %s',
+    (packagePath, contents) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
+      writeFile(rootDir, packagePath, contents);
+      stubConsole();
 
-    expect(() =>
-      preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow(
-      /Prepared package contains forbidden string "chrome-devtools-mcp" in web-shell\/assets\/icon\.svg/,
-    );
-  });
+      const expectedPath = path.relative(
+        path.join(rootDir, 'dist'),
+        path.join(rootDir, packagePath),
+      );
+
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow(
+        `Prepared package contains forbidden string "${browserMcpPackageName}" in ${expectedPath}`,
+      );
+    },
+  );
 
   it('fails packaging when prepared dist exceeds the unpacked size budget', () => {
     const rootDir = createFixtureRoot();

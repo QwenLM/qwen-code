@@ -331,8 +331,9 @@ function writeDistPackageJson(rootDir, distDir) {
 function assertNoSensitivePackageScanLiterals(distDir) {
   for (const filePath of listTextPackageFiles(distDir)) {
     const contents = fs.readFileSync(filePath, 'utf8');
+    const lowerContents = contents.toLowerCase();
     for (const literal of PACKAGE_SCAN_FORBIDDEN_LITERALS) {
-      if (!contents.includes(literal)) continue;
+      if (!lowerContents.includes(literal.toLowerCase())) continue;
       const relativePath = path.relative(distDir, filePath);
       throw new Error(
         `Prepared package contains forbidden string "${literal}" in ${relativePath}`,
