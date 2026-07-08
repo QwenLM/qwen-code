@@ -21,6 +21,8 @@ import {
   useWebShellCustomization,
   type WebShellComposerInput,
   type WebShellComposerTag,
+  type WebShellComposerTagIconMap,
+  type WebShellAtProvider,
 } from '../customization';
 import {
   useComposerCore,
@@ -30,7 +32,11 @@ import {
   getComposerTagLabel,
   getComposerTagValue,
 } from '../hooks/useComposerCore';
+import { AtMentionPanel } from './AtMentionPanel';
+import { cssUrlVar } from '../utils/cssUrlVar';
+import { getComposerTagIconUrl } from './composerTagIcons';
 import { ModeIcon } from './ModeIcon';
+import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
@@ -57,6 +63,7 @@ interface ChatEditorProps {
   onSubmit: (
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
+    commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
@@ -91,6 +98,8 @@ interface ChatEditorProps {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  atProviders?: readonly WebShellAtProvider[];
+  composerTagIcons?: WebShellComposerTagIconMap;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -682,9 +691,9 @@ function SlashCommandPanel({
     '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
   } as CSSProperties;
 
-  let lastSection: string | undefined;
-
   if (!anchorRect) return null;
+
+  const rowPlans = planSlashSectionRows(menu.items, menu.kind);
 
   const positionedPanelStyle = {
     ...panelStyle,
@@ -723,16 +732,24 @@ function SlashCommandPanel({
             onScroll={() => setHoverDetail(null)}
           >
             {menu.items.map((item, index) => {
-              const section = item.section;
-              const showSection =
-                menu.kind === 'command' &&
-                index > 0 &&
-                section !== undefined &&
-                section !== lastSection;
-              lastSection = section ?? lastSection;
+              const plan = rowPlans[index];
               return (
                 <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {showSection && <div className={styles.slashSection} />}
+                  {plan.showHeader && (
+                    <>
+                      {plan.showDivider && (
+                        <div className={styles.slashSection} />
+                      )}
+                      <div className={styles.slashSectionHeader}>
+                        <span>{item.section}</span>
+                        {plan.count > 0 ? (
+                          <span className={styles.slashSectionCount}>
+                            {plan.count}
+                          </span>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
                   <button
                     ref={(node) => {
                       itemRefs.current[index] = node;
@@ -907,6 +924,8 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      atProviders,
+      composerTagIcons,
     } = props;
 
     const core = useComposerCore({
@@ -929,6 +948,8 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      atProviders,
+      composerTagIcons,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -947,11 +968,16 @@ export const ChatEditor = memo(
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
+    const atPanelRef = useRef<HTMLDivElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
     const modelBtnRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
+    const atMenu = core.atMenu;
+    const closeAtMenu = core.closeAtMenu;
+    const hasSlashMenu = Boolean(slashMenu);
+    const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
 
     useEffect(() => {
@@ -968,7 +994,7 @@ export const ChatEditor = memo(
     }, [showQuickActions]);
 
     useEffect(() => {
-      if (!slashMenu) return;
+      if (!hasSlashMenu && !hasAtMenu) return;
       const onPointerOutside = (event: Event) => {
         const target = event.target;
         const container = containerRef.current;
@@ -976,9 +1002,11 @@ export const ChatEditor = memo(
           target instanceof Node &&
           container &&
           !container.contains(target) &&
-          !slashPanelRef.current?.contains(target)
+          !slashPanelRef.current?.contains(target) &&
+          !atPanelRef.current?.contains(target)
         ) {
           closeSlashMenu();
+          closeAtMenu();
         }
       };
       window.addEventListener('mousedown', onPointerOutside);
@@ -987,7 +1015,7 @@ export const ChatEditor = memo(
         window.removeEventListener('mousedown', onPointerOutside);
         window.removeEventListener('touchstart', onPointerOutside);
       };
-    }, [slashMenu, closeSlashMenu]);
+    }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
     useEffect(() => {
       const glowRoot = containerRef.current;
@@ -1205,6 +1233,7 @@ export const ChatEditor = memo(
         setModeDropdownOpen(false);
         setModelDropdownOpen(false);
         core.closeSlashMenu();
+        core.closeAtMenu();
         if (action.action.type === 'insert') {
           core.insertText(action.action.text, { mode: 'replace' });
           return;
@@ -1245,13 +1274,22 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
-      const tagLabel = getComposerTagLabel(tag);
+      const rawTagLabel = getComposerTagLabel(tag);
       const tagValue = getComposerTagValue(tag);
+      const tagLabel = tag.kind ? '' : rawTagLabel;
+      const iconUrl = getComposerTagIconUrl(tag.kind, composerTagIcons);
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
       return (
         <>
+          {iconUrl && (
+            <span
+              className={styles.tagIcon}
+              style={cssUrlVar('--composer-tag-icon-url', iconUrl)}
+              aria-hidden="true"
+            />
+          )}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>
@@ -1266,7 +1304,7 @@ export const ChatEditor = memo(
     const showCancelButton = isRunning && !core.hasContent;
 
     return (
-      <div className={styles.editorShell} data-web-shell-composer>
+      <div className={styles.editorShell} data-composer data-web-shell-composer>
         <div
           ref={containerRef}
           className={styles.container}
@@ -1402,6 +1440,23 @@ export const ChatEditor = memo(
                 onAccept={core.acceptSlashCompletion}
               />
             )}
+            {core.atMenu && (
+              <AtMentionPanel
+                menu={core.atMenu}
+                anchorRef={containerRef}
+                panelRef={atPanelRef}
+                onSelect={core.selectAtCompletion}
+                onAccept={core.acceptAtCompletion}
+                onBack={() => {
+                  const result = core.backAtCategories();
+                  if (result === 'categories') {
+                    window.setTimeout(() => core.focus(), 0);
+                  }
+                  return Boolean(result);
+                }}
+                onSearch={core.updateAtSearch}
+              />
+            )}
             <div className={styles.editorArea}>
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
@@ -1441,6 +1496,7 @@ export const ChatEditor = memo(
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
+                          core.closeAtMenu();
                           setQuickActionsOpen(false);
                           setModeDropdownOpen((v) => !v);
                           setModelDropdownOpen(false);
@@ -1476,6 +1532,7 @@ export const ChatEditor = memo(
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
+                          core.closeAtMenu();
                           setQuickActionsOpen(false);
                           setModelDropdownOpen((v) => !v);
                           setModeDropdownOpen(false);
@@ -1512,6 +1569,7 @@ export const ChatEditor = memo(
                     onClick={(e) => {
                       e.stopPropagation();
                       core.closeSlashMenu();
+                      core.closeAtMenu();
                       setModeDropdownOpen(false);
                       setModelDropdownOpen(false);
                       setQuickActionsOpen((value) => !value);

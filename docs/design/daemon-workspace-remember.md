@@ -1,4 +1,4 @@
-# Daemon Workspace Remember — Sessionless Memory Ingestion
+# Daemon Workspace Memory Tasks — Sessionless Managed Memory
 
 > **Status**: Proposed — implementation in [PR #5884](https://github.com/QwenLM/qwen-code/pull/5884) (branch `codex/sessionless-daemon-remember`), not yet merged.
 
@@ -16,35 +16,35 @@ required an active chat session to write memories. This created two problems:
    `/remember` command adds noise to the session list and confuses users who see
    ghost sessions they never opened.
 
-The solution is a **sessionless workspace-level remember endpoint** that queues
-memory-write tasks, executes them via a hidden `AgentHeadless` fork (no session
-created), and exposes status via polling.
+The solution is a **sessionless workspace-level memory task API** that queues
+remember, forget, and dream tasks, executes them without creating a visible
+session, and exposes status via polling.
 
 ---
 
 ## 2. Design Overview
 
 ```
-┌──────────────┐  POST /workspace/memory/remember   ┌─────────────────────────┐
+┌──────────────┐  POST /workspace/memory/{task}      ┌─────────────────────────┐
 │  SDK / UI    │ ─────────────────────────────────►  │  workspace-remember.ts  │
 │  client      │                                     │  (WorkspaceRemember-    │
-│              │  GET  /workspace/memory/remember/:id │   TaskLane)             │
+│              │  GET  /workspace/memory/{task}/:id  │   TaskLane)             │
 │              │ ─────────────────────────────────►  │                         │
 └──────────────┘                                     └────────────┬────────────┘
-                                                                  │ bridge.runWorkspaceMemoryRemember()
+                                                                  │ bridge.runWorkspaceMemory*
                                                      ┌────────────▼────────────┐
                                                      │  HttpAcpBridge          │
                                                      │  extMethod(             │
                                                      │    'qwen/control/       │
                                                      │     workspace/memory/   │
-                                                     │     remember')          │
+                                                     │     {task}')            │
                                                      └────────────┬────────────┘
                                                                   │ ACP stdio (JSON-RPC)
                                                      ┌────────────▼────────────┐
                                                      │  qwen --acp child       │
                                                      │  (QwenAgent.extMethod)  │
-                                                     │  → runManagedRemember-  │
-                                                     │    ByAgent (forked)     │
+                                                     │  → remember / forget /  │
+                                                     │    dream core logic     │
                                                      └─────────────────────────┘
 ```
 
@@ -54,10 +54,12 @@ Key properties:
   not create/load/resume any ACP session.
 - **Serial execution** — tasks execute one at a time via a promise-chain lane,
   preventing concurrent writes to the managed memory filesystem.
-- **Hidden** — the forked agent runs with `name: 'managed-auto-memory-remember'`
-  and is invisible to the session list.
-- **Capability-advertised** — `workspace_memory_remember` in the daemon's
-  `/capabilities` response, with supported `modes: ['workspace', 'clean']`.
+- **Hidden** — remember/dream run through hidden agents and forget uses a hidden
+  memory config; none of the operations create visible sessions.
+- **Capability-advertised** — `workspace_memory_remember`,
+  `workspace_memory_forget`, and `workspace_memory_dream` in the daemon's
+  `/capabilities` response. Remember also advertises
+  `modes: ['workspace', 'clean']`.
 
 ---
 
@@ -179,6 +181,76 @@ Poll task status.
 
 ---
 
+### 3.3 `POST /workspace/memory/forget`
+
+Queue a forget task. The daemon selects matching managed auto-memory entries
+and removes them without creating a session.
+
+**Request:**
+
+```json
+{
+  "query": "old preference"
+}
+```
+
+| Field   | Type     | Required | Description                                                             |
+| ------- | -------- | -------- | ----------------------------------------------------------------------- |
+| `query` | `string` | yes      | Natural-language description to forget. Max 64 KiB (UTF-8 byte length). |
+
+The initial response is `202 Accepted` with a `forget-...` task id. Poll
+`GET /workspace/memory/forget/:taskId` until terminal.
+
+**Completed result:**
+
+```json
+{
+  "summary": "Forgot 1 memory entry.",
+  "removedEntries": [
+    {
+      "topic": "project",
+      "summary": "old preference",
+      "filePath": "/path/to/memory.md"
+    }
+  ],
+  "touchedTopics": ["project"]
+}
+```
+
+### 3.4 `GET /workspace/memory/forget/:taskId`
+
+Poll forget task status. The shape matches remember task polling, except there
+is no `contextMode` field and terminal failures use `forget_task_not_found` for
+unknown or unauthorized task ids.
+
+### 3.5 `POST /workspace/memory/dream`
+
+Queue a dream task. The daemon runs the managed auto-memory dream compaction
+flow without creating a session.
+
+**Request:** empty JSON object or no body.
+
+The initial response is `202 Accepted` with a `dream-...` task id. Poll
+`GET /workspace/memory/dream/:taskId` until terminal.
+
+**Completed result:**
+
+```json
+{
+  "summary": "Managed auto-memory dream completed.",
+  "touchedTopics": ["project"],
+  "dedupedEntries": 1
+}
+```
+
+### 3.6 `GET /workspace/memory/dream/:taskId`
+
+Poll dream task status. The shape matches remember task polling, except there
+is no `contextMode` field and terminal failures use `dream_task_not_found` for
+unknown or unauthorized task ids.
+
+---
+
 ## 4. Task Lifecycle
 
 ```
@@ -208,7 +280,8 @@ Poll task status.
 
 The lane stores up to **1000 tasks** total (terminal tasks evicted FIFO when the
 cap is reached). At most **16 tasks** may be pending (queued + running) at any
-time.
+time. Forget and dream tasks share a smaller **8 pending task** cap so bursty
+manual maintenance cannot consume every slot needed by automatic remember work.
 
 ---
 
@@ -221,18 +294,21 @@ Located in `packages/cli/src/serve/workspace-remember.ts`. Maintains a
 `enqueue()` appends a `run` function that:
 
 1. Sets status to `running`.
-2. Calls `bridge.runWorkspaceMemoryRemember({ content, contextMode })`.
-3. On success: sets status to `completed`, populates `result`, publishes
-   `memory_changed` event.
+2. Calls the matching bridge method:
+   `runWorkspaceMemoryRemember`, `runWorkspaceMemoryForget`, or
+   `runWorkspaceMemoryDream`.
+3. On success: sets status to `completed`, populates `result`, and publishes a
+   `memory_changed` event when the task actually touched managed memory.
 4. On failure: sets status to `failed`, populates `error` with a stable public
    error code.
 
-The lane guarantees strict serialization — only one remember task executes at
-a time, preventing concurrent filesystem writes to managed memory.
+The lane guarantees strict serialization — only one workspace memory task
+executes at a time, preventing concurrent filesystem writes to managed memory.
 
 ### 5.2 Bridge Layer (`HttpAcpBridge`)
 
-Two methods added to `BridgeInterface` (`packages/acp-bridge/src/bridgeTypes.ts`):
+Workspace memory methods added to `BridgeInterface`
+(`packages/acp-bridge/src/bridgeTypes.ts`):
 
 - `isWorkspaceMemoryRememberAvailable()` — calls
   `qwen/control/workspace/memory/remember/availability` ext-method on the child.
@@ -240,6 +316,12 @@ Two methods added to `BridgeInterface` (`packages/acp-bridge/src/bridgeTypes.ts`
 - `runWorkspaceMemoryRemember(request)` — calls
   `qwen/control/workspace/memory/remember` ext-method. Times out at **300 s**
   (`WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS`). Does NOT create or load a session.
+- `runWorkspaceMemoryForget(request)` — calls
+  `qwen/control/workspace/memory/forget` ext-method and uses the same bridge
+  timeout. Does NOT create or load a session.
+- `runWorkspaceMemoryDream()` — calls `qwen/control/workspace/memory/dream`
+  ext-method and uses the same bridge timeout. Does NOT create or load a
+  session.
 
 Both methods call `ensureChannel()` (spawning the ACP child if needed) and
 restart the idle timer afterwards if no sessions are active.
@@ -247,13 +329,16 @@ restart the idle timer afterwards if no sessions are active.
 ### 5.3 ACP Child Execution (`QwenAgent.extMethod`)
 
 In `packages/cli/src/acp-integration/acpAgent.ts`, the handler for
-`workspaceMemoryRemember`:
+`workspaceMemoryRemember`, `workspaceMemoryForget`, and `workspaceMemoryDream`:
 
-1. Validates `content` (non-empty string, ≤64 KiB) and `contextMode`.
+1. Validates task-specific input (`content`/`contextMode` for remember,
+   `query` for forget).
 2. Checks `config.isManagedMemoryAvailable()`.
-3. Calls `runManagedRememberByAgent()` with a **295 s** abort signal
+3. Calls the matching core operation with a **295 s** abort signal
    (`WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS` — slightly less than the bridge
-   timeout to ensure the child aborts before the bridge backstop).
+   timeout to ensure the child aborts before the bridge backstop). For forget,
+   the signal is threaded through `MemoryManager.forget`, selection, the model
+   side query, and apply-time filesystem mutations.
 
 ### 5.4 Core Remember Logic (`packages/core/src/memory/remember.ts`)
 
@@ -293,9 +378,9 @@ wrapper that:
 ### `memory_changed` (scope: `managed`)
 
 Published on the daemon SSE event stream (`GET /session/:id/events`) as a
-`memory_changed` event with `scope: 'managed'` when a remember task completes
-successfully. Clients subscribed to the per-session event stream receive this
-notification.
+`memory_changed` event with `scope: 'managed'` when a workspace memory task
+completes successfully and actually touches managed memory. Clients subscribed
+to the per-session event stream receive this notification.
 
 **Payload:**
 
@@ -311,12 +396,12 @@ notification.
 }
 ```
 
-| Field           | Type        | Description                                             |
-| --------------- | ----------- | ------------------------------------------------------- |
-| `scope`         | `"managed"` | Discriminates from file-based `memory_changed` events   |
-| `source`        | `string`    | Always `"workspace_memory_remember"` for this feature   |
-| `taskId`        | `string`    | Correlates with the task returned by POST               |
-| `touchedScopes` | `string[]`  | Which memory scopes were written: `"user"`, `"project"` |
+| Field           | Type        | Description                                                                               |
+| --------------- | ----------- | ----------------------------------------------------------------------------------------- |
+| `scope`         | `"managed"` | Discriminates from file-based `memory_changed` events                                     |
+| `source`        | `string`    | `"workspace_memory_remember"`, `"workspace_memory_forget"`, or `"workspace_memory_dream"` |
+| `taskId`        | `string`    | Correlates with the task returned by POST                                                 |
+| `touchedScopes` | `string[]`  | Which memory scopes were written: `"user"`, `"project"`                                   |
 
 The `originatorClientId` (if provided at POST time) is attached to the event
 envelope so the event bus can route it to the originating client.
@@ -331,12 +416,15 @@ envelope so the event bus can route it to the originating client.
 | ---------------------------- | ------------------- | ------------------------------------------------------ |
 | `invalid_content`            | HTTP route          | Content missing, empty, or exceeds 64 KiB              |
 | `invalid_context_mode`       | HTTP route          | contextMode not `"workspace"` or `"clean"`             |
+| `invalid_query`              | HTTP route          | Forget query missing, empty, or exceeds 64 KiB         |
 | `invalid_client_id`          | HTTP route          | Client-Id header not in bridge's known set             |
 | `managed_memory_unavailable` | Bridge / ACP child  | Workspace not configured for managed memory            |
 | `remember_queue_full`        | Task lane           | 16 pending tasks limit reached                         |
 | `remember_path_escape`       | Core remember logic | Agent wrote to a path outside managed memory dirs      |
 | `remember_failed`            | Catch-all           | Unclassified agent failure, timeout, or internal error |
 | `remember_task_not_found`    | HTTP route          | GET for unknown or unauthorized task ID                |
+| `forget_task_not_found`      | HTTP route          | GET for unknown or unauthorized forget task ID         |
+| `dream_task_not_found`       | HTTP route          | GET for unknown or unauthorized dream task ID          |
 
 ### Timeout Chain
 
@@ -355,7 +443,7 @@ rather than a transport-level timeout.
 
 ### TypeScript SDK (`@qwen-code/sdk-typescript`)
 
-Two new methods on `DaemonClient`:
+Workspace memory methods on `DaemonClient`:
 
 ```typescript
 // Queue a remember task
@@ -368,6 +456,12 @@ const task = await client.rememberWorkspaceMemory(
 // Poll until terminal
 const result = await client.getWorkspaceMemoryRememberTask(task.taskId);
 // result.status === 'completed' | 'failed'
+
+const forget = await client.forgetWorkspaceMemory('old preference');
+const forgetResult = await client.getWorkspaceMemoryForgetTask(forget.taskId);
+
+const dream = await client.dreamWorkspaceMemory();
+const dreamResult = await client.getWorkspaceMemoryDreamTask(dream.taskId);
 ```
 
 ### UI Event Normalization

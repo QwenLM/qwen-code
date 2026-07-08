@@ -8,6 +8,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
+  DaemonSessionArtifactChange,
   PermissionOutcome,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
@@ -41,6 +42,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'artifact_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
@@ -280,6 +282,12 @@ export interface DaemonSessionMetadataUpdatedData {
   [key: string]: unknown;
 }
 
+export interface DaemonArtifactChangedData {
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
+  [key: string]: unknown;
+}
+
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
@@ -318,6 +326,11 @@ export interface DaemonMidTurnMessageInjectedData {
 export interface DaemonClientEvictedData {
   reason: string;
   droppedAfter?: number;
+  queueSize?: number;
+  maxQueued?: number;
+  queuedBytes?: number;
+  maxQueuedBytes?: number;
+  eventBytes?: number;
   [key: string]: unknown;
 }
 
@@ -332,6 +345,12 @@ export interface DaemonSlowClientWarningData {
    * `Last-Event-ID` or detach + drain.
    */
   lastEventId: number;
+  /** Approximate serialized bytes queued for this subscriber's live backlog. */
+  queuedBytes?: number;
+  /** Per-subscriber serialized-byte backlog cap. */
+  maxQueuedBytes?: number;
+  /** Which backlog threshold caused the warning. */
+  threshold?: 'frames' | 'bytes' | 'frames_and_bytes';
   [key: string]: unknown;
 }
 
@@ -469,7 +488,11 @@ export interface DaemonFileMemoryChangedData {
 
 export interface DaemonManagedMemoryChangedData {
   scope: 'managed';
-  source: 'workspace_memory_remember' | (string & {});
+  source:
+    | 'workspace_memory_remember'
+    | 'workspace_memory_forget'
+    | 'workspace_memory_dream'
+    | (string & {});
   taskId: string;
   touchedScopes: Array<'user' | 'project'>;
   [key: string]: unknown;
@@ -734,6 +757,7 @@ export interface DaemonTurnErrorData {
   sessionId: string;
   message: string;
   code?: string;
+  errorKind?: DaemonErrorKind | (string & {});
   promptId?: string;
   [key: string]: unknown;
 }
@@ -868,6 +892,10 @@ export type DaemonSessionClosedEvent = DaemonEventEnvelope<
 export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
+>;
+export type DaemonArtifactChangedEvent = DaemonEventEnvelope<
+  'artifact_changed',
+  DaemonArtifactChangedData
 >;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
@@ -1048,6 +1076,7 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
   | DaemonSessionBranchedEvent;
@@ -1497,6 +1526,10 @@ export function asKnownDaemonEvent(
     case 'session_metadata_updated':
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
+        : undefined;
+    case 'artifact_changed':
+      return isArtifactChangedData(event.data)
+        ? (event as DaemonArtifactChangedEvent)
         : undefined;
     case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
@@ -2017,6 +2050,7 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_removed':
     case 'settings_reloaded':
     case 'extensions_changed':
+    case 'artifact_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
@@ -2452,6 +2486,22 @@ function isSessionMetadataUpdatedData(
   );
 }
 
+function isArtifactChangedData(
+  value: unknown,
+): value is DaemonArtifactChangedData {
+  if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) {
+    return false;
+  }
+  const change = value['change'];
+  if (!isRecord(change) || !isNonEmptyString(change['artifactId'])) {
+    return false;
+  }
+  return (
+    isNonEmptyString(change['action']) &&
+    (change['reason'] === undefined || isNonEmptyString(change['reason']))
+  );
+}
+
 function isMidTurnMessageInjectedData(
   value: unknown,
 ): value is DaemonMidTurnMessageInjectedData {
@@ -2501,7 +2551,12 @@ function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
-    isOptionalNumber(value['droppedAfter'])
+    isOptionalNumber(value['droppedAfter']) &&
+    isOptionalNumber(value['queueSize']) &&
+    isOptionalNumber(value['maxQueued']) &&
+    isOptionalNumber(value['queuedBytes']) &&
+    isOptionalNumber(value['maxQueuedBytes']) &&
+    isOptionalNumber(value['eventBytes'])
   );
 }
 
@@ -2523,11 +2578,18 @@ function isSlowClientWarningData(
   // (`isOptionalNumber` → `isFiniteNumber`): `typeof NaN === 'number'`
   // and `typeof Infinity === 'number'` both pass a bare `typeof`
   // check but would be schema garbage for a queue-size measurement.
+  if (!isRecord(value)) return false;
+  const threshold = value['threshold'];
   return (
-    isRecord(value) &&
     isFiniteNumber(value['queueSize']) &&
     isFiniteNumber(value['maxQueued']) &&
-    isFiniteNumber(value['lastEventId'])
+    isFiniteNumber(value['lastEventId']) &&
+    isOptionalNumber(value['queuedBytes']) &&
+    isOptionalNumber(value['maxQueuedBytes']) &&
+    (threshold === undefined ||
+      threshold === 'frames' ||
+      threshold === 'bytes' ||
+      threshold === 'frames_and_bytes')
   );
 }
 

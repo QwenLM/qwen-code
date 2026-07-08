@@ -32,6 +32,7 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
@@ -58,12 +59,14 @@ function buildWorkspaceProvidersStatus(
   options: WorkspaceProvidersStatusProviderOptions,
 ): ServeWorkspaceProvidersStatus {
   try {
-    const loaded = loadSettings(workspaceCwd);
+    const loaded = loadSettings(
+      workspaceCwd,
+      options.env ? { skipLoadEnvironment: true } : true,
+    );
     const settings = loaded.merged;
-    const env =
-      options.env ?? (process.env as Record<string, string | undefined>);
+    const env = options.env ?? snapshotProcessEnv();
     const selectedAuthType =
-      settings.security?.auth?.selectedType ?? getAuthTypeFromEnv();
+      settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
     const argv: CliGenerationConfigInputs['argv'] = {
       model: options.argv?.model,
       openaiApiKey: options.argv?.openaiApiKey,
@@ -101,6 +104,11 @@ function buildWorkspaceProvidersStatus(
     const fastModelId =
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
         ? settings.fastModel
+        : undefined;
+    const visionModelId =
+      typeof settings.visionModel === 'string' &&
+      settings.visionModel.length > 0
+        ? settings.visionModel
         : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
@@ -167,6 +175,7 @@ function buildWorkspaceProvidersStatus(
       currentAcpModelId,
       currentBaseUrl,
       fastModelId,
+      visionModelId,
     );
 
     return {
@@ -391,12 +400,15 @@ function buildCurrent(
   modelId: string | undefined,
   baseUrl: string | undefined,
   fastModelId: string | undefined,
+  visionModelId: string | undefined,
 ): ServeWorkspaceProviderCurrent | undefined {
-  if (!authType && !modelId && !baseUrl && !fastModelId) return undefined;
+  if (!authType && !modelId && !baseUrl && !fastModelId && !visionModelId)
+    return undefined;
   return {
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
     ...(fastModelId ? { fastModelId } : {}),
+    ...(visionModelId ? { visionModelId } : {}),
   };
 }

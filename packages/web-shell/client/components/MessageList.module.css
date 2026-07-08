@@ -30,14 +30,129 @@
   transition: width 320ms ease;
 }
 
-.rowFlash {
-  border-radius: 8px;
-  animation: row-flash 1.6s ease-out;
+.virtualSizer {
+  position: relative;
+  width: 100%;
+  max-width: none;
+  margin-right: 0;
+  margin-left: 0;
+  transition: none;
+}
+
+.virtualRow {
+  width: min(
+    100%,
+    var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+  );
+  margin-right: auto;
+  margin-left: auto;
+  transition: width 320ms ease;
+}
+
+.loadingSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 18px 0 36px;
+  pointer-events: none;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.loadingSkeletonUserRow {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.loadingSkeletonAssistantRow {
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.loadingSkeletonUserBubble,
+.loadingSkeletonUserBubbleCompact {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: min(62%, 520px);
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--accent);
+}
+
+.loadingSkeletonUserBubbleCompact {
+  width: min(46%, 360px);
+}
+
+.loadingSkeletonAssistantBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(72%, 640px);
+  padding: 3px 0;
+}
+
+.loadingSkeletonLineWide,
+.loadingSkeletonLineMedium,
+.loadingSkeletonLineShort,
+.loadingSkeletonLineNarrow {
+  display: block;
+  height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--muted-foreground) 10%, transparent) 25%,
+    color-mix(in srgb, var(--muted-foreground) 24%, transparent) 37%,
+    color-mix(in srgb, var(--muted-foreground) 10%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: loadingSkeletonShimmer 1.4s ease infinite;
+}
+
+.loadingSkeletonLineWide {
+  width: 100%;
+}
+
+.loadingSkeletonLineMedium {
+  width: 72%;
+}
+
+.loadingSkeletonLineShort {
+  width: 48%;
+}
+
+.loadingSkeletonLineNarrow {
+  width: 58%;
+}
+
+@keyframes loadingSkeletonShimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0 50%;
+  }
 }
 
 .turnStatusRow,
 .turnAnswerRow {
   max-width: 100%;
+}
+.turnStatusRow {
+  margin-bottom: 4px;
 }
 
 .turnAnswerRow {
@@ -74,6 +189,7 @@
   margin-right: 0 !important;
   margin-left: 0 !important;
   transition: none;
+  transform: translateX(-22px);
   pointer-events: none;
 }
 
@@ -92,7 +208,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: 12px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -100,12 +216,12 @@
 
 .sessionTimelineItem {
   position: relative;
-  height: 8px;
+  height: 3px;
 }
 
 .sessionTimelineButton {
   position: relative;
-  top: -4px;
+  top: -6.5px;
   display: flex;
   align-items: center;
   width: 58px;
@@ -130,8 +246,8 @@
 
 .sessionTimelineTick {
   display: block;
-  width: 12px;
-  height: 4px;
+  width: 10px;
+  height: 3px;
   border-radius: 1px;
   background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
   transform-origin: left center;
@@ -143,7 +259,7 @@
 .sessionTimelineButton:hover .sessionTimelineTick,
 .sessionTimelineButton:focus-visible .sessionTimelineTick {
   background: color-mix(in srgb, var(--foreground) 94%, transparent);
-  transform: scaleX(4.4);
+  transform: scaleX(2.8);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -158,7 +274,7 @@
     + .sessionTimelineItem .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(3.4);
+  transform: scaleX(2.2);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -179,7 +295,7 @@
       .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(2.4);
+  transform: scaleX(1.6);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -206,7 +322,7 @@
       .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(1.6);
+  transform: scaleX(1.2);
 }
 
 .sessionTimelineButtonInRange .sessionTimelineTick {
@@ -227,7 +343,7 @@
 .sessionTimelineDetails {
   position: absolute;
   top: 50%;
-  left: 72px;
+  left: 56px;
   z-index: 1;
   box-sizing: border-box;
   display: grid;
@@ -254,8 +370,26 @@
   transform: translate3d(0, -50%, 0) scale(1);
 }
 
-.sessionTimelineDetails::before {
-  content: attr(data-title);
+.sessionTimelineDetailsTitle {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.sessionTimelineDetailsIcon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.4;
+}
+
+.sessionTimelineDetailsTitleText {
   overflow: hidden;
   color: var(--foreground);
   font-size: 14px;
@@ -265,15 +399,13 @@
   white-space: nowrap;
 }
 
-.sessionTimelineDetails::after {
-  content: attr(data-detail);
-  display: -webkit-box;
+.sessionTimelineDetailsDetail {
   overflow: hidden;
   color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
   font-size: 13px;
   line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -286,15 +418,5 @@
 @media (max-width: 720px) {
   .sessionTimelinePanel {
     display: none;
-  }
-}
-
-@keyframes row-flash {
-  0%,
-  30% {
-    background: color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
-  }
-  100% {
-    background: transparent;
   }
 }

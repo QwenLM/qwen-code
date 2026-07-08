@@ -108,12 +108,15 @@ export type {
 } from './utils/commandDisplay';
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
+  CodeBlockRenderer,
   MarkdownContentSource,
   MarkdownTableMode,
   MarkdownRenderContext,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  UserMessageContentRenderer,
+  UserMessageContentRenderInfo,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellComposerToolbarRenderInfo,
@@ -121,6 +124,24 @@ export type {
   WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export {
+  ECHARTS_FULLDATA_LANGUAGE,
+  EchartsFullDataBlock,
+  createEchartsFullDataRenderer,
+} from './components/messages/EchartsFullDataBlock';
+export type {
+  DatasetCell,
+  EchartsFullDataBlockProps,
+  EchartsFullDataOption,
+  EchartsFullDataRefMeta,
+  EchartsFullDataRefResolver,
+  EchartsFullDataResolvedDataset,
+  EchartsFullDataRendererOptions,
+  EchartsInstance,
+  EchartsRuntime,
+  EchartsRuntimeLoader,
+} from './components/messages/EchartsFullDataBlock';

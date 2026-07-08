@@ -180,6 +180,13 @@ export type ChannelTaskLifecycleEvent =
       phase: 'agent' | 'delivery';
     });
 
+/** Terminal lifecycle event types — exactly one is expected per task. */
+export function isTerminalTaskLifecycleType(
+  type: ChannelTaskLifecycleEvent['type'],
+): type is 'completed' | 'cancelled' | 'failed' {
+  return type === 'completed' || type === 'cancelled' || type === 'failed';
+}
+
 export interface ChannelMemoryTarget {
   channelName: string;
   chatId: string;
@@ -202,6 +209,18 @@ export interface ChannelMemoryCallbacks {
   ): Promise<ChannelMemoryWriteResult>;
 }
 
+export interface ChannelMemoryIntentClassifierResult {
+  intent: 'remember' | 'list' | 'clear_all' | 'none';
+  memory?: string;
+  confidence: number;
+}
+
+export interface ChannelMemoryIntentClassifier {
+  classifyChannelMemoryIntent(
+    text: string,
+  ): Promise<ChannelMemoryIntentClassifierResult>;
+}
+
 /**
  * A channel plugin registers a channel type and provides a factory
  * to create adapter instances. Both built-in adapters and external
@@ -219,6 +238,9 @@ export interface ChannelPlugin {
    * ChannelConfig fields. Validated at startup.
    */
   requiredConfigFields?: string[];
+
+  /** Optional config fields whose string values may reference environment vars. */
+  envResolvableConfigFields?: string[];
 
   /** Create a channel adapter instance. */
   createChannel(

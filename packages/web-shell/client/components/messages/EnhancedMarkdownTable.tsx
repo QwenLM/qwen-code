@@ -10,6 +10,8 @@ import {
   useState,
   type CSSProperties,
   type ClipboardEvent,
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
@@ -31,7 +33,7 @@ type TextFilterOperator =
   | 'endsWith';
 type NumberFilterOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'between';
 
-interface CellData {
+export interface EnhancedTableCell {
   key: string;
   content: ReactNode;
   text: string;
@@ -39,14 +41,14 @@ interface CellData {
   textAlign?: CSSProperties['textAlign'];
 }
 
-interface RowData {
+export interface EnhancedTableRow {
   key: string;
-  cells: CellData[];
+  cells: EnhancedTableCell[];
 }
 
-interface ParsedTable {
-  headers: CellData[];
-  rows: RowData[];
+export interface EnhancedTableData {
+  headers: EnhancedTableCell[];
+  rows: EnhancedTableRow[];
   columnCount: number;
 }
 
@@ -81,6 +83,12 @@ interface OpenFilterMenu {
   top: number;
 }
 
+interface ColumnResizeState {
+  columnIndex: number;
+  startX: number;
+  startWidth: number;
+}
+
 interface FilterOption {
   value: string;
   label: string;
@@ -103,8 +111,23 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
   between: 'markdownTable.filter.number.between',
 };
 
-const MAX_ENHANCED_TABLE_ROWS = 500;
-const MAX_ENHANCED_TABLE_COLUMNS = 50;
+export const MAX_ENHANCED_TABLE_ROWS = 500;
+export const MAX_ENHANCED_TABLE_COLUMNS = 50;
+const DEFAULT_COLUMN_WIDTH = 160;
+const MIN_COLUMN_WIDTH = 80;
+const MAX_COLUMN_WIDTH = 640;
+const KEYBOARD_COLUMN_RESIZE_STEP = 16;
+const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
+const DEFAULT_COLUMN_STYLE: CSSProperties = {
+  width: DEFAULT_COLUMN_WIDTH,
+  minWidth: DEFAULT_COLUMN_WIDTH,
+  maxWidth: DEFAULT_COLUMN_WIDTH,
+};
+
+function clampColumnWidth(width: number): number {
+  return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
+}
+
 const FOCUSABLE_FILTER_MENU_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -155,7 +178,7 @@ function getTextContent(node: ReactNode): string {
   return '';
 }
 
-function emptyCell(rowKey: string, columnIndex: number): CellData {
+function emptyCell(rowKey: string, columnIndex: number): EnhancedTableCell {
   return {
     key: `${rowKey}-empty-${columnIndex}`,
     content: '',
@@ -164,7 +187,7 @@ function emptyCell(rowKey: string, columnIndex: number): CellData {
   };
 }
 
-function parseRow(rowNode: TableElement, rowKey: string): RowData {
+function parseRow(rowNode: TableElement, rowKey: string): EnhancedTableRow {
   const cellNodes = Children.toArray(rowNode.props.children).filter(
     (child) => isTagElement(child, 'td') || isTagElement(child, 'th'),
   );
@@ -180,13 +203,19 @@ function parseRow(rowNode: TableElement, rowKey: string): RowData {
   };
 }
 
-function parseRows(sectionNode: TableElement, prefix: string): RowData[] {
+function parseRows(
+  sectionNode: TableElement,
+  prefix: string,
+): EnhancedTableRow[] {
   return Children.toArray(sectionNode.props.children)
     .filter((child) => isTagElement(child, 'tr'))
     .map((rowNode, rowIndex) => parseRow(rowNode, `${prefix}-${rowIndex}`));
 }
 
-function normalizeRow(row: RowData, columnCount: number): RowData {
+function normalizeRow(
+  row: EnhancedTableRow,
+  columnCount: number,
+): EnhancedTableRow {
   return {
     ...row,
     cells: Array.from(
@@ -200,11 +229,11 @@ function normalizeRow(row: RowData, columnCount: number): RowData {
 function parseTable(
   children: ReactNode,
   defaultColumnLabel: (columnIndex: number) => string,
-): ParsedTable {
+): EnhancedTableData {
   const topLevel = Children.toArray(children);
-  const headerRows: RowData[] = [];
-  const bodyRows: RowData[] = [];
-  const directRows: RowData[] = [];
+  const headerRows: EnhancedTableRow[] = [];
+  const bodyRows: EnhancedTableRow[] = [];
+  const directRows: EnhancedTableRow[] = [];
 
   topLevel.forEach((child, index) => {
     if (isTagElement(child, 'thead')) {
@@ -272,13 +301,24 @@ function compareCellText(a: string, b: string): number {
   });
 }
 
-function getSelectionBounds(range: SelectionRange) {
+function getSelectionRowBounds(range: SelectionRange) {
   return {
     minRow: Math.min(range.anchorRow, range.focusRow),
     maxRow: Math.max(range.anchorRow, range.focusRow),
-    minCol: Math.min(range.anchorCol, range.focusCol),
-    maxCol: Math.max(range.anchorCol, range.focusCol),
   };
+}
+
+function getSelectedColumnIndexes(
+  range: SelectionRange | null,
+  visibleColumnIndexes: number[],
+): number[] {
+  if (!range) return [];
+  const anchorIndex = visibleColumnIndexes.indexOf(range.anchorCol);
+  const focusIndex = visibleColumnIndexes.indexOf(range.focusCol);
+  if (anchorIndex === -1 || focusIndex === -1) return [];
+  const minIndex = Math.min(anchorIndex, focusIndex);
+  const maxIndex = Math.max(anchorIndex, focusIndex);
+  return visibleColumnIndexes.slice(minIndex, maxIndex + 1);
 }
 
 function sanitizeForClipboard(value: string): string {
@@ -291,14 +331,12 @@ function sanitizeForClipboard(value: string): string {
 
 function getSelectionText(
   range: SelectionRange | null,
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
 ): string {
   if (!range) return '';
-  const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(range);
-  const selectedColumns = visibleColumnIndexes.filter(
-    (columnIndex) => columnIndex >= minCol && columnIndex <= maxCol,
-  );
+  const { minRow, maxRow } = getSelectionRowBounds(range);
+  const selectedColumns = getSelectedColumnIndexes(range, visibleColumnIndexes);
   if (selectedColumns.length === 0) return '';
 
   const lines: string[] = [];
@@ -317,8 +355,8 @@ function getSelectionText(
 }
 
 function getVisibleTableText(
-  headers: CellData[],
-  rows: RowData[],
+  headers: EnhancedTableCell[],
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
 ): string {
   if (visibleColumnIndexes.length === 0) return '';
@@ -344,11 +382,57 @@ function selectionSize(
   visibleColumnIndexes: number[],
 ): number {
   if (!range) return 0;
-  const { minRow, maxRow, minCol, maxCol } = getSelectionBounds(range);
-  const selectedColumnCount = visibleColumnIndexes.filter(
-    (columnIndex) => columnIndex >= minCol && columnIndex <= maxCol,
+  const { minRow, maxRow } = getSelectionRowBounds(range);
+  const selectedColumnCount = getSelectedColumnIndexes(
+    range,
+    visibleColumnIndexes,
   ).length;
   return (maxRow - minRow + 1) * selectedColumnCount;
+}
+
+function moveColumn(order: number[], fromColumn: number, toColumn: number) {
+  if (fromColumn === toColumn) return order;
+  const fromIndex = order.indexOf(fromColumn);
+  const toIndex = order.indexOf(toColumn);
+  if (fromIndex === -1 || toIndex === -1) return order;
+  const next = [...order];
+  const [moved] = next.splice(fromIndex, 1);
+  if (moved === undefined) return order;
+  next.splice(toIndex, 0, moved);
+  return next;
+}
+
+function moveVisibleColumn(
+  order: number[],
+  fromColumn: number,
+  toColumn: number,
+  hiddenColumns: Set<number>,
+) {
+  if (hiddenColumns.size === 0) return moveColumn(order, fromColumn, toColumn);
+  const visibleColumns = order.filter(
+    (columnIndex) => !hiddenColumns.has(columnIndex),
+  );
+  const nextVisibleColumns = moveColumn(
+    visibleColumns,
+    fromColumn,
+    toColumn,
+  );
+  if (nextVisibleColumns === visibleColumns) return order;
+  let visibleIndex = 0;
+  return order.map((columnIndex) => {
+    if (hiddenColumns.has(columnIndex)) return columnIndex;
+    const nextColumn = nextVisibleColumns[visibleIndex];
+    visibleIndex += 1;
+    return nextColumn ?? columnIndex;
+  });
+}
+
+function initialColumnOrder(columnCount: number): number[] {
+  return Array.from({ length: columnCount }, (_, index) => index);
+}
+
+function hasColumnDragData(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes(COLUMN_DRAG_MIME);
 }
 
 function isFilterActive(filter: ColumnFilter | undefined): boolean {
@@ -422,10 +506,10 @@ function matchesColumnFilter(value: string, filter: ColumnFilter): boolean {
 }
 
 function applyFilters(
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   filters: Record<number, ColumnFilter>,
   excludeColumnIndex?: number,
-): RowData[] {
+): EnhancedTableRow[] {
   const activeFilters = Object.entries(filters)
     .map(([key, value]) => [Number(key), value] as const)
     .filter(
@@ -441,7 +525,10 @@ function applyFilters(
   );
 }
 
-function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
+function sortRows(
+  rows: EnhancedTableRow[],
+  sort: SortState | null,
+): EnhancedTableRow[] {
   if (!sort) return rows;
   return rows
     .map((row, index) => ({ row, index }))
@@ -457,7 +544,7 @@ function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
 }
 
 function getColumnOptions(
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   columnIndex: number,
   blankLabel: string,
 ): FilterOption[] {
@@ -476,7 +563,10 @@ function getColumnOptions(
     .sort((a, b) => compareCellText(a.value, b.value));
 }
 
-function isMostlyNumericColumn(rows: RowData[], columnIndex: number): boolean {
+function isMostlyNumericColumn(
+  rows: EnhancedTableRow[],
+  columnIndex: number,
+): boolean {
   let filledCount = 0;
   let numericCount = 0;
   rows.forEach((row) => {
@@ -1038,14 +1128,14 @@ export function EnhancedMarkdownTable({
     return <>{fallback ?? <table>{children}</table>}</>;
   }
 
-  return <InteractiveMarkdownTable table={table} toolbarExtra={toolbarExtra} />;
+  return <EnhancedTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
-function InteractiveMarkdownTable({
+export function EnhancedTable({
   table,
   toolbarExtra,
 }: {
-  table: ParsedTable;
+  table: EnhancedTableData;
   toolbarExtra?: ReactNode;
 }) {
   const { t } = useI18n();
@@ -1059,6 +1149,14 @@ function InteractiveMarkdownTable({
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(
     () => new Set(),
   );
+  const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
+  const [columnOrder, setColumnOrder] = useState<number[]>(() =>
+    initialColumnOrder(table.columnCount),
+  );
+  const [activeColumn, setActiveColumn] = useState<number | null>(null);
+  const [freezeFirstColumn, setFreezeFirstColumn] = useState(false);
+  const [resizingColumn, setResizingColumn] =
+    useState<ColumnResizeState | null>(null);
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
@@ -1083,6 +1181,7 @@ function InteractiveMarkdownTable({
     columnIndex: number;
   } | null>(null);
   const selectionFrameRef = useRef(0);
+  const draggingColumnRef = useRef<number | null>(null);
   const tableStructureKey = useMemo(
     () =>
       `${table.columnCount}\0${table.headers.map((header) => header.text).join('\0')}`,
@@ -1177,12 +1276,23 @@ function InteractiveMarkdownTable({
     setSelection(null);
     setOpenFilterMenu(null);
     setHiddenColumns(new Set());
+    setColumnWidths({});
+    setColumnOrder(initialColumnOrder(table.columnCount));
+    setActiveColumn(null);
+    setFreezeFirstColumn(false);
+    setResizingColumn(null);
     setDetailRowKey(null);
     resetCopiedVisible();
     resetCopiedSelection();
     draggingRef.current = false;
+    draggingColumnRef.current = null;
     setIsDragging(false);
-  }, [resetCopiedSelection, resetCopiedVisible, tableStructureKey]);
+  }, [
+    resetCopiedSelection,
+    resetCopiedVisible,
+    table.columnCount,
+    tableStructureKey,
+  ]);
 
   useEffect(() => {
     resetCopiedSelection();
@@ -1291,17 +1401,54 @@ function InteractiveMarkdownTable({
       ),
     [table.headers, table.rows],
   );
-  const visibleColumnIndexes = useMemo(
+  const orderedVisibleColumnIndexes = useMemo(
     () =>
-      table.headers
-        .map((_, index) => index)
+      columnOrder
+        .filter((index) => index >= 0 && index < table.columnCount)
         .filter((index) => !hiddenColumns.has(index)),
-    [hiddenColumns, table.headers],
+    [columnOrder, hiddenColumns, table.columnCount],
   );
+  const frozenColumnIndex = freezeFirstColumn
+    ? orderedVisibleColumnIndexes[0]
+    : undefined;
 
   useEffect(() => {
     resetCopiedVisible();
-  }, [resetCopiedVisible, visibleColumnIndexes, visibleRows]);
+  }, [resetCopiedVisible, orderedVisibleColumnIndexes, visibleRows]);
+
+  useEffect(() => {
+    if (!resizingColumn) return;
+    const resizeColumn = (event: MouseEvent) => {
+      const nextWidth = clampColumnWidth(
+        resizingColumn.startWidth + event.clientX - resizingColumn.startX,
+      );
+      setColumnWidths((current) => {
+        const currentWidth =
+          current[resizingColumn.columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+        if (currentWidth === nextWidth) return current;
+        if (nextWidth === DEFAULT_COLUMN_WIDTH) {
+          const next = { ...current };
+          delete next[resizingColumn.columnIndex];
+          return next;
+        }
+        return {
+          ...current,
+          [resizingColumn.columnIndex]: nextWidth,
+        };
+      });
+    };
+    const stopResize = () => setResizingColumn(null);
+    window.addEventListener('mousemove', resizeColumn);
+    window.addEventListener('mouseup', stopResize);
+    window.addEventListener('blur', stopResize);
+    document.addEventListener('visibilitychange', stopResize);
+    return () => {
+      window.removeEventListener('mousemove', resizeColumn);
+      window.removeEventListener('mouseup', stopResize);
+      window.removeEventListener('blur', stopResize);
+      document.removeEventListener('visibilitychange', stopResize);
+    };
+  }, [resizingColumn]);
 
   useEffect(() => {
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
@@ -1331,11 +1478,13 @@ function InteractiveMarkdownTable({
     direction: SortState['direction'] | null,
   ) => {
     setSelection(null);
+    setActiveColumn(columnIndex);
     setSort(direction ? { columnIndex, direction } : null);
   };
 
   const toggleSort = (columnIndex: number) => {
     setSelection(null);
+    setActiveColumn(columnIndex);
     setSort((current) => {
       if (current?.columnIndex !== columnIndex) {
         return { columnIndex, direction: 'asc' };
@@ -1352,6 +1501,7 @@ function InteractiveMarkdownTable({
     columnIndex: number,
   ) => {
     setSelection(null);
+    setActiveColumn(columnIndex);
     filterTriggerRef.current = event.currentTarget;
     const buttonRect = event.currentTarget.getBoundingClientRect();
     const menuWidth = 300;
@@ -1377,8 +1527,9 @@ function InteractiveMarkdownTable({
   };
 
   const hideColumn = (columnIndex: number) => {
-    if (visibleColumnIndexes.length <= 1) return;
+    if (orderedVisibleColumnIndexes.length <= 1) return;
     setSelection(null);
+    setActiveColumn((current) => (current === columnIndex ? null : current));
     closeFilterMenu();
     setFilters((current) => {
       const next = { ...current };
@@ -1400,24 +1551,146 @@ function InteractiveMarkdownTable({
     setHiddenColumns(new Set());
   };
 
+  const toggleFreezeFirstColumn = () => {
+    setFreezeFirstColumn((current) => !current);
+  };
+
   const toggleRowDetail = (rowKey: string) => {
     setSelection(null);
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
   };
 
-  const selectionBounds = useMemo(
-    () => (selection ? getSelectionBounds(selection) : null),
+  const selectionRowBounds = useMemo(
+    () => (selection ? getSelectionRowBounds(selection) : null),
     [selection],
+  );
+  const selectedColumnIndexSet = useMemo(
+    () =>
+      new Set(getSelectedColumnIndexes(selection, orderedVisibleColumnIndexes)),
+    [selection, orderedVisibleColumnIndexes],
   );
 
   const isCellSelected = (rowIndex: number, columnIndex: number): boolean => {
-    if (!selectionBounds) return false;
-    const { minRow, maxRow, minCol, maxCol } = selectionBounds;
+    if (!selectionRowBounds) return false;
+    const { minRow, maxRow } = selectionRowBounds;
     return (
       rowIndex >= minRow &&
       rowIndex <= maxRow &&
-      columnIndex >= minCol &&
-      columnIndex <= maxCol
+      selectedColumnIndexSet.has(columnIndex)
+    );
+  };
+
+  const columnStyle = (
+    columnIndex: number,
+    extra?: CSSProperties,
+  ): CSSProperties => {
+    const width = columnWidths[columnIndex];
+    if (width === undefined) {
+      return extra
+        ? { ...DEFAULT_COLUMN_STYLE, ...extra }
+        : DEFAULT_COLUMN_STYLE;
+    }
+    return {
+      width,
+      minWidth: width,
+      maxWidth: width,
+      ...extra,
+    };
+  };
+
+  const startColumnResize = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setResizingColumn({
+      columnIndex,
+      startX: event.clientX,
+      startWidth: columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH,
+    });
+  };
+
+  const resizeColumnWithKeyboard = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => {
+    let delta = 0;
+    if (event.key === 'ArrowRight') {
+      delta = KEYBOARD_COLUMN_RESIZE_STEP;
+    } else if (event.key === 'ArrowLeft') {
+      delta = -KEYBOARD_COLUMN_RESIZE_STEP;
+    }
+
+    if (delta === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    setColumnWidths((current) => {
+      const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+      const nextWidth = clampColumnWidth(width + delta);
+      if (width === nextWidth) return current;
+      if (nextWidth === DEFAULT_COLUMN_WIDTH) {
+        const next = { ...current };
+        delete next[columnIndex];
+        return next;
+      }
+      return {
+        ...current,
+        [columnIndex]: nextWidth,
+      };
+    });
+  };
+
+  const startColumnDrag = (
+    event: ReactDragEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => {
+    event.stopPropagation();
+    setActiveColumn(columnIndex);
+    draggingColumnRef.current = columnIndex;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(COLUMN_DRAG_MIME, String(columnIndex));
+  };
+
+  const stopColumnDrag = () => {
+    draggingColumnRef.current = null;
+  };
+
+  const dragOverColumn = (event: ReactDragEvent<HTMLElement>) => {
+    if (
+      draggingColumnRef.current === null ||
+      !hasColumnDragData(event.dataTransfer)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const dropColumn = (
+    event: ReactDragEvent<HTMLElement>,
+    targetColumnIndex: number,
+  ) => {
+    const sourceColumnIndex = draggingColumnRef.current;
+    stopColumnDrag();
+    if (
+      sourceColumnIndex === null ||
+      !hasColumnDragData(event.dataTransfer)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setSelection(null);
+    setActiveColumn(sourceColumnIndex);
+    setColumnOrder((current) =>
+      moveVisibleColumn(
+        current,
+        sourceColumnIndex,
+        targetColumnIndex,
+        hiddenColumns,
+      ),
     );
   };
 
@@ -1511,7 +1784,11 @@ function InteractiveMarkdownTable({
   };
 
   const copySelection = () => {
-    const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
+    const text = getSelectionText(
+      selection,
+      visibleRows,
+      orderedVisibleColumnIndexes,
+    );
     if (!text || !navigator.clipboard) return;
     const copyGeneration = copiedSelectionGenRef.current;
     void navigator.clipboard
@@ -1537,7 +1814,7 @@ function InteractiveMarkdownTable({
     const text = getVisibleTableText(
       table.headers,
       visibleRows,
-      visibleColumnIndexes,
+      orderedVisibleColumnIndexes,
     );
     if (!text || !navigator.clipboard) return;
     const copyGeneration = copiedVisibleGenRef.current;
@@ -1562,13 +1839,17 @@ function InteractiveMarkdownTable({
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
     if (hasNativeSelection()) return;
-    const text = getSelectionText(selection, visibleRows, visibleColumnIndexes);
+    const text = getSelectionText(
+      selection,
+      visibleRows,
+      orderedVisibleColumnIndexes,
+    );
     if (!text) return;
     event.preventDefault();
     event.clipboardData.setData('text/plain', text);
   };
 
-  const selectedCount = selectionSize(selection, visibleColumnIndexes);
+  const selectedCount = selectionSize(selection, orderedVisibleColumnIndexes);
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
   const rowSummary =
@@ -1621,6 +1902,17 @@ function InteractiveMarkdownTable({
             })}
           </button>
         )}
+        {orderedVisibleColumnIndexes.length > 0 && (
+          <button
+            className={styles.copyButton}
+            type="button"
+            onClick={toggleFreezeFirstColumn}
+          >
+            {freezeFirstColumn
+              ? t('markdownTable.unfreezeFirstColumn')
+              : t('markdownTable.freezeFirstColumn')}
+          </button>
+        )}
         {activeFilterCount > 0 && (
           <span className={styles.selection}>
             {t('markdownTable.filtersActive', { count: activeFilterCount })}
@@ -1658,10 +1950,14 @@ function InteractiveMarkdownTable({
         <table className={styles.table}>
           <thead>
             <tr>
-              <th className={`${styles.headerCell} ${styles.actionHeaderCell}`}>
+              <th
+                className={`${styles.headerCell} ${styles.actionHeaderCell} ${
+                  freezeFirstColumn ? styles.stickyActionHeaderCell : ''
+                }`}
+              >
                 {t('markdownTable.actions')}
               </th>
-              {visibleColumnIndexes.map((columnIndex) => {
+              {orderedVisibleColumnIndexes.map((columnIndex) => {
                 const header = table.headers[columnIndex];
                 if (!header) return null;
                 const isSorted = sort?.columnIndex === columnIndex;
@@ -1692,12 +1988,18 @@ function InteractiveMarkdownTable({
                 const headerAlignStyle = header.textAlign
                   ? { textAlign: header.textAlign }
                   : undefined;
+                const isFrozenColumn = frozenColumnIndex === columnIndex;
+                const isActiveColumn = activeColumn === columnIndex;
                 return (
                   <th
                     key={header.key}
-                    className={styles.headerCell}
+                    className={`${styles.headerCell} ${
+                      isFrozenColumn ? styles.frozenHeaderCell : ''
+                    } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
                     aria-sort={ariaSort}
-                    style={headerAlignStyle}
+                    onDragOver={dragOverColumn}
+                    onDrop={(event) => dropColumn(event, columnIndex)}
+                    style={columnStyle(columnIndex, headerAlignStyle)}
                   >
                     <div className={styles.headerControls}>
                       <button
@@ -1718,6 +2020,23 @@ function InteractiveMarkdownTable({
                         </span>
                       </button>
                       <button
+                        className={`${styles.reorderHandle} ${
+                          isActiveColumn ? styles.reorderHandleVisible : ''
+                        }`}
+                        type="button"
+                        draggable
+                        tabIndex={isActiveColumn ? 0 : -1}
+                        onDragStart={(event) =>
+                          startColumnDrag(event, columnIndex)
+                        }
+                        onDragEnd={stopColumnDrag}
+                        aria-label={t('markdownTable.moveColumn', {
+                          column: columnName,
+                        })}
+                      >
+                        ⋮⋮
+                      </button>
+                      <button
                         className={`${styles.filterTrigger} ${
                           isFiltered ? styles.filterTriggerActive : ''
                         }`}
@@ -1734,6 +2053,26 @@ function InteractiveMarkdownTable({
                         ▾
                       </button>
                     </div>
+                    <button
+                      className={styles.resizeHandle}
+                      type="button"
+                      onMouseDown={(event) =>
+                        startColumnResize(event, columnIndex)
+                      }
+                      onKeyDown={(event) =>
+                        resizeColumnWithKeyboard(event, columnIndex)
+                      }
+                      role="separator"
+                      aria-label={t('markdownTable.resizeColumn', {
+                        column: columnName,
+                      })}
+                      aria-orientation="vertical"
+                      aria-valuemin={MIN_COLUMN_WIDTH}
+                      aria-valuemax={MAX_COLUMN_WIDTH}
+                      aria-valuenow={
+                        columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH
+                      }
+                    />
                   </th>
                 );
               })}
@@ -1748,7 +2087,11 @@ function InteractiveMarkdownTable({
                   <tr
                     className={rowIndex % 2 === 1 ? styles.evenRow : undefined}
                   >
-                    <td className={`${styles.cell} ${styles.actionCell}`}>
+                    <td
+                      className={`${styles.cell} ${styles.actionCell} ${
+                        freezeFirstColumn ? styles.stickyActionCell : ''
+                      }`}
+                    >
                       <button
                         className={styles.rowDetailButton}
                         type="button"
@@ -1765,12 +2108,13 @@ function InteractiveMarkdownTable({
                         {t('markdownTable.rowDetails')}
                       </button>
                     </td>
-                    {visibleColumnIndexes.map((columnIndex) => {
+                    {orderedVisibleColumnIndexes.map((columnIndex) => {
                       const cell = row.cells[columnIndex];
                       if (!cell) return null;
                       const cellAlignStyle = cell.textAlign
                         ? { textAlign: cell.textAlign }
                         : undefined;
+                      const isFrozenColumn = frozenColumnIndex === columnIndex;
                       return (
                         <td
                           key={cell.key}
@@ -1778,8 +2122,8 @@ function InteractiveMarkdownTable({
                             isCellSelected(rowIndex, columnIndex)
                               ? styles.selectedCell
                               : ''
-                          }`}
-                          style={cellAlignStyle}
+                          } ${isFrozenColumn ? styles.frozenCell : ''}`}
+                          style={columnStyle(columnIndex, cellAlignStyle)}
                           data-row-index={rowIndex}
                           data-column-index={columnIndex}
                           onMouseDown={(event) =>
@@ -1804,13 +2148,13 @@ function InteractiveMarkdownTable({
                     <tr id={detailId} className={styles.detailRow}>
                       <td
                         className={styles.detailCell}
-                        colSpan={visibleColumnIndexes.length + 1}
+                        colSpan={orderedVisibleColumnIndexes.length + 1}
                       >
                         <div className={styles.detailPanel}>
                           <div className={styles.detailTitle}>
                             {t('markdownTable.detailsHeader')}
                           </div>
-                          {visibleColumnIndexes.map((columnIndex) => {
+                          {orderedVisibleColumnIndexes.map((columnIndex) => {
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
@@ -1869,7 +2213,7 @@ function InteractiveMarkdownTable({
           sort={sort}
           style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
           menuRef={filterMenuRef}
-          canHideColumn={visibleColumnIndexes.length > 1}
+          canHideColumn={orderedVisibleColumnIndexes.length > 1}
           onApply={setColumnFilter}
           onClose={closeFilterMenu}
           onHideColumn={hideColumn}

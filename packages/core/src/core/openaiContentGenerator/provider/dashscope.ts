@@ -4,10 +4,10 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import {
-  DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
   DASHSCOPE_PROXY_BASE_URL,
+  resolveRequestTimeout,
 } from '../constants.js';
 import type {
   DashScopeRequestMetadata,
@@ -15,7 +15,6 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
-import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
@@ -137,9 +136,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
@@ -311,13 +310,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
-    return {};
-  }
-
-  getResponseParsingOptions(model?: string): OpenAIResponseParsingOptions {
-    if (this.isGlmModel(model ?? this.contentGeneratorConfig.model)) {
-      return { taggedThinkingTags: true };
-    }
     return {};
   }
 

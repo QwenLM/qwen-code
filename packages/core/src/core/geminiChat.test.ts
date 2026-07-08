@@ -172,6 +172,7 @@ describe('GeminiChat', async () => {
       }),
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
+      getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -1520,6 +1521,87 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 1,
+
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'I see the first image' }],
+        },
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'new-shot' } }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'I see the second image' }],
+        },
+
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'response',
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'continue' },
+        'prompt-id-image-refs',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      const contents = request?.contents as Content[];
+      const serialized = JSON.stringify(contents);
+      expect(serialized).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(serialized).not.toContain('"data":"old-shot"');
+      expect(serialized?.match(/"data":"new-shot"/g)).toHaveLength(1);
+      expect(contents.at(-1)).toEqual({
+        role: 'user',
+        parts: expect.arrayContaining([
+          { text: 'continue' },
+          {
+            text: expect.stringContaining('Recent images reattached'),
+          },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'new-shot',
+              displayName: undefined,
+            },
+          },
+        ]),
+      });
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -2117,7 +2199,7 @@ describe('GeminiChat', async () => {
       //   cheap-gate (real estimate via getHistory + userMessage) →
       //   splitter (real) → runSideQuery (mocked at baseLlmClient) →
       //   persistence.
-      const largeChars = 'x'.repeat(400_000); // ~100K estimated tokens
+      const largeChars = 'x'.repeat(520_000); // ~130K estimated tokens
       const inheritedHistory: Content[] = [
         { role: 'user', parts: [{ text: largeChars }] },
         { role: 'model', parts: [{ text: 'ack' }] },
@@ -2127,8 +2209,9 @@ describe('GeminiChat', async () => {
       chat.setHistory(inheritedHistory);
       expect(chat.getLastPromptTokenCount()).toBe(0);
 
-      // Default DEFAULT_TOKEN_LIMIT = 128K → auto ≈ 95K. 100K estimate
-      // crosses, so cheap-gate must let compaction proceed.
+      // Default DEFAULT_TOKEN_LIMIT = 200K minus the 64K output reservation
+      // leaves a 136K effective window; 130K crosses the auto threshold, so
+      // cheap-gate must let compaction proceed.
       const generateText = vi.fn().mockResolvedValue({
         text: '<state_snapshot>compressed</state_snapshot>',
         usage: {
@@ -3918,6 +4001,62 @@ describe('GeminiChat', async () => {
         delete process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
       }
     });
+
+    it('caps reservedOutputTokens at half the context window for small custom windows (issue #6144)', async () => {
+      // Custom local model (unknown to tokenLimits.ts) with a 65,536-token
+      // window and no max_tokens overrides. Without the cap,
+      // effectiveReservedOutput = max(ESCALATED_MAX_TOKENS, 32000) = 64000,
+      // collapsing the input budget to 65536 - 64000 = 1536 tokens: a ~6K
+      // prompt trips the hard-rescue guard, compression NOOPs, and the send
+      // fails with "Context is too large to send safely...". With the cap,
+      // the reservation is floor(65536 / 2) = 32768, thresholds are sane
+      // (hard ≈ 25.9K), and the same prompt sends normally.
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'qwen3coder-64k',
+        contextWindowSize: 65_536,
+      });
+
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 6_276,
+            newTokenCount: 6_276,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('normal response'),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      // The reporter's prompt size: far above the collapsed 1,536 hard limit
+      // but well below the capped thresholds (auto ≈ 22.9K).
+      chatInstance.setLastPromptTokenCount(6_276);
+
+      const stream = await chatInstance.sendMessageStream(
+        'qwen3coder-64k',
+        { message: 'hi' },
+        'prompt-small-window-cap',
+      );
+      for await (const _ of stream) {
+        /* consume — must not throw the hard-rescue failure */
+      }
+
+      // Normal auto-path cheap-gate (force=false), NOT hard-tier rescue, and
+      // the capped reservation is what reaches the compression service.
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[0][1].reservedOutputTokens).toBe(32_768);
+    });
   });
 
   describe('addHistory', () => {
@@ -4619,6 +4758,694 @@ describe('GeminiChat', async () => {
         expect(history.some((h) => h.parts?.some((p) => p.functionCall))).toBe(
           false,
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not enter the fallback chain in unattended retry mode', async () => {
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', '1');
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-model',
+        ]);
+        const resolveForModel = vi.fn();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel,
+        } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+        const capacityError = Object.assign(
+          new StreamContentError(
+            '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+          ),
+          { status: 429 },
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(capacityError);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-unattended-no-fallback',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toBe(capacityError);
+
+        expect(resolveForModel).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('tries the next fallback when a fallback fails before emitting output', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-a',
+        'fallback-b',
+      ]);
+
+      const fallbackAGenerateContentStream = vi.fn();
+      const fallbackBGenerateContentStream = vi.fn();
+      const makeFallbackGenerator = (generateContentStream: unknown) =>
+        ({
+          generateContent: vi.fn(),
+          generateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        }) as unknown as ContentGenerator;
+      const resolveForModel = vi
+        .fn()
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackAGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-a',
+        })
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackBGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-b',
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+      fallbackAGenerateContentStream.mockRejectedValueOnce(capacityError);
+      fallbackBGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'fallback-b ok' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-two-fallbacks',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(
+        events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
+      ).toHaveLength(2);
+      expect(
+        events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
+      ).toEqual([
+        {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'test-model',
+            toModel: 'fallback-a',
+            statusCode: 429,
+            fallbackIndex: 1,
+          },
+        },
+        {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'fallback-a',
+            toModel: 'fallback-b',
+            statusCode: 429,
+            fallbackIndex: 2,
+          },
+        },
+      ]);
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(fallbackAGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(fallbackBGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'fallback-b ok',
+        ),
+      ).toBe(true);
+    });
+
+    it('skips a fallback alias that resolves to the current model', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'resolved-primary-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'primary-alias',
+        'fallback-b',
+      ]);
+
+      const duplicateGenerateContentStream = vi.fn();
+      const fallbackBGenerateContentStream = vi.fn();
+      const makeFallbackGenerator = (generateContentStream: unknown) =>
+        ({
+          generateContent: vi.fn(),
+          generateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        }) as unknown as ContentGenerator;
+      const resolveForModel = vi
+        .fn()
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            duplicateGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'resolved-primary-model',
+        })
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackBGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-b',
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+      fallbackBGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'fallback-b ok' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'requested-primary-model',
+        { message: 'test' },
+        'prompt-skip-resolved-duplicate-fallback',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(resolveForModel).toHaveBeenCalledTimes(2);
+      expect(duplicateGenerateContentStream).not.toHaveBeenCalled();
+      expect(fallbackBGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(
+        events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
+      ).toEqual([
+        {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'requested-primary-model',
+            toModel: 'fallback-b',
+            statusCode: 429,
+            fallbackIndex: 1,
+          },
+        },
+      ]);
+    });
+
+    it('skips an unresolvable fallback model and tries the next fallback', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'bad-fallback',
+        'fallback-b',
+      ]);
+
+      const fallbackBGenerateContentStream = vi.fn();
+      const fallbackBGenerator = {
+        generateContent: vi.fn(),
+        generateContentStream: fallbackBGenerateContentStream,
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+        batchEmbedContents: vi.fn(),
+        useSummarizedThinking: vi.fn().mockReturnValue(false),
+      } as unknown as ContentGenerator;
+      const resolveError = new Error('unknown fallback alias');
+      const resolveForModel = vi
+        .fn()
+        .mockRejectedValueOnce(resolveError)
+        .mockResolvedValueOnce({
+          contentGenerator: fallbackBGenerator,
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-b',
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+      fallbackBGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'fallback-b ok' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-skip-bad-fallback',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(resolveForModel).toHaveBeenCalledTimes(2);
+      expect(resolveForModel).toHaveBeenNthCalledWith(1, 'bad-fallback', {
+        failClosed: true,
+      });
+      expect(resolveForModel).toHaveBeenNthCalledWith(2, 'fallback-b', {
+        failClosed: true,
+      });
+      expect(
+        events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
+      ).toHaveLength(1);
+      expect(fallbackBGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'fallback-b ok',
+        ),
+      ).toBe(true);
+    });
+
+    it('does not try the next fallback after a fallback emits output', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-a',
+        'fallback-b',
+      ]);
+
+      const fallbackAGenerateContentStream = vi.fn();
+      const fallbackBGenerateContentStream = vi.fn();
+      const makeFallbackGenerator = (generateContentStream: unknown) =>
+        ({
+          generateContent: vi.fn(),
+          generateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        }) as unknown as ContentGenerator;
+      const resolveForModel = vi
+        .fn()
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackAGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-a',
+        })
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackBGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-b',
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+      fallbackAGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'fallback-a partial' }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw capacityError;
+        })(),
+      );
+      fallbackBGenerateContentStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'fallback-b ok' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-fallback-output-then-error',
+      );
+      const events: StreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of stream) {
+            events.push(event);
+          }
+        })(),
+      ).rejects.toBe(capacityError);
+
+      expect(
+        events.filter((event) => event.type === StreamEventType.MODEL_FALLBACK),
+      ).toHaveLength(1);
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'fallback-a partial',
+        ),
+      ).toBe(true);
+      expect(fallbackAGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(fallbackBGenerateContentStream).not.toHaveBeenCalled();
+      expect(resolveForModel).not.toHaveBeenCalledWith('fallback-b', {
+        failClosed: true,
+      });
+      const history = chat.getHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0]!.role).toBe('user');
+      expect(
+        history.some((entry) =>
+          entry.parts?.some((part) => part.text === 'fallback-a partial'),
+        ),
+      ).toBe(false);
+    });
+
+    it('surfaces an abort raised while resolving a fallback model', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['fallback-a']);
+
+      const abortError = new DOMException('Aborted', 'AbortError');
+      const resolveForModel = vi.fn().mockRejectedValueOnce(abortError);
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-fallback-resolve-abort',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(abortError);
+
+      expect(resolveForModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces an abort raised by a fallback stream without trying later fallbacks', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-a',
+        'fallback-b',
+      ]);
+
+      const abortError = new DOMException('Aborted', 'AbortError');
+      const fallbackAGenerateContentStream = vi
+        .fn()
+        .mockRejectedValueOnce(abortError);
+      const fallbackBGenerateContentStream = vi.fn();
+      const makeFallbackGenerator = (generateContentStream: unknown) =>
+        ({
+          generateContent: vi.fn(),
+          generateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        }) as unknown as ContentGenerator;
+      const resolveForModel = vi
+        .fn()
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackAGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-a',
+        })
+        .mockResolvedValueOnce({
+          contentGenerator: makeFallbackGenerator(
+            fallbackBGenerateContentStream,
+          ),
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-b',
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(capacityError);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-fallback-stream-abort',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(abortError);
+
+      expect(resolveForModel).toHaveBeenCalledTimes(1);
+      expect(fallbackAGenerateContentStream).toHaveBeenCalledTimes(1);
+      expect(fallbackBGenerateContentStream).not.toHaveBeenCalled();
+    });
+
+    it('does not fallback on non-eligible primary auth errors', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-model',
+      ]);
+      const resolveForModel = vi.fn();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      const authError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"401","message":"Unauthorized"}}',
+        ),
+        { status: 401 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(authError);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-primary-auth-no-fallback',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })(),
+      ).rejects.toBe(authError);
+
+      expect(resolveForModel).not.toHaveBeenCalled();
+    });
+
+    it('preserves primary partial tool calls when fallback is skipped after output', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['test-model']);
+        const resolveForModel = vi.fn();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel,
+        } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+        const capacityError = Object.assign(
+          new StreamContentError(
+            '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+          ),
+          { status: 429 },
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'call_failed_primary_attempt',
+                          name: 'read_file',
+                          args: { path: '/tmp/primary.txt' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            throw capacityError;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-skipped-fallback-failure',
+        );
+
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })();
+        const resultPromise =
+          await expect(collecting).rejects.toBe(capacityError);
+        await vi.advanceTimersByTimeAsync(0);
+        await resultPromise;
+        expect(resolveForModel).not.toHaveBeenCalled();
+        const history = chat.getHistory();
+        expect(history).toHaveLength(2);
+        expect(history[0]!.role).toBe('user');
+        expect(history[1]!.role).toBe('model');
+        expect(history[1]!.parts?.some((part) => part.functionCall)).toBe(true);
       } finally {
         vi.useRealTimers();
       }
@@ -7205,7 +8032,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery',
       );
@@ -7232,6 +8059,88 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('preserves current user image bytes during output recovery', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 0,
+        imagePayloadThreshold: 1,
+
+      });
+      const streams = [
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'done' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+
+        {
+          message: [
+            { text: 'describe this image' },
+            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
+          ],
+        },
+        'prompt-recovery-image',
+      );
+
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[2]?.[0];
+      const serialized = JSON.stringify(recoveryRequest?.contents);
+      expect(serialized).toContain('"data":"current-shot"');
+    });
+
+    it('should skip no-op escalation and recover directly for high-output models', async () => {
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-direct-recovery',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const retries = events.filter((e) => e.type === StreamEventType.RETRY);
+      expect(retries.length).toBe(1);
+      expect((retries[0] as { isContinuation?: boolean }).isContinuation).toBe(
+        true,
+      );
+      expect(
+        (retries[0] as { maxOutputTokensEscalated?: number })
+          .maxOutputTokensEscalated,
+      ).toBeUndefined();
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(text).toBe('Hello ending.');
+    });
+
+
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [
         makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
@@ -7251,7 +8160,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery-overlap',
       );
@@ -7309,7 +8218,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long mermaid answer' },
         'prompt-recovery-contained-replay',
       );
@@ -7357,7 +8266,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-prose-opener',
       );
@@ -7394,7 +8303,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-far-prose',
       );
@@ -7435,7 +8344,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something with a heading' },
         'prompt-recovery-line-boundary-reject',
       );
@@ -7485,7 +8394,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'continue the derivation' },
         'prompt-recovery-single-cell-pipe-prose',
       );
@@ -7532,7 +8441,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a structured answer' },
         'prompt-recovery-newline-normalization',
       );
@@ -7568,7 +8477,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-full-overlap',
       );
@@ -7621,7 +8530,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-thought-only',
       );
@@ -7676,7 +8585,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery-thinking-continuation',
       );
@@ -7724,7 +8633,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery-thinking-continuation-order',
       );
@@ -7773,7 +8682,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: '帮我分析数据' },
         'prompt-recovery-cjk-floor',
       );
@@ -7813,7 +8722,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long markdown answer' },
         'prompt-recovery-leading-whitespace',
       );
@@ -7867,7 +8776,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a very long answer' },
         'prompt-recovery-tail-truncation',
       );
@@ -7927,7 +8836,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a response that contains my delimiter' },
         'prompt-recovery-delimiter-collision',
       );
@@ -7994,7 +8903,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a response that contains my opening delimiter' },
         'prompt-recovery-delimiter-collision-open',
       );
@@ -8062,7 +8971,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a file' },
         'prompt-recovery-skip',
       );
@@ -8102,7 +9011,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'infinite loop test' },
         'prompt-recovery-cap',
       );
@@ -8134,7 +9043,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'recovery fails' },
         'prompt-recovery-fail',
       );
@@ -8217,7 +9126,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'recovery throws after functionCall' },
         'prompt-recovery-fc-throw',
       );
@@ -8292,7 +9201,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'mixed recovery' },
         'prompt-recovery-mixed',
       );
@@ -8334,7 +9243,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'essay' },
         'prompt-recovery-coalesce',
       );
@@ -8426,7 +9335,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chatWithRecording.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'kick off' },
         'prompt-escalation-flush',
       );

@@ -47,7 +47,17 @@ import type {
   AgentDialogEntry,
   DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
-import { isLiveAgentPanelVisibleEntry } from './liveAgentPanelVisibility.js';
+import {
+  isLiveAgentPanelVisibleEntry,
+  LIVE_AGENT_PANEL_MAX_ROWS,
+} from './liveAgentPanelVisibility.js';
+import {
+  type AgentTreeInfo,
+  computeAgentTreeInfo,
+  panelDisplayOrder,
+  statusGlyph,
+  treeRowPrefix,
+} from './agent-forest.js';
 
 interface LiveAgentPanelProps {
   /**
@@ -64,7 +74,10 @@ interface LiveAgentPanelProps {
   width?: number;
 }
 
-const DEFAULT_MAX_ROWS = 12;
+// Sourced from liveAgentPanelVisibility so the composer's panel-focus
+// keyboard handler windows its candidate list identically — see the
+// constant's doc for the lockstep contract.
+const DEFAULT_MAX_ROWS = LIVE_AGENT_PANEL_MAX_ROWS;
 // Re-export under a panel-local alias so the source of truth stays
 // in `subagents/builtin-agents.ts` (a backend rename of the default
 // type would otherwise silently re-introduce the redundant
@@ -92,10 +105,9 @@ function isAgentEntry(entry: DialogEntry): entry is AgentDialogEntry {
   return entry.kind === 'agent';
 }
 
-// Bullet glyphs mirror Claude Code's CoordinatorTaskPanel — `○` for
-// active slots (running / paused) so the row reads as a uniform list,
-// terminal states keep distinct check / cross marks so they're easy
-// to scan at a glance.
+// Glyph vocabulary lives in agent-forest's statusGlyph (shared with the
+// dialog's Sub-agents roster so the two surfaces can't drift); this adds
+// the panel's color mapping plus the synthesized-row special case on top.
 function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
   glyph: string;
   color: string;
@@ -106,19 +118,18 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
     // we don't lie about success.
     return { glyph: '·', color: theme.text.secondary };
   }
+  const glyph = statusGlyph(entry.status);
   switch (entry.status) {
     case 'running':
-      return { glyph: '○', color: theme.status.warning };
     case 'paused':
-      return { glyph: '⏸', color: theme.status.warning };
-    case 'completed':
-      return { glyph: '✔', color: theme.status.success };
-    case 'failed':
-      return { glyph: '✖', color: theme.status.error };
     case 'cancelled':
-      return { glyph: '✖', color: theme.status.warning };
+      return { glyph, color: theme.status.warning };
+    case 'completed':
+      return { glyph, color: theme.status.success };
+    case 'failed':
+      return { glyph, color: theme.status.error };
     default:
-      return { glyph: '○', color: theme.text.secondary };
+      return { glyph, color: theme.text.secondary };
   }
 }
 
@@ -399,7 +410,14 @@ const LiveAgentPanelBody: React.FC<{
 
   if (visibleAgents.length === 0) return null;
 
-  const visibleAgentsAsc = [...visibleAgents].reverse();
+  // Snapshot order is newest-first (dialog convention); panelDisplayOrder
+  // renders oldest-first with each nested agent grouped under its parent
+  // (and keeps the composer's panel-focus keyboard handler in lockstep).
+  // Tree metadata is computed on the full visible set (not the maxRows
+  // window) so a row's indent doesn't shift when the window scrolls past
+  // its parent.
+  const visibleAgentsAsc = panelDisplayOrder(visibleAgents);
+  const treeInfo = computeAgentTreeInfo(visibleAgentsAsc);
   const overflow = Math.max(0, visibleAgentsAsc.length - maxRows);
   const visible =
     overflow > 0 ? visibleAgentsAsc.slice(-maxRows) : visibleAgentsAsc;
@@ -430,6 +448,7 @@ const LiveAgentPanelBody: React.FC<{
           entry={entry}
           now={now}
           selected={focused && clampedIndex === idx + 1}
+          tree={treeInfo.get(entry.agentId)}
         />
       ))}
       {focused && (
@@ -447,7 +466,8 @@ const AgentRow: React.FC<{
   entry: AgentDialogEntry;
   now: number;
   selected?: boolean;
-}> = ({ entry, now, selected = false }) => {
+  tree?: AgentTreeInfo;
+}> = ({ entry, now, selected = false, tree }) => {
   const { glyph, color } = statusIcon(entry);
   // ANSI sanitize every user-controlled string before it reaches Ink.
   // `subagentType` comes from subagent config (user-authored or model-
@@ -497,6 +517,15 @@ const AgentRow: React.FC<{
   //   between the description and the right-pinned elapsed.
   const tail = ` ▶ ${elapsed}${tokenSuffix}`;
   const prefix = selected ? '▸ ' : '  ';
+  // Tree gutter (indent + ↳) comes from the shared agent-forest helper so
+  // the panel and the dialog list can't drift; the orphan additionally
+  // says who launched it.
+  const treePrefix = treeRowPrefix(entry, tree);
+  const orphanNote = tree?.orphaned
+    ? entry.parentName
+      ? ` · from ${escapeAnsiCtrlCodes(entry.parentName)}`
+      : ' · nested'
+    : '';
   return (
     <Box flexDirection="row">
       <Box flexShrink={0}>
@@ -506,6 +535,9 @@ const AgentRow: React.FC<{
       </Box>
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
+          {treePrefix !== '' && (
+            <Text color={theme.text.secondary}>{treePrefix}</Text>
+          )}
           <Text color={color}>{`${glyph} `}</Text>
           {showType && (
             <>
@@ -517,6 +549,7 @@ const AgentRow: React.FC<{
           {activity && (
             <Text color={theme.text.secondary}>{` (${activity})`}</Text>
           )}
+          {orphanNote && <Text color={theme.text.secondary}>{orphanNote}</Text>}
         </Text>
       </Box>
       <Box flexShrink={0}>

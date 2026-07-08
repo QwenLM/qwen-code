@@ -98,6 +98,7 @@ import {
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
 
@@ -1570,47 +1571,7 @@ export class ExtensionManager {
   }
 
   async refreshMemory(): Promise<void> {
-    if (!this.config) return;
-    // refresh mcp servers
-    await this.config.getToolRegistry().restartMcpServers();
-    // Refresh skills + subagents in parallel. Both `refreshCache` calls
-    // now resolve only after their async change-listener chain settles
-    // — for skills, that includes `SkillTool.refreshSkills()` rebuilding
-    // the model-facing tool description and updating `geminiClient`'s
-    // tool list. allSettled (rather than Promise.all) so a rejection
-    // from one leg does not cascade — the other leg's result is still
-    // applied, refreshHierarchicalMemory below still runs, and the
-    // `refreshTools` callers (`enableExtension`, etc.) don't unwind
-    // because of an unrelated transient failure.
-    const skillManager = this.config.getSkillManager();
-    const settled = await Promise.allSettled([
-      skillManager?.refreshCache(),
-      this.config.getSubagentManager().refreshCache(),
-    ]);
-    for (const result of settled) {
-      if (result.status === 'rejected') {
-        debugLogger.warn(
-          'refreshMemory: a refreshCache leg failed:',
-          result.reason,
-        );
-      }
-    }
-    // Hierarchical memory refresh is now awaited too — the previous
-    // fire-and-forget defeated the rest of the function's "wait until
-    // refresh is done" contract. Wrap in try/catch so a transient
-    // failure doesn't propagate up to `enableExtension` /
-    // `installExtension` callers, which have already mutated their
-    // `isActive`/`installed` flags by the time refreshMemory is
-    // invoked. A failed memory refresh leaves stale memory but should
-    // not back out the surrounding extension transition.
-    try {
-      await this.config.refreshHierarchicalMemory();
-    } catch (err) {
-      debugLogger.error(
-        'refreshMemory: refreshHierarchicalMemory failed:',
-        err,
-      );
-    }
+    await refreshExtensionRuntime(this.config);
   }
 
   async refreshTools(): Promise<void> {

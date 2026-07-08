@@ -2,8 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `interactive-widget=resizes-content` is Chrome-on-Android-only (108+);
+      iOS Safari silently ignores it — the virtual keyboard always overlays
+      the viewport there. Keyboard-aware layout on iOS requires the
+      VirtualKeyboard API or `visualViewport` resize events instead.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <!--
+      Status bar color follows the active theme; the inline script below
+      updates this meta tag in the same tick it applies the theme class so
+      mobile browsers never flash the default (white) bar.
+    -->
+    <meta name="theme-color" content="#0d0d0d" />
     <title>Qwen Code Web chat</title>
+    <!--
+      Apply the stored theme class + theme-color before first paint so the
+      <html> background matches the app theme on mobile. Without this, the
+      iOS Safari rubber-band overscroll and the status-bar / home-indicator
+      safe areas briefly show the default white canvas. Storage key mirrors
+      THEME_STORAGE_KEY in main.tsx.
+    -->
+    <script>
+      !function(){try{var k='qwen-code-web-shell-theme',p=new URLSearchParams(location.search),t=p.get('theme');if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem(k)}catch(_){t=null}}if(t!=='dark'&&t!=='light')t='dark';document.documentElement.classList.add('theme-'+t);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='light'?'#ffffff':'#0d0d0d')}catch(e){console.warn('theme-init:',e)}}();
+    </script>
     <!--
       Favicon is inlined as a data: URI rather than a /favicon.svg file because
       the daemon's static server only exposes /assets/* and / (see

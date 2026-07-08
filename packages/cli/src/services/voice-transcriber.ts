@@ -65,6 +65,7 @@ interface ResolveVoiceTranscriptionConfigArgs {
   config: VoiceModelSource;
   settings: LoadedSettings;
   voiceModel: string;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 interface TranscribeVoiceAudioArgs extends ResolveVoiceTranscriptionConfigArgs {
@@ -241,12 +242,13 @@ function readApiKey(
   settings: LoadedSettings,
   model: AvailableModel,
   baseUrl: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
 ): string | undefined {
   if (!model.envKey && !isQwenBaseUrl(baseUrl)) {
     return undefined;
   }
   const envKey = model.envKey ?? DEFAULT_OPENAI_API_KEY;
-  const envValue = process.env[envKey];
+  const envValue = (env ?? process.env)[envKey];
   if (envValue && envValue.trim().length > 0) {
     return envValue.trim();
   }
@@ -267,6 +269,7 @@ export function resolveVoiceTranscriptionConfig({
   config,
   settings,
   voiceModel,
+  env,
 }: ResolveVoiceTranscriptionConfigArgs): VoiceTranscriptionConfig {
   const matches = config
     .getAllConfiguredModels()
@@ -305,7 +308,7 @@ export function resolveVoiceTranscriptionConfig({
     );
   }
 
-  const apiKey = readApiKey(settings, model, normalizedBaseUrl);
+  const apiKey = readApiKey(settings, model, normalizedBaseUrl, env);
   if (model.envKey && !apiKey) {
     throw new Error(`Voice model '${voiceModel}' requires ${model.envKey}.`);
   }

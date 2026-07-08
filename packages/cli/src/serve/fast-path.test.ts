@@ -363,13 +363,12 @@ afterEach(() => {
 
 describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
-    const indexSource = readFileSync('index.ts', 'utf8');
+    const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(indexSource).not.toContain("import './src/gemini.js'");
-    expect(indexSource).not.toContain("import { main } from './src/gemini.js'");
-    expect(indexSource).not.toContain("process.argv[2] === 'serve'");
-    expect(indexSource).toContain('import { isServeFastPathArgv }');
-    expect(indexSource).toContain("await import('./src/serve/fast-path.js')");
+    expect(cliSource).not.toContain("import './gemini.js'");
+    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("process.argv[2] === 'serve'");
+    expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
 
   it('does not import the full settings loader on the serve fast path', () => {
@@ -547,6 +546,27 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('falls back to the full parser for repeatable --workspace values', () => {
+    expect(
+      parseServeFastPathArgs([
+        'serve',
+        '--workspace',
+        '/tmp/primary',
+        '--workspace',
+        '/tmp/secondary',
+      ]),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('falls back to the full parser for empty --workspace values', () => {
+    expect(parseServeFastPathArgs(['serve', '--workspace='])).toEqual({
+      kind: 'fallback',
+    });
+    expect(parseServeFastPathArgs(['serve', '--workspace', ''])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('parses Windows bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       'C:\\repo\\dist\\cli.js',
@@ -593,6 +613,7 @@ describe('serve fast path argument parsing', () => {
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
       ['max-sessions', ['--max-sessions', '10']],
+      ['max-total-sessions', ['--max-total-sessions', '20']],
       [
         'max-pending-prompts-per-session',
         ['--max-pending-prompts-per-session', '5'],
@@ -658,6 +679,7 @@ describe('serve fast path argument parsing', () => {
       },
     });
     expect(fastPathParsed).not.toHaveProperty('options.maxSessions');
+    expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
     expect(fastPathParsed).not.toHaveProperty(

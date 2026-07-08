@@ -96,10 +96,11 @@ interface ServeArgs {
   hostname: string;
   token?: string;
   'max-sessions': number;
+  'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
-  workspace?: string;
+  workspace?: string | string[];
   'require-auth': boolean;
   'enable-session-shell': boolean;
   'tls-cert'?: string;
@@ -127,6 +128,12 @@ interface ServeArgs {
   'rate-limit-window-ms'?: number;
   experimentalLsp?: boolean;
   channel?: string[];
+}
+
+function primaryWorkspaceArg(
+  workspace: string | string[] | undefined,
+): string | undefined {
+  return Array.isArray(workspace) ? workspace[0] : workspace;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -159,6 +166,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('max-total-sessions', {
+        type: 'number',
+        description:
+          'Non-negative integer cap on concurrent live sessions across all ' +
+          'workspace runtimes. Set to 0 to disable.',
+      })
       .option('max-pending-prompts-per-session', {
         type: 'number',
         default: 5,
@@ -168,6 +181,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('workspace', {
         type: 'string',
+        array: true,
+        requiresArg: true,
         description:
           'Absolute workspace path this daemon binds to. ' +
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
@@ -449,7 +464,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // a deployment that's wide-open at boot. Suppress with
     // QWEN_CODE_SUPPRESS_YOLO_WARNING=1.
     try {
-      const loaded = loadSettings(argv.workspace ?? process.cwd());
+      const loaded = loadSettings(
+        primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
+      );
       const merged = loaded.merged;
       const approvalMode = merged.tools?.approvalMode;
       const sandbox = merged.tools?.sandbox;
@@ -532,6 +549,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
+        ...(argv['max-total-sessions'] !== undefined
+          ? { maxTotalSessions: argv['max-total-sessions'] }
+          : {}),
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],

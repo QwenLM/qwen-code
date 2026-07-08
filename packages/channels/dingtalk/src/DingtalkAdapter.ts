@@ -7,6 +7,7 @@ import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
@@ -17,6 +18,7 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -107,6 +109,18 @@ export class DingtalkChannel extends ChannelBase {
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
+  private activeReactionKeys = new Set<string>();
+  /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
+  private sessionReactionKeys = new Map<
+    string,
+    Map<string, { messageId: string; chatId: string }>
+  >();
+  /**
+   * Real inbound message ids (insertion-ordered, size-capped). Unlike the
+   * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
+   * turn that starts minutes after its message arrived still gets a reaction.
+   */
+  private inboundMessageIds = new Set<string>();
   /**
    * Token cache for proactive sends. The stream SDK only refreshes its token
    * on (re)connect, so a long-lived socket serves a stale one after ~2h.
@@ -465,13 +479,13 @@ export class DingtalkChannel extends ChannelBase {
     msgId: string,
     conversationId: string,
   ): Promise<void> {
-    const token = this.getAccessToken();
-    if (!token) return;
-
     const robotCode = this.config.clientId;
     if (!robotCode || !msgId || !conversationId) return;
-
     try {
+      const token = this.config.clientSecret
+        ? await this.getProactiveToken()
+        : this.getAccessToken();
+      if (!token) return;
       const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
         method: 'POST',
         headers: {
@@ -493,7 +507,7 @@ export class DingtalkChannel extends ChannelBase {
         }),
       });
       if (!resp.ok) {
-        const detail = await resp.text().catch(() => '');
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 500);
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed: ${resp.status} ${detail}\n`,
         );
@@ -521,6 +535,8 @@ export class DingtalkChannel extends ChannelBase {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    this.activeReactionKeys.clear();
+    this.sessionReactionKeys.clear();
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
@@ -534,22 +550,120 @@ export class DingtalkChannel extends ChannelBase {
     return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
-  protected override onPromptStart(
+  private reactionKey(messageId: string, conversationId: string): string {
+    return `${conversationId}:${messageId}`;
+  }
+
+  private rememberInboundMessageId(msgId: string): void {
+    this.inboundMessageIds.delete(msgId);
+    this.inboundMessageIds.add(msgId);
+    if (this.inboundMessageIds.size > 1000) {
+      const oldest = this.inboundMessageIds.values().next().value;
+      if (oldest !== undefined) this.inboundMessageIds.delete(oldest);
+    }
+  }
+
+  private logReactionFailure(action: string, err: unknown): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] ${action} failed: ${err instanceof Error ? err.message : err}\n`,
+    );
+  }
+
+  private startReaction(
     chatId: string,
-    _sessionId: string,
     messageId?: string,
+    sessionId?: string,
   ): void {
     if (!messageId || !this.isConversationId(chatId)) return;
-    this.attachReaction(messageId, chatId).catch(() => {});
+    // Loop lifecycle events carry the internal job id as messageId; the
+    // emotion API only accepts ids of real inbound messages, so skip anything
+    // we never saw arrive.
+    if (!this.inboundMessageIds.has(messageId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (this.activeReactionKeys.has(key)) return;
+    this.activeReactionKeys.add(key);
+    if (sessionId) {
+      let keys = this.sessionReactionKeys.get(sessionId);
+      if (!keys) {
+        keys = new Map();
+        this.sessionReactionKeys.set(sessionId, keys);
+      }
+      keys.set(key, { messageId, chatId });
+    }
+    this.attachReaction(messageId, chatId)
+      .then(() => {
+        if (!this.activeReactionKeys.has(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('late reaction recall', err);
+          });
+        }
+      })
+      .catch((err) => {
+        this.activeReactionKeys.delete(key);
+        this.logReactionFailure('reaction attach', err);
+      });
+  }
+
+  private stopReaction(
+    chatId: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
+    if (!messageId || !this.isConversationId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (sessionId) {
+      const keys = this.sessionReactionKeys.get(sessionId);
+      if (keys) {
+        keys.delete(key);
+        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
+      }
+    }
+    if (!this.activeReactionKeys.delete(key)) return;
+    this.recallReaction(messageId, chatId).catch((err) => {
+      this.logReactionFailure('reaction recall', err);
+    });
+  }
+
+  /** Recall reactions left behind when a session dies without terminal lifecycle events. */
+  override onSessionDied(sessionId: string): void {
+    const keys = this.sessionReactionKeys.get(sessionId);
+    if (keys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const [key, { messageId, chatId }] of keys) {
+        if (this.activeReactionKeys.delete(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('session-death reaction recall', err);
+          });
+        }
+      }
+    }
+    super.onSessionDied(sessionId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startReaction(event.chatId, event.messageId, event.sessionId);
+      return;
+    }
+    if (isTerminalTaskLifecycleType(event.type)) {
+      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+    }
+  }
+
+  protected override onPromptStart(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    this.startReaction(chatId, messageId, sessionId);
   }
 
   protected override onPromptEnd(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
-    this.recallReaction(messageId, chatId).catch(() => {});
+    this.stopReaction(chatId, messageId, sessionId);
   }
 
   /**
@@ -791,6 +905,7 @@ export class DingtalkChannel extends ChannelBase {
       }
       if (msgId) {
         this.seenMessages.set(msgId, Date.now());
+        this.rememberInboundMessageId(msgId);
       }
 
       const isGroup = data.conversationType === '2';
@@ -861,7 +976,7 @@ export class DingtalkChannel extends ChannelBase {
 
       // Strip first @mention (the bot) from text, keep other @mentions intact
       if (isMentioned) {
-        cleanText = cleanText.replace(/@\S+/, '').trim();
+        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context

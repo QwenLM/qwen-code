@@ -14,6 +14,7 @@ export function useMessages(
           promptCancelled: t('request.cancelled'),
           branchSuccess: (name) => t('branch.success', { name }),
           midTurnInserted: (message) => t('midTurn.inserted', { message }),
+          modelStreamInterrupted: t('error.modelStreamInterrupted'),
         },
       }),
     [blocks, t],

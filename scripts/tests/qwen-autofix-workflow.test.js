@@ -4,21 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
-const refreshIssueComments =
-  workflow.match(/refresh_issue_comments\(\) \{[\s\S]*?\n[ ]{12}\}/)?.[0] ?? '';
-const tier2Scan =
-  workflow.match(/Tier 2:[\s\S]*?tier2-scan\.json"; then/)?.[0] ?? '';
-const filterUnattendedCandidates =
-  workflow.match(
-    /filter_unattended_candidates\(\) \{[\s\S]*?\n[ ]{12}\}/,
-  )?.[0] ?? '';
+const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const sandboxImageResolverScript = readFileSync(
+  '.github/scripts/resolve-sandbox-image.mjs',
+  'utf8',
+);
+const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
-    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
+    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
+  )?.[0] ?? '';
+const routeStep =
+  workflow.match(
+    /- name: 'Decide phases'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
 const publishPrStep =
   workflow.match(
@@ -28,63 +41,155 @@ const pushAndReportStep =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
+const reportDryRunFailureSteps =
+  workflow.match(
+    /- name: 'Report dry-run \/ failure'[\s\S]*?(?=\n[ ]{6}- name: '|$)/g,
+  ) ?? [];
+const issueAutofixReportStep =
+  reportDryRunFailureSteps.find((step) => step.includes('pr-title.txt')) ?? '';
+const reviewAddressReportStep =
+  reportDryRunFailureSteps.find((step) =>
+    step.includes('address-summary.md'),
+  ) ?? '';
 const withdrawClaimStep =
   workflow.match(
     /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
-const issueSandboxImageStep =
+const prepareQwenCliSteps =
   workflow.match(
-    /- name: 'Select issue sandbox image'[\s\S]*?(?=\n {6}- name: 'Claim issue')/,
-  )?.[0] ?? '';
-const reviewSandboxImageStep =
+    /- name: 'Prepare Qwen Code CLI'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
+const assessCandidatesStep =
   workflow.match(
-    /- name: 'Select review sandbox image'[\s\S]*?(?=\n {6}- name: 'Triage and address')/,
+    /- name: 'Assess candidates'[\s\S]*?(?=\n[ ]{6}- name: 'Read decision')/,
   )?.[0] ?? '';
+const findCandidateIssuesStep =
+  workflow.match(
+    /- name: 'Find candidate issues'[\s\S]*?(?=\n[ ]{6}- name: 'Resolve sandbox image')/,
+  )?.[0] ?? '';
+const readDecisionStep =
+  workflow.match(
+    /- name: 'Read decision'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
+  )?.[0] ?? '';
+const claimIssueStep =
+  workflow.match(
+    /- name: 'Claim issue'[\s\S]*?(?=\n[ ]{6}- name: 'Develop fix')/,
+  )?.[0] ?? '';
+const developFixStep =
+  workflow.match(
+    /- name: 'Develop fix'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
+  )?.[0] ?? '';
+const triageAndAddressStep =
+  workflow.match(
+    /- name: 'Triage and address'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
+  )?.[0] ?? '';
+const prepareBranchAndFeedbackStep =
+  workflow.match(
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+  )?.[0] ?? '';
+const resetAutofixWorkspaceSteps =
+  workflow.match(
+    /- name: 'Reset autofix workspace'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
+const verificationGateSteps =
+  workflow.match(/- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
+  [];
+const resolveSandboxImageSteps =
+  workflow.match(
+    /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
+const installAndBuildSteps =
+  workflow.match(
+    /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
+
+function readAutofixSkill() {
+  return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+}
+
+function withRunnerDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeQwenStub(dir, lines = []) {
+  const stub = join(dir, 'qwen-stub.mjs');
+  writeFileSync(stub, ['#!/usr/bin/env node', ...lines, ''].join('\n'));
+  chmodSync(stub, 0o755);
+  return stub;
+}
+
+function writeWorkdirStub(dir, lines) {
+  return writeQwenStub(dir, [
+    "import { writeFileSync } from 'node:fs';",
+    "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+    'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+    ...lines,
+  ]);
+}
+
+function runAutofixRunner(args) {
+  return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
+    encoding: 'utf8',
+  });
+}
+
+function runAddressReview(dir, stub, extraArgs = []) {
+  return runAutofixRunner([
+    '--mode',
+    'address-review',
+    '--pr',
+    '5678',
+    '--issue',
+    '1234',
+    '--workdir',
+    dir,
+    '--qwen-bin',
+    stub,
+    ...extraArgs,
+  ]);
+}
+
+function runDevelopIssue(dir, stub) {
+  return runAutofixRunner([
+    '--mode',
+    'develop-issue',
+    '--issue',
+    '1234',
+    '--workdir',
+    dir,
+    '--qwen-bin',
+    stub,
+  ]);
+}
 
 describe('qwen-autofix workflow', () => {
-  it('does not classify tier-2 issues with incomplete fallback comments', () => {
-    expect(workflow).toContain('refresh_issue_comments()');
-    expect(workflow).toContain('gh api --paginate');
-    expect(workflow).toContain('TRUSTED_ASSOC');
-    expect(workflow).toContain('KNOWN_BOTS');
+  it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
-    expect(refreshIssueComments.length).toBeGreaterThan(0);
-    expect(tier2Scan.length).toBeGreaterThan(0);
-    expect(workflow).toContain('::warning::Failed to refresh comments');
-    expect(workflow).toContain(
-      '::warning::Failed to assemble refreshed comments',
-    );
-    expect(refreshIssueComments).toContain(
-      'Comment refresh: ${succeeded}/${total} issues succeeded',
-    );
-    expect(refreshIssueComments).toContain('total - succeeded');
-    expect(tier2Scan).toContain(
-      '--limit 30 --json number,title,body,labels,createdAt,url \\',
-    );
-    expect(tier2Scan).not.toContain(',comments');
-    expect(workflow).not.toContain('using issue-list comments');
-    expect(refreshIssueComments.match(/>> "\$\{ndjson\}"/g)).toHaveLength(1);
-    expect(refreshIssueComments).not.toContain(
-      'printf \'%s\\n\' "${issue}" >> "${ndjson}"',
-    );
-  });
-
-  it('keeps candidate tiering and age-window guards covered', () => {
-    expect(workflow).toContain('MIN_ISSUE_AGE_DAYS');
-    expect(workflow).toContain('MAX_ISSUE_AGE_DAYS');
-    expect(workflow).toContain('created:${MAX_CREATED}..${MIN_CREATED}');
     expect(workflow).toContain('autofixTier: 0');
     expect(workflow).toContain('autofixTier: 1');
-    expect(workflow).toContain('autofixTier: 2');
-    expect(workflow).toContain('.[0] as $tier1 | .[1] as $tier2');
-    expect(workflow).toContain('.[0:(10 - ($selected | length))]');
-    expect(workflow).toContain('del(.comments)');
+    expect(workflow).not.toContain('autofixTier: 2');
+    expect(workflow).not.toContain('Tier 2 — unattended bugs');
+    expect(workflow).not.toContain('filter_unattended_candidates()');
+    expect(workflow).not.toContain('refresh_issue_comments()');
+    expect(workflow).not.toContain('created:${MAX_CREATED}..${MIN_CREATED}');
+    expect(workflow).not.toContain(
+      'label:${BUG_LABEL} -label:${READY_FOR_AGENT_LABEL}',
+    );
+    expect(workflow).not.toContain('tier2.with-tier.json');
+    expect(workflow).not.toContain('tier2-scan.json');
     // Forced issues must still honor the autofix skip/in-progress exclusion.
     expect(workflow).toContain(
       'any(. == "autofix/skip" or . == "autofix/in-progress")',
     );
-    // Tier-2 must exclude ready-for-agent bugs so they only flow through tier 1.
-    expect(workflow).toContain('-label:${READY_FOR_AGENT_LABEL}');
+    expect(workflow).toContain(
+      '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
+    );
+    expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
 
   it('keeps label-triggered issue routing guarded and diagnosable', () => {
@@ -102,6 +207,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}',
     );
+    expect(workflow).toContain(
+      '::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run.',
+    );
     expect(workflow).toContain("${sender_permission}\" == 'write'");
     expect(workflow).toContain("${sender_permission}\" == 'maintain'");
     expect(workflow).toContain("${sender_permission}\" == 'admin'");
@@ -109,29 +217,47 @@ describe('qwen-autofix workflow', () => {
       "sender_permission='${sender_permission:-none}'",
     );
     expect(workflow).toContain(
+      '[[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true',
+    );
+    expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
     expect(workflow).toContain('ready=${issue_is_ready}');
+    expect(workflow).toContain('approved=${issue_is_approved}');
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
     expect(workflow).toContain("group: 'qwen-autofix-issue'");
     expect(workflow).toContain(
-      '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))',
+      '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
     expect(workflow).toContain(
       '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
     );
     expect(workflow).toContain(
-      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_ISSUE}"',
+      'if [[ "${EVENT_NAME}" == \'workflow_dispatch\' && ( -z "${PHASE}" || "${PHASE}" == \'auto\' ) ]]; then',
+    );
+    expect(routeStep).toContain(
+      '[[ -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false',
+    );
+    expect(routeStep).toContain(
+      '[[ -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true',
+    );
+    expect(routeStep).toContain(
+      '[[ -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true',
+    );
+    expect(routeStep).not.toContain(
+      '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false',
     );
     expect(workflow).toContain(
-      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_PR}"',
+      'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
     );
     expect(workflow).toContain(
-      'is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping.',
+      'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
     );
+    expect(workflow).toContain('"${issue_is_approved}" == \'true\'');
+    expect(workflow).toContain('--remove-label "${AUTOFIX_APPROVED_LABEL}"');
     expect(workflow).not.toContain(
       "contains(github.event.issue.labels.*.name, 'type/bug')",
     );
@@ -139,6 +265,28 @@ describe('qwen-autofix workflow', () => {
       "contains(github.event.issue.labels.*.name, 'status/ready-for-agent')",
     );
     expect(workflow).not.toContain('github.event.sender.author_association');
+  });
+
+  it('does not expose comment-triggered autofix commands', () => {
+    expect(workflow).not.toContain(
+      "issue_comment:\n    types:\n      - 'created'",
+    );
+    expect(workflow).not.toContain(
+      "pull_request_review_comment:\n    types:\n      - 'created'",
+    );
+    expect(workflow).not.toContain(
+      "pull_request_review:\n    types:\n      - 'submitted'",
+    );
+    expect(workflow).not.toContain(
+      "COMMENT_BODY: '${{ github.event.comment.body }}'",
+    );
+    expect(workflow).not.toContain('@qwen-code /autofix');
+    expect(workflow).not.toContain('/autofix run');
+    expect(workflow).not.toContain('@qwen-code /address-review');
+    expect(routeStep).not.toContain('comment command accepted');
+    expect(routeStep).not.toContain('address-review command accepted');
+    expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
+    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
@@ -151,15 +299,141 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'elif [[ "$(jq -r \'.state // ""\' "${forced_issue_json}")" != \'OPEN\' ]]; then',
     );
+    expect(workflow).toContain(
+      'workflow_dispatch is a maintainer-initiated escape hatch',
+    );
+    expect(routeStep).toContain('sanitize_number()');
+    expect(routeStep).toContain('[[ "${value}" =~ ^[0-9]+$ ]]');
+    expect(routeStep).toContain('ROUTE_ISSUE="$(sanitize_number');
+    expect(routeStep).toContain('ROUTE_PR="$(sanitize_number');
+    expect(routeStep).toContain('Rejected non-numeric routing input');
+    expect(routeStep).toContain('routing values single-line numeric');
+    expect(workflow).toContain(
+      "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'",
+    );
+    expect(workflow).toContain(
+      "FORCED_PR: '${{ needs.route.outputs.pr_number }}'",
+    );
+    expect(workflow).not.toContain(
+      "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number",
+    );
+    expect(workflow).not.toContain(
+      "FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'",
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
+    );
   });
 
-  it('checks unattended filtering uses maintainer association gates', () => {
-    expect(filterUnattendedCandidates.length).toBeGreaterThan(0);
-    expect(filterUnattendedCandidates).toContain('authorAssociation');
-    expect(filterUnattendedCandidates).toContain('IN($trust[])');
-    expect(filterUnattendedCandidates).toContain('IN($bots[])');
-    expect(filterUnattendedCandidates).not.toContain(
-      '.author.login] | map(select',
+  it('passes existing open autofix PR context into the skill and guards decisions', () => {
+    const skill = readAutofixSkill();
+
+    expect(findCandidateIssuesStep).toContain('open-autofix-prs.json');
+    expect(findCandidateIssuesStep).toContain('--author "${AUTOFIX_BOT}"');
+    expect(findCandidateIssuesStep).toContain(
+      'if [[ "${COUNT}" -gt 0 ]]; then',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      '($p + (.number | tostring)) as $branch',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'first($prs[] | select((.headRefName // "") == $branch)',
+    );
+    expect(findCandidateIssuesStep).toContain('existingAutofixPr');
+    expect(findCandidateIssuesStep).toContain('annotated-candidates.json');
+    expect(findCandidateIssuesStep).toContain(
+      'Open autofix PR scan failed; candidates will proceed without duplicate-PR annotation.',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'Open autofix PR annotation failed; candidates will proceed without duplicate-PR annotation.',
+    );
+    expect(findCandidateIssuesStep).not.toContain(
+      'Open autofix PR scan failed; falling back to an empty candidate list',
+    );
+    expect(findCandidateIssuesStep).not.toContain(
+      'Open autofix PR annotation failed; falling back to an empty candidate list',
+    );
+    expect(readDecisionStep).toContain(
+      'first(.[] | select(.number == $go) | .existingAutofixPr.number) // empty',
+    );
+    expect(readDecisionStep).toContain(
+      'already has open autofix PR #${EXISTING_PR}',
+    );
+    expect(skill).toContain('existingAutofixPr');
+    expect(skill).toContain('must continue through PR review handling');
+  });
+
+  it('keeps release-failure autofix issues approved for scheduled fallback', () => {
+    expect(releaseWorkflow).toContain(
+      'Safe to auto-apply approval: release-failure issue content is',
+    );
+    expect(releaseWorkflow).toContain(
+      '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(releaseWorkflow).toContain(
+      'gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}"',
+    );
+  });
+
+  it('revalidates approval labels immediately before claiming an issue', () => {
+    expect(readDecisionStep).toContain(
+      "EVENT_NAME: '${{ github.event_name }}'",
+    );
+    expect(readDecisionStep).toContain(
+      'gh issue view "${GO}" --repo "${REPO}" --json labels,state',
+    );
+    expect(readDecisionStep).toContain('"${DRY_RUN}" != "true"');
+    expect(readDecisionStep).toContain(
+      '[[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != \'workflow_dispatch\' ]]',
+    );
+    expect(readDecisionStep).toContain(
+      '($labels | index($ready)) and ($labels | index($approved))',
+    );
+    expect(readDecisionStep).toContain(
+      '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
+    );
+    expect(readDecisionStep).toContain(
+      'no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}',
+    );
+  });
+
+  it('requires re-approval when transient autofix failures withdraw a claim', () => {
+    expect(withdrawClaimStep).toContain(
+      'the issue will require the `autofix/approved` label to be re-added before any future automated attempt.',
+    );
+    expect(withdrawClaimStep).toContain(
+      "LABEL_ARGS=(--remove-label 'autofix/in-progress')",
+    );
+    expect(withdrawClaimStep).not.toContain(
+      '--add-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+  });
+
+  it('fails claim cleanly before commenting when label updates fail', () => {
+    expect(claimIssueStep).toContain(
+      'if ! gh issue edit "${ISSUE}" --repo "${REPO}"',
+    );
+    expect(claimIssueStep).toContain(
+      'Failed to add autofix/in-progress label on #${ISSUE} before claim comment was posted',
+    );
+    expect(claimIssueStep).toContain('exit 1');
+    const addInProgressIndex = claimIssueStep.indexOf(
+      "--add-label 'autofix/in-progress'",
+    );
+    const removeApprovalIndex = claimIssueStep.indexOf(
+      '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(addInProgressIndex).toBeGreaterThan(-1);
+    expect(removeApprovalIndex).toBeGreaterThan(addInProgressIndex);
+    expect(removeApprovalIndex).toBeLessThan(
+      claimIssueStep.indexOf('gh issue comment "${ISSUE}"'),
     );
   });
 
@@ -169,7 +443,7 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep.length).toBeGreaterThan(0);
     expect(withdrawClaimStep.length).toBeGreaterThan(0);
     expect(workflow.indexOf("- name: 'Check bot credentials'")).toBeLessThan(
-      workflow.indexOf("- name: 'Set up Node.js'"),
+      workflow.indexOf("- name: 'Set up Node.js (hosted)'"),
     );
     expect(checkBotCredentialsStep).toContain(
       'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
@@ -212,30 +486,705 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('falls back to the floating sandbox image only when the matching version image is missing', () => {
-    expect(issueSandboxImageStep.length).toBeGreaterThan(0);
-    expect(reviewSandboxImageStep.length).toBeGreaterThan(0);
-    for (const step of [issueSandboxImageStep, reviewSandboxImageStep]) {
-      expect(step).toContain('npm view @qwen-code/qwen-code@latest version');
+  it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
+    const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
+
+    expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).not.toContain(
+      '["self-hosted", "linux", "x64", "autofix"]',
+    );
+    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
+    expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
+    expect(workflow).toContain(
+      "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
+    );
+    expect(prepareQwenCliSteps).toHaveLength(2);
+    for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
-        'version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"',
+        'qwen_version="$(node -p "require(\'./package.json\').version")"',
       );
-      expect(step).toContain('fallback_image="ghcr.io/qwenlm/qwen-code:latest"');
-      expect(step).toContain('docker manifest inspect "${version_image}"');
-      expect(step).toContain('docker manifest inspect "${fallback_image}"');
-      expect(step).toContain('QWEN_SANDBOX_IMAGE=${sandbox_image}');
       expect(step).toContain(
-        'echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"',
+        'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
+      expect(step).toContain('qwen-bin');
+      expect(step).not.toContain('current_version="$(qwen --version');
+      expect(step).not.toContain('Using pre-installed Qwen Code');
+      expect(step).not.toContain('npm install -g');
+    }
+    expect(workflow).not.toContain('run_shell_command(node dist/cli.js)');
+    for (const command of [
+      'run_shell_command(npm run build)',
+      'run_shell_command(npm run typecheck)',
+      'run_shell_command(npm run lint)',
+      'run_shell_command(npx vitest)',
+    ]) {
+      expect(developFixStep).toContain(command);
+      expect(triageAndAddressStep).toContain(command);
+    }
+    expect(developFixStep).not.toContain('run_shell_command(npm)');
+    expect(triageAndAddressStep).not.toContain('run_shell_command(npm)');
+    expect(assessCandidatesStep).not.toContain('run_shell_command(npm)');
+    expect(workflow).not.toContain('run_shell_command(npm publish)');
+    expect(workflow).not.toContain('run_shell_command(npm exec)');
+    expect(workflow).not.toContain('run_shell_command(npm run bundle)');
+    expect(assessCandidatesStep).not.toContain('run_shell_command(npx vitest)');
+    expect(workflowAndSkill).toContain(
+      'Run required verification commands before committing',
+    );
+    expect(workflowAndSkill).toContain('npm run build');
+    expect(workflowAndSkill).toContain('npm run typecheck');
+    expect(workflowAndSkill).toContain('npm run lint');
+    expect(workflowAndSkill).toContain(
+      'Do not run the CLI, examples, release scripts',
+    );
+    expect(workflowAndSkill).toContain('do not commit');
+    expect(workflow).toContain('"sandbox": "docker"');
+    expect(workflow).not.toContain('"sandbox": false');
+    expect(workflow).not.toContain('"sandbox": true');
+    expect(workflow).not.toContain('QwenLM/qwen-code-action@');
+    expect(resolveSandboxImageSteps).toHaveLength(2);
+    for (const step of resolveSandboxImageSteps) {
+      expect(step).toContain('node .github/scripts/resolve-sandbox-image.mjs');
       expect(step).toContain(
-        '::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}.',
+        `"$(node -p "require('./package.json').config.sandboxImageUri")"`,
       );
     }
-    expect(workflow).toContain(
-      "version: '${{ steps.issue_sandbox_image.outputs.qwen_version }}'",
+    expect(sandboxImageResolverScript).toContain('QWEN_SANDBOX_IMAGE');
+    expect(sandboxImageResolverScript).toContain(
+      "const GHCR_REPOSITORY = 'qwenlm/qwen-code';",
     );
-    expect(workflow).toContain(
-      "version: '${{ steps.review_sandbox_image.outputs.qwen_version }}'",
+    expect(sandboxImageResolverScript).toContain('ghcr.io/${GHCR_REPOSITORY}');
+    expect(workflow).not.toContain('npm view @qwen-code/qwen-code@latest');
+    expect(workflow).not.toContain('KNOWN_BOTS');
+  });
+
+  it('retries dependency installation before building', () => {
+    expect(installAndBuildSteps).toHaveLength(2);
+    for (const step of installAndBuildSteps) {
+      expect(step).toContain('for attempt in 1 2 3; do');
+      expect(step).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false',
+      );
+      expect(step).toContain('sleep $((attempt * 15))');
+      expect(step).toContain('npm run build');
+      expect(step).toContain('npm run bundle');
+    }
+  });
+
+  it('uses the standard checkout action for autonomous runner jobs', () => {
+    expect(workflow).toContain('actions/checkout@');
+    expect(workflow).not.toContain('Checkout with retry');
+    expect(workflow).not.toContain('Repository checkout failed on attempt');
+  });
+
+  it('surfaces assessment failures instead of turning them into green no-ops', () => {
+    expect(assessCandidatesStep.length).toBeGreaterThan(0);
+    expect(assessCandidatesStep).not.toContain('continue-on-error: true');
+  });
+
+  it('clears tracked build output before switching to a review PR branch', () => {
+    expect(prepareBranchAndFeedbackStep.length).toBeGreaterThan(0);
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Restoring tracked build output before switching to the PR branch.',
     );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'git restore --source=HEAD --staged --worktree .',
+    );
+    expect(
+      prepareBranchAndFeedbackStep.indexOf(
+        'git restore --source=HEAD --staged --worktree .',
+      ),
+    ).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf(
+        'git checkout -B "${BRANCH}" "origin/${BRANCH}"',
+      ),
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
+    expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
+  });
+
+  it('clears persistent autofix workdirs before agent steps run', () => {
+    expect(resetAutofixWorkspaceSteps).toHaveLength(2);
+    expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
+    expect(workflow).toContain(
+      "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
+    );
+    expect(workflow).not.toContain("WORKDIR: '/tmp/autofix-review'");
+    for (const step of resetAutofixWorkspaceSteps) {
+      expect(step).toContain('rm -rf "${WORKDIR}"');
+      expect(step).toContain('mkdir -p "${WORKDIR}"');
+    }
+    expect(workflow.indexOf("- name: 'Checkout'")).toBeLessThan(
+      workflow.indexOf("- name: 'Reset autofix workspace'"),
+    );
+    expect(workflow.indexOf("- name: 'Reset autofix workspace'")).toBeLessThan(
+      workflow.indexOf("- name: 'Find candidate issues'"),
+    );
+    expect(
+      workflow.lastIndexOf("- name: 'Reset autofix workspace'"),
+    ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
+  });
+
+  it('runs qwen headless once in each agent step', () => {
+    const qwenSteps = [
+      assessCandidatesStep,
+      developFixStep,
+      triageAndAddressStep,
+    ];
+    for (const step of qwenSteps) {
+      expect(step.length).toBeGreaterThan(0);
+      expect(step).toContain('node .qwen/skills/autofix/scripts/run-agent.mjs');
+      expect(step).not.toContain('qwen --yolo --prompt "${PROMPT}"');
+      expect(step).not.toContain('AUTOFIX_INVOCATION:');
+      expect(step).not.toContain('qwen_status=$?');
+      expect(step).not.toMatch(/PROMPT: \|-\n\s+\/autofix /);
+      expect(step).not.toContain('for attempt in 1 2; do');
+      expect(step).not.toContain('Qwen Code failed on attempt');
+    }
+    expect(assessCandidatesStep).toContain(
+      'rm -f "${WORKDIR}/decision.json" "${WORKDIR}/failure.md"',
+    );
+    expect(developFixStep).toContain('rm -f "${WORKDIR}/failure.md"');
+    expect(triageAndAddressStep).toContain('rm -f "${WORKDIR}/failure.md"');
+  });
+
+  it('keeps agent decision logic in the project autofix skill', () => {
+    const skill = readAutofixSkill();
+
+    expect(skill).toContain('name: autofix');
+    for (const requiredText of [
+      'assess-candidates',
+      'develop-issue',
+      'address-review',
+      'untrusted input',
+      'Do not push, comment, create pull requests',
+      'Operate only in the workflow',
+      'Run required verification commands before committing',
+      '.qwen/skills/prepare-pr/SKILL.md',
+      '.qwen/skills/bugfix/SKILL.md',
+      '.qwen/skills/e2e-testing/SKILL.md',
+      'decision.json',
+      'pr-title.txt',
+      'pr-body.md',
+      'e2e-report.md',
+      'address-summary.md',
+      'no-action.md',
+      'failure.md',
+    ]) {
+      expect(skill).toContain(requiredText);
+    }
+
+    expect(assessCandidatesStep).toContain(
+      'run-agent.mjs \\\n            --mode assess-candidates',
+    );
+    expect(developFixStep).toContain(
+      'run-agent.mjs \\\n            --mode develop-issue',
+    );
+    expect(triageAndAddressStep).toContain(
+      'run-agent.mjs \\\n            --mode address-review',
+    );
+    expect(workflow).not.toContain('.github/scripts/build-autofix-prompt.mjs');
+
+    for (const step of [
+      assessCandidatesStep,
+      developFixStep,
+      triageAndAddressStep,
+    ]) {
+      expect(step).not.toContain('## Role');
+      expect(step).not.toContain('## Workflow');
+      expect(step).not.toContain('## Task');
+    }
+  });
+
+  it('keeps the current autofix skill limited to workflow-invoked modes', () => {
+    const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
+
+    expect(stderr).toContain(
+      '--mode must be one of: assess-candidates, develop-issue, address-review',
+    );
+  });
+
+  it('builds local debug prompts from structured autofix runner options', () => {
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        autofixRunnerScriptPath,
+        '--mode',
+        'address-review',
+        '--pr',
+        '5678',
+        '--issue',
+        '1234',
+        '--workdir',
+        '/tmp/autofix-review-5678',
+        '--conflict',
+        'false',
+        '--base',
+        'main',
+        '--print-prompt',
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(stdout).toContain('Skill directory:');
+    expect(stdout).toContain('Mode: address-review');
+    expect(stdout).toContain('Invocation:');
+    expect(stdout).toContain(
+      '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
+    );
+  });
+
+  it('keeps autofix runner failure paths explicit', () => {
+    withRunnerDir((dir) => {
+      expect(runAutofixRunner(['--mode', 'develop-issue']).stderr).toContain(
+        '--issue is required',
+      );
+      expect(runDevelopIssue(dir, process.execPath).stderr).toContain(
+        'Missing input file',
+      );
+
+      const stub = writeQwenStub(dir);
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      expect(runDevelopIssue(dir, stub).stderr).toContain(
+        'without required output',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'without required output',
+      );
+    });
+  }, 10000);
+
+  it('allows non-package fixes after deterministic verification', () => {
+    expect(verificationGateSteps).toHaveLength(2);
+    for (const step of verificationGateSteps) {
+      expect(step).toContain('npm run build');
+      expect(step).toContain('npm run typecheck');
+      expect(step).toContain('npm run lint');
+      expect(step).toContain(
+        'No package changes detected; skipping package tests.',
+      );
+      expect(step).not.toContain('Fix does not touch any package');
+      expect(step).not.toContain('PR does not touch any package');
+    }
+  });
+
+  it('passes model credentials directly to qwen subprocesses', () => {
+    const qwenSteps = [
+      assessCandidatesStep,
+      developFixStep,
+      triageAndAddressStep,
+    ];
+    for (const step of qwenSteps) {
+      expect(step.length).toBeGreaterThan(0);
+      expect(step).toContain(
+        "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'",
+      );
+      expect(step).toContain(
+        'AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.',
+      );
+      expect(step).toContain(
+        "OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'",
+      );
+      expect(step).toContain("NO_PROXY: '127.0.0.1,localhost,::1'");
+      expect(step).not.toContain('QWEN_UPSTREAM_OPENAI_API_KEY');
+      expect(step).not.toContain('QWEN_UPSTREAM_OPENAI_BASE_URL');
+      expect(step).not.toContain('start_openai_proxy');
+      expect(step).not.toContain('openai-proxy.mjs');
+      expect(step).not.toContain('qwen-loopback-proxy');
+    }
+    expect(assessCandidatesStep).not.toContain(
+      'run_shell_command(gh issue view)',
+    );
+    expect(assessCandidatesStep).not.toContain('run_shell_command(gh search)');
+    expect(workflow).not.toContain(
+      "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'",
+    );
+    expect(workflow).not.toContain('proxy_script="$(mktemp');
+    expect(workflow).not.toContain('cat > "${proxy_script}"');
+  });
+
+  it('pushes autofix branches without rewriting remote history', () => {
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]*-[^\n\s]*f/);
+    expect(publishPrStep).toContain('git push origin "${BRANCH}"');
+    expect(pushAndReportStep).toContain('git push origin "${BRANCH}"');
+  });
+
+  it('keeps sandbox image fallback covered by a reusable script', () => {
+    expect(sandboxImageResolverScript).toContain(
+      'https://ghcr.io/token?service=ghcr.io&scope=repository:${GHCR_REPOSITORY}:pull',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      'https://ghcr.io/v2/${GHCR_REPOSITORY}/tags/list?n=1000',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      'signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      'GHCR returned at least 1000 tags',
+    );
+    expect(sandboxImageResolverScript).toContain('latestSemverTag(tags)');
+    expect(sandboxImageResolverScript).toContain(
+      "spawn(command, ['pull', image]",
+    );
+    expect(sandboxImageResolverScript).toContain('Timed out pulling ${image}');
+    expect(sandboxImageResolverScript).toContain(
+      '::error::Timed out pulling ${image}',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      "Failed to start '${command} pull ${image}'",
+    );
+    expect(sandboxImageResolverScript).toContain(
+      "::error::'${command} pull ${image}' exited with code ${code}",
+    );
+    expect(sandboxImageResolverScript).toContain(
+      '::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',
+    );
+    expect(ciWorkflow).toContain(
+      '.github/scripts/resolve-sandbox-image.test.mjs',
+    );
+    expect(workflow).not.toContain('.github/scripts/openai-proxy.mjs');
+  });
+
+  it('reports issue dry-runs and issue-phase failures to the step summary', () => {
+    expect(issueAutofixReportStep.length).toBeGreaterThan(0);
+    expect(issueAutofixReportStep).toContain('GITHUB_STEP_SUMMARY');
+    expect(issueAutofixReportStep).toContain(
+      "OUTCOME: '${{ steps.verify.outputs.outcome }}'",
+    );
+    expect(issueAutofixReportStep).toContain(
+      'outcome=${OUTCOME:-unknown}${SUFFIX}',
+    );
+    expect(issueAutofixReportStep).not.toContain('outcome=${{ job.status }}');
+    expect(issueAutofixReportStep).toContain(
+      "needs.route.outputs.dry_run == 'true'",
+    );
+    expect(issueAutofixReportStep).toContain('failure()');
+    expect(issueAutofixReportStep).toContain("echo '```'");
+    for (const filename of [
+      'decision.json',
+      'pr-title.txt',
+      'pr-body.md',
+      'e2e-report.md',
+      'failure.md',
+    ]) {
+      expect(issueAutofixReportStep).toContain(filename);
+    }
+  });
+
+  it('still runs review verification reporting when the agent step fails', () => {
+    expect(verificationGateSteps).toHaveLength(2);
+    const reviewVerificationGateStep = verificationGateSteps[1];
+
+    expect(reviewVerificationGateStep).toContain(
+      'if: |-\n          ${{ always() }}',
+    );
+    expect(reviewVerificationGateStep).toContain('failure.md');
+    expect(reviewVerificationGateStep).toContain('outcome=failed');
+    expect(reviewAddressReportStep.length).toBeGreaterThan(0);
+    expect(reviewAddressReportStep).toContain('GITHUB_STEP_SUMMARY');
+    expect(reviewAddressReportStep).toContain(
+      "needs.route.outputs.dry_run == 'true'",
+    );
+    expect(reviewAddressReportStep).toContain('failure() || cancelled()');
+    expect(reviewAddressReportStep).not.toContain(
+      "steps.verify.outputs.outcome == 'failed'",
+    );
+  });
+
+  it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
+    expect(reviewAddressReportStep).toContain(
+      "GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "NEWEST: '${{ steps.prepare.outputs.newest }}'",
+    );
+    expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
+    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/handoff.md"');
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Could not address the latest review feedback automatically',
+    );
+    expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
+    expect(reviewAddressReportStep).toContain(
+      'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${bot_actor}',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '::warning::Failed to post handoff comment on PR #${PR}',
+    );
+    expect(reviewAddressReportStep).toContain('human should take over');
+    expect(reviewAddressReportStep).toContain("sed 's/<!--[^>]*-->//g'");
+  });
+
+  it('writes agent output to a log and marks loop guard failures for handoff', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
+        'turn_tool_call_cap',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen hit the tool-call loop guard',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('handles agent log stream errors without crashing immediately', () => {
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
+      "log.on('error', () => {});",
+    );
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
+      'if (log.destroyed)',
+    );
+  });
+
+  it('detects loop guard output before it falls out of the log tail', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Loop detection halted the run\\n');",
+        "process.stdout.write('x'.repeat(21_000));",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen hit the tool-call loop guard',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('does not mark generic qwen subprocess failures for handoff', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('temporary upstream error\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
+        'temporary upstream error',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+    });
+  });
+
+  it('preserves agent-written failure details when the qwen subprocess fails', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/failure.md`, 'agent detail\\n');",
+        'process.exit(1);',
+      ]);
+
+      expect(runDevelopIssue(dir, stub).status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'agent detail',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('bounds qwen subprocess runtime', () => {
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+
+    expect(runner).toContain('50 * 60 * 1000');
+    expect(runner).toContain('setTimeout(() =>');
+    expect(runner).toContain("killQwen(child, 'SIGKILL')");
+    expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
+  });
+
+  it('kills qwen subprocess descendants on timeout', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "import { spawn } from 'node:child_process';",
+        "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], {",
+        "  stdio: ['ignore', 'inherit', 'inherit'],",
+        '});',
+        'setTimeout(() => process.exit(0), 3000);',
+      ]);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_TIMEOUT_MS: '100' },
+          timeout: 2000,
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'timeout (100ms)',
+      );
+    });
+  });
+
+  it('reports external qwen subprocess signals without calling them timeouts', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+
+      const stub = writeQwenStub(dir, [
+        "process.kill(process.pid, 'SIGTERM');",
+      ]);
+      const result = runAddressReview(dir, stub);
+      expect(result.status).not.toBe(0);
+      const failure = readFileSync(join(dir, 'failure.md'), 'utf8');
+      expect(failure).toContain('signal SIGTERM');
+      expect(failure).not.toContain('timeout (');
+    });
+  });
+
+  it('rejects invalid --conflict values', () => {
+    expect(
+      runAutofixRunner([
+        '--mode',
+        'address-review',
+        '--pr',
+        '5678',
+        '--issue',
+        '1234',
+        '--conflict',
+        'maybe',
+        '--print-prompt',
+      ]).stderr,
+    ).toContain('--conflict must be true or false');
+  });
+
+  it('requires --pr for address-review mode', () => {
+    expect(
+      runAutofixRunner([
+        '--mode',
+        'address-review',
+        '--issue',
+        '1234',
+        '--print-prompt',
+      ]).stderr,
+    ).toContain('--pr is required');
+  });
+
+  it('logs failure.md content when the agent writes it and exits 0', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/failure.md`, 'cannot proceed\\n');",
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('failure.md:');
+      expect(result.stderr).toContain('cannot proceed');
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'cannot proceed',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('rejects mutually exclusive address-review output files', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/address-summary.md`, 'fixed\\n');",
+        "writeFileSync(`${workdir}/no-action.md`, 'skipped\\n');",
+      ]);
+
+      const result = runAddressReview(dir, stub);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('mutually exclusive output files');
+      expect(result.stderr).toContain('address-summary.md');
+      expect(result.stderr).toContain('no-action.md');
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'mutually exclusive output files',
+      );
+    });
+  });
+
+  it('treats empty output files as missing runner outputs', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/e2e-report.md`, 'ok\\n');",
+        "writeFileSync(`${workdir}/pr-title.txt`, '');",
+        "writeFileSync(`${workdir}/pr-body.md`, 'body\\n');",
+      ]);
+
+      const { stderr } = runDevelopIssue(dir, stub);
+      expect(stderr).toContain('pr-title.txt');
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'pr-title.txt',
+      );
+    });
+  });
+
+  it('reports only missing output files in the error message', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      const { stderr } = runDevelopIssue(dir, writeQwenStub(dir));
+      expect(stderr).toContain('e2e-report.md');
+      expect(stderr).toContain('pr-title.txt');
+      expect(stderr).toContain('pr-body.md');
+    });
+  }, 10000);
+
+  it('does not reference stale comment-trigger routing in the skill', () => {
+    const skill = readAutofixSkill();
+    expect(skill).not.toContain('label/comment trigger');
+    expect(skill).toContain('label event');
   });
 });

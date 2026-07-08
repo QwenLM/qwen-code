@@ -9,6 +9,7 @@ import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
+  CompressionStatus,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -57,6 +58,22 @@ function userItem(
 
 function geminiItem(id: number): HistoryItem {
   return { type: 'gemini', id, text: `response ${id}` } as HistoryItem;
+}
+
+function compressionItem(
+  id: number,
+  compressionStatus = CompressionStatus.COMPRESSED,
+): HistoryItem {
+  return {
+    type: 'compression',
+    id,
+    compression: {
+      isPending: false,
+      originalTokenCount: 100,
+      newTokenCount: 40,
+      compressionStatus,
+    },
+  } as HistoryItem;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +282,71 @@ describe('computeApiTruncationIndex', () => {
       ];
       // Rewind to turn 5 → 2 user turns before it, but API only has 1 user text
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+    });
+
+    it('maps post-compression UI turns from the latest compressed marker', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre-compression prompt'),
+        geminiItem(2),
+        compressionItem(3),
+        userItem(4, 'post 1'),
+        geminiItem(5),
+        userItem(6, 'post 2'),
+        geminiItem(7),
+        userItem(8, 'post 3'),
+        geminiItem(9),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post 1'),
+        modelContent('response 1'),
+        userContent('post 2'),
+        modelContent('response 2'),
+        userContent('post 3'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
+      expect(computeApiTruncationIndex(ui, 6, api)).toBe(5);
+      expect(computeApiTruncationIndex(ui, 8, api)).toBe(7);
+    });
+
+    it('does not rewind to UI turns before a successful compression marker', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre-compression prompt'),
+        geminiItem(2),
+        compressionItem(3),
+        userItem(4, 'post compression'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post compression'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
+
+    it('does not treat no-op compression markers as collapsed history', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'first prompt'),
+        geminiItem(2),
+        compressionItem(3, CompressionStatus.NOOP),
+        userItem(4, 'second prompt'),
+        geminiItem(5),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('first prompt'),
+        modelContent('response 1'),
+        userContent('second prompt'),
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
     });
   });
 

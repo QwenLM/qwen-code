@@ -185,7 +185,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // CATEGORY_ORDER: search first (capitalized), then read (lowercased)
-      expect(frame).toContain('Searched 1 pattern');
+      expect(frame).toContain('Searched pattern');
       expect(frame).toContain('read 2 files');
       expect(frame).not.toContain('MockTool');
     });
@@ -204,7 +204,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // Collapsible → summary line
-      expect(frame).toContain('Read 1 file');
+      expect(frame).toContain('Read a.ts');
       // Non-collapsible → individual ToolMessage
       expect(frame).toContain('MockTool[s1]');
     });
@@ -226,7 +226,7 @@ describe('<ToolGroupMessage />', () => {
       // All tools render individually — no summary line
       expect(frame).toContain('MockTool[r1]');
       expect(frame).toContain('MockTool[e1]');
-      expect(frame).not.toContain('Read 1 file');
+      expect(frame).not.toContain('Read a.ts');
     });
 
     it('forceExpandAll passes forceShowResult to Success siblings in error group', () => {
@@ -276,7 +276,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       // Successful ReadFile → summary line
-      expect(frame).toContain('Read 1 file');
+      expect(frame).toContain('Read a.ts');
       // Canceled ReadFile → individual ToolMessage (partial output visible)
       expect(frame).toContain('MockTool[r2]');
     });
@@ -306,7 +306,7 @@ describe('<ToolGroupMessage />', () => {
       const frame = lastFrame() ?? '';
       expect(frame).toContain('Recalled 2 memories');
       // Collapsible tool still summarized
-      expect(frame).toContain('Read 1 file');
+      expect(frame).toContain('Read config.yaml');
       // Non-collapsible tool rendered individually
       expect(frame).toContain('MockTool[s1]');
     });

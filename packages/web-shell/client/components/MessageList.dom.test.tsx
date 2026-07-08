@@ -4,6 +4,8 @@ import { act, createRef, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Message } from '../adapters/types';
 import { I18nProvider } from '../i18n';
+import flashStyles from './MessageLocateFlash.module.css';
+import styles from './MessageList.module.css';
 
 // Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
@@ -17,15 +19,18 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      isLocateFlashing,
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      isLocateFlashing?: boolean;
     }) =>
       React.createElement(
         'div',
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
         },
         message.role === 'thinking'
           ? React.createElement('button', {
@@ -36,11 +41,40 @@ vi.mock('./MessageItem', async () => {
       ),
   };
 });
-vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
-  ParallelAgentsGroup: () => null,
-}));
+vi.mock('./messages/tools/ParallelAgentsGroup', async () => {
+  const React = await import('react');
+  return {
+    ParallelAgentsGroup: () =>
+      React.createElement('div', { 'data-testid': 'parallel-agents' }),
+  };
+});
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({
+    count,
+    enabled,
+    getItemKey,
+  }: {
+    count: number;
+    enabled: boolean;
+    getItemKey: (index: number) => string | number;
+  }) => {
+    const virtualItems = enabled
+      ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
+          key: getItemKey(index),
+          index,
+          start: index * 80,
+        }))
+      : [];
+    return {
+      getVirtualItems: () => virtualItems,
+      getTotalSize: () => (enabled ? count * 80 : 0),
+      measureElement: () => {},
+      scrollToIndex: () => {},
+    };
+  },
+}));
 
 const { MessageList } = await import('./MessageList');
 type MessageListHandle = import('./MessageList').MessageListHandle;
@@ -108,6 +142,18 @@ const toolMsg = (id: string): ToolGroupMessage => ({
   role: 'tool_group',
   tools: [{ callId: `call-${id}`, toolName: 'Read', status: 'completed' }],
 });
+const agentMsg = (id: string): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [
+    {
+      callId: `call-${id}`,
+      toolName: 'Task',
+      status: 'completed',
+      args: { subagent_type: 'explore' },
+    },
+  ],
+});
 const asstMsg = (id: string): AssistantMessage => ({
   id,
   role: 'assistant',
@@ -128,6 +174,9 @@ function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
   opts: {
+    hideSessionTimeline?: boolean;
+    loadingTranscript?: boolean;
+    catchingUp?: boolean;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
@@ -142,8 +191,10 @@ function mount(
           ref={ref}
           messages={messages}
           pendingApproval={null}
+          hideSessionTimeline={opts.hideSessionTimeline}
+          loadingTranscript={opts.loadingTranscript}
+          catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
-          shellOutputMaxLines={50}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
@@ -151,6 +202,34 @@ function mount(
   });
   mounted.push({ root, container });
   return container;
+}
+
+function renderInto(
+  root: Root,
+  messages: Message[],
+  ref?: RefObject<MessageListHandle | null>,
+  opts: {
+    loadingTranscript?: boolean;
+    catchingUp?: boolean;
+    isResponding?: boolean;
+    onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  } = {},
+) {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <MessageList
+          ref={ref}
+          messages={messages}
+          pendingApproval={null}
+          loadingTranscript={opts.loadingTranscript}
+          catchingUp={opts.catchingUp}
+          isResponding={opts.isResponding}
+          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+        />
+      </I18nProvider>,
+    );
+  });
 }
 
 const has = (c: HTMLElement, id: string) =>
@@ -190,6 +269,11 @@ const mockMessageListWidth = (width: number) =>
     y: 0,
     toJSON: () => ({}),
   });
+const simpleTurns = (count: number): Message[] =>
+  Array.from({ length: count }, (_, index) => {
+    const turn = index + 1;
+    return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
+  }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
@@ -273,6 +357,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(true);
   });
 
+  it('renders virtual scroll rows with sizer and row width classes', () => {
+    const c = mount(simpleTurns(110));
+
+    expect(c.querySelector(`.${styles.virtualSizer}`)).not.toBeNull();
+    expect(c.querySelectorAll(`.${styles.virtualRow}`).length).toBeGreaterThan(
+      0,
+    );
+  });
+
   it('renders the session timeline in the left gutter without expanding turns', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount([
@@ -284,6 +377,10 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
       userMsg('u2'),
       asstMsg('a2'),
+      userMsg('u3'),
+      asstMsg('a3'),
+      userMsg('u4'),
+      asstMsg('a4'),
     ]);
     await nextFrame();
 
@@ -295,6 +392,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(entries.map((entry) => entry.getAttribute('data-turn-id'))).toEqual([
       'u1',
       'u2',
+      'u3',
+      'u4',
     ]);
     expect(entries[0]?.getAttribute('data-node-kinds')).toBe(
       'thought,commentary,tool,plan',
@@ -302,10 +401,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     const details = Array.from(
       c.querySelectorAll('[data-testid="session-timeline-detail"]'),
     );
-    expect(details).toHaveLength(2);
-    expect(details[0]?.getAttribute('data-detail')).toContain(
-      'thinking · answer · 1 tool call · plan update',
-    );
+    expect(details).toHaveLength(4);
+    expect(details[0]?.getAttribute('data-detail')).toBe('answer');
     const buttons = Array.from(
       c.querySelectorAll<HTMLButtonElement>(
         '[data-testid="session-timeline-entry"] button',
@@ -314,7 +411,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(buttons[0]?.getAttribute('aria-label')).toBe(
       'Turn 1: q. Current turn',
     );
-    expect(buttons[0]?.getAttribute('title')).toContain('thinking');
+    expect(buttons[0]?.hasAttribute('title')).toBe(false);
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
     expect(
@@ -325,17 +422,48 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('renders scheduled task marker when source is present', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount([
+      // Source propagation is owned by the metadata adapter PR; this test covers
+      // the timeline rendering contract once that source is present.
+      { ...userMsg('u1'), source: 'cron', content: 'scheduled tracking task' },
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+      userMsg('u3'),
+      asstMsg('a3'),
+      userMsg('u4'),
+      asstMsg('a4'),
+    ]);
+    await nextFrame();
+
+    const scheduledDetail = c.querySelector(
+      '[data-turn-id="u1"] [data-testid="session-timeline-detail"]',
+    );
+    expect(scheduledDetail?.getAttribute('data-scheduled-task')).toBe('true');
+    expect(
+      scheduledDetail?.querySelector(`.${styles.sessionTimelineDetailsIcon}`),
+    ).not.toBeNull();
+    expect(scheduledDetail?.textContent).toContain('scheduled tracking task');
+    rectSpy.mockRestore();
+  });
+
+  it('hides the session timeline until there are at least four turns', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(3));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
   it('clicks a session timeline entry to jump to its turn', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const scrollIntoView = vi
       .spyOn(Element.prototype, 'scrollIntoView')
       .mockImplementation(() => {});
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
     await nextFrame();
 
     const secondEntryButton = c.querySelector<HTMLButtonElement>(
@@ -349,19 +477,61 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    await nextFrame();
+
+    const targetMessage = c.querySelector('[data-testid="msg-u2"]');
+    expect(targetMessage?.getAttribute('data-locate-flashing')).toBe('true');
+    expect(targetMessage?.closest('[data-index]')?.className).not.toMatch(
+      /flash/i,
+    );
     scrollIntoView.mockRestore();
     rectSpy.mockRestore();
+  });
+
+  it('flashes grouped parallel agents inside the row when locating a tool', async () => {
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, 'scrollIntoView')
+      .mockImplementation(() => {});
+    const ref = createRef<MessageListHandle>();
+    const c = mount(
+      [userMsg('u1'), agentMsg('g1'), agentMsg('g2'), asstMsg('a1')],
+      ref,
+    );
+
+    let found = false;
+    act(() => {
+      found = ref.current!.scrollToMessage('g1', 'call-g1');
+    });
+    await nextFrame();
+
+    expect(found).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    const parallelAgents = c.querySelector('[data-testid="parallel-agents"]');
+    expect(parallelAgents?.parentElement?.className).toContain(
+      flashStyles.flash,
+    );
+    expect(parallelAgents?.closest('[data-index]')?.className).not.toMatch(
+      /flash/i,
+    );
+    scrollIntoView.mockRestore();
   });
 
   it('hides the session timeline when the message list is narrow', async () => {
     const rectSpy = mockMessageListWidth(1000);
 
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('hides the session timeline when the caller disables it', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+
+    const c = mount(simpleTurns(4), undefined, {
+      hideSessionTimeline: true,
+    });
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
@@ -371,12 +541,7 @@ describe('MessageList — turn collapse (DOM)', () => {
   it('hides the session timeline when the message list has no width', async () => {
     const rectSpy = mockMessageListWidth(0);
 
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
@@ -396,7 +561,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(false);
   });
 
-  it('smooth-scrolls the page when a new chat prompt appears', () => {
+  it('smooth-scrolls the page when a new chat prompt appears', async () => {
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
@@ -411,12 +576,242 @@ describe('MessageList — turn collapse (DOM)', () => {
       value: scrollTo,
     });
 
-    mount([userMsg('u1')]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+    renderInto(root, [userMsg('u1'), asstMsg('a1'), userMsg('u2')]);
+    await nextFrame();
 
     expect(scrollTo).toHaveBeenCalledWith({
       top: 1200,
       behavior: 'smooth',
     });
+  });
+
+  it('does not smooth-scroll when initial history already contains a user prompt', () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    mount([userMsg('u1'), asstMsg('a1')]);
+
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('shows a transcript skeleton while loading transcript', () => {
+    const c = mount([], undefined, { loadingTranscript: true });
+
+    expect(
+      c.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).not.toBeNull();
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Session is still loading. Try again in a moment.',
+    );
+  });
+
+  it('shows the transcript skeleton while loading transcript with existing messages', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      loadingTranscript: true,
+    });
+
+    expect(
+      c.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not show the transcript skeleton outside transcript loading', () => {
+    const idle = mount([]);
+
+    expect(
+      idle.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).toBeNull();
+  });
+
+  it('does not smooth-scroll when existing session history loads after an empty render', () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, []);
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('smooth-scrolls the first new prompt after an empty render', async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, []);
+    renderInto(root, [userMsg('u1')]);
+    await nextFrame();
+
+    expect(scrollTo).toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('does not smooth-scroll restored history that ends with a user prompt', async () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [], undefined, { loadingTranscript: true });
+    renderInto(root, [userMsg('u1')], undefined, {
+      loadingTranscript: false,
+    });
+    await nextFrame();
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('does not smooth-scroll when a user prompt is already followed by an assistant row', async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+    renderInto(root, [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+    await nextFrame();
+
+    expect(scrollTo).not.toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('snaps to bottom without smooth scrolling when catch-up completes', () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const messages = [userMsg('u1'), asstMsg('a1')];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, messages, undefined, { catchingUp: true });
+    expect(scrollTop).toBe(0);
+
+    renderInto(root, messages, undefined, { catchingUp: false });
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it('does not treat a user_shell row as a new chat prompt', () => {

@@ -513,7 +513,7 @@ done
 # the baked line hasn't been updated yet (dev / pre-release checkouts).
 #
 # ~~~ BAKED_VERSION: auto-updated by CD workflow after each release — do not edit ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.6.7"
+CUA_DRIVER_RS_BAKED_VERSION="0.7.0"
 # ~~~ END_BAKED_VERSION ~~~
 
 if [[ -n "${CUA_DRIVER_RS_VERSION:-}" ]]; then
@@ -840,7 +840,7 @@ else
     # user always gets enough to recover, even if hint-text fetching is
     # blocked. Skip everything else.
     echo "Next steps: $BIN_LINK --version  |  $BIN_LINK mcp-config  |  $BIN_LINK skills install"
-    echo "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
+    echo "Docs: https://github.com/QwenLM/qwen-code/tree/main/packages/cua-driver/rust"
 fi
 
 case "$(uname -s)" in

@@ -82,6 +82,55 @@ describe('SessionRouter', () => {
       expect(s1).toBe(s2); // same thread = same session
     });
 
+    it('thread scope: keeps original target owner when reusing a session', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sessionId = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      await router.resolve('ch', 'bob', 'chat1', 'thread1');
+
+      expect(router.getTarget(sessionId)).toMatchObject({
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: 'thread1',
+      });
+    });
+
+    it('thread scope: never downgrades group target metadata', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sessionId = await router.resolve(
+        'ch',
+        'alice',
+        'chat1',
+        'thread1',
+        undefined,
+        true,
+      );
+
+      await router.resolve('ch', 'bob', 'chat1', 'thread1');
+
+      expect(router.getTarget(sessionId)).toMatchObject({
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: 'thread1',
+        isGroup: true,
+      });
+    });
+
+    it('thread scope: upgrades group target metadata', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sessionId = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      await router.resolve('ch', 'alice', 'chat1', 'thread1', undefined, true);
+
+      expect(router.getTarget(sessionId)).toMatchObject({
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: 'thread1',
+        isGroup: true,
+      });
+    });
+
     it('thread scope: falls back to chatId when no threadId', async () => {
       const router = new SessionRouter(bridge, '/tmp', 'thread');
       const s1 = await router.resolve('ch', 'alice', 'chat1');
@@ -467,6 +516,48 @@ describe('SessionRouter', () => {
       expect(router.removeSessionId(sid)).toBe(true);
 
       expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({});
+    });
+
+    it('updates persisted target metadata when reusing a restored session', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'sessions.json');
+      writePersistedSession(persistPath, 'ch:chat1');
+      const router = new SessionRouter(bridge, '/tmp', 'thread', persistPath);
+
+      await expect(router.restoreSessions()).resolves.toEqual({
+        restored: 1,
+        failed: 0,
+      });
+      const sid = await router.resolve(
+        'ch',
+        'alice',
+        'chat1',
+        undefined,
+        '/tmp',
+        true,
+      );
+
+      expect(sid).toBe('old-session');
+      expect(router.getTarget(sid)).toEqual({
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: undefined,
+        isGroup: true,
+      });
+      expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
+        'ch:chat1': {
+          sessionId: 'old-session',
+          target: {
+            channelName: 'ch',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: true,
+          },
+          cwd: '/tmp',
+        },
+      });
     });
   });
 

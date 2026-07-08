@@ -451,21 +451,21 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: 'thinking · 2 tool calls · plan update',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: ['thought', 'tool', 'plan'],
       },
       {
         id: 'u2',
         label: 'hello',
-        detail: 'No activity',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: [],
       },
     ]);
   });
 
-  it('keeps mid-turn assistant updates but ignores the final answer', () => {
+  it('prefers the visible final answer over hidden turn steps', () => {
     expect(
       getSessionTimelineEntries([
         makeUserMessage('u1'),
@@ -477,18 +477,38 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: 'response · thinking',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: ['commentary', 'thought'],
       },
     ]);
   });
 
-  it('summarizes thinking without exposing its content', () => {
+  it('does not prefer assistant text before later tool work as the final detail', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('mid'), content: "I'll check" },
+      makeAgentToolGroup('tool', 'Read'),
+    ]);
+
+    expect(entry?.detail).toBe("I'll check · 1 tool call");
+  });
+
+  it('uses the final answer detail without exposing thinking content', () => {
     const [entry] = getSessionTimelineEntries([
       makeUserMessage('u1'),
       makeThinkingMessage('think', 'private reasoning details'),
       makeAssistantMessage('final'),
+    ]);
+
+    expect(entry?.detail).toBe('response');
+    expect(entry?.detail).not.toContain('private');
+  });
+
+  it('falls back to a thinking summary when there is no final answer', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      makeThinkingMessage('think', 'private reasoning details'),
     ]);
 
     expect(entry?.detail).toBe('thinking');
@@ -528,7 +548,7 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: '2 parallel agents',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: ['agents'],
       },
@@ -552,6 +572,17 @@ describe('getSessionTimelineEntries', () => {
     ]);
   });
 
+  it('preserves shell glob syntax in timeline labels', () => {
+    const [entry] = getSessionTimelineEntries([
+      {
+        ...makeUserShellMessage('shell'),
+        command: 'find packages/*/src/*.ts',
+      },
+    ]);
+
+    expect(entry?.label).toBe('find packages/*/src/*.ts');
+  });
+
   it('keeps a single prompt turn as no activity', () => {
     expect(getSessionTimelineEntries([makeUserMessage('u1')])).toEqual([
       {
@@ -570,6 +601,50 @@ describe('getSessionTimelineEntries', () => {
     ]);
     expect(entry?.label.endsWith('…')).toBe(true);
     expect(/[\uD800-\uDFFF]/u.test(entry?.label ?? '')).toBe(false);
+  });
+
+  it('cleans markdown markers from timeline details', () => {
+    const [entry] = getSessionTimelineEntries([
+      {
+        ...makeUserMessage('u1'),
+        content: '介绍下 `agent-reproduce-align`',
+      },
+      {
+        ...makeAssistantMessage('a1'),
+        content:
+          '**agent-reproduce-align** – 对齐测试技能\n\n**用途：** 在 [Qwen Code](https://example.com) 中运行参考代码，中文*强调*·*范围*—*引用*「_下划线_，保留 snake_case。',
+      },
+    ]);
+
+    expect(entry?.label).toBe('介绍下 `agent-reproduce-align`');
+    expect(entry?.detail).toBe(
+      'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码，中文强调·范围—引用「下划线，保留 snake_case。',
+    );
+  });
+
+  it('cleans preview markdown without rewriting code text', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('a1'),
+        content:
+          '# Title\n> quoted\n- item\n~~gone~~\n![alt text](url)\n`*literal*`\n```ts\n**code**\n```',
+      },
+    ]);
+
+    expect(entry?.detail).toBe(
+      'Title quoted item gone alt text *literal* **code**',
+    );
+  });
+
+  it('falls back when the final answer cleans to an empty detail', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('a1'), content: '![](url)' },
+    ]);
+
+    expect(entry?.detail).toBe('assistant update');
+    expect(entry?.nodeKinds).toEqual(['commentary']);
   });
 });
 
@@ -1067,19 +1142,86 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 0)).toBeUndefined();
   });
 
-  it('folds a turn with no final answer down to just the prompt', () => {
+  it('keeps a turn with no final answer expanded by default', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
       makeMultiToolGroup('g1'),
       makeMultiToolGroup('g2'),
     ]);
     const out = collapseItems(items);
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'g2']);
     expect(collapseOf(out, 0)).toEqual({
       turnId: 'u1',
-      collapsed: true,
+      collapsed: false,
       hiddenCount: 2,
       toolCallCount: 4,
+    });
+  });
+
+  it('still allows manually collapsing a turn with no final answer', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeMultiToolGroup('g2'),
+    ]);
+    const out = collapseItems(items, {
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    expect(collapseOf(out, 0)?.collapsed).toBe(true);
+  });
+
+  it('keeps a turn with a turn error expanded by default', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 's1']);
+    expect(collapseOf(out, 0)).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+      toolCallCount: 2,
+    });
+  });
+
+  it('keeps a turn error expanded even when a final answer is present', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'u1-content-0',
+      'a1',
+      'u1-content-1',
+    ]);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1', 's1']);
+    expect(collapseOf(out, 0)).toEqual({
+      turnId: 'u1',
+      collapsed: false,
+      hiddenCount: 1,
+      toolCallCount: 2,
     });
   });
 
@@ -1202,8 +1344,9 @@ describe('applyTurnCollapse', () => {
       { id: 'x', role: 'assistant', content: undefined as unknown as string },
     ]);
     const out = collapseItems(items);
-    // No assistant-with-content → no final answer → fold to just the prompt.
-    expect(rowIds(out)).toEqual(['u1', 'tc-u1']);
+    // No assistant-with-content → no final answer → stays expanded.
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'u1-content-0']);
+    expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'x']);
     expect(collapseOf(out, 0)?.hiddenCount).toBe(2);
   });
 
