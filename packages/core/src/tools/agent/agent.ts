@@ -1976,6 +1976,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
         );
+      } else if (this.params.working_dir !== undefined) {
+        // A teammate spawns via TeamManager with cwd = getCwd() and returns
+        // before the working_dir rebind below is reached, so the pin would be
+        // silently ignored and the teammate would run in the parent working
+        // tree. Refuse rather than give a false sense of isolation. (Same
+        // lifecycle rationale as run_in_background: a persistent teammate has
+        // no coupling to a caller-owned worktree.)
+        return this.buildSpawnBlockedResult(
+          'Error: "working_dir" is not supported for a named teammate — a teammate runs in the parent working tree, so the worktree pin would be silently ignored. Drop "name" to pin a one-shot sub-agent to the worktree, or drop "working_dir".',
+          'working_dir is incompatible with a named teammate',
+        );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);
       }
