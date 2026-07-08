@@ -207,4 +207,22 @@ describe('AgentTool.toAutoClassifierInput', () => {
     expect(result['prompt']).toBe(longPrompt);
     expect((result['prompt'] as string).length).toBe(longPrompt.length);
   });
+
+  it('includes working_dir so AUTO-mode classification can see the worktree rebind', () => {
+    const result = (
+      AgentTool.prototype.toAutoClassifierInput as (
+        p: unknown,
+      ) => Record<string, unknown>
+    ).call(
+      {},
+      {
+        description: 'review',
+        prompt: 'review the diff',
+        subagent_type: 'file-search',
+        working_dir: '.qwen/tmp/review-pr-1',
+      },
+    );
+    expect(result['working_dir']).toBe('.qwen/tmp/review-pr-1');
+    expect(result['subagent_type']).toBe('file-search');
+  });
 });
