@@ -118,6 +118,13 @@ describe('<LoadingIndicator />', () => {
       StreamingState.Responding,
     );
     expect(whole.lastFrame()).toContain('(2.0s · esc to cancel)');
+
+    // Timer start / reset publishes exactly 0.
+    const zero = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={0} />,
+      StreamingState.Responding,
+    );
+    expect(zero.lastFrame()).toContain('(0.0s · esc to cancel)');
   });
 
   it('should display the elapsedTime correctly when Responding', () => {
