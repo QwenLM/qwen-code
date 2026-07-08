@@ -240,12 +240,22 @@ const debugLogger = createDebugLogger('AGENT');
  * `isolation:'worktree'`, the harness neither creates nor tears down this
  * directory — it only rebinds the child Config's cwd surfaces to it.
  *
- * The directory MUST be a worktree registered against the current
- * repository. `getRegisteredWorktreeBranch` enforces this by comparing
- * `--git-common-dir` and `--show-toplevel`, which rejects arbitrary
- * directories, sibling `git init`s, and plain sub-directories — the
- * containment guarantee that stops a bad path from aiming the sub-agent at
- * `~/`, `/etc`, or an unrelated repo.
+ * Two checks stop a bad path from aiming the sub-agent somewhere it should not
+ * be:
+ *
+ * - It must resolve INSIDE the repository (canonical comparison), because
+ *   pinning rebinds the child's `WorkspaceContext` wholesale.
+ * - It must be a REGISTERED linked worktree of this repository, enforced by
+ *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
+ *   point back at it, and it must not be the primary working tree. That
+ *   rejects arbitrary directories, sibling `git init`s, plain sub-directories
+ *   (including a stale registry record whose directory was recreated),
+ *   other repositories' worktrees, and a directory carrying a copied `.git`
+ *   file.
+ *
+ * `getRegisteredWorktreeBranch` is consulted only for a best-effort branch
+ * label; it is deliberately NOT a gate, since it returns null for a legitimate
+ * detached-HEAD worktree.
  *
  * @returns the resolved absolute path + branch, or `{ error }` with a
  *   user-facing reason.
