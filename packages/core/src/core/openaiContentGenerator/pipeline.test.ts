@@ -1889,9 +1889,70 @@ describe('ContentGenerationPipeline', () => {
         mockApiPromise,
       );
 
-      await expect(
-        pipeline.executeStream(request, userPromptId),
-      ).rejects.toThrow(NonSSEResponseError);
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, userPromptId);
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.httpStatus).toBe(200);
+      expect(thrownError!.status).toBe(200);
+      expect(thrownError!.requestId).toBe('req-123');
+    });
+
+    it('should throw NonSSEResponseError for application/json streaming responses', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const jsonBody = '{"error":"gateway blocked streaming request"}';
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(jsonBody));
+          controller.close();
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'application/json',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: 'req-json',
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.contentType).toBe('application/json');
+      expect(thrownError!.bodyPrefix).toContain('gateway blocked');
+      expect(thrownError!.requestId).toBe('req-json');
     });
 
     it('should include body prefix in NonSSEResponseError when body is readable', async () => {
@@ -1900,7 +1961,7 @@ describe('ContentGenerationPipeline', () => {
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
-      const htmlBody = '<html><body>Gateway Block</body></html>';
+      const htmlBody = '<html>' + 'x'.repeat(700) + '</html>';
       const mockStream = {
         async *[Symbol.asyncIterator]() {},
       };
@@ -1945,8 +2006,58 @@ describe('ContentGenerationPipeline', () => {
       expect(thrownError).toBeInstanceOf(NonSSEResponseError);
       expect(thrownError!.contentType).toBe('text/html');
       expect(thrownError!.httpStatus).toBe(200);
-      expect(thrownError!.bodyPrefix).toContain('Gateway Block');
+      expect(thrownError!.bodyPrefix).toBe(htmlBody.slice(0, 512));
+      expect(thrownError!.bodyPrefix).toHaveLength(512);
       expect(thrownError!.requestId).toBeNull();
+    });
+
+    it('should still throw NonSSEResponseError when body prefix read fails', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {},
+      };
+
+      const bodyStream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error('body already consumed'));
+        },
+      });
+
+      const mockHttpResponse = {
+        headers: new Headers({
+          'content-type': 'text/html',
+        }),
+        status: 200,
+        body: bodyStream,
+      } as unknown as Response;
+
+      const mockApiPromise = Object.assign(Promise.resolve(mockStream), {
+        withResponse: () =>
+          Promise.resolve({
+            data: mockStream,
+            response: mockHttpResponse,
+            request_id: null,
+          }),
+      });
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockReturnValue(
+        mockApiPromise,
+      );
+
+      let thrownError: NonSSEResponseError | undefined;
+      try {
+        await pipeline.executeStream(request, 'test-id');
+      } catch (e) {
+        thrownError = e as NonSSEResponseError;
+      }
+
+      expect(thrownError).toBeInstanceOf(NonSSEResponseError);
+      expect(thrownError!.bodyPrefix).toBe('');
     });
 
     it('should not throw NonSSEResponseError for text/event-stream content-type', async () => {

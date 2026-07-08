@@ -80,7 +80,6 @@ function isSSECompatibleContentType(contentType: string | null): boolean {
   const mediaType = (contentType.split(';')[0] ?? '').trim().toLowerCase();
   return (
     mediaType === 'text/event-stream' ||
-    mediaType === 'application/json' ||
     mediaType === 'application/x-ndjson' ||
     mediaType === 'application/stream+json'
   );
@@ -93,6 +92,8 @@ function isSSECompatibleContentType(contentType: string | null): boolean {
  * returned empty stream" from "upstream returned a non-SSE page".
  */
 export class NonSSEResponseError extends Error {
+  readonly status: number;
+
   constructor(
     readonly contentType: string | null,
     readonly httpStatus: number,
@@ -106,6 +107,7 @@ export class NonSSEResponseError extends Error {
         `${preview}`,
     );
     this.name = 'NonSSEResponseError';
+    this.status = httpStatus;
   }
 }
 
@@ -315,11 +317,16 @@ export class ContentGenerationPipeline {
             typeof (createPromise as { withResponse?: unknown })
               .withResponse === 'function'
           ) {
-            const { data, response: httpResponse } = await (
+            const {
+              data,
+              response: httpResponse,
+              request_id,
+            } = await (
               createPromise as unknown as {
                 withResponse(): Promise<{
                   data: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
                   response: Response;
+                  request_id: string | null;
                 }>;
               }
             ).withResponse();
@@ -354,7 +361,7 @@ export class ContentGenerationPipeline {
                 contentType,
                 httpResponse.status,
                 bodyPrefix,
-                httpResponse.headers.get('x-request-id'),
+                request_id,
               );
             }
           } else {
