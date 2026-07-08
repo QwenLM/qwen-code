@@ -4,14 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
 
+// Real git invocations (plus any user-global hooks) can take 10–20s per setup
+// on slower runners; bump per-test and per-hook timeouts so the suite isn't
+// flaky on CI, matching the sibling hooks/symlinks integration suites.
 describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   const tmpDirs: string[] = [];
 
   afterEach(() => {
@@ -61,8 +66,8 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
   it('returns false for a main tree whose .git is a FILE (separate-git-dir)', async () => {
     // `git init --separate-git-dir` leaves the main working tree carrying a
     // `.git` FILE rather than a directory — the exact case a "`.git` is a
-    // file ⟹ linked worktree" heuristic would misclassify. The registry
-    // check must still report it as the main tree (it is the first record).
+    // file ⟹ linked worktree" heuristic would misclassify. Its --git-dir and
+    // --git-common-dir still coincide, so it is correctly the main tree.
     const base = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-linked-sep-')),
     );
@@ -122,10 +127,10 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
   });
 
   it('returns false for a fake worktree carrying a copied .git file (not registered)', async () => {
-    // A directory with a `.git` file copied from a real linked worktree can
-    // pass a --git-dir vs --git-common-dir heuristic, but it is absent from
-    // `git worktree list` (which reads .git/worktrees/<name>/gitdir), so the
-    // authoritative registry check rejects it.
+    // A directory with a `.git` file copied from a real linked worktree passes
+    // a bare --git-dir vs --git-common-dir heuristic: it reports a per-worktree
+    // git dir. But that entry's `gitdir` pointer names the REAL worktree, not
+    // this copy, so verifying the pointer rejects it.
     const repo = initRepo('qwen-linked-fake-');
     const realWt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
     fs.mkdirSync(path.dirname(realWt), { recursive: true });
@@ -143,9 +148,10 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
   });
 
   it('is not fooled by a worktree path containing a newline that fakes a registry entry', async () => {
-    // A worktree whose path embeds "\nworktree <other>" injects a bogus record
-    // into a *newline*-split parse of `git worktree list --porcelain`. Parsing
-    // the NUL-separated (`-z`) form keeps it as a single record.
+    // A worktree whose path embeds "\nworktree <other>" would inject a bogus
+    // record into any newline-split parse of `git worktree list --porcelain`.
+    // Verifying the registry pointer for the one probed path sidesteps that
+    // class of bug entirely — no list is parsed, on any git version.
     const repo = initRepo('qwen-linked-nl-');
     const fake = path.join(repo, 'fake');
     fs.mkdirSync(fake);
