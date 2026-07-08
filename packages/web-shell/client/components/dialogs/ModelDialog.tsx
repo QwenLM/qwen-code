@@ -212,7 +212,7 @@ export function ModelDialog({
               ) : null}
               <span className={styles.label}>{getModelName(model)}</span>
               {model.isRuntime ? (
-                <span className={styles.badge}>Runtime</span>
+                <span className={styles.badge}>{t('common.runtime')}</span>
               ) : null}
             </div>
           );

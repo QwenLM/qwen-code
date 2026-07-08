@@ -115,7 +115,7 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         )}
         {!loading && error && (
           <div className={dp('picker-empty')}>
-            {error.message || 'Failed to load sessions'}
+            {error.message || t('resume.failedToLoad')}
           </div>
         )}
         {!loading && !error && filtered.length === 0 && (

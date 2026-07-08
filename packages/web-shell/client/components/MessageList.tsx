@@ -474,12 +474,15 @@ function isMidTurnInjectedDebugMessage(message: {
   );
 }
 
-export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
+export function getTurnTimelineNode(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): TurnTimelineNode {
   if (item.type === 'parallel_agents') {
     return {
       kind: 'agents',
       timestamp: item.timestamp,
-      label: 'Parallel agents',
+      label: t ? t('timeline.parallelAgents') : 'Parallel agents',
     };
   }
   if (item.type !== 'message') return { kind: 'none' };
@@ -490,7 +493,7 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
       return {
         kind: 'thought',
         timestamp: message.timestamp,
-        label: 'Thinking',
+        label: t ? t('timeline.thinking') : 'Thinking',
       };
     case 'assistant':
       if (item.turnCollapse)
@@ -500,28 +503,30 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
       return {
         kind: 'commentary',
         timestamp: message.timestamp,
-        label: 'Assistant update',
+        label: t ? t('timeline.assistantUpdate') : 'Assistant update',
       };
     case 'tool_group': {
       const count = message.tools.length;
       return {
         kind: 'tool',
         timestamp: message.timestamp,
-        label: `${count} tool call${count === 1 ? '' : 's'}`,
+        label: t
+          ? t('timeline.toolCalls', { count })
+          : `${count} tool call${count === 1 ? '' : 's'}`,
       };
     }
     case 'plan':
       return {
         kind: 'plan',
         timestamp: message.timestamp,
-        label: 'Plan update',
+        label: t ? t('timeline.planUpdate') : 'Plan update',
       };
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
         ? {
             kind: 'status',
             timestamp: message.timestamp,
-            label: 'Status update',
+            label: t ? t('timeline.statusUpdate') : 'Status update',
           }
         : { kind: 'none', timestamp: message.timestamp };
     case 'user':
@@ -611,7 +616,10 @@ function stripBalancedTimelineMarker(raw: string, marker: string): string {
   return result;
 }
 
-function timelineLabelForTurn(message: Message): string {
+function timelineLabelForTurn(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   const raw =
     message.role === 'user'
       ? message.content
@@ -619,7 +627,7 @@ function timelineLabelForTurn(message: Message): string {
         ? message.command
         : '';
   const compact = compactTimelineText(raw, 32);
-  if (!compact) return 'User turn';
+  if (!compact) return t ? t('timeline.userTurn') : 'User turn';
   return compact;
 }
 
@@ -639,19 +647,24 @@ function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
 }
 
-function timelineDetailSnippetForMessage(message: Message): string {
+function timelineDetailSnippetForMessage(
+  message: Message,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   switch (message.role) {
     case 'thinking':
       // Thinking content may include private model reasoning; keep details label-only.
-      return SESSION_TIMELINE_KIND_LABEL.thought;
+      return t ? t('timeline.kind.thought') : 'thinking';
     case 'assistant':
       return compactTimelineText(message.content, 120, { stripMarkdown: true });
     case 'tool_group': {
       const count = message.tools.length;
-      return `${count} tool call${count === 1 ? '' : 's'}`;
+      return t
+        ? t('timeline.toolCalls', { count })
+        : `${count} tool call${count === 1 ? '' : 's'}`;
     }
     case 'plan':
-      return 'plan update';
+      return t ? t('timeline.planDetail') : 'plan update';
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
         ? compactTimelineText(message.content, 120, { stripMarkdown: true })
@@ -670,19 +683,33 @@ function timelineDetailSnippetForMessage(message: Message): string {
   }
 }
 
-function timelineDetailSnippetForItem(item: DisplayItem): string {
+function timelineDetailSnippetForItem(
+  item: DisplayItem,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
   if (item.type === 'parallel_agents') {
     const count = item.agents.length;
-    return `${count} parallel agent${count === 1 ? '' : 's'}`;
+    return t
+      ? t('timeline.parallelAgentsDetail', { count })
+      : `${count} parallel agent${count === 1 ? '' : 's'}`;
   }
   if (item.type !== 'message') return '';
-  return timelineDetailSnippetForMessage(item.message);
+  return timelineDetailSnippetForMessage(item.message, t);
+}
+
+function getKindLabel(
+  kind: TurnTimelineNodeKind,
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (!t) return SESSION_TIMELINE_KIND_LABEL[kind];
+  return t(`timeline.kind.${kind}`);
 }
 
 function timelineDetailForTurn(
   turnItems: readonly DisplayItem[],
   finalAssistantId: string | null,
   nodeKinds: readonly TurnTimelineNodeKind[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   if (finalAssistantId !== null) {
     for (const item of turnItems) {
@@ -708,22 +735,21 @@ function timelineDetailForTurn(
     ) {
       continue;
     }
-    const snippet = timelineDetailSnippetForItem(item);
+    const snippet = timelineDetailSnippetForItem(item, t);
     if (snippet) snippets.push(snippet);
   }
 
   const detail = compactTimelineText(snippets.join(' · '), 180);
   if (detail) return detail;
   if (nodeKinds.length > 0) {
-    return nodeKinds
-      .map((kind) => SESSION_TIMELINE_KIND_LABEL[kind])
-      .join(' · ');
+    return nodeKinds.map((kind) => getKindLabel(kind, t)).join(' · ');
   }
-  return 'No activity';
+  return t ? t('timeline.noActivity') : 'No activity';
 }
 
 export function getSessionTimelineEntries(
   messages: readonly Message[],
+  t?: (key: string, vars?: Record<string, string | number>) => string,
 ): SessionTimelineEntry[] {
   const entries: SessionTimelineEntry[] = [];
   let turnStart: Message | null = null;
@@ -757,7 +783,7 @@ export function getSessionTimelineEntries(
       ) {
         continue;
       }
-      const node = getTurnTimelineNode(item);
+      const node = getTurnTimelineNode(item, t);
       if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
         nodeKinds.push(node.kind);
       }
@@ -765,8 +791,13 @@ export function getSessionTimelineEntries(
 
     entries.push({
       id: turnStart.id,
-      label: timelineLabelForTurn(turnStart),
-      detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
+      label: timelineLabelForTurn(turnStart, t),
+      detail: timelineDetailForTurn(
+        timelineItems,
+        finalAssistantId,
+        nodeKinds,
+        t,
+      ),
       timestamp: turnStart.timestamp,
       nodeKinds,
       ...(isScheduledTaskMessage(turnStart) ? { isScheduledTask: true } : {}),
@@ -1650,13 +1681,14 @@ const SessionTimeline = memo(function SessionTimeline({
   hidden: boolean;
   onSelect: (turnId: string) => void;
 }) {
+  const { t } = useI18n();
   if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
         className={styles.sessionTimelinePanel}
-        aria-label="Session timeline"
+        aria-label={t('timeline.sessionTimeline')}
         data-testid="session-timeline"
       >
         <ol className={styles.sessionTimelineList}>
@@ -1671,8 +1703,8 @@ const SessionTimeline = memo(function SessionTimeline({
                 : entry.id === currentTurnId;
             const nodeKinds = entry.nodeKinds.join(',');
             const ariaLabel = [
-              `Turn ${index + 1}: ${entry.label}`,
-              isCurrent ? 'Current turn' : null,
+              `${t('timeline.turnPrefix', { index: index + 1 })}: ${entry.label}`,
+              isCurrent ? t('timeline.currentTurn') : null,
             ]
               .filter(Boolean)
               .join('. ');
@@ -1819,6 +1851,7 @@ export const MessageList = memo(
       useState(false);
     const sessionTimelineCache = useRef<{
       signature: string;
+      t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
     // Signature + entries are O(transcript text); only pay for them while the
@@ -1826,14 +1859,18 @@ export const MessageList = memo(
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
-      if (sessionTimelineCache.current?.signature !== signature) {
+      if (
+        sessionTimelineCache.current?.signature !== signature ||
+        sessionTimelineCache.current?.t !== t
+      ) {
         sessionTimelineCache.current = {
           signature,
-          entries: getSessionTimelineEntries(mergedMessages),
+          t,
+          entries: getSessionTimelineEntries(mergedMessages, t),
         };
       }
       return sessionTimelineCache.current.entries;
-    }, [isSessionTimelineVisible, mergedMessages]);
+    }, [isSessionTimelineVisible, mergedMessages, t]);
     const sessionTimelineEntryIndexById = useMemo(
       () =>
         new Map(
