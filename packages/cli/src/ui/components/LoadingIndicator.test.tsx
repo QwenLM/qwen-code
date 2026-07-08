@@ -72,7 +72,7 @@ describe('<LoadingIndicator />', () => {
     const output = lastFrame();
     expect(output).toContain('MockRespondingSpinner');
     expect(output).toContain('Loading...');
-    expect(output).toContain('5s');
+    expect(output).toContain('5.0s');
     expect(output).toContain('esc to cancel');
   });
 
@@ -89,7 +89,7 @@ describe('<LoadingIndicator />', () => {
     expect(output).toContain('⠏'); // Static char for WaitingForConfirmation
     expect(output).toContain('Confirm action');
     expect(output).not.toContain('(esc to cancel)');
-    expect(output).not.toContain('10s');
+    expect(output).not.toContain('10.0s');
   });
 
   it('should display the currentLoadingPhrase correctly', () => {
@@ -102,6 +102,22 @@ describe('<LoadingIndicator />', () => {
       StreamingState.Responding,
     );
     expect(lastFrame()).toContain('Processing data...');
+  });
+
+  it('should keep a fixed-width time string across 0.5s ticks below one minute (#6402)', () => {
+    // The timer ticks at 0.5s resolution; without the fixed decimal the
+    // string alternates between "1s" and "1.5s" and the status line jitters.
+    const half = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={1.5} />,
+      StreamingState.Responding,
+    );
+    expect(half.lastFrame()).toContain('(1.5s · esc to cancel)');
+
+    const whole = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={2} />,
+      StreamingState.Responding,
+    );
+    expect(whole.lastFrame()).toContain('(2.0s · esc to cancel)');
   });
 
   it('should display the elapsedTime correctly when Responding', () => {
@@ -156,7 +172,7 @@ describe('<LoadingIndicator />', () => {
     let output = lastFrame();
     expect(output).toContain('MockRespondingSpinner');
     expect(output).toContain('Now Responding');
-    expect(output).toContain('(2s · esc to cancel)');
+    expect(output).toContain('(2.0s · esc to cancel)');
 
     // Transition to WaitingForConfirmation
     rerender(
@@ -171,7 +187,7 @@ describe('<LoadingIndicator />', () => {
     expect(output).toContain('⠏');
     expect(output).toContain('Please Confirm');
     expect(output).not.toContain('(esc to cancel)');
-    expect(output).not.toContain('15s');
+    expect(output).not.toContain('15.0s');
 
     // Transition back to Idle
     rerender(
@@ -211,7 +227,7 @@ describe('<LoadingIndicator />', () => {
       // Check for single line output
       expect(output?.includes('\n')).toBe(false);
       expect(output).toContain('Loading...');
-      expect(output).toContain('(5s · esc to cancel)');
+      expect(output).toContain('(5.0s · esc to cancel)');
       expect(output).toContain('Right');
     });
 
@@ -233,8 +249,8 @@ describe('<LoadingIndicator />', () => {
       expect(lines).toHaveLength(3);
       if (lines) {
         expect(lines[0]).toContain('Loading...');
-        expect(lines[0]).not.toContain('5s');
-        expect(lines[1]).toContain('5s');
+        expect(lines[0]).not.toContain('5.0s');
+        expect(lines[1]).toContain('5.0s');
         expect(lines[2]).toContain('Right');
       }
     });
@@ -267,7 +283,7 @@ describe('<LoadingIndicator />', () => {
       const output = lastFrame();
       expect(output).toContain('↓ 847 tokens');
       expect(output).not.toContain('↑');
-      expect(output).toContain('5s');
+      expect(output).toContain('5.0s');
       expect(output).toContain('esc to cancel');
     });
 
@@ -320,7 +336,7 @@ describe('<LoadingIndicator />', () => {
         120,
       );
       const output = lastFrame();
-      expect(output).toContain('(5s · ↓ 5.4k tokens · esc to cancel)');
+      expect(output).toContain('(5.0s · ↓ 5.4k tokens · esc to cancel)');
     });
 
     it('should not show response tokens/sec by default', () => {
