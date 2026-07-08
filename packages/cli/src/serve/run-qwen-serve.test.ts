@@ -1273,6 +1273,16 @@ describe('runQwenServe runtime startup failures', () => {
     expect(features).not.toContain('client_mcp_over_ws');
   });
 
+  it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      'https://example.com',
+      '/opt/qwen-cdp-mcp-adapter',
+    );
+
+    expect(features).not.toContain('browser_automation_mcp');
+  });
+
   it('forwards auto-enabled CDP tunnel state to the ACP child env', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-child-env-')),

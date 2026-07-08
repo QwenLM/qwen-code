@@ -180,7 +180,7 @@ function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         );
       }
       console.warn(`Warning: ${message}`);
-      return false;
+      return;
     }
   }
   for (const [artifactPath, description, predicate] of [
@@ -204,7 +204,7 @@ function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         );
       }
       console.warn(`Warning: ${message}`);
-      return false;
+      return;
     }
   }
 
@@ -225,7 +225,7 @@ function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
       );
     }
     console.warn(`Warning: ${message}`);
-    return false;
+    return;
   }
   const addonRequire = createRequire(path.join(addonSrc, 'package.json'));
   for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
@@ -240,12 +240,11 @@ function verifyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
         );
       }
       console.warn(`Warning: ${message}`);
-      return false;
+      return;
     }
   }
 
   console.log('Verified native audio capture package');
-  return true;
 }
 
 function hasFileMatching(dir, predicate) {
@@ -336,7 +335,7 @@ function assertNoSensitivePackageScanLiterals(distDir) {
       if (!contents.includes(literal)) continue;
       const relativePath = path.relative(distDir, filePath);
       throw new Error(
-        `Prepared package contains scanner-sensitive literal in ${relativePath}`,
+        `Prepared package contains forbidden string "${literal}" in ${relativePath}`,
       );
     }
   }
