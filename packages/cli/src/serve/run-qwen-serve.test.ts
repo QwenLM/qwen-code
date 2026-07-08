@@ -4100,6 +4100,13 @@ describe('runQwenServe channel worker supervisor', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-retry-')),
     );
     const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
       locals: {},
       listen: vi.fn((port, _host, cb) => {
@@ -4136,9 +4143,15 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     try {
+      stderrSpy.mockRestore();
       expect(portsAttempted).toEqual([4170, 4171]);
       expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(handle.url).not.toContain(':4170');
+      expect(
+        stderrWrites.some((w) =>
+          w.includes('port 4170 is in use, trying 4171'),
+        ),
+      ).toBe(true);
     } finally {
       await handle.close();
     }
@@ -4175,6 +4188,74 @@ describe('runQwenServe channel worker supervisor', () => {
     ).rejects.toBe(listenError);
 
     expect(portsAttempted).toEqual([4170]);
+  });
+
+  it('rejects after exhausting all port retry attempts', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-exhaust-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual(
+      Array.from({ length: 10 }, (_, i) => 4170 + i),
+    );
+  });
+
+  it('does not retry EADDRINUSE when port is 0 (ephemeral)', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port0-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([0]);
   });
 
   it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {

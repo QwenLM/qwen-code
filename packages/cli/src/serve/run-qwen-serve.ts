@@ -3569,16 +3569,6 @@ export async function runQwenServe(
           reject(err);
         }
       });
-
-      server.once('listening', () => {
-        // Listener is up — wire the permanent runtime error handler.
-        // onListening (fired by the same `listening` event) has already
-        // resolved actualPort and printed the startup banner.
-        server.on('error', (runtimeErr) => {
-          removeCurrentServePidfile();
-          reject(runtimeErr);
-        });
-      });
     };
 
     tryListen(opts.port, 0);

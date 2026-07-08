@@ -237,14 +237,25 @@ try {
 }
 
 const hostname = readOption('--hostname') || '127.0.0.1';
-const startPort = parseInt(readOption('--port') || '4170', 10);
+const rawPort = readOption('--port') || '4170';
+const startPort = parseInt(rawPort, 10);
+if (!Number.isInteger(startPort) || startPort < 0 || startPort > 65535) {
+  console.error(
+    `daemon-dev: --port must be an integer 0–65535, got "${rawPort}".`,
+  );
+  process.exit(1);
+}
 if (startPort === 0) {
   console.error(
     'daemon-dev: --port 0 is not supported; the launcher needs a fixed port to poll for health.',
   );
   process.exit(1);
 }
-const port = String(await findAvailablePort(hostname, startPort));
+const probeHostname =
+  hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+const port = String(await findAvailablePort(probeHostname, startPort));
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
