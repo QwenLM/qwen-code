@@ -243,24 +243,13 @@ export function splitCommands(command: string): string[] {
     }
 
     if (!inSingleQuotes && !inDoubleQuotes) {
-      if (
-        (char === '$' || char === '<' || char === '>') &&
-        nextChar === '('
-      ) {
+      if ((char === '$' || char === '<' || char === '>') && nextChar === '(') {
         substitutionDepth++;
-        currentCommand += char + nextChar;
-        i += 2;
-        continue;
-      }
-
-      if (char === ')' && substitutionDepth > 0) {
+      } else if (char === ')' && substitutionDepth > 0) {
         substitutionDepth--;
-        currentCommand += char;
-        i++;
-        continue;
       }
 
-      if (substitutionDepth > 0) {
+      if (substitutionDepth > 0 || char === ')') {
         currentCommand += char;
         i++;
         continue;
@@ -1003,24 +992,16 @@ function pgrepRawArgsTargetSelf(command: string, rawArgs: string): boolean {
 }
 
 function pgrepCommandTargetsSelf(command: string): boolean {
-  for (const segment of getCommandSegments(command)) {
+  return getCommandSegments(command).some((segment) => {
     const parsed = parseShellSegment(segment);
-    if (!parsed) {
-      if (pgrepRawArgsTargetSelf('pgrep', segment)) {
-        return true;
-      }
-      continue;
-    }
+    if (!parsed) return pgrepRawArgsTargetSelf('pgrep', segment);
     const tokens = unwrapExecutionPrefixes(parsed);
     const root = normalizeExecutableName(tokens[0] ?? '');
-    if (
+    return (
       (root === 'pgrep' || root === 'pidof') &&
       pgrepTargetsSelf(tokens, root)
-    ) {
-      return true;
-    }
-  }
-  return false;
+    );
+  });
 }
 
 function tokenInvokesKill(token: string): boolean {
@@ -1111,13 +1092,10 @@ function killCommandTargetsSelf(segment: string): boolean {
   }
   for (const match of segment.matchAll(/\$\(([^()]*)\)|<\s*<\(([^()]*)\)/g)) {
     const innerCommand = match[1] ?? match[2] ?? '';
-    if (
-      (/[;&|]/.test(innerCommand) ||
-        /^\s*(?:command|sudo|env|nohup|timeout|strace)\b/i.test(
-          innerCommand,
-        )) &&
-      pgrepCommandTargetsSelf(innerCommand)
-    ) {
+    if (/^\s*nice\s+-/i.test(innerCommand)) {
+      continue;
+    }
+    if (pgrepCommandTargetsSelf(innerCommand)) {
       return true;
     }
   }
