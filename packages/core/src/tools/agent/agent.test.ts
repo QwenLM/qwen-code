@@ -1214,6 +1214,36 @@ describe('AgentTool', () => {
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
     });
 
+    it('allows working_dir for a background:true subagent that downgrades to foreground when nested', async () => {
+      // Nested → isTopLevelSession() is false → the config's background: true
+      // is downgraded to an awaited foreground run, so shouldRunInBackground
+      // is false and the background guard must NOT fire. Execution proceeds to
+      // worktree validation (which rejects this non-worktree path), proving
+      // the guard keys off the effective decision and does not over-reject the
+      // foreground path. A regression back to `backgroundRequested` would flip
+      // this to the background-agent error.
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        background: true,
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Review',
+        prompt: 'Review the diff',
+        subagent_type: 'file-search',
+        working_dir: '/tmp/qwen-not-a-worktree-xyz',
+      });
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      const text = partToString(result.llmContent);
+      expect(text).not.toMatch(/background agent/i);
+      expect(text).toMatch(/not a git repository|not a registered/i);
+    });
+
     it('strips internal analysis and summary tags from subagent result', async () => {
       vi.mocked(mockAgent.getFinalText).mockReturnValue(
         [

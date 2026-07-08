@@ -11,7 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
 
-describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
+describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
   const tmpDirs: string[] = [];
 
   afterEach(() => {
@@ -44,7 +44,7 @@ describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
   it('returns false for the repository primary working tree', async () => {
     const repo = initRepo('qwen-linked-main-');
     const svc = new GitWorktreeService(repo);
-    expect(await svc.isLinkedWorktree(repo)).toBe(false);
+    expect(await svc.isRegisteredLinkedWorktree(repo)).toBe(false);
   });
 
   it('returns true for a linked worktree created via `git worktree add`', async () => {
@@ -55,15 +55,14 @@ describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
       cwd: repo,
     });
     const svc = new GitWorktreeService(repo);
-    expect(await svc.isLinkedWorktree(wt)).toBe(true);
+    expect(await svc.isRegisteredLinkedWorktree(wt)).toBe(true);
   });
 
   it('returns false for a main tree whose .git is a FILE (separate-git-dir)', async () => {
     // `git init --separate-git-dir` leaves the main working tree carrying a
-    // `.git` FILE rather than a directory — the exact case a
-    // "`.git` is a file ⟹ linked worktree" heuristic would misclassify.
-    // The --git-dir vs --git-common-dir comparison must still report it as
-    // the main tree.
+    // `.git` FILE rather than a directory — the exact case a "`.git` is a
+    // file ⟹ linked worktree" heuristic would misclassify. The registry
+    // check must still report it as the main tree (it is the first record).
     const base = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-linked-sep-')),
     );
@@ -84,7 +83,7 @@ describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
     expect(fs.statSync(path.join(tree, '.git')).isFile()).toBe(true);
 
     const svc = new GitWorktreeService(tree);
-    expect(await svc.isLinkedWorktree(tree)).toBe(false);
+    expect(await svc.isRegisteredLinkedWorktree(tree)).toBe(false);
   });
 
   it('returns false (fail-closed) for a path that is not a git repository', async () => {
@@ -96,24 +95,50 @@ describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
     );
     tmpDirs.push(plain);
     const svc = new GitWorktreeService(plain);
-    expect(await svc.isLinkedWorktree(plain)).toBe(false);
+    expect(await svc.isRegisteredLinkedWorktree(plain)).toBe(false);
   });
 
-  it('canonicalizes a symlinked input before deciding (main tree via symlink → false)', async () => {
-    // Without the realpath call, `--absolute-git-dir` (which git returns
-    // canonicalized) would differ from `--git-common-dir` resolved against
-    // the symlinked input, and the main tree would be misreported as linked
-    // — the macOS `/var → /private/var` failure mode, reproduced with an
-    // explicit symlink so it runs everywhere.
+  it('matches a registered worktree through a symlinked input path', async () => {
+    // The input path is canonicalized before matching against the registry,
+    // so a symlinked path to a real linked worktree still resolves to it —
+    // the macOS `/var → /private/var` case, reproduced with an explicit
+    // symlink so it runs everywhere. Without the realpath the symlink path
+    // would not match the registry's canonical entry and this would be false.
     const repo = initRepo('qwen-linked-symlink-');
+    const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
+    execFileSync('git', ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'], {
+      cwd: repo,
+    });
     const linkParent = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-linked-symlink-lnk-')),
     );
     tmpDirs.push(linkParent);
-    const link = path.join(linkParent, 'repo-link');
-    fs.symlinkSync(repo, link, 'dir');
+    const link = path.join(linkParent, 'wt-link');
+    fs.symlinkSync(wt, link, 'dir');
 
     const svc = new GitWorktreeService(repo);
-    expect(await svc.isLinkedWorktree(link)).toBe(false);
+    expect(await svc.isRegisteredLinkedWorktree(link)).toBe(true);
+  });
+
+  it('returns false for a fake worktree carrying a copied .git file (not registered)', async () => {
+    // A directory with a `.git` file copied from a real linked worktree can
+    // pass a --git-dir vs --git-common-dir heuristic, but it is absent from
+    // `git worktree list` (which reads .git/worktrees/<name>/gitdir), so the
+    // authoritative registry check rejects it.
+    const repo = initRepo('qwen-linked-fake-');
+    const realWt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+    fs.mkdirSync(path.dirname(realWt), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-b', 'review-pr-1', realWt, 'HEAD'],
+      { cwd: repo },
+    );
+    const fake = path.join(repo, 'fake-wt');
+    fs.mkdirSync(fake);
+    fs.copyFileSync(path.join(realWt, '.git'), path.join(fake, '.git'));
+
+    const svc = new GitWorktreeService(repo);
+    expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
   });
 });

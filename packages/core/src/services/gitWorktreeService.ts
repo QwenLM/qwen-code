@@ -1203,39 +1203,50 @@ export class GitWorktreeService {
   }
 
   /**
-   * Returns true when `worktreePath` is a LINKED worktree (one created by
-   * `git worktree add`) rather than a repository's primary working tree.
+   * Returns true when `worktreePath` is a REGISTERED linked worktree of this
+   * repository — it appears in `git worktree list` and is not the repo's
+   * primary working tree (the first record).
    *
-   * A linked worktree keeps its per-worktree git dir under
-   * `<common>/worktrees/<name>`, so `--absolute-git-dir` differs from
-   * `--git-common-dir`; for the main working tree the two resolve to the
-   * same directory. This distinction is reliable where a "`.git` is a file
-   * ⟹ linked" heuristic is NOT: the main working tree also has a `.git`
-   * *file* under `git clone --separate-git-dir` and inside submodules,
-   * which would fool the heuristic into treating the main tree as linked.
+   * This consults the authoritative worktree registry rather than inferring
+   * from a path's git metadata. A `.git`-is-a-file heuristic misfires (the
+   * main tree also has a `.git` file under `git clone --separate-git-dir` and
+   * in submodules), and even a `--git-dir` vs `--git-common-dir` comparison
+   * can be fooled by a hand-crafted directory that carries a *copied* `.git`
+   * file from a real linked worktree — it would report a per-worktree git dir
+   * differing from the common dir, yet it is not registered. `git worktree
+   * list` reads `.git/worktrees/<name>/gitdir`, so such a fake is absent from
+   * it and correctly rejected here.
    *
    * Fail-closed: any git error returns false, so a caller that gates
    * isolation on this check rejects an unverifiable path rather than
    * silently pinning a sub-agent to a possibly-main tree.
    */
-  async isLinkedWorktree(worktreePath: string): Promise<boolean> {
+  async isRegisteredLinkedWorktree(worktreePath: string): Promise<boolean> {
     try {
-      // Canonicalize first. `--absolute-git-dir` returns a realpath'd path,
-      // so comparing it against `--git-common-dir` resolved from a symlinked
-      // input (macOS `/var → /private/var`, `os.tmpdir()`, …) would diverge
-      // for the MAIN tree and misreport it as linked. Mirrors the realpath
-      // handling in `getRegisteredWorktreeBranch`.
-      const realPath = await fs.realpath(worktreePath);
-      const probeGit = simpleGit(realPath);
-      const [gitDir, commonDir] = await Promise.all([
-        probeGit.raw(['rev-parse', '--absolute-git-dir']),
-        probeGit.raw(['rev-parse', '--git-common-dir']),
-      ]);
-      const resolve = (p: string) => path.resolve(realPath, p.trim());
-      return resolve(gitDir) !== resolve(commonDir);
+      const target = await fs.realpath(worktreePath);
+      const out = await this.git.raw(['worktree', 'list', '--porcelain']);
+      // Records are blank-line separated and begin with `worktree <path>`.
+      // The FIRST record is the primary working tree; a linked worktree must
+      // match one of the remaining records.
+      const registered: string[] = [];
+      for (const line of out.split('\n')) {
+        if (line.startsWith('worktree ')) {
+          registered.push(line.slice('worktree '.length).trim());
+        }
+      }
+      for (const candidate of registered.slice(1)) {
+        let resolved: string;
+        try {
+          resolved = await fs.realpath(candidate);
+        } catch {
+          resolved = path.resolve(candidate);
+        }
+        if (resolved === target) return true;
+      }
+      return false;
     } catch (error) {
       debugLogger.debug(
-        `isLinkedWorktree: probe at ${worktreePath} failed: ${error}`,
+        `isRegisteredLinkedWorktree: probe at ${worktreePath} failed: ${error}`,
       );
       return false;
     }

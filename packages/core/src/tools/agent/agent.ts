@@ -291,20 +291,21 @@ async function resolveExternalWorktreeDir(
   }
   // getRegisteredWorktreeBranch also accepts the repository's OWN primary
   // working tree (its --git-common-dir and --show-toplevel both match), so
-  // `working_dir: "."` or the repo root would pass — and silently pin the
-  // sub-agent to the user's main checkout, defeating the isolation. Reject
-  // anything that is not a LINKED worktree (distinguished by comparing the
-  // per-worktree git dir against the common git dir; see isLinkedWorktree).
-  if (!(await wtService.isLinkedWorktree(resolvedPath))) {
-    // isLinkedWorktree fails closed (returns false) on a git error too, so
-    // the cause is either "it is the main working tree" or "its git metadata
-    // could not be read" — name both rather than assert the former.
+  // `working_dir: "."` or the repo root would pass — and it can even be fooled
+  // by a hand-crafted directory carrying a copied `.git` file. Gate on the
+  // authoritative worktree registry: the path must be a REGISTERED linked
+  // worktree (present in `git worktree list`, and not the main tree).
+  if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
+    // Fails closed (returns false) on a git error too, so the cause is either
+    // "not a registered linked worktree" (main tree / unregistered) or "its
+    // git metadata could not be read" — name both rather than assert one.
     return {
       error:
-        `working_dir "${resolvedPath}" is not a linked worktree (it is the ` +
-        `repository's main working tree, or its git metadata could not be ` +
-        `read) — pinning a sub-agent there would not isolate it. Pass a ` +
-        `linked worktree created via \`git worktree add\`.`,
+        `working_dir "${resolvedPath}" is not a registered linked worktree of ` +
+        `this repository (it is the main working tree, is absent from \`git ` +
+        `worktree list\`, or its git metadata could not be read) — pinning a ` +
+        `sub-agent there would not isolate it. Pass a worktree created via ` +
+        `\`git worktree add\`.`,
     };
   }
   return {
