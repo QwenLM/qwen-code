@@ -1203,6 +1203,39 @@ export class GitWorktreeService {
   }
 
   /**
+   * Returns true when `worktreePath` is a LINKED worktree (one created by
+   * `git worktree add`) rather than a repository's primary working tree.
+   *
+   * A linked worktree keeps its per-worktree git dir under
+   * `<common>/worktrees/<name>`, so `--absolute-git-dir` differs from
+   * `--git-common-dir`; for the main working tree the two resolve to the
+   * same directory. This distinction is reliable where a "`.git` is a file
+   * ⟹ linked" heuristic is NOT: the main working tree also has a `.git`
+   * *file* under `git clone --separate-git-dir` and inside submodules,
+   * which would fool the heuristic into treating the main tree as linked.
+   *
+   * Fail-closed: any git error returns false, so a caller that gates
+   * isolation on this check rejects an unverifiable path rather than
+   * silently pinning a sub-agent to a possibly-main tree.
+   */
+  async isLinkedWorktree(worktreePath: string): Promise<boolean> {
+    try {
+      const probeGit = simpleGit(worktreePath);
+      const [gitDir, commonDir] = await Promise.all([
+        probeGit.raw(['rev-parse', '--absolute-git-dir']),
+        probeGit.raw(['rev-parse', '--git-common-dir']),
+      ]);
+      const resolve = (p: string) => path.resolve(worktreePath, p.trim());
+      return resolve(gitDir) !== resolve(commonDir);
+    } catch (error) {
+      debugLogger.debug(
+        `isLinkedWorktree: probe at ${worktreePath} failed: ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * Fetches the GitHub PR ref `refs/pull/<N>/head` from the `origin` remote
    * so a subsequent `createUserWorktree(..., 'FETCH_HEAD')` call can branch
    * off the PR's tip (Phase D-3). Returns `{ success: true }` on success,

@@ -6,7 +6,6 @@
 
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
@@ -290,16 +289,10 @@ async function resolveExternalWorktreeDir(
   // getRegisteredWorktreeBranch also accepts the repository's OWN primary
   // working tree (its --git-common-dir and --show-toplevel both match), so
   // `working_dir: "."` or the repo root would pass — and silently pin the
-  // sub-agent to the user's main checkout, defeating the isolation. A LINKED
-  // worktree has a `.git` FILE (pointing into <repo>/.git/worktrees/<name>);
-  // the main working tree has a `.git` DIRECTORY. Require the former.
-  let gitEntryIsFile = false;
-  try {
-    gitEntryIsFile = (await fs.stat(path.join(resolvedPath, '.git'))).isFile();
-  } catch {
-    gitEntryIsFile = false;
-  }
-  if (!gitEntryIsFile) {
+  // sub-agent to the user's main checkout, defeating the isolation. Reject
+  // anything that is not a LINKED worktree (distinguished by comparing the
+  // per-worktree git dir against the common git dir; see isLinkedWorktree).
+  if (!(await wtService.isLinkedWorktree(resolvedPath))) {
     return {
       error:
         `working_dir "${resolvedPath}" is the repository's main working tree, ` +
@@ -1012,7 +1005,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     if (params.working_dir !== undefined) {
       if (
         typeof params.working_dir !== 'string' ||
-        params.working_dir.length === 0
+        params.working_dir.trim().length === 0
       ) {
         return 'Parameter "working_dir" must be a non-empty string when set.';
       }

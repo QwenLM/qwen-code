@@ -585,6 +585,15 @@ describe('AgentTool', () => {
       ).toMatch(/working_dir/i);
     });
 
+    it('rejects a whitespace-only working_dir', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '   ',
+        }),
+      ).toMatch(/working_dir/i);
+    });
+
     it('rejects working_dir combined with isolation', () => {
       expect(
         agentTool.validateToolParams({
@@ -1347,6 +1356,8 @@ describe('AgentTool', () => {
         // Every cwd surface is rebound to the caller's worktree...
         expect(agentConfig.getProjectRoot()).toBe(wt);
         expect(agentConfig.getTargetDir()).toBe(wt);
+        expect(agentConfig.getCwd()).toBe(wt);
+        expect(agentConfig.getWorkingDir()).toBe(wt);
         expect(agentConfig.getProjectRoot()).not.toBe(repo);
         // ...and the caller-owned worktree is NOT torn down by cleanup.
         expect(fs.existsSync(wt)).toBe(true);
@@ -1453,6 +1464,8 @@ describe('AgentTool', () => {
         // The relative path resolves to the correct absolute worktree.
         expect(agentConfig.getProjectRoot()).toBe(wt);
         expect(agentConfig.getTargetDir()).toBe(wt);
+        expect(agentConfig.getCwd()).toBe(wt);
+        expect(agentConfig.getWorkingDir()).toBe(wt);
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
@@ -1496,6 +1509,63 @@ describe('AgentTool', () => {
 
         expect(partToString(result.llmContent)).toMatch(/main working tree/i);
         expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('re-anchors validation at the repo root when launched from a monorepo subdirectory', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-mono-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        // A nested package directory the CLI could be launched from.
+        const subdir = path.join(repo, 'packages', 'core');
+        fs.mkdirSync(subdir, { recursive: true });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        // getTargetDir() is the subdirectory, not the repo root, so the
+        // helper's `repoRoot !== parentCwd` re-anchoring branch executes.
+        vi.mocked(config.getProjectRoot).mockReturnValue(subdir);
+        vi.mocked(config.getTargetDir).mockReturnValue(subdir);
+        vi.mocked(config.getCwd).mockReturnValue(subdir);
+        vi.mocked(config.getWorkingDir).mockReturnValue(subdir);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          // Absolute worktree path registered at the repo root.
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
