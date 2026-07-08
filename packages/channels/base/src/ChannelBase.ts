@@ -611,7 +611,7 @@ export abstract class ChannelBase {
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
     // Without the delivery-contract sentence the model treats "post X" prompts
     // as an action it must perform itself and goes hunting for send credentials.
-    let promptText = `[Loop "${label}" created by ${createdBy}] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\n${sanitizePromptText(job.prompt)}`;
+    const promptText = `[Loop "${label}" created by ${createdBy}] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\n${sanitizePromptText(job.prompt)}`;
     const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
 
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();

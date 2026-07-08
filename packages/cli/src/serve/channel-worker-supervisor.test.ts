@@ -2136,11 +2136,14 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    const rejected = expect(
-      supervisor.enqueueWebhookTask(webhookTask),
-    ).rejects.toThrow('send boom');
+    const rejected = supervisor.enqueueWebhookTask(webhookTask).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await vi.advanceTimersByTimeAsync(30_000);
-    await rejected;
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('send boom');
   });
 
   it('rejects webhook tasks when the IPC send callback reports an error', async () => {
@@ -2167,11 +2170,14 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    const rejected = expect(
-      supervisor.enqueueWebhookTask(webhookTask),
-    ).rejects.toThrow('callback boom');
+    const rejected = supervisor.enqueueWebhookTask(webhookTask).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await vi.advanceTimersByTimeAsync(30_000);
-    await rejected;
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('callback boom');
   });
 
   it('rejects webhook tasks when IPC result times out', async () => {
@@ -2194,12 +2200,16 @@ describe('createChannelWorkerSupervisor', () => {
     });
     await started;
 
-    const accepted = supervisor.enqueueWebhookTask(webhookTask);
-    const rejected = expect(accepted).rejects.toThrow(
-      'Channel webhook task IPC timed out.',
+    const accepted = supervisor.enqueueWebhookTask(webhookTask).then(
+      () => undefined,
+      (error: unknown) => error,
     );
     await vi.advanceTimersByTimeAsync(30_000);
-    await rejected;
+    const error = await accepted;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      'Channel webhook task IPC timed out.',
+    );
   });
 
   it('rejects pending webhook tasks when the worker exits', async () => {
