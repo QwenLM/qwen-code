@@ -24,7 +24,10 @@ import type {
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { formatHistoryGapNotice } from './history-gap-notice.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from './history-gap-notice.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -141,9 +144,9 @@ function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
 }
 
 /**
- * INFO divider shown at a bridged history gap: an earlier segment of the
- * session was physically lost and the older history above was stitched back on
- * during load. Mirrors the ACP replay notice so both surfaces read the same.
+ * INFO divider shown at a detected history gap: an earlier segment of the
+ * session was physically lost (storage interruption) and could not be
+ * recovered. Mirrors the ACP replay notice so both surfaces read the same.
  */
 function createHistoryGapItem(gap: HistoryGap): HistoryItemInfo {
   return {
@@ -168,10 +171,7 @@ function convertToHistoryItems(
   historyGaps?: HistoryGap[],
 ): HistoryItemWithoutId[] {
   const items: HistoryItemWithoutId[] = [];
-  const gapByChildUuid = new Map<string, HistoryGap>();
-  for (const gap of historyGaps ?? []) {
-    gapByChildUuid.set(gap.childUuid, gap);
-  }
+  const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
 
@@ -243,9 +243,9 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
-    // A bridged history gap begins at this record — surface a visible divider
-    // so the restored older history above is not read as contiguous with the
-    // turns below. Flush any pending tool group first so the divider is not
+    // A detected history gap begins at this record — surface a visible divider
+    // so the surviving turns below are not read as contiguous across the lost
+    // segment. Flush any pending tool group first so the divider is not
     // swallowed into it.
     const gap = gapByChildUuid.get(record.uuid);
     if (gap) {

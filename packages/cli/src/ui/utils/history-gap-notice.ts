@@ -19,3 +19,19 @@ export function formatHistoryGapNotice(_gap: HistoryGap): string {
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
   );
 }
+
+/**
+ * Indexes detected history gaps by the uuid of the child record each one
+ * precedes, so a replay/render loop can O(1) test whether a divider belongs
+ * before a given record. Shared by the terminal `/resume` builder and the ACP
+ * replayer so both surfaces key the divider off the same field.
+ */
+export function indexGapsByChild(
+  gaps: readonly HistoryGap[] | undefined,
+): Map<string, HistoryGap> {
+  const byChild = new Map<string, HistoryGap>();
+  for (const gap of gaps ?? []) {
+    byChild.set(gap.childUuid, gap);
+  }
+  return byChild;
+}

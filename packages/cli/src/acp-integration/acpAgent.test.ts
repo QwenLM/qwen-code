@@ -5248,7 +5248,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/session/loadUpdates threads bridged historyGaps to the replayer', async () => {
+  it('qwen/session/loadUpdates threads detected historyGaps to the replayer', async () => {
     const settings = makeCoreSettings();
     const gaps = [{ childUuid: 'c', missingParentUuid: 'gone' }];
     mockSessionServiceLoad({
@@ -5267,7 +5267,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     // 3rd arg to the replayer is the historyGaps threaded through
     // collectHistoryReplayUpdates — without it this ACP surface renders a
-    // bridged (recovered) history as contiguous, with no gap divider.
+    // broken chain as contiguous, with no gap divider.
     expect(mockHistoryReplay).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
@@ -7897,7 +7897,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
     // load semantic: history MUST be replayed so SSE subscribers see
-    // the persisted turns. Second arg is the bridged history gaps
+    // the persisted turns. Second arg is the detected history gaps
     // (undefined here — this fixture session has an intact chain).
     expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(
       messages,

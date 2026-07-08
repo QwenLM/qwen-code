@@ -19,7 +19,10 @@ import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { getToolResultCallId } from '../../utils/chat-record-tool-call-id.js';
-import { formatHistoryGapNotice } from '../../ui/utils/history-gap-notice.js';
+import {
+  formatHistoryGapNotice,
+  indexGapsByChild,
+} from '../../ui/utils/history-gap-notice.js';
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -58,16 +61,13 @@ export class HistoryReplayer {
    * Replays all chat records from a loaded session.
    *
    * @param records - Array of chat records to replay
-   * @param gaps - Optional bridged history gaps; a visible notice is emitted
+   * @param gaps - Optional detected history gaps; a visible notice is emitted
    *   immediately before each gap's child record so the user sees that an
    *   earlier segment was lost rather than assuming the halves are contiguous.
    */
   async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
     this.pendingReplayToolCalls.clear();
-    const gapByChildUuid = new Map<string, HistoryGap>();
-    for (const gap of gaps ?? []) {
-      gapByChildUuid.set(gap.childUuid, gap);
-    }
+    const gapByChildUuid = indexGapsByChild(gaps);
     try {
       let replayError: unknown;
       try {
@@ -195,10 +195,11 @@ export class HistoryReplayer {
 
   /**
    * Emits a visible notice marking a break in the persisted history chain: an
-   * earlier segment was physically lost (storage rollback/relocation) and the
-   * older history below was stitched back on during load. Uses the agent
-   * message channel — the same one used for other system notices (see
-   * MessageEmitter.emitStopHookLoop) — so no new session-update kind is needed.
+   * earlier segment was physically lost (storage interruption) and could not be
+   * recovered, so the surviving turns below must not be read as contiguous with
+   * whatever came before the gap. Uses the agent message channel — the same one
+   * used for other system notices (see MessageEmitter.emitStopHookLoop) — so no
+   * new session-update kind is needed.
    */
   private async emitHistoryGapNotice(
     gap: HistoryGap,

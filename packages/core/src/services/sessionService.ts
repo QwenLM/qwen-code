@@ -184,10 +184,10 @@ export interface ResumedSessionData {
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
   /**
-   * Breaks in the persisted parentUuid chain that were bridged during
-   * reconstruction (an earlier segment of history was physically lost). Lets
-   * the surface render a visible gap divider. Undefined when the chain was
-   * intact.
+   * Breaks in the persisted parentUuid chain that were detected during
+   * reconstruction (an earlier segment of history was physically lost and could
+   * not be recovered). Lets the surface render a visible gap divider. Undefined
+   * when the chain was intact.
    */
   historyGaps?: HistoryGap[];
 }
