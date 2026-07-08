@@ -1872,4 +1872,170 @@ describe('replyMsgId cleanup timer', () => {
     chp['disconnect'] = origDisconnect;
     ch.disconnect();
   });
+
+  // ---------------------------------------------------------------------------
+  // flushAndTrack transient vs permanent error handling
+  // ---------------------------------------------------------------------------
+  describe('flushAndTrack transient errors', () => {
+    function makeChannelForFlush(): QQChannelInstance {
+      const ch = new QQChannel(
+        'test-bot',
+        {
+          type: 'qq',
+          token: '',
+          senderPolicy: 'open' as const,
+          allowedUsers: [],
+          sessionScope: 'user' as const,
+          cwd: '/tmp',
+          groupPolicy: 'disabled' as const,
+          groups: {},
+          appID: 'test-app-id',
+          appSecret: 'test-secret',
+        },
+        {} as unknown as ChannelAgentBridge,
+      );
+      return ch;
+    }
+
+    it('keeps streamState on RATE_LIMITED (transient)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: 'test buffer',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+      };
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+        }
+      >;
+      streamState.set('session-1', state);
+
+      // Spy on sendMessage to throw RATE_LIMITED
+      const sendSpy = vi
+        .spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessage: () => Promise<void>;
+          },
+          'sendMessage',
+        )
+        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+
+      // Call flushAndTrack
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('session-1', 'test buffer', state, 'test');
+
+      // Drain microtask queue so the .catch() handler runs
+      // (must NOT advance timers — that would fire the retry setTimeout)
+      await Promise.resolve();
+
+      // RATE_LIMITED is transient — streamState should keep the entry
+      expect(streamState.has('session-1')).toBe(true);
+
+      sendSpy.mockRestore();
+      vi.useRealTimers();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // sendIdentify cold start vs warm reconnect
+  // ---------------------------------------------------------------------------
+  describe('sendIdentify cold vs warm reconnect', () => {
+    function makeChannelForIdentify(
+      groupAllPolicy?: string,
+    ): QQChannelInstance {
+      return new QQChannel(
+        'test-bot',
+        {
+          type: 'qq',
+          token: '',
+          senderPolicy: 'open' as const,
+          allowedUsers: [],
+          sessionScope: 'user' as const,
+          cwd: '/tmp',
+          groupPolicy: 'disabled' as const,
+          groups: {},
+          appID: 'test-app-id',
+          appSecret: 'test-secret',
+          groupAllPolicy: groupAllPolicy ?? 'log',
+        },
+        {} as unknown as ChannelAgentBridge,
+      );
+    }
+
+    it('sends RESUME when tryResume=true and sessionId is set (warm reconnect)', () => {
+      const ch = makeChannelForIdentify();
+      const chp = ch as unknown as Record<string, unknown>;
+      let sentPayload: string | null = null;
+      chp['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      chp['accessToken'] = 'test-token';
+      chp['tryResume'] = true;
+      chp['sessionId'] = 'resume-session-123';
+      chp['seq'] = 42;
+
+      (chp['sendIdentify'] as () => void)();
+
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.op).toBe(6); // RESUME
+      expect(parsed.d.token).toBe('QQBot test-token');
+      expect(parsed.d.session_id).toBe('resume-session-123');
+      expect(parsed.d.seq).toBe(42);
+    });
+
+    it('sends IDENTIFY when tryResume=false (cold start)', () => {
+      const ch = makeChannelForIdentify();
+      const chp = ch as unknown as Record<string, unknown>;
+      let sentPayload: string | null = null;
+      chp['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      chp['accessToken'] = 'test-token';
+      chp['tryResume'] = false;
+
+      (chp['sendIdentify'] as () => void)();
+
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.op).toBe(2); // IDENTIFY
+      expect(parsed.d.token).toBe('QQBot test-token');
+    });
+
+    it('falls back to IDENTIFY when tryResume=true but no sessionId', () => {
+      const ch = makeChannelForIdentify();
+      const chp = ch as unknown as Record<string, unknown>;
+      let sentPayload: string | null = null;
+      chp['ws'] = {
+        send: (data: string) => {
+          sentPayload = data;
+        },
+      };
+      chp['accessToken'] = 'test-token';
+      chp['tryResume'] = true;
+      chp['sessionId'] = '';
+
+      (chp['sendIdentify'] as () => void)();
+
+      const parsed = JSON.parse(sentPayload!);
+      expect(parsed.op).toBe(2); // IDENTIFY (no sessionId to resume)
+    });
+  });
 });

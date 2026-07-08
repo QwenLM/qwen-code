@@ -449,12 +449,6 @@ export class QQChannel extends ChannelBase {
           '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
         );
       }
-      parts.push(
-        '',
-        '## 关于机器人消息',
-        '',
-        '消息前缀 [bot] 表示该消息来自另一个机器人。是否回复由你自主判断。',
-      );
       this.config.instructions = parts.join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -703,8 +697,7 @@ export class QQChannel extends ChannelBase {
   ): Promise<{ base: string; path: string } | null> {
     if (this.disposed) {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: channel disposed, dropping message to ${sanitizeLogText(chatId, 64)}\n
-`,
+        `[QQ:${this.name}] resolveRoute: channel disposed, dropping message to ${sanitizeLogText(chatId, 64)}\n`,
       );
       return null;
     }
@@ -713,23 +706,20 @@ export class QQChannel extends ChannelBase {
         await this.fetchToken();
       } catch (_e) {
         process.stderr.write(
-          `[QQ:${this.name}] resolveRoute: token refresh failed (${sanitizeLogText(_e instanceof Error ? _e.message : String(_e), 120)}), dropping message to ${sanitizeLogText(chatId, 64)}\n
-`,
+          `[QQ:${this.name}] resolveRoute: token refresh failed (${sanitizeLogText(_e instanceof Error ? _e.message : String(_e), 120)}), dropping message to ${sanitizeLogText(chatId, 64)}\n`,
         );
         return null;
       }
     }
     if (!this.accessToken) {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: accessToken is empty after fetchToken\n
-`,
+        `[QQ:${this.name}] resolveRoute: accessToken is empty after fetchToken\n`,
       );
       return null;
     }
     if (!isValidChatId(chatId)) {
       process.stderr.write(
-        `[QQ:${this.name}] resolveRoute: invalid chatId rejected (length=${chatId.length})\n
-`,
+        `[QQ:${this.name}] resolveRoute: invalid chatId rejected (length=${chatId.length})\n`,
       );
       return null;
     }
@@ -1261,6 +1251,7 @@ export class QQChannel extends ChannelBase {
 
       if (raw.chatTypeMap) {
         const arr = raw.chatTypeMap as Array<[string, unknown]>;
+        const totalRaw = Array.isArray(arr) ? arr.length : 0;
         this.chatTypeMap = new Map(
           Array.isArray(arr)
             ? arr.filter(
@@ -1271,9 +1262,15 @@ export class QQChannel extends ChannelBase {
               )
             : [],
         ) as Map<string, 'c2c' | 'group'>;
+        if (this.chatTypeMap.size < totalRaw) {
+          process.stderr.write(
+            `[QQ:${this.name}] restoreQQState: accepted ${this.chatTypeMap.size} chatTypeMap entries (rejected ${totalRaw - this.chatTypeMap.size})\n`,
+          );
+        }
       }
       if (raw.replyMsgId) {
         const arr = raw.replyMsgId as Array<[string, unknown]>;
+        const totalRaw = Array.isArray(arr) ? arr.length : 0;
         this.replyMsgId = new Map(
           Array.isArray(arr)
             ? arr
@@ -1298,9 +1295,15 @@ export class QQChannel extends ChannelBase {
                 ])
             : [],
         );
+        if (this.replyMsgId.size < totalRaw) {
+          process.stderr.write(
+            `[QQ:${this.name}] restoreQQState: accepted ${this.replyMsgId.size} replyMsgId entries (rejected ${totalRaw - this.replyMsgId.size})\n`,
+          );
+        }
       }
       if (raw.msgSeqMap) {
         const arr = raw.msgSeqMap as Array<[string, unknown]>;
+        const totalRaw = Array.isArray(arr) ? arr.length : 0;
         this.msgSeqMap = new Map(
           Array.isArray(arr)
             ? arr.filter(
@@ -1313,9 +1316,15 @@ export class QQChannel extends ChannelBase {
               )
             : [],
         ) as Map<string, number>;
+        if (this.msgSeqMap.size < totalRaw) {
+          process.stderr.write(
+            `[QQ:${this.name}] restoreQQState: accepted ${this.msgSeqMap.size} msgSeqMap entries (rejected ${totalRaw - this.msgSeqMap.size})\n`,
+          );
+        }
       }
       if (raw.groupActiveMsgEnabled) {
         const arr = raw.groupActiveMsgEnabled as Array<[string, unknown]>;
+        const totalRaw = Array.isArray(arr) ? arr.length : 0;
         this.groupActiveMsgEnabled = new Map(
           Array.isArray(arr)
             ? arr.filter(
@@ -1326,9 +1335,15 @@ export class QQChannel extends ChannelBase {
               )
             : [],
         ) as Map<string, boolean>;
+        if (this.groupActiveMsgEnabled.size < totalRaw) {
+          process.stderr.write(
+            `[QQ:${this.name}] restoreQQState: accepted ${this.groupActiveMsgEnabled.size} groupActiveMsgEnabled entries (rejected ${totalRaw - this.groupActiveMsgEnabled.size})\n`,
+          );
+        }
       }
       if (raw.botOpenIdByGroup) {
         const arr = raw.botOpenIdByGroup as Array<[string, unknown]>;
+        const totalRaw = Array.isArray(arr) ? arr.length : 0;
         this.botOpenIdByGroup = new Map(
           Array.isArray(arr)
             ? arr.filter(
@@ -1340,6 +1355,11 @@ export class QQChannel extends ChannelBase {
               )
             : [],
         ) as Map<string, string>;
+        if (this.botOpenIdByGroup.size < totalRaw) {
+          process.stderr.write(
+            `[QQ:${this.name}] restoreQQState: accepted ${this.botOpenIdByGroup.size} botOpenIdByGroup entries (rejected ${totalRaw - this.botOpenIdByGroup.size})\n`,
+          );
+        }
       }
       return true;
     } catch (e) {
@@ -1649,6 +1669,7 @@ export class QQChannel extends ChannelBase {
       }
       this.stopHeartbeat();
       this.ws = null;
+      this._ready = false;
 
       const shouldReconnect =
         this.serverRequestedReconnect ||
@@ -1718,6 +1739,18 @@ export class QQChannel extends ChannelBase {
     });
   }
 
+  /**
+   * Finalize READY state across cold-start and warm-reconnect paths.
+   * Extracted to eliminate triplication in the READY handler.
+   */
+  private finalizeReady(): void {
+    this._ready = true;
+    this.reconnectAttempts = 0;
+    this.isReconnecting = false;
+    this.coldStart = false;
+    this.attachCronHandler();
+  }
+
   private handleGatewayMessage(
     msg: Record<string, unknown>,
     onReady: () => void,
@@ -1778,20 +1811,12 @@ export class QQChannel extends ChannelBase {
                 process.stderr.write(
                   `[QQ:${this.name}] Ready (${count} sessions)\n`,
                 );
-                this._ready = true;
-                this.reconnectAttempts = 0;
-                this.isReconnecting = false;
-                this.coldStart = false;
-                this.attachCronHandler();
+                this.finalizeReady();
                 this._checkGroupAllPolicyRequireMention();
                 onReady();
               })
               .catch(() => {
-                this._ready = true;
-                this.reconnectAttempts = 0;
-                this.isReconnecting = false;
-                this.coldStart = false;
-                this.attachCronHandler();
+                this.finalizeReady();
                 this._checkGroupAllPolicyRequireMention();
                 onReady();
               });
@@ -1799,10 +1824,7 @@ export class QQChannel extends ChannelBase {
             process.stderr.write(
               `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
             );
-            this._ready = true;
-            this.reconnectAttempts = 0;
-            this.isReconnecting = false;
-            this.attachCronHandler();
+            this.finalizeReady();
             this._checkGroupAllPolicyRequireMention();
             onReady();
           }
@@ -2211,6 +2233,12 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    if (!isValidChatId(chatId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] C2C message dropped: invalid chatId (length=${chatId.length})\n`,
+      );
+      return;
+    }
     this.chatTypeMap.set(chatId, 'c2c');
     this.setReplyMsgId(chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
@@ -2487,6 +2515,12 @@ export class QQChannel extends ChannelBase {
   private handleGroupDelRobot(event: GroupDelRobotEvent): void {
     const groupId = event.group_openid;
     if (!groupId) return;
+    if (!isValidChatId(groupId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupDelRobot: invalid group_openid (length=${groupId.length})\n`,
+      );
+      return;
+    }
     this.chatTypeMap.delete(groupId);
     this.groupActiveMsgEnabled.delete(groupId);
     // msgSeqMap is keyed by message ID, not group_openid — get the

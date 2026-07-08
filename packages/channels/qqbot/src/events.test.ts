@@ -1343,3 +1343,145 @@ describe('Token refresh exhaustion', () => {
     vi.useRealTimers();
   });
 });
+
+// ---------------------------------------------------------------------------
+// resolveRoute with chatTypes config fallback
+// ---------------------------------------------------------------------------
+describe('resolveRoute chatTypes fallback', () => {
+  it('uses chatTypes config when chatTypeMap has no entry', async () => {
+    const ch = makeChannel({
+      chatTypes: { 'config-chat-id': 'group' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | null>
+    )('config-chat-id');
+
+    expect(result).not.toBeNull();
+    expect(result!.path).toBe('/v2/groups/config-chat-id/messages');
+  });
+
+  it('prefers chatTypeMap over chatTypes config', async () => {
+    const ch = makeChannel({
+      chatTypes: { 'dual-chat-id': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    (chp['chatTypeMap'] as Map<string, string>).set('dual-chat-id', 'group');
+
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | null>
+    )('dual-chat-id');
+
+    expect(result).not.toBeNull();
+    expect(result!.path).toBe('/v2/groups/dual-chat-id/messages');
+  });
+
+  it('returns null when neither chatTypeMap nor chatTypes has entry', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | null>
+    )('unknown-chat');
+
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractBotOpenId
+// ---------------------------------------------------------------------------
+describe('extractBotOpenId', () => {
+  it('returns empty string when no self-mention found', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )([], 'group-1');
+    expect(result).toBe('');
+  });
+
+  it('returns empty string for invalid botOpenId format', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )([
+      {
+        member_openid: 'not-hex!!',
+        is_you: true,
+        scope: 'single' as const,
+      },
+    ]);
+    expect(result).toBe('');
+  });
+
+  it('returns botOpenId and saves to botOpenIdByGroup when valid', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pvt = ch as unknown as QQChannelRaw;
+    const botOpenIdByGroup = chp['botOpenIdByGroup'] as Map<string, string>;
+
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )(
+      [
+        {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+          is_you: true,
+          scope: 'single' as const,
+        },
+      ],
+      'group-openid-1',
+    );
+
+    expect(result).toBe('ABCDEF0123456789ABCDEF0123456789');
+    expect(botOpenIdByGroup.get('group-openid-1')).toBe(
+      'ABCDEF0123456789ABCDEF0123456789',
+    );
+  });
+
+  it('prefers member_openid over id', () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const result = (
+      pvt['extractBotOpenId'] as (
+        mentions: QQGroupMessageEvent['mentions'],
+        chatId?: string,
+      ) => string
+    )([
+      {
+        member_openid: '11111111222222223333333344444444',
+        id: '99999999888888887777777766666666',
+        is_you: true,
+        scope: 'single' as const,
+      },
+    ]);
+    expect(result).toBe('11111111222222223333333344444444');
+  });
+});
