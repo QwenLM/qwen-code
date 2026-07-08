@@ -18,9 +18,10 @@ import { getCachedStringWidth } from './textUtils.js';
  * commit and flicker.
  */
 
-/** TableRenderer draws `2 * dataRows + 5` rows: N-1 inter-row separators, plus
- *  top / header / header-separator / bottom borders and a `marginY` of 1 (2
- *  rows). */
+/** The fixed chrome a horizontal table adds around its rows: the top,
+ *  header-separator and bottom borders (3) plus a `marginY` of 1 (2 rows) = 5.
+ *  fitPendingSlice adds this to the summed wrapped row heights (`contentRows`)
+ *  and the N-1 inter-row separators — it is no longer a flat `2 * dataRows + 5`. */
 export const TABLE_CHROME_ROWS = 5;
 
 /** The wrap-height threshold: when any cell wraps past this many lines,
@@ -217,9 +218,11 @@ export function fitPendingSlice(
       // early on a wide terminal, while modelling only the width trigger
       // under-charges a wide terminal whose long-text cells wrap tall (the
       // renderer goes vertical, the live frame overflows and locks to the top).
+      // splitMarkdownTableRow already trims each cell, so headerCells and the
+      // per-row cells below need no further trimming.
       const headerCells = splitMarkdownTableRow(
         TABLE_ROW_RE.exec(allLines[i]!)![1]!,
-      ).map((cell) => cell.trim());
+      );
       const colCount = headerCells.length;
       // TableRenderer: borderOverhead = 1 + 3*colCount;
       // minHorizontalTableWidth = max(24, colCount*3 + borderOverhead + 4).
@@ -245,36 +248,51 @@ export function fitPendingSlice(
       //    that wraps at ~`contentWidth`. Charging just the value, or one flat
       //    line per cell, would under-count a long `label: value` that wraps.
       let contentRows = 0;
-      let maxRowLines = 1;
       let verticalRows = 0;
-      for (let r = i; r < j; r++) {
-        if (r === i + 1) continue; // the separator row is not rendered content
+      // The header row's own wrapped height (reusing headerCells, not re-parsed).
+      let maxRowLines = 1;
+      for (const label of headerCells) {
+        maxRowLines = Math.max(
+          maxRowLines,
+          estimateWrappedRows(label, perColWidth),
+        );
+      }
+      contentRows += maxRowLines;
+      // Data rows: sum every row's wrapped height, but anchor the vertical
+      // trigger to the header + FIRST data row only (r === i + 2) so appending
+      // rows never flips the format mid-stream.
+      for (let r = i + 2; r < j; r++) {
         const cells = splitMarkdownTableRow(
           TABLE_ROW_RE.exec(allLines[r]!)![1]!,
         );
         let rowMax = 1;
         for (let colIdx = 0; colIdx < cells.length; colIdx++) {
-          const trimmed = cells[colIdx]!.trim();
-          rowMax = Math.max(rowMax, estimateWrappedRows(trimmed, perColWidth));
-          if (r >= i + 2) {
-            const label = headerCells[colIdx] ?? '';
-            verticalRows += estimateWrappedRows(
-              label ? `${label}: ${trimmed}` : trimmed,
-              contentWidth,
-            );
-          }
+          const value = cells[colIdx]!;
+          rowMax = Math.max(rowMax, estimateWrappedRows(value, perColWidth));
+          const label = headerCells[colIdx] ?? '';
+          verticalRows += estimateWrappedRows(
+            label ? `${label}: ${value}` : value,
+            contentWidth,
+          );
         }
         contentRows += rowMax;
-        // Vertical trigger mirrors TableRenderer, which anchors the format choice
-        // to the header + FIRST data row only (r === i or i+2) so appending rows
-        // never flips the format mid-stream. Heights above still sum every row.
-        if (r === i || r === i + 2) {
+        if (r === i + 2) {
           maxRowLines = Math.max(maxRowLines, rowMax);
         }
       }
-      // `maxRowLines` (header + first row) is an upper bound on the renderer's
-      // real first-row wrap count — the equal column share never widens a cell —
-      // so it agrees with TableRenderer on which format is chosen.
+      // `maxRowLines` (header + first row) drives the format choice, mirroring
+      // TableRenderer. It is close to but NOT a guaranteed upper bound on the
+      // renderer's real first-row wrap count — three renderer behaviours can make
+      // a cell wrap taller than modelled here: (a) proportional (not equal-share)
+      // column widths shrink a narrow column below `perColWidth`; (b) word-aware
+      // wrapping (wrapAnsi) can break a line one row earlier than character-level
+      // `estimateWrappedRows`; (c) a post-layout width-safety check can force
+      // vertical. Each can only make the renderer go vertical/taller while the
+      // estimate stays horizontal/shorter — an under-charge — for which the
+      // `MainContent` maxHeight backstop is the hard cap that still prevents the
+      // overflow/lock. Deliberately NOT over-correcting here (e.g. shrinking every
+      // width or bumping the trigger), which would over-charge and clip common
+      // uniform tables early.
       // With no data rows yet (a header+separator still streaming), TableRenderer
       // keeps the horizontal header box — renderVerticalFormat iterates the data
       // rows and would draw nothing — so only model vertical once a row exists.

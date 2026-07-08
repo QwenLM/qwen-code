@@ -173,6 +173,19 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(lines.length);
   });
 
+  it('adds the marginY (2 rows) to a clamped table cost', () => {
+    // TableRenderer clamps the inner <Text> to `tableClampRows` but wraps it in
+    // <Box marginY={1}>, so a clamped table renders clampRows + 2. A non-first
+    // huge table with clamp 5 costs min(rows, 5+2)=7. intro(1)+7 = 8 > budget 7
+    // → cut before it. With the old `min(rows, clampRows)`=5 charge, 1+5 = 6 ≤ 7
+    // would keep it, dropping the two margin lines.
+    const rows = Array.from({ length: 40 }, () => '|1|2|');
+    const lines = ['intro', '| A | B |', '| - | - |', ...rows];
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 7, /* clamp */ 5);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1);
+  });
+
   it('returns keptLines=0 when the first line alone overflows (wide/CJK line)', () => {
     // One line of 200 CJK cols at width 10 → 20 rows > budget 5.
     const lines = ['一'.repeat(100)];

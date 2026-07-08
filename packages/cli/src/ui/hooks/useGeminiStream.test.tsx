@@ -4640,9 +4640,14 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
       const releaseStream = await streamContent(result, content);
 
-      // The completed tables committed incrementally rather than stalling.
+      // The completed tables committed incrementally rather than stalling. All
+      // three tables must have committed (a partial stall — one commits, the
+      // other two dump together — would leave fewer than three committed items).
       const committed = geminiContentItems();
-      expect(committed.length).toBeGreaterThanOrEqual(2);
+      expect(committed.length).toBeGreaterThanOrEqual(3);
+      for (const marker of ['t1r0', 't2r0', 't3r0']) {
+        expect(committed.some((item) => item.text.includes(marker))).toBe(true);
+      }
       // Nothing orphaned: any committed chunk with table rows carries its
       // separator (a whole table, not a headerless tail).
       for (const item of committed) {
