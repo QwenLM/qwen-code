@@ -14,11 +14,8 @@
    - Verify `<projectRoot>` directory exists on disk. Missing → "Error: original project directory '<projectRoot>' no longer exists. Aborted.", stop.
 5. **Verify session belongs to current project**: Apply `sanitizeCwd(<projectRoot>)` and compare with current project's `<sanitizeCwd>`. If they don't match → "Error: Session belongs to another project. Aborted.", stop.
 
-   **Limitation note**: chat-resume uses sanitizeCwd for project comparison. Both these commands and the core SessionService use `sanitizeCwd` for session directory resolution. The collision risk (e.g., `/home/a-b/c` and `/home/a/b-c` both produce `home-a-b-c`) is inherent in the sanitizeCwd algorithm itself, not a mismatch between layers.
-
 6. **Validate projectRoot for shell safety**: <projectRoot> must match `^[a-zA-Z0-9/._-]+$` — reject any path containing characters outside this set. Reject: "Error: Session path contains unsafe characters. Aborted."
    - For Windows: also reject `^`, `%`, `\`
-   - This whitelist approach prevents command injection via metacharacters like $, `, ;, |, >, <, &, (, ), ', ", \, and newlines.
 7. **Execute a shell command** to launch a NEW terminal window with cd to project directory:
    - Windows (PowerShell): `start pwsh -NoExit -Command "cd '<projectRoot>'; qwen --resume <id>"`
    - Windows (CMD fallback): `start cmd /k "cd /d \"<projectRoot>\" && qwen --resume <id>"` (use if PowerShell unavailable)

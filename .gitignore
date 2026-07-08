@@ -36,8 +36,6 @@ CLAUDE.md
 !.qwen/skills/**
 !.qwen/agents/
 !.qwen/agents/**
-!.qwen/chat-src/
-!.qwen/chat-src/**
 
 # OS metadata
 .DS_Store

@@ -90,8 +90,6 @@ Split `{{args}}` by whitespace. First token = flag. Remaining = raw_args.
 | **Session ID source** | Filename (no extension) of `.jsonl` in `<runtimeBase>/projects/<sanitizeCwd>/chats/`. runtimeBase priority: `$QWEN_RUNTIME_DIR` > `~/.qwen` (default)     |
 | **Project dir**       | `sanitizeCwd(projectRoot)` replaces all non-alphanumeric characters with `-`. On Windows, also lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` |
 
-**Note**: If user has configured `advanced.runtimeOutputDir` in settings.json, sessions are stored under that path. /chat commands cannot read settings.json (credential leak risk) and will not find those sessions.
-
 ---
 
 ## Help Text

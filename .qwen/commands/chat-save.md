@@ -10,7 +10,7 @@
    - If JSON has no `cwd` field → skip verification (legacy session, allow save).
    - First line not valid JSON → skip verification (corrupt session, allow save with warning "Warning: session file corrupt, skipping project verification.").
    - Apply `sanitizeCwd(<cwd>)` and compare with current project's `<sanitizeCwd>`. If they don't match → "Error: Selected session belongs to another project. Aborted. Please resume the session from its original project first.", stop.
-6. Add or update `{{name}}` key in existing index object. **Write atomically**: write to `.qwen/.chat-index.json.tmp` first, then rename/move to `.qwen/chat-index.json`. Do NOT write directly to the index file.
+6. Add or update `{{name}}` key in existing index object (2-space indent). **Write atomically**: write to `.qwen/.chat-index.json.tmp` first, then rename/move to `.qwen/chat-index.json`. Do NOT write directly to the index file.
 7. Output: `Saved: {{name}} → <id>` (or `Overwritten: ...`)
 
-**Runtime Base Resolution** and **sanitizeCwd** details: (See chat.md Common Rules.)
+Runtime Base / sanitizeCwd: see chat.md Common Rules.
