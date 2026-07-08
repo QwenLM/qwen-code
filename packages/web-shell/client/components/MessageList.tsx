@@ -1692,6 +1692,8 @@ const SESSION_TIMELINE_TOOLTIP_THEME_VARS = [
   '--web-shell-popover-z-index',
 ];
 
+const SESSION_TIMELINE_TOOLTIP_ID = 'session-timeline-detail-tooltip';
+
 const SessionTimeline = memo(function SessionTimeline({
   entries,
   currentTurnId,
@@ -1709,6 +1711,7 @@ const SessionTimeline = memo(function SessionTimeline({
   const panelRef = useRef<HTMLElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef(false);
   const [tooltip, setTooltip] = useState<SessionTimelineTooltip | null>(null);
 
   const currentIndex =
@@ -1717,6 +1720,11 @@ const SessionTimeline = memo(function SessionTimeline({
       : entries.findIndex((entry) => entry.id === currentTurnId);
 
   const hideTooltip = useCallback(() => setTooltip(null), []);
+
+  const handleViewportScroll = useCallback(() => {
+    if (programmaticScrollRef.current) return;
+    hideTooltip();
+  }, [hideTooltip]);
 
   const showTooltip = useCallback(
     (entry: SessionTimelineEntry, el: HTMLElement) => {
@@ -1741,6 +1749,7 @@ const SessionTimeline = memo(function SessionTimeline({
   );
 
   useLayoutEffect(() => {
+    if (hidden) return;
     const viewport = viewportRef.current;
     if (!viewport || currentIndex < 0) return;
     const item = viewport.querySelector<HTMLElement>(
@@ -1749,11 +1758,21 @@ const SessionTimeline = memo(function SessionTimeline({
     if (!item) return;
     const itemCenter = item.offsetTop + item.offsetHeight / 2;
     const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
-    viewport.scrollTop = Math.max(
+    const nextScrollTop = Math.max(
       0,
       Math.min(itemCenter - viewport.clientHeight / 2, maxScrollTop),
     );
-  }, [currentIndex, entries.length]);
+    if (viewport.scrollTop === nextScrollTop) return;
+    programmaticScrollRef.current = true;
+    viewport.scrollTop = nextScrollTop;
+    const frame = requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      programmaticScrollRef.current = false;
+    };
+  }, [currentIndex, hidden]);
 
   useLayoutEffect(() => {
     if (!tooltip || tooltip.clamped) return;
@@ -1791,7 +1810,7 @@ const SessionTimeline = memo(function SessionTimeline({
           ref={viewportRef}
           className={styles.sessionTimelineViewport}
           data-testid="session-timeline-viewport"
-          onScroll={hideTooltip}
+          onScroll={handleViewportScroll}
         >
           <ol className={styles.sessionTimelineList}>
             {entries.map((entry, index) => {
@@ -1815,6 +1834,7 @@ const SessionTimeline = memo(function SessionTimeline({
                   | ReactMouseEvent<HTMLButtonElement>
                   | ReactFocusEvent<HTMLButtonElement>,
               ) => showTooltip(entry, event.currentTarget);
+              const describedByTooltip = tooltip?.entry.id === entry.id;
               return (
                 <li
                   key={entry.id}
@@ -1837,6 +1857,11 @@ const SessionTimeline = memo(function SessionTimeline({
                         : undefined,
                     )}
                     aria-current={isCurrent ? 'step' : undefined}
+                    aria-describedby={
+                      describedByTooltip
+                        ? SESSION_TIMELINE_TOOLTIP_ID
+                        : undefined
+                    }
                     aria-label={ariaLabel}
                     onClick={() => onSelect(entry.id)}
                     onFocus={revealTooltip}
@@ -1857,6 +1882,7 @@ const SessionTimeline = memo(function SessionTimeline({
             <div
               ref={tooltipRef}
               className={styles.sessionTimelineDetails}
+              id={SESSION_TIMELINE_TOOLTIP_ID}
               data-testid="session-timeline-detail"
               data-title={tooltip.entry.label}
               data-detail={tooltip.entry.detail}

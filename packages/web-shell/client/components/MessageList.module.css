@@ -395,8 +395,22 @@
   box-shadow: 0 10px 28px color-mix(in srgb, black 10%, transparent);
   pointer-events: none;
   text-align: left;
+  opacity: 1;
   transform: translate3d(0, -50%, 0) scale(1);
   transform-origin: left center;
+  animation: sessionTimelineDetailsIn 120ms ease-out;
+}
+
+@keyframes sessionTimelineDetailsIn {
+  from {
+    opacity: 0;
+    transform: translate3d(-4px, -50%, 0) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, -50%, 0) scale(1);
+  }
 }
 
 .sessionTimelineDetailsTitle {
@@ -438,9 +452,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sessionTimelineTick,
-  .sessionTimelineDetails {
+  .sessionTimelineTick {
     transition-duration: 0.01ms;
+  }
+
+  .sessionTimelineDetails {
+    animation: none;
   }
 }
 
