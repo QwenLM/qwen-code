@@ -220,6 +220,16 @@ describe('useStatusLine', () => {
       ]);
     });
 
+    it('falls back to config model display name when the preset current model is empty', () => {
+      mockUIState.currentModel = '';
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([
+        '\u279c dir \u00b7 git:(main) \u00b7 Test Model \u00b7 131.1k Context 0.1% used',
+      ]);
+    });
+
     it('renders the session model when config is scoped to a fast subagent', () => {
       mockUIState.currentModel = 'main-model';
       mockConfig.getModelDisplayName.mockReturnValue('Fast Model');
