@@ -451,9 +451,9 @@ export function registerSessionRoutes(
     async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
-      const runtime = resolveLiveSessionRuntime(sessionId, res, route);
-      if (!runtime) return;
       try {
+        const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+        if (!runtime) return;
         await archiveCoordinator.runSharedMany([sessionId], async () => {
           await handler(req, res, sessionId, runtime);
         });
@@ -475,9 +475,9 @@ export function registerSessionRoutes(
     async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
-      const runtime = resolveLiveSessionRuntime(sessionId, res, route);
-      if (!runtime) return;
       try {
+        const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+        if (!runtime) return;
         await handler(req, res, sessionId, runtime);
       } catch (err) {
         sendBridgeError(res, err, { route, sessionId });
@@ -1685,11 +1685,28 @@ export function registerSessionRoutes(
   const listWorkspaceSessionsHandler =
     (paramName: string): RequestHandler =>
     async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/sessions'
+          : 'GET /workspace/:id/sessions';
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
       const runtime = resolveRuntimeFromWorkspaceParam(req, res, paramName);
       if (runtime === null) return;
+      if (!runtime.primary && !runtime.trusted) {
+        logSessionRoutingFailure(route, 'untrusted_workspace', {
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+        res.status(403).json({
+          error: `Workspace "${runtime.workspaceCwd}" is not trusted.`,
+          code: 'untrusted_workspace',
+          workspaceCwd: runtime.workspaceCwd,
+          workspaceId: runtime.workspaceId,
+        });
+        return;
+      }
       const key = runtime.workspaceCwd;
       try {
         const cursor =

@@ -5,24 +5,33 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type {
-  AcpSessionBridge,
-  BridgeFreshSessionAdmission,
-  BridgeOptions,
-  BridgeSessionSummary,
+import {
+  SessionNotFoundError,
+  type AcpSessionBridge,
+  type BridgeFreshSessionAdmission,
+  type BridgeOptions,
+  type BridgeSessionSummary,
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 
 const WS_BOUND = '/work/bound';
 
-function makeBridge(sessionCount = 0): AcpSessionBridge {
-  const getSessionSummary = (sessionId: string): BridgeSessionSummary => ({
-    sessionId,
-    workspaceCwd: WS_BOUND,
-    createdAt: '2026-05-17T12:00:00.000Z',
-    clientCount: 1,
-    hasActivePrompt: false,
-  });
+function makeBridge(
+  sessionCount = 0,
+  liveSessionIds?: ReadonlySet<string>,
+): AcpSessionBridge {
+  const getSessionSummary = (sessionId: string): BridgeSessionSummary => {
+    if (liveSessionIds && !liveSessionIds.has(sessionId)) {
+      throw new SessionNotFoundError(sessionId);
+    }
+    return {
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      createdAt: '2026-05-17T12:00:00.000Z',
+      clientCount: 1,
+      hasActivePrompt: false,
+    };
+  };
 
   return {
     get sessionCount() {
@@ -43,7 +52,8 @@ describe('createServeApp default bridge wiring', () => {
 
   it('wires the internally-created bridge lifecycle into the workspace registry', async () => {
     let sessionLifecycle: BridgeOptions['sessionLifecycle'];
-    const bridge = makeBridge();
+    const liveSessionIds = new Set<string>();
+    const bridge = makeBridge(0, liveSessionIds);
     vi.doMock('./acp-session-bridge.js', async () => {
       const actual = await vi.importActual<
         typeof import('./acp-session-bridge.js')
@@ -69,6 +79,7 @@ describe('createServeApp default bridge wiring', () => {
     const locals = app.locals as { workspaceRegistry?: WorkspaceRegistry };
 
     expect(sessionLifecycle).toBeDefined();
+    liveSessionIds.add('session-indexed');
     sessionLifecycle!({
       type: 'registered',
       sessionId: 'session-indexed',
@@ -80,6 +91,18 @@ describe('createServeApp default bridge wiring', () => {
     ).toEqual({
       kind: 'found',
       runtime: locals.workspaceRegistry!.primary,
+    });
+    liveSessionIds.delete('session-indexed');
+    sessionLifecycle!({
+      type: 'removed',
+      sessionId: 'session-indexed',
+      workspaceCwd: WS_BOUND,
+      reason: 'client_close',
+    });
+    expect(
+      locals.workspaceRegistry!.resolveLiveSessionOwner('session-indexed'),
+    ).toEqual({
+      kind: 'not_found',
     });
   }, 15_000);
 

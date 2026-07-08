@@ -4997,6 +4997,42 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionContextCalls).toEqual(['s-secondary']);
     });
 
+    it('surfaces live owner scan failures as structured bridge errors on owner-routed reads', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: () => {
+          throw new Error('summary exploded');
+        },
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+
+      const res = await request(app)
+        .get('/session/s-secondary/context')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain('summary exploded');
+      expect(secondaryBridge.sessionContextCalls).toEqual([]);
+    });
+
     it('returns session context-usage from the bridge', async () => {
       const usage: ServeSessionContextUsageStatus = {
         v: 1,

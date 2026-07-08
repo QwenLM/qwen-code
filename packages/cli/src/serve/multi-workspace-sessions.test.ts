@@ -63,6 +63,7 @@ interface FakeBridge extends AcpSessionBridge {
     action: 'load' | 'resume';
     req: BridgeRestoreSessionRequest;
   }>;
+  readonly listCalls: string[];
 }
 
 function makeSummary(
@@ -101,6 +102,7 @@ function makeBridge(
   const pendingPromptCalls: string[] = [];
   const removePendingPromptCalls: FakeBridge['removePendingPromptCalls'] = [];
   const restoreCalls: FakeBridge['restoreCalls'] = [];
+  const listCalls: string[] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -114,6 +116,7 @@ function makeBridge(
     pendingPromptCalls,
     removePendingPromptCalls,
     restoreCalls,
+    listCalls,
     get sessionCount() {
       return live.size;
     },
@@ -186,6 +189,7 @@ function makeBridge(
       };
     },
     listWorkspaceSessions(cwd: string) {
+      listCalls.push(cwd);
       return [...live.values()].filter(
         (summary) => summary.workspaceCwd === cwd,
       );
@@ -738,6 +742,31 @@ describe('multi-workspace session dispatch', () => {
     expect(unknown.status).toBe(400);
     expect(unknown.body.code).toBe('workspace_mismatch');
     expect(unknown.body.workspaceCount).toBe(2);
+  });
+
+  it('rejects untrusted non-primary workspace session listing', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      daemonLog,
+    });
+
+    const res = await request(app)
+      .get('/workspaces/secondary-id/sessions')
+      .set('Host', host());
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+    expect(secondaryBridge.listCalls).toEqual([]);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'GET /workspaces/:workspace/sessions',
+        resolutionKind: 'untrusted_workspace',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
   });
 
   it('pages live non-primary workspace sessions with a stable cursor', async () => {
