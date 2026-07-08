@@ -1257,8 +1257,12 @@ export function KeypressProvider({
     const pasteModeSuffixBuf = Buffer.from(PASTE_MODE_SUFFIX);
 
     function partialMarkerTailLength(chunk: Buffer, marker: Buffer): number {
+      // Start from min(chunk.length, marker.length - 1) down to 2.
+      // We skip length 1 because a lone ESC (0x1b) is the start of ALL
+      // ANSI escape sequences, not just paste markers — holding it back
+      // would swallow ESC keypresses and break readline's CSI parsing.
       const maxCheck = Math.min(chunk.length, marker.length - 1);
-      for (let len = maxCheck; len >= 1; len--) {
+      for (let len = maxCheck; len >= 2; len--) {
         const tail = chunk.subarray(chunk.length - len);
         if (marker.subarray(0, len).equals(tail)) {
           return len;
