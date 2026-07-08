@@ -950,8 +950,35 @@
 }
 
 .footerButtonLabel {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footerCompact,
+.footerTight {
+  gap: 4px;
+}
+
+.footerCompact .footerButton,
+.footerTight .footerButton {
+  width: 26px;
+  height: 28px;
+  flex: 0 0 26px;
+  justify-content: center;
+  padding: 0;
+}
+
+.footerCompact .footerButtonLabel,
+.footerTight .footerButtonLabel {
+  display: none;
+}
+
+.footerCompact .collapseButton,
+.footerTight .collapseButton {
+  width: 26px;
+  height: 28px;
 }
 
 .collapseButton {

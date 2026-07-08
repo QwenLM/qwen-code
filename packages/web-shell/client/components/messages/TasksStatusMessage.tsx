@@ -710,7 +710,7 @@ function detailTitle(
 ): string {
   switch (task.kind) {
     case 'agent':
-      return `${task.subagentType ?? 'Agent'} › ${task.label}`;
+      return `${task.subagentType ?? t('common.agent')} › ${task.label}`;
     case 'shell':
       return `${t('tasks.kind.shell')} › ${task.command}`;
     case 'monitor':
