@@ -730,8 +730,8 @@ describe('DingtalkChannel parsed-message logging', () => {
     }
 
     expect(logged).toContain('[DingTalk:test-dingtalk] debug payload');
-    expect(logged).toContain('"msgId": "debug-m1"');
-    expect(logged).toContain('"sessionWebhook": "[redacted]"');
+    expect(logged).toContain('"msgId":"debug-m1"');
+    expect(logged).toContain('"sessionWebhook":"[redacted]"');
     expect(logged).not.toContain('access_token=token');
   });
 

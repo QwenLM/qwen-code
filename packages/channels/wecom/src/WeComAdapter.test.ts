@@ -1740,11 +1740,11 @@ describe('WeComChannel', () => {
     }
 
     expect(logged).toContain('[WeCom:bot] debug payload');
-    expect(logged).toContain('"secret": "[redacted]"');
-    expect(logged).toContain('"token": "[redacted]"');
-    expect(logged).toContain('"response_url": "[redacted]"');
-    expect(logged).toContain('"url": "[redacted]"');
-    expect(logged).toContain('"aeskey": "[redacted]"');
+    expect(logged).toContain('"secret":"[redacted]"');
+    expect(logged).toContain('"token":"[redacted]"');
+    expect(logged).toContain('"response_url":"[redacted]"');
+    expect(logged).toContain('"url":"[redacted]"');
+    expect(logged).toContain('"aeskey":"[redacted]"');
     expect(logged).not.toContain('bot-secret');
     expect(logged).not.toContain('access-token');
     expect(logged).not.toContain('media-key');
