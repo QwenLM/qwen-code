@@ -2517,7 +2517,11 @@ export function WebShellSidebar({
           <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
             <IconSettings />
           </span>
-          {!collapsed && <span>{t('sidebar.settings')}</span>}
+          {!collapsed && (
+            <span className={styles.footerButtonLabel}>
+              {t('sidebar.settings')}
+            </span>
+          )}
         </button>
         {!collapsed && versionLabel && (
           <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
