@@ -840,7 +840,7 @@ else
     # user always gets enough to recover, even if hint-text fetching is
     # blocked. Skip everything else.
     echo "Next steps: $BIN_LINK --version  |  $BIN_LINK mcp-config  |  $BIN_LINK skills install"
-    echo "Docs: https://github.com/trycua/cua/tree/main/libs/cua-driver/rust"
+    echo "Docs: https://github.com/QwenLM/qwen-code/tree/main/packages/cua-driver/rust"
 fi
 
 case "$(uname -s)" in

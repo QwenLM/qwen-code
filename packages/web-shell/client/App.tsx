@@ -105,6 +105,7 @@ import {
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
+import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -240,7 +241,6 @@ const MAX_TOASTS = 4;
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
-const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
 
 /** Maps each ModelDialogMode to its i18n title key — single source of truth. */
 const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
@@ -249,10 +249,6 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
   voice: 'model.setVoice',
   vision: 'model.setVision',
 };
-
-function isVisibleComposerModel(model: { id: string }): boolean {
-  return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
-}
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
@@ -652,8 +648,14 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
   };
 }
 
-function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
-  return `Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}`;
+function serializeModelSwitchSummary(
+  summary: ModelSwitchSummary,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  return t('model.usingModel', {
+    isRuntime: summary.isRuntime ? 1 : 0,
+    modelId: summary.modelId,
+  });
 }
 
 function isEditToolPermission(request: PermissionRequest): boolean {
@@ -4021,7 +4023,7 @@ export function App({
           if (summary) {
             store.dispatch({
               type: 'debug',
-              text: serializeModelSwitchSummary(summary),
+              text: serializeModelSwitchSummary(summary, t),
               source: 'model_switch_summary',
               data: summary,
             });

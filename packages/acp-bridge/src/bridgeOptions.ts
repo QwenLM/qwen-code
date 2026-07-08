@@ -185,6 +185,14 @@ export interface BridgeOptions {
    */
   eventRingSize?: number;
   /**
+   * Per-session cap, in serialized bytes, for the in-memory compacted replay
+   * snapshot returned by `session/load` late attach. This bounds daemon heap
+   * retained for historical replay; the current unfinished live turn remains in
+   * `liveJournal` until its turn boundary. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
+  /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
    * cancelled — the per-session FIFO can drain instead of poisoning

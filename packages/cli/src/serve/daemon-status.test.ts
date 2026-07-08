@@ -28,6 +28,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8000,
+    compactedReplayMaxBytes: 4 * 1024 * 1024,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -101,6 +102,58 @@ describe('buildDaemonStatusResponse', () => {
         }),
       ]),
     });
+  });
+
+  it('reuses the primary bridge snapshot when a workspace registry is installed', async () => {
+    const primarySnapshot = vi.fn(() => ({
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+    }));
+    const secondarySnapshot = vi.fn(() => ({
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 2,
+    }));
+    const primaryBridge = {
+      getDaemonStatusSnapshot: primarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const secondaryBridge = {
+      getDaemonStatusSnapshot: secondarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary: {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+      },
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: primaryBridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: secondaryBridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(primarySnapshot).toHaveBeenCalledTimes(1);
+    expect(secondarySnapshot).toHaveBeenCalledTimes(1);
+    expect(response.runtime.sessions.active).toBe(3);
   });
 
   it('reports every runtime issue code from daemon counters', async () => {
@@ -600,6 +653,87 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.activity).toMatchObject({
       pendingPrompts: 1,
       queuedPrompts: 0,
+    });
+  });
+
+  it('derives queued prompts per runtime when pendingPromptTotal is unavailable', async () => {
+    const primarySnapshot = {
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+      sessions: [
+        {
+          sessionId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          createdAt: '2026-07-01T00:00:00.000Z',
+          clientCount: 1,
+          subscriberCount: 1,
+          attachCount: 1,
+          pendingPromptCount: 3,
+          pendingPermissionCount: 0,
+          hasActivePrompt: true,
+          lastEventId: 1,
+        },
+      ],
+    };
+    const secondarySnapshot = {
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+      sessions: [
+        {
+          sessionId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          createdAt: '2026-07-01T00:00:00.000Z',
+          clientCount: 1,
+          subscriberCount: 1,
+          attachCount: 1,
+          pendingPromptCount: 2,
+          pendingPermissionCount: 0,
+          hasActivePrompt: false,
+          lastEventId: 1,
+        },
+      ],
+    };
+    const primaryBridge = {
+      getDaemonStatusSnapshot: () => primarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const secondaryBridge = {
+      getDaemonStatusSnapshot: () => secondarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary: {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+      },
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: primaryBridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: secondaryBridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.activity).toMatchObject({
+      pendingPrompts: 5,
+      queuedPrompts: 4,
     });
   });
 

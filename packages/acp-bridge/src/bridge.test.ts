@@ -111,6 +111,28 @@ describe('createAcpSessionBridge', () => {
     );
   });
 
+  it('accepts and rejects BridgeOptions.compactedReplayMaxBytes at construction time', () => {
+    expect(() => makeBridge({ compactedReplayMaxBytes: 1 })).not.toThrow();
+    expect(() =>
+      makeBridge({ compactedReplayMaxBytes: 4 * 1024 * 1024 }),
+    ).not.toThrow();
+    expect(() => makeBridge({ compactedReplayMaxBytes: 0 })).toThrow(
+      /compactedReplayMaxBytes/,
+    );
+    expect(() => makeBridge({ compactedReplayMaxBytes: -1 })).toThrow(
+      /compactedReplayMaxBytes/,
+    );
+    expect(() => makeBridge({ compactedReplayMaxBytes: 1.5 })).toThrow(
+      /compactedReplayMaxBytes/,
+    );
+    expect(() =>
+      makeBridge({ compactedReplayMaxBytes: Number.POSITIVE_INFINITY }),
+    ).toThrow(/compactedReplayMaxBytes/);
+    expect(() =>
+      makeBridge({ compactedReplayMaxBytes: 512 * 1024 * 1024 }),
+    ).toThrow(/compactedReplayMaxBytes/);
+  });
+
   it('sanitizes client artifact provenance fields', async () => {
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,
@@ -567,6 +589,7 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
 
     await bridge.shutdown();
@@ -622,6 +645,7 @@ describe('createAcpSessionBridge', () => {
                   },
                 ],
                 touchedTopics: ['project'],
+                touchedScopes: ['project'],
                 querySeen: params['query'],
               };
             }
@@ -640,6 +664,7 @@ describe('createAcpSessionBridge', () => {
     expect(result).toMatchObject({
       summary: 'forgot',
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
       removedEntries: [
         {
           topic: 'project',
@@ -657,7 +682,41 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('derives workspace memory forget scopes for legacy responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [],
+                touchedTopics: ['feedback', 'project'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryForget({
+      query: 'old preference',
+    });
+
+    expect(result).toMatchObject({
+      touchedTopics: ['feedback', 'project'],
+      touchedScopes: ['user', 'project'],
+    });
 
     await bridge.shutdown();
   });
@@ -1298,9 +1357,9 @@ describe('createAcpSessionBridge', () => {
     expect(loaded.partial).toBe(true);
     expect(loaded.replayError).toBe('replay boom');
     expect(loaded.lastEventId).toBe(2);
-    expect(loaded.compactedReplay).toEqual([]);
-    expect(loaded.liveJournal).toHaveLength(2);
-    expect(loaded.liveJournal?.[0]?._meta?.['serverTimestamp']).toBe(
+    expect(loaded.compactedReplay).toHaveLength(2);
+    expect(loaded.liveJournal).toEqual([]);
+    expect(loaded.compactedReplay?.[0]?._meta?.['serverTimestamp']).toBe(
       1_700_000_000_000,
     );
 
@@ -1313,6 +1372,56 @@ describe('createAcpSessionBridge', () => {
       data: { reason: 'seeded_replay_not_in_ring' },
     });
     await iterator.return?.();
+    await bridge.shutdown();
+  });
+
+  it('bounds response-mode load replay and emits a history_truncated marker', async () => {
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+                },
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+                },
+              ],
+            },
+          },
+        }),
+      }).channel;
+    const bridge = makeBridge({
+      channelFactory: factory,
+      compactedReplayMaxBytes: 512,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-bounded-history',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+
+    expect(loaded.lastEventId).toBe(2);
+    expect(loaded.liveJournal).toEqual([]);
+    expect(loaded.compactedReplay?.[0]?.type).toBe('history_truncated');
+    expect(loaded.compactedReplay?.[0]?.data).toMatchObject({
+      reason: 'replay_window_exceeded',
+      truncatedEvents: 1,
+      retainedEvents: 1,
+      maxBytes: 512,
+      fullTranscriptAvailable: false,
+    });
+    const retained = loaded.compactedReplay?.[1]?.data as {
+      update?: { content?: { text?: string } };
+    };
+    expect(retained.update?.content?.text).toBe(`new-${'y'.repeat(600)}`);
+
     await bridge.shutdown();
   });
 
@@ -1485,12 +1594,14 @@ describe('createAcpSessionBridge', () => {
       historyReplay: 'response',
     });
 
-    expect(loaded.liveJournal?.map((event) => event.type)).toEqual([
+    expect(loaded.compactedReplay?.map((event) => event.type)).toEqual([
       'session_update',
+    ]);
+    expect(loaded.liveJournal?.map((event) => event.type)).toEqual([
       'mcp_budget_warning',
     ]);
-    expect(loaded.liveJournal?.[0]?.id).toBe(1);
-    expect(loaded.liveJournal?.[1]?.id).toBe(2);
+    expect(loaded.compactedReplay?.[0]?.id).toBe(1);
+    expect(loaded.liveJournal?.[0]?.id).toBe(2);
 
     await bridge.shutdown();
   });

@@ -413,9 +413,9 @@ export function createServeApp(
   // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
   // only the `runQwenServe` path piped the option through.
   //
-  // The daemon is bound to exactly one workspace. The value advertised
-  // on `/capabilities`, used for the `POST /session` cwd fallback,
-  // AND passed into the bridge must be the SAME canonical form.
+  // The primary workspace value advertised on `/capabilities`, used for the
+  // `POST /session` cwd fallback, AND passed into the primary bridge must be
+  // the SAME canonical form.
   // `deps.boundWorkspace` is the pre-canonicalized fast-path from
   // `runQwenServe`; when omitted we canonicalize ourselves.
   const injectedWorkspaceRegistry = deps.workspaceRegistry;
@@ -545,6 +545,8 @@ export function createServeApp(
       reloadAvailable:
         deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
       sessionShellCommandEnabled,
+      multiWorkspaceSessionsEnabled:
+        (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
     });
   const statusProvider =
     deps.statusProvider ??
@@ -570,6 +572,7 @@ export function createServeApp(
         : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -811,6 +814,7 @@ export function createServeApp(
     opts,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    workspaceRegistry,
     workspace: primaryWorkspace,
     daemonLog,
     startup: deps.startup,
@@ -834,7 +838,10 @@ export function createServeApp(
     mode: opts.mode,
     currentServeFeatures,
     boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxSessionsPerWorkspace: opts.maxSessions,
+    maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     languageCodes,
   });
@@ -996,6 +1003,7 @@ export function createServeApp(
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    workspaceRegistry,
     archiveCoordinator,
     mutate,
     sendBridgeError,
@@ -1112,12 +1120,15 @@ export function createServeApp(
 
   registerPermissionRoutes(app, {
     bridge: primaryBridge,
+    workspaceRegistry,
+    daemonLog,
     mutate,
     sendPermissionVoteError,
   });
 
   registerSseEventsRoutes(app, {
     bridge: primaryBridge,
+    workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
