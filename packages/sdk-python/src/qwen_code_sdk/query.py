@@ -603,6 +603,7 @@ def query(
 
     validate_query_options(parsed_options)
 
+    session_id: str | None
     if parsed_options.fork_session:
         session_id = parsed_options.session_id or str(uuid4())
     else:
