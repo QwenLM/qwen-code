@@ -656,7 +656,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           <input
             className={styles.input}
             value={models}
-            placeholder={defaultIds || 'model-id-1, model-id-2'}
+            placeholder={defaultIds || t('auth.modelsPlaceholder')}
             onChange={(event) => {
               setModels(event.target.value);
               setError(null);
