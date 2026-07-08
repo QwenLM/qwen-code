@@ -198,6 +198,7 @@ export interface BridgeWorkspaceMemoryForgetResult {
   summary?: string;
   removedEntries: BridgeWorkspaceMemoryForgetMatch[];
   touchedTopics: BridgeAutoMemoryTopic[];
+  touchedScopes: Array<'user' | 'project'>;
 }
 
 export interface BridgeWorkspaceMemoryDreamResult {
@@ -371,6 +372,7 @@ export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
+  compactedReplayMaxBytes: number;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }

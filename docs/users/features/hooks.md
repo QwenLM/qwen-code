@@ -64,7 +64,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "WriteFile",
+        "matcher": "write_file",
         "hooks": [
           {
             "type": "command",
@@ -215,7 +215,7 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "run_shell_command",
         "hooks": [
           {
             "type": "prompt",
@@ -235,45 +235,47 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                            | Matcher Target                                            |
-| :------------------- | :---------------------------------------- | :-------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                     | Tool name (`WriteFile`, `ReadFile`, `Bash`, etc.)         |
-| `PostToolUse`        | After successful tool execution           | Tool name                                                 |
-| `PostToolUseFailure` | After tool execution fails                | Tool name                                                 |
-| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                       |
-| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)          |
-| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)     |
-| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                       |
-| `Stop`               | When Claude prepares to conclude response | None (always fires)                                       |
-| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)             |
-| `SubagentStop`       | When subagent stops                       | Agent type                                                |
-| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                |
-| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`) |
-| `PermissionRequest`  | When permission dialog is shown           | Tool name                                                 |
-| `TodoCreated`        | When a new todo item is created           | None (always fires)                                       |
-| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                       |
+| Event                | Triggered When                            | Matcher Target                                                 |
+| :------------------- | :---------------------------------------- | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution           | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
+| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                            |
+| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                       | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
 
 ### Matcher Patterns
 
 `matcher` is a regular expression used to filter trigger conditions.
 
-| Event Type          | Events                                                                 | Matcher Support | Matcher Target                                           |
-| :------------------ | :--------------------------------------------------------------------- | :-------------- | :------------------------------------------------------- |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest` | ✅ Regex        | Tool name: `WriteFile`, `ReadFile`, `Bash`, etc.         |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                        | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                     |
-| Session Events      | `SessionStart`                                                         | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`          |
-| Session Events      | `SessionEnd`                                                           | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.     |
-| Notification Events | `Notification`                                                         | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success` |
-| Compact Events      | `PreCompact`                                                           | ✅ Exact match  | Trigger: `manual`, `auto`                                |
-| Todo Events         | `TodoCreated`, `TodoCompleted`                                         | ❌ No           | N/A                                                      |
-| Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                      |
-| Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                      |
-| Message Display     | `MessageDisplay`                                                       | ❌ No           | N/A                                                      |
+| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                |
+| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :------------------------------------------------------------ |
+| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc. |
+| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
+| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
+| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
+| Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
+| Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
+| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                           |
+| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                           |
+| Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                           |
 
 **Matcher Syntax:**
 
 - Empty string `""` or `"*"` matches all events of that type
-- Standard regex syntax supported (e.g., `^Bash$`, `Read.*`, `(WriteFile|Edit)`)
+- Standard regex syntax supported (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`)
+- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids.
 
 **Examples:**
 
@@ -282,7 +284,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^Bash$",
+        "matcher": "^run_shell_command$",
         "hooks": [
           {
             "type": "command",
@@ -291,7 +293,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
         ]
       },
       {
-        "matcher": "Write.*",
+        "matcher": "write_.*",
         "hooks": [
           {
             "type": "command",
@@ -1095,7 +1097,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^Bash$",
+        "matcher": "^run_shell_command$",
         "sequential": false,
         "hooks": [
           {
@@ -1148,7 +1150,7 @@ Only `command` type supports asynchronous execution. Setting `"async": true` run
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "WriteFile|Edit",
+        "matcher": "write_file|edit",
         "hooks": [
           {
             "type": "command",

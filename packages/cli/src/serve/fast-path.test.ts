@@ -620,6 +620,10 @@ describe('serve fast path argument parsing', () => {
       ],
       ['max-connections', ['--max-connections', '256']],
       ['event-ring-size', ['--event-ring-size', '8000']],
+      [
+        'compacted-replay-max-bytes',
+        ['--compacted-replay-max-bytes', '4194304'],
+      ],
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
@@ -683,8 +687,24 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
     expect(fastPathParsed).not.toHaveProperty(
+      'options.compactedReplayMaxBytes',
+    );
+    expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --compacted-replay-max-bytes on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--compacted-replay-max-bytes',
+      '1048576',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { compactedReplayMaxBytes: 1024 * 1024 },
+    });
   });
 
   it('keeps --experimental-lsp on the fast path', () => {
@@ -733,6 +753,10 @@ describe('serve fast path argument parsing', () => {
     [
       ['serve', '--max-pending-prompts-per-session=-1'],
       'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
+    ],
+    [
+      ['serve', '--compacted-replay-max-bytes=0'],
+      'qwen serve: --compacted-replay-max-bytes must be a positive safe integer in [1, 268435456].',
     ],
     [
       ['serve', '--rate-limit', '--rate-limit-prompt=0'],

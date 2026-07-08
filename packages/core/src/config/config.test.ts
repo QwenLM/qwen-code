@@ -590,6 +590,17 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('setAutoSkillEnabled', () => {
+    it('flips the live value read by getAutoSkillEnabled', () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+      expect(config.getAutoSkillEnabled()).toBe(true);
+      config.setAutoSkillEnabled(false);
+      expect(config.getAutoSkillEnabled()).toBe(false);
+      config.setAutoSkillEnabled(true);
+      expect(config.getAutoSkillEnabled()).toBe(true);
+    });
+  });
+
   describe('agents.maxParallelAgents', () => {
     it('configures the background task registry concurrency cap', () => {
       const config = new Config({

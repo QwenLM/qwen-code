@@ -5,6 +5,7 @@
  */
 import type { ChildProcess } from 'child_process';
 import type { ToolArtifact } from '../tools/tools.js';
+import type { TaskStatus } from '../agents/tasks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -926,11 +927,37 @@ export interface ContextUsageData {
 }
 
 /**
+ * Background task info for hook payloads
+ */
+export interface BackgroundTaskInfo {
+  id: string;
+  status: TaskStatus;
+  agent_type: string;
+  started_at: string;
+  description?: string;
+}
+
+/**
+ * Cron job info for hook payloads
+ */
+export interface CronJobInfo {
+  id: string;
+  schedule: string;
+  prompt: string;
+  recurring: boolean;
+  next_run?: string;
+  last_run?: string;
+  enabled: boolean;
+}
+
+/**
  * Stop hook input
  */
 export interface StopInput extends HookInput, Partial<ContextUsageData> {
   stop_hook_active: boolean;
   last_assistant_message: string;
+  background_tasks: BackgroundTaskInfo[];
+  crons: CronJobInfo[];
 }
 
 /**
@@ -1133,6 +1160,8 @@ export interface SubagentStopInput extends HookInput {
   agent_type: AgentType | string;
   agent_transcript_path: string;
   last_assistant_message: string;
+  background_tasks: BackgroundTaskInfo[];
+  crons: CronJobInfo[];
 }
 
 /**

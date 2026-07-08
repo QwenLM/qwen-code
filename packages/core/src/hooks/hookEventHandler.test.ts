@@ -410,6 +410,125 @@ describe('HookEventHandler', () => {
       expect(result.success).toBe(true);
       expect(result.finalOutput).toBeUndefined();
     });
+
+    it('should inject background_tasks and crons into Stop input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      const mockRegistry = {
+        getAll: vi.fn().mockReturnValue([
+          {
+            id: 'bg-1',
+            status: 'running',
+            subagentType: 'Explorer',
+            startTime: 1720000000000,
+            description: 'test task',
+          },
+        ]),
+      };
+      const mockScheduler = {
+        list: vi.fn().mockReturnValue([
+          {
+            id: 'cron-1',
+            cronExpr: '0 */2 * * *',
+            prompt: 'check status',
+            recurring: true,
+            fireAtMs: 1720007200000,
+            lastFiredAt: 1720000000000,
+          },
+        ]),
+      };
+      const configWithMocks = mockConfig as unknown as {
+        getBackgroundTaskRegistry: () => typeof mockRegistry;
+        getCronScheduler: () => typeof mockScheduler;
+      };
+      configWithMocks.getBackgroundTaskRegistry = () => mockRegistry;
+      configWithMocks.getCronScheduler = () => mockScheduler;
+
+      // Re-create handler with updated config mocks
+      const handler = new HookEventHandler(
+        mockConfig,
+        mockHookPlanner,
+        mockHookRunner,
+        mockHookAggregator,
+        mockSessionHooksManager,
+      );
+
+      await handler.fireStopEvent(true, 'msg');
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        background_tasks: Array<{
+          id: string;
+          status: string;
+          agent_type: string;
+        }>;
+        crons: Array<{ id: string; schedule: string; prompt: string }>;
+      };
+
+      expect(input.background_tasks).toHaveLength(1);
+      expect(input.background_tasks[0].id).toBe('bg-1');
+      expect(input.background_tasks[0].status).toBe('running');
+      expect(input.background_tasks[0].agent_type).toBe('Explorer');
+
+      expect(input.crons).toHaveLength(1);
+      expect(input.crons[0].id).toBe('cron-1');
+      expect(input.crons[0].schedule).toBe('0 */2 * * *');
+      expect(input.crons[0].prompt).toBe('check status');
+    });
+
+    it('should return empty arrays when registry/scheduler unavailable', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Config without registry/scheduler methods
+      const bareConfig = {
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+        getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+        getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
+      } as unknown as Config;
+
+      const handler = new HookEventHandler(
+        bareConfig,
+        mockHookPlanner,
+        mockHookRunner,
+        mockHookAggregator,
+        mockSessionHooksManager,
+      );
+
+      await handler.fireStopEvent(true, 'msg');
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        background_tasks: unknown[];
+        crons: unknown[];
+      };
+
+      expect(input.background_tasks).toEqual([]);
+      expect(input.crons).toEqual([]);
+    });
   });
 
   describe('fireMessageDisplayEvent', () => {
