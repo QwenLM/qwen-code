@@ -8181,24 +8181,24 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/approval-mode (#4175 Wave 4 PR 17)', () => {
-    // Strict-gated route: refuses on no-token loopback defaults. All
-    // tests configure a token and forward `Authorization: Bearer …`.
+    // Non-strict route: works on no-token loopback defaults (matches
+    // POST /session/:id/model). Token-configured tests still forward
+    // `Authorization: Bearer …`.
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
       req
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+    it('200 on no-token daemon without bearer auth', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .post('/session/session-A/approval-mode')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ mode: 'yolo' });
-      expect(res.status).toBe(401);
-      expect(res.body.code).toBe('token_required');
-      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(bridge.setApprovalModeCalls).toHaveLength(1);
     });
 
     it('200 with the typed result on success and persist defaults to false', async () => {
