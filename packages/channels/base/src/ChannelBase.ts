@@ -16,6 +16,7 @@ import type {
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
+import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
@@ -192,6 +193,7 @@ export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: ChannelAgentBridge;
   protected groupGate: GroupGate;
+  protected dmGate: DmGate;
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
@@ -392,6 +394,7 @@ export abstract class ChannelBase {
     this.loopController = options?.loopController;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
+    this.dmGate = new DmGate(config.dmPolicy);
 
     const pairingStore =
       config.senderPolicy === 'pairing' ? new PairingStore(name) : undefined;
@@ -2291,6 +2294,7 @@ export abstract class ChannelBase {
     };
     return (
       this.groupGate.check(envelope).allowed &&
+      this.dmGate.check(envelope).allowed &&
       this.gate.isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
@@ -2949,6 +2953,11 @@ export abstract class ChannelBase {
       if (groupResult.reason === 'mention_required') {
         this.recordPendingGroupHistory(envelope);
       }
+      return false;
+    }
+
+    const dmResult = this.dmGate.check(envelope);
+    if (!dmResult.allowed) {
       return false;
     }
 
