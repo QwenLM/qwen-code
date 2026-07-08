@@ -218,9 +218,12 @@ export interface AgentParams {
    * create or clean up the directory — the caller owns its lifecycle
    * (e.g. `/review`'s `fetch-pr` provisions the PR worktree and `cleanup`
    * removes it). Every "where am I?" surface on the sub-agent's Config is
-   * rebound to this path so its file/shell tools cannot leak into the
-   * parent project tree. Must resolve to a worktree registered against
-   * this repository. Mutually exclusive with `isolation`.
+   * rebound to this path so its cwd-relative file/shell operations and its
+   * search tools resolve inside the worktree rather than the parent tree.
+   * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
+   * reach outside, same as `isolation:'worktree'`.) Must resolve to a
+   * worktree registered against this repository. Mutually exclusive with
+   * `isolation`.
    */
   working_dir?: string;
 }
@@ -740,7 +743,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. All of the sub-agent's file and shell tools operate inside this directory, so it cannot touch the parent project tree. Must be a worktree already registered against the current repository. Mutually exclusive with 'isolation'.",
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory and search tools (grep, glob) enforce it as the workspace boundary. Note: this is a cwd pin, not a filesystem sandbox — file/shell tools can still reach outside via absolute paths. Must be a worktree already registered against the current repository. Mutually exclusive with 'isolation'.",
         },
       },
       required: ['description', 'prompt'],
