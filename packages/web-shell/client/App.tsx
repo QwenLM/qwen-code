@@ -353,6 +353,13 @@ export type SessionChangeEvent =
   | { type: 'submit'; sessionId: string; prompt: string; queued: boolean }
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
+export interface WebShellApi {
+  /** Open the in-window split view, matching the built-in sidebar button. */
+  openSplitView: () => void;
+  /** Open the Session Overview panel, matching the built-in sidebar button. */
+  openSessionOverview: () => void;
+}
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
@@ -372,6 +379,12 @@ export interface WebShellProps {
   chatMaxWidth?: number;
   /** Optional workspace sidebar. Disabled by default. */
   sidebar?: boolean | WebShellSidebarOptions;
+  /** Session ids to control the split view; an empty array closes it. */
+  splitSessionIds?: readonly string[];
+  /** Called when the split pane list changes from inside WebShell. */
+  onSplitSessionIdsChange?: (sessionIds: string[]) => void;
+  /** Imperative handle for externally opening WebShell surfaces. */
+  shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
@@ -566,6 +579,25 @@ function assignComposerRef(
     return;
   }
   (ref as React.MutableRefObject<WebShellComposerApi | null>).current = value;
+}
+
+function assignShellRef(
+  ref: React.Ref<WebShellApi> | undefined,
+  value: WebShellApi | null,
+): void {
+  if (!ref) return;
+  if (typeof ref === 'function') {
+    ref(value);
+    return;
+  }
+  (ref as React.MutableRefObject<WebShellApi | null>).current = value;
+}
+
+function areSessionIdsEqual(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
 function getInitialLanguage(): WebShellLanguage {
@@ -802,6 +834,9 @@ export function App({
   renderFooter,
   chatMaxWidth,
   sidebar,
+  splitSessionIds: externalSplitSessionIds,
+  onSplitSessionIdsChange,
+  shellRef,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
@@ -1248,7 +1283,7 @@ export function App({
   // is the live pane set — SplitView mirrors add/remove back into it via
   // onPanesChange — so it must be preserved across entries, not blindly reset.
   const openSplitView = useCallback(
-    (sessionIds?: string[]) => {
+    (sessionIds?: readonly string[]) => {
       setActivePanel(null);
       setSplitSessionIds((prev) => {
         // An explicit selection (the overview, or a `?split=` URL) replaces the
@@ -1266,6 +1301,53 @@ export function App({
       setMainView('split');
     },
     [connection.sessionId],
+  );
+  const shellApi = useMemo<WebShellApi>(
+    () => ({
+      openSplitView: () => openSplitView(),
+      openSessionOverview: () => openPanel('sessions'),
+    }),
+    [openPanel, openSplitView],
+  );
+  useEffect(() => {
+    assignShellRef(shellRef, shellApi);
+  }, [shellApi, shellRef]);
+  useEffect(
+    () => () => {
+      assignShellRef(shellRef, null);
+    },
+    [shellRef],
+  );
+  const externalSplitSignature = useMemo(() => {
+    const requested = Array.from(
+      new Set((externalSplitSessionIds ?? []).filter(Boolean)),
+    ).slice(0, MAX_SPLIT_PANES);
+    return requested.join('\0');
+  }, [externalSplitSessionIds]);
+  const externalSplitControlled = externalSplitSessionIds !== undefined;
+  useEffect(() => {
+    if (!externalSplitControlled) return;
+    const requested = externalSplitSignature
+      ? externalSplitSignature.split('\0')
+      : [];
+    setSplitSessionIds((prev) =>
+      areSessionIdsEqual(prev, requested) ? prev : requested,
+    );
+    if (requested.length > 0) {
+      setActivePanel(null);
+      setMainView('split');
+    } else {
+      setMainView((prev) => (prev === 'split' ? 'chat' : prev));
+    }
+  }, [externalSplitControlled, externalSplitSignature]);
+  const handleSplitPanesChange = useCallback(
+    (sessionIds: string[]) => {
+      if (!externalSplitControlled) {
+        setSplitSessionIds(sessionIds);
+      }
+      onSplitSessionIdsChange?.(sessionIds);
+    },
+    [externalSplitControlled, onSplitSessionIdsChange],
   );
   // Stable so SplitView's onExit-dependent effect (auto-exit on last pane
   // close) doesn't re-fire on every App re-render. Back from the split returns
@@ -4758,12 +4840,12 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                     <CompactModeContext.Provider value={compactMode}>
                       <SplitView
-                        initialSessionIds={splitSessionIds}
+                        sessionIds={splitSessionIds}
                         // Mirror live pane add/remove back up so switching away
                         // and re-entering restores the same panes. Pass the
                         // setter directly — a fresh arrow each render would loop
                         // SplitView's reporting effect.
-                        onPanesChange={setSplitSessionIds}
+                        onPanesChange={handleSplitPanesChange}
                         // Refresh the "add pane" picker when the session list
                         // changes elsewhere, matching the sidebar.
                         sessionListReloadToken={sessionListReloadToken}

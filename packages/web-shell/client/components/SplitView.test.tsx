@@ -122,7 +122,7 @@ function openPicker(): void {
 
 describe('SplitView', () => {
   it('renders one pane per initial session, each under its own provider', () => {
-    render({ initialSessionIds: ['s1', 's2'] });
+    render({ sessionIds: ['s1', 's2'] });
     expect(panes()).toHaveLength(2);
     expect(titles()).toEqual(['One', 'Two']);
     const providers = container!.querySelectorAll('[data-session]');
@@ -137,18 +137,41 @@ describe('SplitView', () => {
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
   });
 
-  it('seeds with the current session when no initial sessions are given', () => {
-    render({ initialSessionIds: [] });
+  it('seeds with the current session when no session ids are given', () => {
+    render();
     expect(titles()).toEqual(['Three']);
   });
 
   it('dedupes initial sessions', () => {
-    render({ initialSessionIds: ['s1', 's1', 's2'] });
+    render({ sessionIds: ['s1', 's1', 's2'] });
     expect(titles()).toEqual(['One', 'Two']);
   });
 
+  it('syncs panes when session ids change after mount', () => {
+    render({ sessionIds: ['s1'] });
+    expect(titles()).toEqual(['One']);
+
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView onExit={() => {}} sessionIds={['s1', 's2']} />
+        </I18nProvider>,
+      ),
+    );
+    expect(titles()).toEqual(['One', 'Two']);
+
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView onExit={() => {}} sessionIds={[]} />
+        </I18nProvider>,
+      ),
+    );
+    expect(panes()).toHaveLength(0);
+  });
+
   it('adds a pane from the picker', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     expect(panes()).toHaveLength(1);
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
@@ -166,7 +189,7 @@ describe('SplitView', () => {
   });
 
   it('closes the picker on Escape', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
@@ -184,7 +207,7 @@ describe('SplitView', () => {
   });
 
   it('closes the picker on a click outside it', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
@@ -203,7 +226,7 @@ describe('SplitView', () => {
   });
 
   it('keeps the picker open on a click inside it', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     const addButton = container!.querySelector(
       'button[aria-haspopup="listbox"]',
     ) as HTMLButtonElement;
@@ -221,7 +244,7 @@ describe('SplitView', () => {
   });
 
   it('removes a pane via its close button', () => {
-    render({ initialSessionIds: ['s1', 's2'] });
+    render({ sessionIds: ['s1', 's2'] });
     const closes = container!.querySelectorAll('[data-testid="pane-close"]');
     act(() =>
       closes[0].dispatchEvent(new MouseEvent('click', { bubbles: true })),
@@ -231,7 +254,7 @@ describe('SplitView', () => {
 
   it('auto-exits to the overview when the last pane is closed', () => {
     const onExit = vi.fn();
-    render({ initialSessionIds: ['s1'], onExit });
+    render({ sessionIds: ['s1'], onExit });
     expect(onExit).not.toHaveBeenCalled();
     const close = container!.querySelector('[data-testid="pane-close"]');
     act(() => close!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -240,7 +263,7 @@ describe('SplitView', () => {
 
   it('exits via the back button', () => {
     const onExit = vi.fn();
-    render({ initialSessionIds: ['s1'], onExit });
+    render({ sessionIds: ['s1'], onExit });
     // The back button is the first toolbar button (aria-label from common.back).
     const back = container!.querySelector('header button') as HTMLButtonElement;
     act(() => back.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -253,7 +276,7 @@ describe('SplitView', () => {
       workspaceCwd: '/w',
       displayName: `Pane ${i}`,
     }));
-    render({ initialSessionIds: sessionsState.map((s) => s.sessionId) });
+    render({ sessionIds: sessionsState.map((s) => s.sessionId) });
     // Eight requested, but only six live panes mount.
     expect(panes()).toHaveLength(6);
   });
@@ -263,7 +286,7 @@ describe('SplitView', () => {
       { sessionId: 's1', workspaceCwd: '/w', displayName: 'BOOM' },
       { sessionId: 's2', workspaceCwd: '/w', displayName: 'Two' },
     ];
-    render({ initialSessionIds: ['s1', 's2'] });
+    render({ sessionIds: ['s1', 's2'] });
     // The crashing pane shows its error fallback; the healthy pane still renders.
     expect(container!.textContent).toContain('This session pane hit an error');
     expect(panes()).toHaveLength(1);
@@ -271,7 +294,7 @@ describe('SplitView', () => {
   });
 
   it('reloads the session list when the picker opens (never a stale list)', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     // `useSessions` only fetches on mount; nothing reloads until the user acts.
     expect(reloadMock).not.toHaveBeenCalled();
     const addButton = container!.querySelector(
@@ -284,7 +307,7 @@ describe('SplitView', () => {
   });
 
   it('renders the refreshed session list on reopen — not the entry snapshot', () => {
-    render({ initialSessionIds: ['s1'] });
+    render({ sessionIds: ['s1'] });
     // First open: the picker offers the sessions present at entry.
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
@@ -305,7 +328,7 @@ describe('SplitView', () => {
   });
 
   it('reloads the picker list when the parent bumps the reload token', () => {
-    render({ initialSessionIds: ['s1'], sessionListReloadToken: 0 });
+    render({ sessionIds: ['s1'], sessionListReloadToken: 0 });
     // The initial token is not a change, so it does not trigger a reload.
     expect(reloadMock).not.toHaveBeenCalled();
     act(() =>
@@ -313,7 +336,7 @@ describe('SplitView', () => {
         <I18nProvider language="en">
           <SplitView
             onExit={() => {}}
-            initialSessionIds={['s1']}
+            sessionIds={['s1']}
             sessionListReloadToken={1}
           />
         </I18nProvider>,
@@ -324,7 +347,7 @@ describe('SplitView', () => {
 
   it('mirrors the live pane set up to the parent as panes change', () => {
     const onPanesChange = vi.fn();
-    render({ initialSessionIds: ['s1'], onPanesChange });
+    render({ sessionIds: ['s1'], onPanesChange });
     // Reported on mount so the parent's seed reflects the actual panes…
     expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
     // …and after every add (so switching away and back restores it).

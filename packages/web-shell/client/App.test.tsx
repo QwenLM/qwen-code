@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { WebShellApi } from './App';
 
 type StreamingState = 'idle' | 'responding';
 
@@ -363,7 +364,7 @@ vi.doMock('./components/SplitView', async () => {
   return {
     SplitView: (props: {
       onExit?: () => void;
-      initialSessionIds?: string[];
+      sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
     }) =>
       React.createElement(
@@ -373,7 +374,7 @@ vi.doMock('./components/SplitView', async () => {
         React.createElement(
           'span',
           { 'data-testid': 'split-initial' },
-          (props.initialSessionIds ?? []).join(','),
+          (props.sessionIds ?? []).join(','),
         ),
         // Simulate the real SplitView reporting its live pane set up to the App.
         React.createElement(
@@ -1093,6 +1094,158 @@ describe('App session callbacks', () => {
     expect(messages?.closest('[aria-hidden="true"]')).not.toBeNull();
   });
 
+  it('syncs the split view from external session ids without the sidebar', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1');
+
+    rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+
+    rerender({ sidebar: false, splitSessionIds: [] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+
+    rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+  });
+
+  it('does not reopen controlled split view when the same ids get a new array reference', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2'],
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Session Overview');
+
+    rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Session Overview');
+  });
+
+  it('notifies external callers when split session ids change inside WebShell', async () => {
+    const onSplitSessionIdsChange = vi.fn();
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-report-panes"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSplitSessionIdsChange).toHaveBeenCalledWith(['s1', 's2', 's3']);
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1');
+
+    rerender({
+      sidebar: false,
+      splitSessionIds: ['s1', 's2', 's3'],
+      onSplitSessionIdsChange,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2,s3');
+  });
+
+  it('opens the split view from the external shell ref like the sidebar button', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { container } = renderApp({
+      sidebar: false,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
+
+    await act(async () => {
+      shellApi?.openSplitView();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('session-1');
+  });
+
+  it('opens the Session Overview from the external shell ref like the sidebar button', async () => {
+    let shellApi: WebShellApi | null = null;
+    const { container } = renderApp({
+      sidebar: false,
+      shellRef: (api) => {
+        shellApi = api;
+      },
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
+
+    await act(async () => {
+      shellApi?.openSessionOverview();
+      await Promise.resolve();
+    });
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
   it('returns to the Session Overview when leaving the split view', async () => {
     const { container } = renderApp();
     await flush();
@@ -1148,7 +1301,9 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
 
     // …and reopen it from the toolbar. The reported panes must be restored, not
     // reset to empty / the current session (the regression this guards).

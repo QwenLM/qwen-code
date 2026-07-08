@@ -23,8 +23,8 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
-  /** Sessions to open initially (e.g. the selection from the overview). */
-  initialSessionIds?: string[];
+  /** Sessions to show in the split view. */
+  sessionIds?: string[];
   /**
    * Report the live pane set (after every add / remove) up to the parent so it
    * survives this view unmounting. Switching away from the split and back must
@@ -52,7 +52,7 @@ export interface SplitViewProps {
  * fight over which session an approval or Enter belongs to.
  */
 export function SplitView({
-  initialSessionIds,
+  sessionIds,
   onPanesChange,
   onExit,
   onError,
@@ -72,10 +72,18 @@ export function SplitView({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  const sessionIdsControlled = sessionIds !== undefined;
+  const normalizedSessionIds = useMemo(
+    () =>
+      Array.from(new Set((sessionIds ?? []).filter(Boolean))).slice(
+        0,
+        MAX_PANES,
+      ),
+    [sessionIds],
+  );
 
   const [paneIds, setPaneIds] = useState<string[]>(() => {
-    const seed = Array.from(new Set((initialSessionIds ?? []).filter(Boolean)));
-    if (seed.length > 0) return seed.slice(0, MAX_PANES);
+    if (normalizedSessionIds.length > 0) return normalizedSessionIds;
     return currentSessionId ? [currentSessionId] : [];
   });
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -88,6 +96,16 @@ export function SplitView({
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2),
   );
+
+  useEffect(() => {
+    if (!sessionIdsControlled) return;
+    setPaneIds((prev) =>
+      prev.length === normalizedSessionIds.length &&
+      prev.every((id, index) => id === normalizedSessionIds[index])
+        ? prev
+        : normalizedSessionIds,
+    );
+  }, [normalizedSessionIds, sessionIdsControlled]);
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -172,7 +190,7 @@ export function SplitView({
 
   // Mirror the live pane set up to the parent so it outlives this component
   // unmounting when the user switches views. On re-entry the parent reseeds
-  // `initialSessionIds` from it, restoring the exact panes instead of clearing.
+  // `sessionIds` from it, restoring the exact panes instead of clearing.
   useEffect(() => {
     onPanesChange?.(paneIds);
   }, [paneIds, onPanesChange]);
