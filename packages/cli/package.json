@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.7",
+  "version": "0.19.7-nightly.20260708.394c1a289",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.7"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.7-nightly.20260708.394c1a289"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-dingtalk",
-  "version": "0.19.7",
+  "version": "0.19.7-nightly.20260708.394c1a289",
   "description": "DingTalk channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

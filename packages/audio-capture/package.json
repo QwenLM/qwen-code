@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/audio-capture",
-  "version": "0.19.7",
+  "version": "0.19.7-nightly.20260708.394c1a289",
   "description": "Native microphone capture backend for Qwen Code voice input",
   "type": "module",
   "main": "dist/index.js",
