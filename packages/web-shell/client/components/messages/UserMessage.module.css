@@ -63,6 +63,56 @@
   word-break: break-word;
 }
 
+.referenceChip {
+  display: inline-flex;
+  max-width: min(44ch, 100%);
+  min-height: 20px;
+  align-items: center;
+  margin: 0 0.25ch;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--secondary);
+  color: var(--foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.2;
+  vertical-align: baseline;
+}
+
+.referenceIcon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.referenceLabel,
+.referenceValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.referenceLabel {
+  padding: 3px 0 3px 7px;
+  color: var(--agent-blue-500);
+}
+
+.referenceValue {
+  max-width: 32ch;
+  padding: 3px 7px 3px 0.5ch;
+  color: var(--foreground);
+}
+
+.referenceIcon + .referenceValue {
+  padding-left: 0.5ch;
+}
+
 .chatContentCollapsed {
   max-height: 400px;
   overflow: hidden;

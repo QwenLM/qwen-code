@@ -53,6 +53,7 @@ import {
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
+import { getComposerTagRenderParts } from '../components/composerTagRender';
 import { getComposerTagIconUrl } from '../components/composerTagIcons';
 import type {
   WebShellComposerApi,
@@ -557,16 +558,18 @@ class ComposerTagWidget extends WidgetType {
     const chip = document.createElement('span');
     chip.style.cssText =
       'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    const rawTagLabel = getComposerTagLabel(this.tag);
-    const tagValue = getComposerTagValue(this.tag);
-    const tagLabel = this.tag.kind ? '' : rawTagLabel;
-    const iconUrl = this.tag.iconUrl ?? getComposerTagIconUrl(this.tag.kind);
+    const { tagLabel, tagValue, iconUrl } =
+      getComposerTagRenderParts(this.tag);
+    const resolvedIconUrl = this.tag.iconUrl ?? iconUrl;
 
-    if (iconUrl) {
+    if (resolvedIconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
-      icon.style.setProperty('--composer-tag-icon-url', cssUrlValue(iconUrl));
+      icon.style.setProperty(
+        '--composer-tag-icon-url',
+        cssUrlValue(resolvedIconUrl),
+      );
       chip.appendChild(icon);
     }
 

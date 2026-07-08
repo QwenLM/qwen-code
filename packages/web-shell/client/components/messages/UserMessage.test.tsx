@@ -35,6 +35,32 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('hello world');
   });
 
+  it('renders file references as chips by default', () => {
+    const container = render(<UserMessage content="list @.qwen/ files" />);
+    const chip = container.querySelector('[title="@.qwen/"]');
+
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toBe('.qwen/');
+    expect(container.textContent).toContain('list .qwen/ files');
+  });
+
+  it('renders extension and MCP references as chips by default', () => {
+    const container = render(
+      <UserMessage content="@ext:browser and @mcp:docs" />,
+    );
+
+    expect(container.querySelector('[title="@ext:browser"]')).not.toBeNull();
+    expect(container.querySelector('[title="@mcp:docs"]')).not.toBeNull();
+    expect(container.textContent).toContain('browser and docs');
+  });
+
+  it('does not render inline email addresses as chips', () => {
+    const container = render(<UserMessage content="mail me at a@b.test" />);
+
+    expect(container.querySelector('[title="@b.test"]')).toBeNull();
+    expect(container.textContent).toContain('a@b.test');
+  });
+
   it('renders images when provided', () => {
     const container = render(
       <UserMessage

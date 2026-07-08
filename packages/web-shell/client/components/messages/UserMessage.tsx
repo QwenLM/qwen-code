@@ -1,15 +1,24 @@
 import {
+  Fragment,
   memo,
-  useMemo,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
+import {
+  getComposerTagRenderParts,
+  useComposerTagReferences,
+} from '../composerTagRender';
 import { isSafeImageSrc } from './Markdown';
-import { useWebShellCustomization } from '../../customization';
+import {
+  useWebShellCustomization,
+  type WebShellComposerTag,
+} from '../../customization';
 import { useI18n } from '../../i18n';
+import { cssUrlVar } from '../../utils/cssUrlVar';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -24,6 +33,42 @@ interface UserMessageProps {
   isLocateFlashing?: boolean;
 }
 
+function UserMessageReferenceChip({ tag }: { tag: WebShellComposerTag }) {
+  const { tagLabel, tagValue, iconUrl, fallback } =
+    getComposerTagRenderParts(tag);
+  return (
+    <span className={styles.referenceChip} title={tag.serialized}>
+      {iconUrl && (
+        <span
+          className={styles.referenceIcon}
+          style={cssUrlVar('--composer-tag-icon-url', iconUrl)}
+          aria-hidden="true"
+        />
+      )}
+      {tagLabel && <span className={styles.referenceLabel}>{tagLabel}</span>}
+      <span className={styles.referenceValue}>{tagValue || fallback}</span>
+    </span>
+  );
+}
+
+function DefaultUserMessageContent({ content }: { content: string }) {
+  const segments = useComposerTagReferences(content);
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === 'text' ? (
+          <Fragment key={index}>{segment.text}</Fragment>
+        ) : (
+          <UserMessageReferenceChip
+            key={`${segment.tag.id}:${index}`}
+            tag={segment.tag}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
 export const UserMessage = memo(function UserMessage({
   content,
   images,
@@ -35,7 +80,10 @@ export const UserMessage = memo(function UserMessage({
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
   const renderedContent = useMemo(
-    () => renderUserMessageContent?.({ content, images }) ?? content,
+    () =>
+      renderUserMessageContent?.({ content, images }) ?? (
+        <DefaultUserMessageContent content={content} />
+      ),
     [content, images, renderUserMessageContent],
   );
 
