@@ -311,10 +311,16 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      await this.sendMessage(
-        target.chatId,
-        this.formatPermissionRequest(pending),
-      );
+      const text = this.formatPermissionRequest(pending);
+      if (
+        target.threadId !== undefined &&
+        this.supportsProactiveSend() &&
+        this.supportsProactiveTarget(target)
+      ) {
+        await this.pushProactive(target, text);
+      } else {
+        await this.sendMessage(target.chatId, text);
+      }
     } catch (err) {
       this.removePendingPermission(event.requestId);
       try {

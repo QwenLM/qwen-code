@@ -21,6 +21,7 @@ import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
+  proactiveTargets: SessionTarget[] = [];
   proactiveSupported = false;
   proactiveTargetSupported: boolean | undefined;
   sendMessageError?: Error;
@@ -83,10 +84,11 @@ class TestChannel extends ChannelBase {
   }
 
   protected override async pushProactive(
-    target: { chatId: string },
+    target: SessionTarget,
     text: string,
   ): Promise<void> {
     this.proactive.push({ chatId: target.chatId, text });
+    this.proactiveTargets.push(target);
   }
 
   enableCancelCommand(): void {
@@ -504,6 +506,36 @@ describe('ChannelBase', () => {
       });
     });
 
+    it('delivers threaded permission requests through proactive targets when supported', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'thread',
+      });
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const sessionId = await startSession(ch, {
+        chatId: 'group1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+
+      emitPermission(sessionId, 'req-thread-1');
+
+      expect(ch.proactiveTargets.at(-1)).toMatchObject({
+        chatId: 'group1',
+        senderId: 'alice',
+        threadId: 'thread-1',
+      });
+      expect(ch.proactive.at(-1)?.text).toContain(
+        'Permission required to run a tool',
+      );
+      expect(ch.sent.at(-1)?.text).not.toContain(
+        'Permission required to run a tool',
+      );
+    });
+
     it('routes single-scope permission requests to the active chat', async () => {
       const ch = createChannel({ sessionScope: 'single' });
       await startSession(ch, { senderId: 'alice', chatId: 'alice-dm' });
@@ -694,6 +726,7 @@ describe('ChannelBase', () => {
       expect(respondToPermissionMock()).toHaveBeenCalledWith('req-2', {
         outcome: { outcome: 'selected', optionId: 'reject' },
       });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
 
       emitPermission(sessionId, 'req-3', [
         { optionId: 'always', kind: 'allow_always', name: 'Allow always' },
@@ -708,6 +741,7 @@ describe('ChannelBase', () => {
       expect(respondToPermissionMock()).toHaveBeenCalledWith('req-3', {
         outcome: { outcome: 'cancelled' },
       });
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
     });
 
     it('reports permission requests that lack requested approval options', async () => {
@@ -772,6 +806,7 @@ describe('ChannelBase', () => {
       expect(respondToPermissionMock()).toHaveBeenCalledWith('req-1', {
         outcome: { outcome: 'selected', optionId: 'proceed_always_project' },
       });
+      expect(ch.sent.at(-1)?.text).toBe('Permission approved always.');
     });
 
     it('falls back to user-scope approve-always when project scope is unavailable', async () => {
