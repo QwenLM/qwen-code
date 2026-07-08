@@ -2149,4 +2149,6 @@ export default {
     '⚠️ 歷史記錄缺口：此處約 {{days}} 天的較早會話記錄已遺失（儲存中斷，無法復原）。以上為系統找回的更早歷史，以下為該缺口之後的對話。',
   '⚠️ History gap: an earlier segment of conversation was lost here (storage interruption, unrecoverable). Recovered earlier history is shown above; the conversation continues below.':
     '⚠️ 歷史記錄缺口：此處一段較早的會話記錄已遺失（儲存中斷，無法復原）。以上為系統找回的更早歷史，以下為該缺口之後的對話。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 歷史記錄缺口：此處之前的會話記錄已遺失（儲存中斷），且無法找回。',
 };
