@@ -2467,6 +2467,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       undefined,
       new TurnBoundaryCompactionEngine({
         maxReplayBytes: compactedReplayMaxBytes,
+        onReplayWindowEviction: (eviction) => {
+          teeServeDebugLine(
+            `replay window evicted ${JSON.stringify(eviction)}`,
+          );
+        },
       }),
     );
 

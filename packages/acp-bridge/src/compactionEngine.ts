@@ -11,7 +11,6 @@ import {
   type CompactionEngine,
   type SessionReplaySnapshot,
 } from './eventBus.js';
-import { writeStderrLine } from './internal/stderrLine.js';
 import { normalizeCompactedReplayMaxBytes } from './replayWindowLimits.js';
 
 export type { CompactionEngine, SessionReplaySnapshot };
@@ -66,8 +65,19 @@ interface ReplaySegment {
   turnCount: number;
 }
 
+export interface ReplayWindowEviction {
+  droppedBytes: number;
+  droppedEvents: number;
+  droppedSegments: number;
+  droppedTurns: number;
+  maxBytes: number;
+  retainedBytes: number;
+  retainedEvents: number;
+}
+
 export interface TurnBoundaryCompactionEngineOptions {
   maxReplayBytes?: number;
+  onReplayWindowEviction?: (eviction: ReplayWindowEviction) => void;
 }
 
 /**
@@ -83,6 +93,9 @@ export interface TurnBoundaryCompactionEngineOptions {
  */
 export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private readonly maxReplayBytes: number;
+  private readonly onReplayWindowEviction:
+    | ((eviction: ReplayWindowEviction) => void)
+    | undefined;
   private replaySegments: ReplaySegment[] = [];
   private replaySegmentStart = 0;
   private replayBytes = 0;
@@ -98,6 +111,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   constructor(opts: TurnBoundaryCompactionEngineOptions = {}) {
     this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
+    this.onReplayWindowEviction = opts.onReplayWindowEviction;
   }
 
   ingest(event: BridgeEvent): void {
@@ -390,7 +404,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     if (droppedSegmentCount > 0) {
       this.compactReplaySegmentQueueIfNeeded();
-      writeReplayWindowEvictionDebugLine({
+      this.notifyReplayWindowEviction({
         droppedBytes,
         droppedEvents,
         droppedSegments: droppedSegmentCount,
@@ -418,6 +432,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.replaySegmentStart = 0;
   }
 
+  private notifyReplayWindowEviction(eviction: ReplayWindowEviction): void {
+    try {
+      this.onReplayWindowEviction?.(eviction);
+    } catch {
+      // Best-effort diagnostic; eviction accounting must not break replay.
+    }
+  }
+
   private makeHistoryTruncatedEvent(retainedEvents: number): BridgeEvent {
     return {
       v: EVENT_SCHEMA_VERSION,
@@ -442,27 +464,6 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.truncatedEvents = 0;
     this.truncatedTurns = 0;
   }
-}
-
-function writeReplayWindowEvictionDebugLine(data: {
-  droppedBytes: number;
-  droppedEvents: number;
-  droppedSegments: number;
-  droppedTurns: number;
-  maxBytes: number;
-  retainedBytes: number;
-  retainedEvents: number;
-}): void {
-  if (!isServeDebugLoggingEnabled()) return;
-  writeStderrLine(
-    `qwen serve debug: replay window evicted ${JSON.stringify(data)}`,
-  );
-}
-
-function isServeDebugLoggingEnabled(): boolean {
-  const value = process.env['QWEN_SERVE_DEBUG'];
-  if (!value) return false;
-  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
 }
 
 function makeMergedSessionUpdateEvent(

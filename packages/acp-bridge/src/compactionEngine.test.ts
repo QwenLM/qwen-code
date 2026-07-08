@@ -438,32 +438,49 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.compactedTurns.at(-1)?.id).toBe(2);
     });
 
-    it('writes an eviction debug line when serve debug logging is enabled', () => {
-      const originalDebug = process.env['QWEN_SERVE_DEBUG'];
-      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    it('notifies the eviction diagnostic hook when replay is dropped', () => {
+      const onReplayWindowEviction = vi.fn();
+      const engine = new TurnBoundaryCompactionEngine({
+        maxReplayBytes: 512,
+        onReplayWindowEviction,
+      });
 
-      try {
-        process.env['QWEN_SERVE_DEBUG'] = '1';
-        const engine = new TurnBoundaryCompactionEngine({
-          maxReplayBytes: 512,
-        });
+      engine.ingest(makeTextChunk(1, `first-${'x'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(2));
+      engine.ingest(makeTextChunk(3, `second-${'y'.repeat(600)}`));
+      engine.ingest(makeTurnComplete(4));
 
+      expect(onReplayWindowEviction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          droppedEvents: 2,
+          droppedSegments: 1,
+          droppedTurns: 1,
+          maxBytes: 512,
+          retainedEvents: 2,
+        }),
+      );
+    });
+
+    it('keeps replay working when the eviction diagnostic hook throws', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxReplayBytes: 512,
+        onReplayWindowEviction: () => {
+          throw new Error('diagnostic failed');
+        },
+      });
+
+      expect(() => {
         engine.ingest(makeTextChunk(1, `first-${'x'.repeat(600)}`));
         engine.ingest(makeTurnComplete(2));
         engine.ingest(makeTextChunk(3, `second-${'y'.repeat(600)}`));
         engine.ingest(makeTurnComplete(4));
+      }).not.toThrow();
 
-        expect(stderrSpy).toHaveBeenCalledWith(
-          expect.stringContaining('qwen serve debug: replay window evicted'),
-        );
-        expect(stderrSpy).toHaveBeenCalledWith(
-          expect.stringContaining('"droppedEvents":2'),
-        );
-      } finally {
-        if (originalDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
-        else process.env['QWEN_SERVE_DEBUG'] = originalDebug;
-        stderrSpy.mockRestore();
-      }
+      const snap = engine.snapshot();
+      expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+      expect(extractTexts(snap.compactedTurns)).toEqual([
+        `second-${'y'.repeat(600)}`,
+      ]);
     });
   });
 
