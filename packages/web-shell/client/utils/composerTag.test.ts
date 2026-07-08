@@ -74,6 +74,27 @@ describe('splitComposerTagContent', () => {
     ]);
   });
 
+  it('keeps custom provider-prefixed references as text', () => {
+    expect(splitComposerTagContent('open @dataset:users')).toEqual([
+      { type: 'text', text: 'open @dataset:users' },
+    ]);
+  });
+
+  it('keeps Windows drive references as file tags', () => {
+    expect(splitComposerTagContent('open @C:/Users/name/file.ts')).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@C:/Users/name/file.ts',
+          kind: 'file',
+          value: 'C:/Users/name/file.ts',
+          serialized: '@C:/Users/name/file.ts',
+        },
+      },
+    ]);
+  });
+
   it('unescapes reference display text', () => {
     expect(splitComposerTagContent('open @path\\ with\\ spaces')).toEqual([
       { type: 'text', text: 'open ' },

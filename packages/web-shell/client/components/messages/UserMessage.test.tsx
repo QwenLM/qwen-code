@@ -61,6 +61,13 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('a@b.test');
   });
 
+  it('keeps custom provider references as text by default', () => {
+    const container = render(<UserMessage content="open @dataset:users" />);
+
+    expect(container.querySelector('[title="@dataset:users"]')).toBeNull();
+    expect(container.textContent).toContain('open @dataset:users');
+  });
+
   it('renders images when provided', () => {
     const container = render(
       <UserMessage

@@ -66,7 +66,22 @@ function getReferenceDisplay(raw: string, prefix: string) {
   return value.replace(/\\(.)/g, '$1') || raw;
 }
 
-function createComposerTagFromReference(raw: string): WebShellComposerTag {
+// Custom providers can use the @provider:item shape, but user messages only
+// persist serialized text. Without provider metadata, default rendering should
+// leave those references as text instead of guessing they are file chips.
+function isCustomProviderReference(raw: string): boolean {
+  const value = raw.slice(1);
+  const colonIndex = value.indexOf(':');
+  if (colonIndex <= 0) return false;
+  const prefix = value.slice(0, colonIndex);
+  if (prefix === 'ext' || prefix === 'mcp') return false;
+  if (prefix.length === 1 && value[colonIndex + 1] === '/') return false;
+  return /^[\p{L}\p{N}_-]+$/u.test(prefix);
+}
+
+function createComposerTagFromReference(
+  raw: string,
+): WebShellComposerTag | null {
   if (raw.startsWith('@ext:')) {
     return {
       id: `extension:${raw}`,
@@ -83,6 +98,7 @@ function createComposerTagFromReference(raw: string): WebShellComposerTag {
       serialized: raw,
     };
   }
+  if (isCustomProviderReference(raw)) return null;
   return {
     id: `file:${raw}`,
     kind: 'file',
@@ -110,20 +126,19 @@ export function splitComposerTagContent(
   const segments: ComposerTagContentSegment[] = [];
   let cursor = 0;
   for (let index = 0; index < content.length; index += 1) {
-    if (
-      content[index] !== '@' ||
-      !isAtReferenceBoundary(content[index - 1])
-    ) {
+    if (content[index] !== '@' || !isAtReferenceBoundary(content[index - 1])) {
       continue;
     }
     const end = readAtReferenceEnd(content, index);
     if (end === index + 1) continue;
+    const tag = createComposerTagFromReference(content.slice(index, end));
+    if (!tag) continue;
     if (cursor < index) {
       segments.push({ type: 'text', text: content.slice(cursor, index) });
     }
     segments.push({
       type: 'reference',
-      tag: createComposerTagFromReference(content.slice(index, end)),
+      tag,
     });
     cursor = end;
     index = end - 1;
