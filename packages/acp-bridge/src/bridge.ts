@@ -1611,12 +1611,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
-  const rollbackAttachRegistration = (
+  const rollbackAttachRegistration = async (
     entry: SessionEntry,
     clientId: string,
-  ): void => {
-    if (entry.attachCount > 0) entry.attachCount--;
+    attachCountDelta = 1,
+  ): Promise<void> => {
+    entry.attachCount = Math.max(0, entry.attachCount - attachCountDelta);
     unregisterClient(entry, clientId);
+    if (
+      entry.spawnOwnerWantedKill &&
+      entry.attachCount === 0 &&
+      entry.events.subscriberCount === 0
+    ) {
+      await bridgeApi.killSession(entry.sessionId).catch(() => {
+        /* best-effort; channel.exited will eventually reap anyway */
+      });
+    } else if (
+      entry.clientIds.size === 0 &&
+      entry.events.subscriberCount === 0 &&
+      !entry.promptActive
+    ) {
+      await closeSessionImpl(entry.sessionId, undefined, {
+        reason: 'last_client_detached',
+      }).catch((err) => {
+        writeStderrLine(
+          `qwen serve: close-on-attach-rollback failed for ` +
+            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+      });
+    }
   };
 
   const resolveTrustedClientId = (
@@ -1953,6 +1976,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const ci = await ensureChannel();
     ci.sessionSpawnsInFlight++;
     let sessionRegistered = false;
+    let sessionRemovedDuringInitialization = false;
+    let initializedSessionId: string | undefined;
     let newSessionResp: {
       sessionId: string;
       models?: { currentModelId?: unknown } | null;
@@ -2010,17 +2035,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionResp.sessionId,
         boundWorkspace,
       );
+      initializedSessionId = entry.sessionId;
       sessionRegistered = true;
       onSessionRegistered?.();
       seedSnapshotCaches(entry, newSessionResp);
       const clientId = registerClient(entry, requestedClientId);
-      // `defaultEntry` is the single-scope attach target — only sessions
-      // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
-      // never become the attach target, otherwise a later omitted-scope
-      // (or daemon-default-`single`) caller would attach to what its
-      // sender promised was an isolated session. Subsequent same-scope
-      // spawns also don't overwrite (first wins).
-      if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
 
       // ACP `newSession` doesn't take a model id; honor the caller's
       // `modelServiceId` via `unstable_setSessionModel`. See
@@ -2047,6 +2066,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             await closeSessionImpl(entry.sessionId, undefined, {
               reason: 'approval_mode_initialization_failed',
             });
+            sessionRemovedDuringInitialization = true;
           } catch {
             /* best-effort; preserve the approval-mode failure */
           }
@@ -2066,6 +2086,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       }
 
+      // `defaultEntry` is the single-scope attach target — only sessions
+      // SPAWNED UNDER `'single'` may claim it. Publish it only after
+      // fatal initialization has succeeded, otherwise a concurrent attach
+      // can join a session that the failing initializer is about to close.
+      if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
+
       return {
         sessionId: entry.sessionId,
         workspaceCwd: entry.workspaceCwd,
@@ -2077,6 +2103,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
       if (!sessionRegistered) {
         await reapPendingEmptyChannel(ci);
+      } else if (sessionRemovedDuringInitialization && hasNoChannelWork(ci)) {
+        await reapPendingEmptyChannel(ci);
+        if (!ci.isDying) {
+          await startIdleTimer(
+            ci,
+            `approval-mode initialization failure "${initializedSessionId}"`,
+          );
+        }
       }
     }
   }
@@ -2324,7 +2358,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     try {
       await applyApprovalMode(entry, mode, false, clientId);
     } catch (err) {
-      rollbackAttachRegistration(entry, clientId);
+      await rollbackAttachRegistration(entry, clientId);
       throw err;
     }
   }
@@ -3255,11 +3289,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             );
           } catch (err) {
-            racedEntry.attachCount = Math.max(
-              0,
-              racedEntry.attachCount - 1 - coalesceState.count,
+            await rollbackAttachRegistration(
+              racedEntry,
+              clientId,
+              1 + coalesceState.count,
             );
-            unregisterClient(racedEntry, clientId);
             throw err;
           }
         }

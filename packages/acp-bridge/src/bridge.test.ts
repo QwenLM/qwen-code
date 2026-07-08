@@ -7306,6 +7306,53 @@ describe('createAcpSessionBridge', () => {
       };
     }
 
+    function deferredApprovalModeFactory(): {
+      factory: ChannelFactory;
+      waitForApprovalMode: () => Promise<void>;
+      rejectApprovalMode: (error?: Error) => void;
+    } {
+      let started!: () => void;
+      let rejectApprovalMode: ((error: Error) => void) | undefined;
+      const startedPromise = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      return {
+        factory: async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const agent = new FakeAgent({
+            extMethodImpl: (method) => {
+              if (method !== 'qwen/control/session/approval_mode') {
+                return Promise.resolve({});
+              }
+              return new Promise((_resolve, reject) => {
+                rejectApprovalMode = reject;
+                started();
+              });
+            },
+          });
+          new AgentSideConnection(() => agent as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        },
+        waitForApprovalMode: () => startedPromise,
+        rejectApprovalMode: (error = new Error('trust gate rejected')) => {
+          if (!rejectApprovalMode) {
+            throw new Error('approval mode was not requested');
+          }
+          rejectApprovalMode(
+            Object.assign(error, { data: { errorKind: 'trust_gate' } }),
+          );
+        },
+      };
+    }
+
     it('reaps a fresh session when approval-mode initialization fails', async () => {
       const bridge = makeBridge({
         channelFactory: rejectingApprovalModeFactory(),
@@ -7320,6 +7367,49 @@ describe('createAcpSessionBridge', () => {
         }),
       ).rejects.toThrow();
 
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        }),
+      ).resolves.toMatchObject({ attached: false });
+      await bridge.shutdown();
+    });
+
+    it('does not publish a failing approval-mode spawn as the default session', async () => {
+      const { factory, waitForApprovalMode, rejectApprovalMode } =
+        deferredApprovalModeFactory();
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+
+      const first = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'single',
+        approvalMode: ApprovalMode.YOLO,
+      });
+      await waitForApprovalMode();
+
+      const second = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'single',
+      });
+      let secondSettled = false;
+      void second.then(
+        () => {
+          secondSettled = true;
+        },
+        () => {
+          secondSettled = true;
+        },
+      );
+      await Promise.resolve();
+      expect(secondSettled).toBe(false);
+
+      rejectApprovalMode();
+      await expect(first).rejects.toThrow();
+      await expect(second).rejects.toThrow();
       await expect(
         bridge.spawnOrAttach({
           workspaceCwd: WS_A,
@@ -7354,6 +7444,33 @@ describe('createAcpSessionBridge', () => {
           sessionScope: 'thread',
         }),
       ).resolves.toMatchObject({ attached: false });
+      await bridge.shutdown();
+    });
+
+    it('reaps a tombstoned session when approval-mode attach rollback removes the last attach', async () => {
+      const { factory, waitForApprovalMode, rejectApprovalMode } =
+        deferredApprovalModeFactory();
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'single',
+      });
+
+      const attach = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'single',
+        approvalMode: ApprovalMode.YOLO,
+      });
+      await waitForApprovalMode();
+      await bridge.killSession(first.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+
+      rejectApprovalMode();
+      await expect(attach).rejects.toThrow();
+      expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
 
