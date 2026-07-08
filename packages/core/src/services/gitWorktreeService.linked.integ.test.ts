@@ -147,6 +147,40 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
     expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
   });
 
+  it('returns false for a fabricated .git chain that names itself (not in the repo registry)', async () => {
+    // Everything a candidate-side check would read is attacker-controlled:
+    // `<target>/.git` names a git dir the attacker also owns, whose `commondir`
+    // can point at the real repo and whose `gitdir` can point back at itself.
+    // Only reading `<commonDir>/worktrees/*` on the REPO side defeats this.
+    const repo = initRepo('qwen-linked-fabricated-');
+    const realWt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+    fs.mkdirSync(path.dirname(realWt), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-b', 'review-pr-1', realWt, 'HEAD'],
+      { cwd: repo },
+    );
+
+    const evil = path.join(repo, 'evil');
+    const fakeGitDir = path.join(evil, 'fakegit');
+    fs.mkdirSync(fakeGitDir, { recursive: true });
+    fs.writeFileSync(path.join(evil, '.git'), `gitdir: ${fakeGitDir}\n`);
+    fs.writeFileSync(
+      path.join(fakeGitDir, 'commondir'),
+      `${path.join(repo, '.git')}\n`,
+    );
+    fs.writeFileSync(
+      path.join(fakeGitDir, 'gitdir'),
+      `${path.join(evil, '.git')}\n`,
+    );
+    fs.writeFileSync(path.join(fakeGitDir, 'HEAD'), 'ref: refs/heads/main\n');
+
+    const svc = new GitWorktreeService(repo);
+    expect(await svc.isRegisteredLinkedWorktree(evil)).toBe(false);
+    // Sanity: the genuine worktree still validates.
+    expect(await svc.isRegisteredLinkedWorktree(realWt)).toBe(true);
+  });
+
   it('returns false for a stale registry record whose path was recreated as a plain directory', async () => {
     // Deleting a worktree directory without `git worktree remove`/`prune`
     // leaves the record in `git worktree list` (tagged `prunable`) for

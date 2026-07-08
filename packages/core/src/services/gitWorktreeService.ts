@@ -1207,24 +1207,30 @@ export class GitWorktreeService {
    * repository — i.e. git's own registry entry for it points back at exactly
    * this path — and it is not the repository's primary working tree.
    *
-   * It verifies the one path in question rather than enumerating the registry:
+   * Two complementary checks, because neither alone suffices:
    *
-   * 1. `--git-dir` equal to `--git-common-dir` means the primary working tree.
-   * 2. The common dir must match this repository's, or it belongs to another
-   *    repo.
-   * 3. `<gitDir>/gitdir` records the path of the worktree that entry belongs
-   *    to; it must resolve back to the probed path.
+   * 1. **Registry** (repo side): some `<commonDir>/worktrees/<name>/gitdir`
+   *    must name this path. Everything read here belongs to the repository, so
+   *    a candidate cannot forge it — fabricating `<target>/.git` and the git
+   *    dir it points at (with its own `commondir`/`gitdir`) only controls
+   *    candidate-side files, which are never consulted. This also rejects the
+   *    primary working tree, which has no `worktrees/<name>` entry, along with
+   *    other repositories' worktrees and a directory carrying a `.git` file
+   *    *copied* from a real worktree (the entry names the original, not the
+   *    copy).
+   * 2. **Liveness** (inside the path): the path's own `--git-dir` must be that
+   *    same entry. A registry record survives `rm -rf` of its directory (git
+   *    tags it `prunable` and keeps it for gc.worktreePruneExpire, 3 months by
+   *    default); if the path is then recreated as an ordinary directory, git
+   *    resolves it into the MAIN checkout. The registry answers "is this path
+   *    registered?"; only the probe answers "is it a worktree right now?".
    *
-   * Step 3 is what makes this authoritative. A `.git`-is-a-file heuristic
-   * misfires (the main tree also carries a `.git` file under
-   * `git clone --separate-git-dir` and in submodules), and a bare `--git-dir`
-   * vs `--git-common-dir` comparison is fooled by a hand-crafted directory
-   * holding a `.git` file *copied* from a real linked worktree: it reports a
-   * per-worktree git dir, but that entry's `gitdir` points at the real
-   * worktree, not the copy. Verifying the pointer also avoids parsing
-   * `git worktree list`, whose porcelain form is newline-delimited — and so
-   * injectable by a worktree path that itself contains a newline — unless
-   * `-z` is used, which needs Git >= 2.36 and would break older git.
+   * A `.git`-is-a-file heuristic would misfire here (the main tree also carries
+   * a `.git` file under `git clone --separate-git-dir` and in submodules), and
+   * reading the registry directly avoids parsing `git worktree list`, whose
+   * porcelain form is newline-delimited — and so injectable by a worktree path
+   * that itself contains a newline — unless `-z` is used, which needs
+   * Git >= 2.36 and would break older git.
    *
    * Fail-closed: any git or I/O error returns false, so a caller that gates
    * isolation on this check rejects an unverifiable path rather than
@@ -1240,43 +1246,58 @@ export class GitWorktreeService {
     };
     try {
       const target = await fs.realpath(worktreePath);
-      const probeGit = simpleGit(target);
-      const [rawGitDir, rawCommonDir] = await Promise.all([
-        probeGit.raw(['rev-parse', '--git-dir']),
-        probeGit.raw(['rev-parse', '--git-common-dir']),
-      ]);
-      // Either may come back relative to the probed directory.
-      const gitDir = path.resolve(target, rawGitDir.trim());
-      const commonDir = path.resolve(target, rawCommonDir.trim());
 
-      // For the primary working tree the per-worktree git dir IS the common
-      // git dir. A linked worktree keeps its own under
-      // `<common>/worktrees/<name>`.
-      if ((await realpathOr(gitDir)) === (await realpathOr(commonDir))) {
-        return false;
-      }
-
-      // It must be a worktree of THIS repository, not another repo's.
+      // ── Registry side, read from THIS repository ──────────────────────
+      // `<commonDir>/worktrees/<name>/gitdir` records the path of the worktree
+      // that entry belongs to. Everything read here lives on the repo side, so
+      // a candidate directory cannot forge an entry: fabricating `<target>/.git`
+      // (and the git dir it names, with its own `commondir`/`gitdir`) only
+      // controls candidate-side files, which are never consulted.
       const ourCommonDir = path.resolve(
         this.sourceRepoPath,
         (await this.git.raw(['rev-parse', '--git-common-dir'])).trim(),
       );
-      if ((await realpathOr(commonDir)) !== (await realpathOr(ourCommonDir))) {
-        return false;
+      const worktreesDir = path.join(ourCommonDir, 'worktrees');
+      let entryNames: string[];
+      try {
+        entryNames = await fs.readdir(worktreesDir);
+      } catch {
+        return false; // the repository has no linked worktrees at all
       }
 
-      // Authoritative: `<gitDir>/gitdir` records the path of the worktree that
-      // registry entry belongs to. A hand-crafted directory carrying a `.git`
-      // file copied from a real linked worktree resolves to that REAL entry,
-      // whose `gitdir` points back at the real worktree — not the fake — so it
-      // is rejected. Reading this one file also avoids parsing
-      // `git worktree list`, whose porcelain form is newline-delimited (and so
-      // injectable by a worktree path containing a newline) unless `-z` is
-      // available, which requires Git >= 2.36.
-      const pointer = (
-        await fs.readFile(path.join(gitDir, 'gitdir'), 'utf8')
+      let entryGitDir: string | null = null;
+      for (const name of entryNames) {
+        const entry = path.join(worktreesDir, name);
+        let pointer: string;
+        try {
+          pointer = (
+            await fs.readFile(path.join(entry, 'gitdir'), 'utf8')
+          ).trim();
+        } catch {
+          continue; // incomplete entry — ignore
+        }
+        // `gitdir` holds `<registeredPath>/.git`.
+        if ((await realpathOr(path.dirname(pointer))) === target) {
+          entryGitDir = entry;
+          break;
+        }
+      }
+      // No entry names this path. This also rejects the primary working tree,
+      // which never has a `worktrees/<name>` entry of its own.
+      if (!entryGitDir) return false;
+
+      // ── Liveness probe, inside the path ───────────────────────────────
+      // A registry record survives `rm -rf` of its directory (git tags it
+      // `prunable` and keeps it for gc.worktreePruneExpire, 3 months by
+      // default). If the path is later recreated as an ordinary directory, git
+      // resolves it into the MAIN checkout, so its `--git-dir` will not be this
+      // entry. The registry answers "is this path registered?"; only a probe
+      // inside the path answers "is it a worktree right now?".
+      const rawGitDir = (
+        await simpleGit(target).raw(['rev-parse', '--git-dir'])
       ).trim();
-      return (await realpathOr(path.dirname(pointer))) === target;
+      const probeGitDir = await realpathOr(path.resolve(target, rawGitDir));
+      return probeGitDir === (await realpathOr(entryGitDir));
     } catch (error) {
       debugLogger.debug(
         `isRegisteredLinkedWorktree: probe at ${worktreePath} failed: ${error}`,
