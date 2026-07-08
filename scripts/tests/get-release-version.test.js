@@ -189,7 +189,7 @@ describe('getVersion', () => {
         if (command.includes('npm view') && command.includes('--tag=nightly')) {
           throw new Error('npm error code E404');
         }
-        // Empty versions list (no nightlies published yet)
+        // Stable versions exist but no nightly dist-tag
         if (command.includes('npm view') && command.includes('versions --json'))
           return JSON.stringify(['0.6.0', '0.6.1']);
 
@@ -210,7 +210,7 @@ describe('getVersion', () => {
         if (command.includes('npm view') && command.includes('--tag=preview')) {
           throw new Error('npm error code E404');
         }
-        // Empty versions list (no previews published yet)
+        // Stable versions exist but no preview dist-tag
         if (command.includes('npm view') && command.includes('versions --json'))
           return JSON.stringify(['0.6.0', '0.6.1']);
 
@@ -305,9 +305,10 @@ describe('getVersion', () => {
       const result = getVersion({ type: 'stable' });
       expect(result.releaseVersion).toBe('0.7.0');
       expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
-    it('should propagate transient NPM errors instead of falling back silently', () => {
+    it('should propagate transient NPM errors from dist-tag lookup', () => {
       const mockWithTransientError = (command) => {
         if (
           command.includes('npm view') &&
@@ -322,6 +323,44 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation(mockWithTransientError);
 
       expect(() => getVersion({ type: 'stable' })).toThrow('ETIMEDOUT');
+    });
+
+    it('should propagate transient NPM errors from versions list lookup', () => {
+      const mockWithTransientVersionsError = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('versions --json')
+        ) {
+          throw new Error('npm error code ECONNRESET');
+        }
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithTransientVersionsError);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow('ECONNRESET');
+    });
+
+    it('should derive baseline from latest versions when latest dist-tag is missing', () => {
+      const mockWithNoLatestTag = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.5.0', '0.6.0', '0.6.1', '0.7.0-preview.0']);
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoLatestTag);
+
+      const result = getVersion({ type: 'patch', 'patch-from': 'stable' });
+      expect(result.releaseVersion).toBe('0.6.2');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
     });
   });
 });

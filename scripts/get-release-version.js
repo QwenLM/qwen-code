@@ -34,8 +34,10 @@ function getAllVersionsFromNPM() {
     const versionsJson = execSync(command).toString().trim();
     return JSON.parse(versionsJson);
   } catch (error) {
-    console.error(`Failed to get all NPM versions: ${error.message}`);
-    return [];
+    if (error.message?.includes('E404') || error.message?.includes('404')) {
+      return [];
+    }
+    throw error;
   }
 }
 
@@ -315,12 +317,9 @@ function getPreviewVersion(args) {
       tagResult.latestVersion.replace(/-nightly.*/, '') + '-preview.0';
   } else {
     const packageJson = readJson('package.json');
-    releaseVersion = packageJson.version.split('-')[0] + '-preview.0';
-    validateVersion(
-      packageJson.version.split('-')[0],
-      'X.Y.Z',
-      'package.json version',
-    );
+    const baseVersion = packageJson.version.split('-')[0];
+    releaseVersion = baseVersion + '-preview.0';
+    validateVersion(baseVersion, 'X.Y.Z', 'package.json version');
   }
 
   return {
