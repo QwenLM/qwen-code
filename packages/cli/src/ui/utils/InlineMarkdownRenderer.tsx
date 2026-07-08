@@ -281,7 +281,8 @@ export const getPlainTextLength = (
   text: string,
   enableInlineMath = false,
 ): number => {
-  let cleanText = text
+  const renderedText = enableInlineMath ? renderInlineMathInText(text) : text;
+  const cleanText = renderedText
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/_(.*?)_/g, '$1')
@@ -289,8 +290,5 @@ export const getPlainTextLength = (
     .replace(/`(.*?)`/g, '$1')
     .replace(/<u>(.*?)<\/u>/g, '$1')
     .replace(/.*\[(.*?)\]\(.*\)/g, '$1');
-  if (enableInlineMath) {
-    cleanText = renderInlineMathInText(cleanText);
-  }
   return stringWidth(cleanText);
 };
