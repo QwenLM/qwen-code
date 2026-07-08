@@ -5,12 +5,8 @@
  */
 
 /**
- * Debounce window for the MessageDisplay hook. Unlike Claude Code — whose
- * MessageDisplay hook spawns a separate OS process per streamed batch and
- * therefore needs cross-process locking to reassemble order — Qwen Code's
- * streaming loop is single and sequential, so no such reassembly is needed.
- * This constant just bounds how often a `command` hook process gets spawned
- * per streamed reply.
+ * Debounce window for the MessageDisplay hook: bounds how often a `command`
+ * hook process gets spawned per streamed reply.
  */
 export const MESSAGE_DISPLAY_DEBOUNCE_MS = 200;
 

@@ -229,6 +229,10 @@ export class GeminiClient {
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
+  // Per-message-id chain of in-flight MessageDisplay hook requests, so a slow
+  // hook command doesn't let concurrent processes for the same message pile
+  // up unboundedly — see fireMessageDisplayHook.
+  private readonly messageDisplayChains = new Map<string, Promise<void>>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -1233,6 +1237,13 @@ export class GeminiClient {
    * caller — the streaming loop calls this and immediately continues to the next
    * event, so a slow or hung hook command never stalls the reply's display. Errors
    * are caught and logged here since there is no caller left to observe them.
+   *
+   * Batches for the same messageId are chained (not run concurrently): each waits
+   * for the previous batch's hook process to finish before its own request goes
+   * out. This bounds concurrent hook processes per message to one, so a slow or
+   * hung `command` hook can't let them pile up, while still preserving arrival
+   * order (important since `displayed_text` is cumulative — an out-of-order
+   * delivery would let an older, shorter payload land after a newer one).
    */
   private fireMessageDisplayHook(
     messageBus: ReturnType<Config['getMessageBus']>,
@@ -1244,23 +1255,33 @@ export class GeminiClient {
     if (!messageBus) {
       return;
     }
-    messageBus
-      .request<HookExecutionRequest, HookExecutionResponse>(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'MessageDisplay',
-          input: {
-            message_id: messageId,
-            displayed_text: displayedText,
-            is_final: isFinal,
+    const prior = this.messageDisplayChains.get(messageId) ?? Promise.resolve();
+    const next = prior
+      .then(() =>
+        messageBus.request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'MessageDisplay',
+            input: {
+              message_id: messageId,
+              displayed_text: displayedText,
+              is_final: isFinal,
+            },
+            signal,
           },
-          signal,
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        ),
       )
+      .then(() => undefined)
       .catch((err) => {
         this.config.getDebugLogger().warn(`MessageDisplay hook failed: ${err}`);
+      })
+      .finally(() => {
+        if (this.messageDisplayChains.get(messageId) === next) {
+          this.messageDisplayChains.delete(messageId);
+        }
       });
+    this.messageDisplayChains.set(messageId, next);
   }
 
   async startChat(
@@ -2575,11 +2596,21 @@ export class GeminiClient {
       // Final MessageDisplay flush: this turn.run() stream is exhausted, so this
       // message is done, regardless of whether pending tool calls will trigger a
       // continuation (that continuation is its own message.run() call and gets its
-      // own message_id — see the const declarations above the loop). Unconditional,
-      // same as the debounced mid-stream flushes: not gated on !turn.pendingToolCalls
-      // the way the Stop hook below is, since a message boundary and a Stop-worthy
-      // end-of-turn are different things here.
-      if (messageDisplayEnabled) {
+      // own message_id — see the const declarations above the loop). Not gated on
+      // !turn.pendingToolCalls the way the Stop hook below is, since a message
+      // boundary and a Stop-worthy end-of-turn are different things here. It does
+      // re-send the same cumulative text as the last debounced flush when nothing
+      // changed since then — that's intentional, not a missed dedup: is_final is
+      // itself new information (it tells subscribers this message is done), so the
+      // event still needs to fire even when displayedText didn't change. Gated on
+      // there being any text at all so tool-call-only turns (no Content events ever
+      // arrived) don't fire a vacuous empty-text final event, and on !signal.aborted
+      // to match the Stop hook's cancellation guard below.
+      if (
+        messageDisplayEnabled &&
+        messageDisplayState.displayedText !== '' &&
+        !signal.aborted
+      ) {
         this.fireMessageDisplayHook(
           messageBus,
           messageDisplayId,

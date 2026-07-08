@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
+import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   AuthType,
@@ -7609,6 +7610,114 @@ Other open files:
         });
         expect(request.input.message_id).toEqual(expect.any(String));
         expect(request.input.message_id.length).toBeGreaterThan(0);
+      });
+
+      it('fires a debounced mid-stream flush once the debounce window elapses, then a separate final flush', async () => {
+        vi.useFakeTimers();
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({}),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'MessageDisplay',
+        );
+
+        let releaseSecondChunk!: () => void;
+        const secondChunkGate = new Promise<void>((resolve) => {
+          releaseSecondChunk = resolve;
+        });
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'Hello, ' };
+            await secondChunkGate;
+            yield { type: GeminiEventType.Content, value: 'world.' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-message-display-debounced',
+        );
+        const consumed = (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })();
+
+        // Let the first chunk get processed. It arrives in the same instant the
+        // debounce state was created, so it does not clear the debounce window
+        // by itself.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+
+        // Cross the debounce window, then let the second chunk arrive — this
+        // should fire a mid-stream flush (is_final: false) on its own, distinct
+        // from the unconditional final flush that fires once the stream ends.
+        await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DEBOUNCE_MS);
+        releaseSecondChunk();
+        await consumed;
+
+        expect(mockMessageBus.request).toHaveBeenCalledTimes(2);
+        const [midStreamCall, finalCall] = mockMessageBus.request.mock.calls;
+        expect(midStreamCall[0]).toMatchObject({
+          eventName: 'MessageDisplay',
+          input: { displayed_text: 'Hello, world.', is_final: false },
+        });
+        expect(finalCall[0]).toMatchObject({
+          eventName: 'MessageDisplay',
+          input: { displayed_text: 'Hello, world.', is_final: true },
+        });
+      });
+
+      it('logs and swallows a rejected MessageDisplay hook request', async () => {
+        const debugLogger = {
+          isEnabled: vi.fn().mockReturnValue(true),
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        };
+        const mockMessageBus = {
+          request: vi.fn().mockRejectedValue(new Error('hook process failed')),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'MessageDisplay',
+        );
+        vi.mocked(mockConfig.getDebugLogger).mockReturnValue(debugLogger);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-message-display-rejected',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+        // fireMessageDisplayHook is fire-and-forget; give its chained promise a
+        // tick to settle before asserting on the logger.
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(debugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'MessageDisplay hook failed: Error: hook process failed',
+          ),
+        );
       });
 
       it('ends the Stop hook loop when the blocking cap is reached', async () => {
