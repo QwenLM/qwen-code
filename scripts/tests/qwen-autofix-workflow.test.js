@@ -286,6 +286,36 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
   });
 
+  it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
+    // Route step must check PR author against AUTOFIX_BOT for review events.
+    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    // Must verify sender is trusted (collaborator or review bot).
+    expect(routeStep).toContain('"${SENDER_LOGIN}" == "${REVIEW_BOT}"');
+    expect(routeStep).toContain(
+      'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
+    );
+    // Must reject fork PRs and non-main targets.
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    // Must set ROUTE_PR from the event payload.
+    expect(routeStep).toContain(
+      'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
+    );
+    // Review-scan must also verify in-repo and base-ref for forced PRs.
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    expect(reviewScanStep).toContain('isCrossRepository');
+    expect(reviewScanStep).toContain('(.baseRefName // "") == "main"');
+    expect(reviewScanStep).toContain('--base main');
+    // review-address must check out trusted base, not PR merge ref.
+    expect(workflow).toContain("'Checkout trusted base'");
+    expect(workflow).toContain(
+      "ref: '${{ github.event.repository.default_branch }}'",
+    );
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',

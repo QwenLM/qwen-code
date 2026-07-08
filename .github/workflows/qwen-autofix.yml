@@ -120,6 +120,8 @@ jobs:
           SCHEDULE: '${{ github.event.schedule }}'
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
+          PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
+          PR_BASE_REF: '${{ github.event.pull_request.base.ref }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
@@ -151,16 +153,40 @@ jobs:
               if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
                 DO_ISSUE=true
               fi
-              # Real-time review triggers: only process PRs authored by the
-              # dev-bot so arbitrary PR reviews do not kick off expensive runs.
+              # Real-time review triggers: only process in-repo bot PRs with
+              # reviews/comments from trusted senders (collaborators or the
+              # review bot). This prevents arbitrary commenters from forcing
+              # expensive review-scan runs.
               if [[ "${EVENT_NAME}" == 'pull_request_review' || "${EVENT_NAME}" == 'pull_request_review_comment' ]]; then
                 DO_ISSUE=false
-                if [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
-                  DO_REVIEW=true
-                  ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
-                  echo "🧭 review event on bot PR #${PR_NUMBER_EVENT} → review phase"
-                else
+                if [[ "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
                   echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                  echo "🧭 review event ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
+                elif [[ "${PR_BASE_REF}" != "main" ]]; then
+                  echo "🧭 review event ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                else
+                  # Verify the reviewer/commenter is trusted (prompt-injection gate).
+                  sender_permission=''
+                  sender_is_trusted=false
+                  if [[ "${SENDER_LOGIN}" == "${REVIEW_BOT}" ]]; then
+                    sender_is_trusted=true
+                  elif [[ -n "${SENDER_LOGIN}" ]]; then
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write) sender_is_trusted=true ;;
+                      esac
+                    else
+                      sender_permission=''
+                    fi
+                  fi
+                  if [[ "${sender_is_trusted}" == "true" ]]; then
+                    DO_REVIEW=true
+                    ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
+                    echo "🧭 review event on bot PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} (${sender_permission:-review-bot}) → review phase"
+                  else
+                    echo "🧭 review event ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not trusted"
+                  fi
                 fi
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
@@ -894,23 +920,28 @@ jobs:
         run: |-
           WORKDIR="$(mktemp -d)"
 
-          # Candidate PRs: all open, in-repo PRs authored by the dev-bot.
-          # A forced PR must still pass these checks.
+          # Candidate PRs: open, same-repo, targeting main, authored by the
+          # dev-bot. A forced PR must still pass all these checks.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName 2> /dev/null || echo '{}')"
+              --json number,state,author,headRefName,isCrossRepository,baseRefName 2> /dev/null || echo '{}')"
             OK="$(jq -r --arg ab "${AUTOFIX_BOT}" \
               '(((.state // "") == "OPEN")
-                 and ((.author.login // "") == $ab))' <<< "${META}")"
+                 and ((.author.login // "") == $ab)
+                 and ((.isCrossRepository // true) | not)
+                 and ((.baseRefName // "") == "main"))' <<< "${META}")"
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open PR owned by ${AUTOFIX_BOT}"
+              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
             CANDIDATES="${FORCED_PR}"
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+              --base main \
               --limit 100 --json number,headRefName > "${WORKDIR}/bot-prs.json"
+            # gh pr list with --author on the same repo only returns in-repo PRs,
+            # and --base main limits to main-targeting PRs.
             CANDIDATES="$(jq -r '.[] | .number' "${WORKDIR}/bot-prs.json")"
           fi
 
@@ -966,6 +997,16 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
               "${WORKDIR}/rc.json")"
+            # Issue-level PR comments (e.g. /review suggestion summaries) are
+            # also actionable feedback. Exclude the bot's own eval markers.
+            N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              [ .[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test("<!-- autofix-eval ") | not) ] | length' \
+              "${WORKDIR}/ic.json")"
 
             # mergeable: GitHub may report UNKNOWN until it recomputes; treat only
             # an explicit CONFLICTING as a conflict so we never block on UNKNOWN.
@@ -973,12 +1014,12 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} comment(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" \
@@ -1020,9 +1061,15 @@ jobs:
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
     steps:
-      - name: 'Checkout'
+      # SECURITY: checkout trusted base code first. The PR branch is checked
+      # out later in "Prepare branch and feedback" after the trusted CLI bundle
+      # is built from this base. Without this pin, pull_request_review events
+      # would check out the PR merge ref by default, letting PR-controlled
+      # code influence the secret-bearing address run.
+      - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
+          ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
           persist-credentials: false
 
@@ -1126,9 +1173,12 @@ jobs:
 
           gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
           gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
+          gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
+          # Includes reviews, inline review comments, and issue-level PR comments
+          # (excluding the bot's own eval markers).
           NEWEST="$(jq -rs \
             --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
             --argjson trust "${TRUSTED_ASSOC}" '
@@ -1139,7 +1189,11 @@ jobs:
             + (.[1] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) | .created_at))
-            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json")"
+            + (.[2] | map(select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((.body // "") | test("<!-- autofix-eval ") | not) | .created_at))
+            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json")"
           [[ -z "${NEWEST}" ]] && NEWEST="${WATERMARK}"
           echo "newest=${NEWEST}" >> "${GITHUB_OUTPUT}"
 
@@ -1172,6 +1226,17 @@ jobs:
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
+            echo
+            echo "## Issue-level comments"
+            jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              .[]
+              | select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((.body // "") | test("<!-- autofix-eval ") | not)
+              | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              "${WORKDIR}/ic.json"
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
