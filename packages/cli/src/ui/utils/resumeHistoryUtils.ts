@@ -253,6 +253,14 @@ function convertToHistoryItems(
         items.push({ type: 'tool_group', tools: [...currentToolGroup] });
         currentToolGroup = [];
       }
+      // Reset pending @-command state at the boundary as well: the divider
+      // means the records below begin a fresh reachable island, so an
+      // unconsumed pre-gap at_command must never be shift()-paired with the
+      // post-gap user turn (which would attach @file reads to a turn the user
+      // never wrote them on). Today reconstructHistory truncates to the tail,
+      // so the buffer is already empty here; this keeps the invariant if that
+      // ever changes.
+      pendingAtCommands.length = 0;
       items.push(createHistoryGapItem(gap));
     }
 
