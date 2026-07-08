@@ -578,7 +578,14 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
             err instanceof Error ? err.message : String(err),
             512,
           );
-          writeStderrLine(`[Channel] webhook task failed: ${safeMessage}`);
+          const safeId = sanitizeLogText(message.id, 128);
+          const safeChannel = sanitizeLogText(message.task.channelName, 128);
+          const safeSource = sanitizeLogText(message.task.source, 128);
+          writeStderrLine(
+            `[Channel] webhook task failed ` +
+              `(id=${safeId}, channel=${safeChannel}, source=${safeSource}): ` +
+              safeMessage,
+          );
         });
       };
       const clearHeartbeat = () => {

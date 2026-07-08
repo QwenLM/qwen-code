@@ -137,6 +137,7 @@ import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import { parseChannelWebhookConfig } from '../commands/channel/config-utils.js';
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -178,10 +179,19 @@ function loadServeChannelWebhookConfigs(
     if (typeof rawConfig !== 'object' || rawConfig === null) {
       continue;
     }
-    const webhooks = parseChannelWebhookConfig(
-      channelName,
-      rawConfig as Record<string, unknown>,
-    );
+    let webhooks: ReturnType<typeof parseChannelWebhookConfig>;
+    try {
+      webhooks = parseChannelWebhookConfig(
+        channelName,
+        rawConfig as Record<string, unknown>,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderrLine(
+        `[daemon] Skipping malformed webhook config for channel "${channelName}": ${message}`,
+      );
+      continue;
+    }
     if (webhooks) {
       parsed[channelName] = { webhooks };
     }
@@ -740,11 +750,6 @@ export function createServeApp(
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
-  app.use(bearerAuth(opts.token));
-
-  // Rate limiter: after auth (only count authenticated requests),
-  // before body parser (reject early without burning JSON.parse CPU).
-  const rateLimiter = installRateLimiter(app, opts, daemonLog);
   installJsonBodyParser(app);
 
   if (deps.enqueueChannelWebhookTask) {
@@ -754,6 +759,12 @@ export function createServeApp(
       enqueueWebhookTask: deps.enqueueChannelWebhookTask,
     });
   }
+
+  app.use(bearerAuth(opts.token));
+
+  // Rate limiter: after auth (only count authenticated requests), except
+  // webhook routes which use their own shared-secret auth before bearerAuth.
+  const rateLimiter = installRateLimiter(app, opts, daemonLog);
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register

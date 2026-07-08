@@ -1668,7 +1668,8 @@ describe('daemonWorkerCommand', () => {
       });
       await vi.waitFor(() => {
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
-          '[Channel] webhook task failed: run boom',
+          '[Channel] webhook task failed ' +
+            '(id=webhook-1, channel=telegram, source=github-ci): run boom',
         );
       });
 

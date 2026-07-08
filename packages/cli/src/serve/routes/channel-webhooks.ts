@@ -68,13 +68,18 @@ export function registerChannelWebhookRoutes(
       return;
     }
 
+    const payload = readPayload(body, res);
+    if (!payload) {
+      return;
+    }
+
     const task: ChannelWebhookTask = {
       channelName,
       source,
       eventType,
       targetRef,
       title,
-      payload: readPayload(body),
+      payload,
     };
     if (typeof body['summary'] === 'string') {
       task.summary = body['summary'];
@@ -127,13 +132,29 @@ function matchesWebhookSecret(
   return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
-function readPayload(body: Record<string, unknown>): Record<string, unknown> {
+function readPayload(
+  body: Record<string, unknown>,
+  res: {
+    status: (code: number) => {
+      json: (body: Record<string, string>) => void;
+    };
+  },
+): Record<string, unknown> | undefined {
   const payload = body['payload'];
-  return typeof payload === 'object' &&
+  if (payload === undefined) {
+    return {};
+  }
+  if (
+    typeof payload === 'object' &&
     payload !== null &&
     !Array.isArray(payload)
-    ? (payload as Record<string, unknown>)
-    : {};
+  ) {
+    return payload as Record<string, unknown>;
+  }
+  res.status(400).json({
+    error: 'Body field "payload" must be an object when provided',
+  });
+  return undefined;
 }
 
 function classifyChannelWebhookEnqueueError(error: unknown): {

@@ -107,6 +107,28 @@ describe('channel webhook routes', () => {
     });
   });
 
+  it.each(['string payload', 123, true, ['array']])(
+    'rejects non-object payload values: %s',
+    async (payload) => {
+      const h = appHarness();
+      const res = await request(h.app)
+        .post('/channels/dingtalk-main/webhooks/github-ci')
+        .set('x-qwen-webhook-secret', 'secret-value')
+        .send({
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          payload,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Body field "payload" must be an object when provided',
+      });
+      expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects invalid secrets', async () => {
     const h = appHarness();
     const res = await request(h.app)
