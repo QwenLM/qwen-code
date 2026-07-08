@@ -747,7 +747,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory and search tools (grep, glob) enforce it as the workspace boundary. Note: this is a cwd pin, not a filesystem sandbox — file/shell tools can still reach outside via absolute paths. Must be a worktree already registered against the current repository. Mutually exclusive with 'isolation'.",
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository. Mutually exclusive with 'isolation'.",
         },
       },
       required: ['description', 'prompt'],

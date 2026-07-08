@@ -98,4 +98,22 @@ describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
     const svc = new GitWorktreeService(plain);
     expect(await svc.isLinkedWorktree(plain)).toBe(false);
   });
+
+  it('canonicalizes a symlinked input before deciding (main tree via symlink → false)', async () => {
+    // Without the realpath call, `--absolute-git-dir` (which git returns
+    // canonicalized) would differ from `--git-common-dir` resolved against
+    // the symlinked input, and the main tree would be misreported as linked
+    // — the macOS `/var → /private/var` failure mode, reproduced with an
+    // explicit symlink so it runs everywhere.
+    const repo = initRepo('qwen-linked-symlink-');
+    const linkParent = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-linked-symlink-lnk-')),
+    );
+    tmpDirs.push(linkParent);
+    const link = path.join(linkParent, 'repo-link');
+    fs.symlinkSync(repo, link, 'dir');
+
+    const svc = new GitWorktreeService(repo);
+    expect(await svc.isLinkedWorktree(link)).toBe(false);
+  });
 });

@@ -1393,7 +1393,7 @@ describe('AgentTool', () => {
           subagent_type: 'file-search',
           working_dir: wt,
         });
-        await invocation.execute();
+        const result = await invocation.execute();
 
         const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
           .mock.calls[0];
@@ -1404,8 +1404,12 @@ describe('AgentTool', () => {
         expect(agentConfig.getCwd()).toBe(wt);
         expect(agentConfig.getWorkingDir()).toBe(wt);
         expect(agentConfig.getProjectRoot()).not.toBe(repo);
-        // ...and the caller-owned worktree is NOT torn down by cleanup.
+        // ...and the caller-owned worktree is NOT torn down by cleanup, nor
+        // reported as preserved (the externallyManaged guard skips teardown).
         expect(fs.existsSync(wt)).toBe(true);
+        expect(partToString(result.llmContent)).not.toContain(
+          '[worktree preserved',
+        );
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
