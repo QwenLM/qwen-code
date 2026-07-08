@@ -259,6 +259,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Multi-workspace sessions closed loop (issue #6378 Phase 2a). Advertised
+  // only when one daemon hosts more than one registered workspace runtime.
+  multi_workspace_sessions: { since: 'v1' },
   // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
   // the Chrome extension) can host an MCP server that the daemon's agent
   // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
@@ -316,6 +319,7 @@ export interface AdvertiseFeatureToggles {
    */
   cdpTunnelOverWsEnabled?: boolean;
   voiceWsAvailable?: boolean;
+  multiWorkspaceSessionsEnabled?: boolean;
 }
 
 /**
@@ -382,6 +386,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  [
+    'multi_workspace_sessions',
+    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
   ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [

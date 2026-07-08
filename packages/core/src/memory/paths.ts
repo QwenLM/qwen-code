@@ -47,52 +47,6 @@ function findGitRoot(startPath: string): string | null {
   }
 }
 
-function findCanonicalGitRoot(startPath: string): string | null {
-  const gitRoot = findGitRoot(startPath);
-  if (!gitRoot) {
-    return null;
-  }
-
-  try {
-    const gitContent = fs
-      .readFileSync(path.join(gitRoot, '.git'), 'utf-8')
-      .trim();
-    if (!gitContent.startsWith('gitdir:')) {
-      return gitRoot;
-    }
-
-    const worktreeGitDir = path.resolve(
-      gitRoot,
-      gitContent.slice('gitdir:'.length).trim(),
-    );
-    const commonDir = path.resolve(
-      worktreeGitDir,
-      fs.readFileSync(path.join(worktreeGitDir, 'commondir'), 'utf-8').trim(),
-    );
-
-    if (
-      path.resolve(path.dirname(worktreeGitDir)) !==
-      path.join(commonDir, 'worktrees')
-    ) {
-      return gitRoot;
-    }
-
-    const backlink = fs.realpathSync(
-      fs.readFileSync(path.join(worktreeGitDir, 'gitdir'), 'utf-8').trim(),
-    );
-    if (backlink !== path.join(fs.realpathSync(gitRoot), '.git')) {
-      return gitRoot;
-    }
-
-    if (path.basename(commonDir) !== '.git') {
-      return commonDir.normalize('NFC');
-    }
-    return path.dirname(commonDir).normalize('NFC');
-  } catch {
-    return gitRoot;
-  }
-}
-
 /**
  * Returns the base directory for all auto-memory storage.
  * Defaults to the runtime output dir (`runtimeOutputDir`, `QWEN_RUNTIME_DIR`,
@@ -125,12 +79,15 @@ export function getAutoMemoryRoot(projectRoot: string): string {
   if (useLocalMemory) {
     result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   } else {
-    const canonicalRoot =
-      findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
+    // Anchor at the nearest git root WITHOUT resolving linked worktrees back
+    // to their canonical repository root: each worktree gets its own memory,
+    // consistent with the per-worktree isolation of chats/, workflows/, and
+    // team memory (getTeamAutoMemoryRoot). See #6449.
+    const gitRoot = findGitRoot(projectRoot) ?? path.resolve(projectRoot);
     result = path.join(
       memoryBaseDir,
       'projects',
-      sanitizeCwd(canonicalRoot),
+      sanitizeCwd(gitRoot),
       AUTO_MEMORY_DIRNAME,
     );
   }

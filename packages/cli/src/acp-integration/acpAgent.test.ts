@@ -487,7 +487,8 @@ const { mockHistoryReplayPage } = vi.hoisted(() => ({
 }));
 vi.mock('./session/HistoryReplayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
-    replay: (messages: unknown) => mockHistoryReplay(context, messages),
+    replay: (messages: unknown, gaps: unknown) =>
+      mockHistoryReplay(context, messages, gaps),
     replayPage: (messages: unknown, options: unknown) =>
       mockHistoryReplayPage(context, messages, options),
   })),
@@ -3464,6 +3465,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     });
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -3501,6 +3503,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     });
     expect(forget).toHaveBeenCalledWith('/workspace', 'old preference', {
       config: expect.objectContaining({
@@ -5265,6 +5268,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(result.updates).toHaveLength(1);
     expect(result.updates[0]!.timestamp).toBe(4242);
     expect(result).not.toHaveProperty('partial');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates threads detected historyGaps to the replayer', async () => {
+    const settings = makeCoreSettings();
+    const gaps = [{ childUuid: 'c', missingParentUuid: 'gone' }];
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [{ role: 'user' }],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      historyGaps: gaps,
+    });
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    });
+    // 3rd arg to the replayer is the historyGaps threaded through
+    // collectHistoryReplayUpdates — without it this ACP surface renders a
+    // broken chain as contiguous, with no gap divider.
+    expect(mockHistoryReplay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      gaps,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -8066,8 +8099,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
     // load semantic: history MUST be replayed so SSE subscribers see
-    // the persisted turns.
-    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(messages);
+    // the persisted turns. Second arg is the detected history gaps
+    // (undefined here — this fixture session has an intact chain).
+    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(
+      messages,
+      undefined,
+    );
 
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);

@@ -2347,4 +2347,36 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 个扩展',
+  '{{count}} extensions': '{{count}} 个扩展',
+  '{{count}} command': '{{count}} 个命令',
+  '{{count}} commands': '{{count}} 个命令',
+  '{{count}} skill': '{{count}} 个技能',
+  '{{count}} skills': '{{count}} 个技能',
+  '{{count}} agent': '{{count}} 个代理',
+  '{{count}} agents': '{{count}} 个代理',
+  '{{count}} hook': '{{count}} 个钩子',
+  '{{count}} hooks': '{{count}} 个钩子',
+  '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension MCP servers': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension LSP server': '{{count}} 个扩展 LSP 服务器',
+  '{{count}} extension LSP servers': '{{count}} 个扩展 LSP 服务器',
+  'Reload extension changes from disk': '从磁盘重新加载扩展变更',
+  'Reloaded extensions: {{summary}}': '已重新加载扩展：{{summary}}',
+  'Reload failed: {{message}}': '重新加载失败：{{message}}',
+  'Reload failed.': '重新加载失败。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁盘上的扩展已变更。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败：{{message}}。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '扩展重新加载未完成。运行 /reload-plugins 重试。',
 };

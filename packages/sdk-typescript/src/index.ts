@@ -63,6 +63,7 @@ export {
   type DaemonTrustChangeRequestedEvent,
   type DaemonWorkspaceInitializedData,
   type DaemonWorkspaceInitializedEvent,
+  type DaemonWorkspaceCapability,
   type DaemonAvailableCommand,
   type DaemonCapabilities,
   type DaemonEnvCell,

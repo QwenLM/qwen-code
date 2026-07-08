@@ -412,22 +412,212 @@ describe('runQwenServe telemetry validation', () => {
     await expect(run).rejects.toThrow(/Invalid telemetry configuration:/);
   });
 
-  it('rejects multiple explicit workspace inputs before runtime boot', async () => {
+  it('accepts multiple explicit workspace inputs and advertises workspaces', async () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
 
-    await expect(
-      runQwenServe({
+    const handle = await runQwenServe(
+      {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
         workspace: [primary, secondary],
         maxSessions: 1,
-      }),
-    ).rejects.toThrow(/Multiple --workspace values are not supported yet/);
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        workspaceCwd: string;
+        features: string[];
+        workspaces: Array<{ cwd: string; primary: boolean }>;
+        limits: { maxTotalSessions: number | null };
+      };
+      expect(body.workspaceCwd).toBe(canonicalizeWorkspace(primary));
+      expect(body.features).toContain('multi_workspace_sessions');
+      expect(body.limits.maxTotalSessions).toBe(2);
+      expect(body.workspaces).toEqual([
+        expect.objectContaining({
+          cwd: canonicalizeWorkspace(primary),
+          primary: true,
+        }),
+        expect.objectContaining({
+          cwd: canonicalizeWorkspace(secondary),
+          primary: false,
+        }),
+      ]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const secondaryCwd = canonicalizeWorkspace(secondary);
+    const primaryBridge = makeRuntimeBridge();
+    const secondaryBridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        primaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      )
+      .mockReturnValueOnce(
+        secondaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (workspace) => {
+        const workspaceCwd =
+          typeof workspace === 'string' ? canonicalizeWorkspace(workspace) : '';
+        return {
+          merged:
+            workspaceCwd === secondaryCwd
+              ? {
+                  policy: {
+                    permissionStrategy: 'consensus',
+                    consensusQuorum: 2,
+                  },
+                }
+              : {},
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        eventRingSize: 1234,
+        compactedReplayMaxBytes: 1024,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        bootSettings: { policy: { permissionStrategy: 'local-only' } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        compactedReplayMaxBytes: 1024,
+        eventRingSize: 1234,
+        permissionPolicy: 'local-only',
+      });
+      expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        compactedReplayMaxBytes: 1024,
+        eventRingSize: 1234,
+        permissionPolicy: 'local-only',
+      });
+      expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
+        'permissionConsensusQuorum',
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not validate policy settings for untrusted secondary workspaces', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const secondaryCwd = canonicalizeWorkspace(secondary);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      )
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (workspace) => {
+        const workspaceCwd =
+          typeof workspace === 'string' ? canonicalizeWorkspace(workspace) : '';
+        return {
+          merged:
+            workspaceCwd === secondaryCwd
+              ? { policy: { permissionStrategy: 'bogus' } }
+              : {},
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(
+      trustedFoldersRuntime,
+      'getWorkspaceTrustStatus',
+    ).mockImplementation(
+      (_settings, workspace) =>
+        ({
+          effective: {
+            state:
+              canonicalizeWorkspace(workspace) === secondaryCwd
+                ? 'untrusted'
+                : 'trusted',
+          },
+        }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        bootSettings: { policy: { permissionStrategy: 'local-only' } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        permissionPolicy: 'local-only',
+      });
+    } finally {
+      await handle.close();
+    }
   });
 
   it('accepts a single workspace array input as the primary workspace', async () => {
@@ -1035,6 +1225,34 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
     },
   );
+
+  it('rejects an injected bridge with multiple explicit workspaces before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bridge-opt-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: [primary, secondary],
+        },
+        { bridge: makeRuntimeBridge() },
+      ),
+    ).rejects.toThrow(/Injected bridge dependencies/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+  });
 });
 
 describe('runQwenServe session reaper timeout validation', () => {
@@ -1564,6 +1782,102 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('updates secondary runtime env metadata in place after workspace reload', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-secondary-env-reload-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
+        const workspace = args[0];
+        const options = args[1];
+        const isReload =
+          typeof options === 'object' && options?.skipLoadEnvironment === true;
+        const isSecondary = workspace === secondary;
+        return {
+          merged: {
+            env: {
+              [isSecondary
+                ? 'QWEN_TEST_SECONDARY_ENV'
+                : 'QWEN_TEST_PRIMARY_ENV']: isReload ? 'reloaded' : 'boot',
+            },
+          },
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(settingsRuntime, 'reloadEnvironment').mockReturnValue({
+      updatedKeys: ['QWEN_TEST_SECONDARY_ENV'],
+      removedKeys: [],
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      )
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      );
+    let workspaceRegistry:
+      | import('./workspace-registry.js').WorkspaceRegistry
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        workspaceRegistry = deps?.workspaceRegistry;
+        return express();
+      },
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const secondaryRuntime = workspaceRegistry
+        ?.list()
+        .find((runtime) => runtime.workspaceCwd === secondary);
+      expect(secondaryRuntime).toBeDefined();
+      const env = secondaryRuntime!.env;
+      const overlayKeys = env.overlayKeys;
+      const envFilePaths = env.envFilePaths;
+      const envFileReadFailures = env.envFileReadFailures;
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('boot');
+
+      await secondaryRuntime!.workspaceService.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: secondary,
+      });
+
+      expect(env.overlayKeys).toBe(overlayKeys);
+      expect(env.envFilePaths).toBe(envFilePaths);
+      expect(env.envFileReadFailures).toBe(envFileReadFailures);
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('reloaded');
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('filters secondary workspace roots before constructing the bridge filesystem', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
@@ -1958,6 +2272,80 @@ describe('runQwenServe runtime startup failures', () => {
         error: 'Daemon runtime is still starting',
         code: 'daemon_runtime_starting',
       });
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.close();
+    }
+  });
+
+  it('returns bootstrap 503 for multi-workspace capabilities until runtime routes mount', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-starting-caps-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        runtimeStartupTimeoutMs: 0,
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+
+    try {
+      const bootstrapRes = await fetch(`${handle.url}/capabilities`);
+      expect(bootstrapRes.status).toBe(503);
+      expect(bootstrapRes.headers.get('retry-after')).toBe('1');
+      expect(await bootstrapRes.json()).toMatchObject({
+        error: 'Daemon runtime is still starting',
+        code: 'daemon_runtime_starting',
+      });
+      expect(createBridge).not.toHaveBeenCalled();
+
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.runtimeReady;
+      const runtimeRes = await fetch(`${handle.url}/capabilities`);
+      expect(runtimeRes.status).toBe(200);
+      const runtimeBody = (await runtimeRes.json()) as { features: string[] };
+      expect(runtimeBody.features).toContain('multi_workspace_sessions');
     } finally {
       resolveTelemetry?.({
         enabled: false,
@@ -3088,6 +3476,50 @@ describe('runQwenServe runtime startup failures', () => {
     expect(bridge.shutdown).toHaveBeenCalledTimes(1);
   });
 
+  it('shuts down all workspace bridges when multi-workspace runtime mounting fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-partial-fail-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const primaryBridge = makeRuntimeBridge();
+    const secondaryBridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        primaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      )
+      .mockReturnValueOnce(
+        secondaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      throw new Error('runtime app boom');
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow('runtime app boom');
+      expect(primaryBridge.shutdown).toHaveBeenCalledTimes(1);
+      expect(secondaryBridge.shutdown).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+    expect(primaryBridge.shutdown).toHaveBeenCalledTimes(1);
+    expect(secondaryBridge.shutdown).toHaveBeenCalledTimes(1);
+  });
+
   it('cleans up runtime locals when closed immediately after listening', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-close-')),
@@ -4063,11 +4495,12 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     const listenError = new Error('listen failed') as NodeJS.ErrnoException;
     listenError.code = 'EADDRINUSE';
-    const fakeServer = createServer();
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
       listen: vi.fn(() => {
-        setImmediate(() => fakeServer.emit('error', listenError));
-        return fakeServer;
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
       }),
     } as unknown as express.Application);
     const worker = makeWorker({
@@ -4101,6 +4534,180 @@ describe('runQwenServe channel worker supervisor', () => {
       servePid: process.pid,
     });
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
+  it('retries the next port on EADDRINUSE and succeeds', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        if (portsAttempted.length === 1) {
+          const err = new Error('address in use') as NodeJS.ErrnoException;
+          err.code = 'EADDRINUSE';
+          setImmediate(() => srv.emit('error', err));
+        } else {
+          srv.listen(0, '127.0.0.1', () => {
+            setImmediate(() => {
+              srv.emit('listening');
+              if (typeof cb === 'function') cb();
+            });
+          });
+        }
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      stderrSpy.mockRestore();
+      expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(handle.url).not.toContain(':4170');
+      expect(
+        stderrWrites.some((w) =>
+          w.includes('port 4170 is in use, trying 4171'),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not retry on non-EADDRINUSE listen errors', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('permission denied') as NodeJS.ErrnoException;
+    listenError.code = 'EACCES';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, _cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([4170]);
+  });
+
+  it('rejects after exhausting all port retry attempts', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-exhaust-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    stderrSpy.mockRestore();
+    expect(portsAttempted).toEqual(
+      Array.from({ length: 10 }, (_, i) => 4170 + i),
+    );
+    expect(
+      stderrWrites.some((w) => w.includes('all ports 4170–4179 are in use')),
+    ).toBe(true);
+  });
+
+  it('does not retry EADDRINUSE when port is 0 (ephemeral)', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port0-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([0]);
   });
 
   it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {

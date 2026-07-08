@@ -589,6 +589,7 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
 
     await bridge.shutdown();
@@ -644,6 +645,7 @@ describe('createAcpSessionBridge', () => {
                   },
                 ],
                 touchedTopics: ['project'],
+                touchedScopes: ['project'],
                 querySeen: params['query'],
               };
             }
@@ -662,6 +664,7 @@ describe('createAcpSessionBridge', () => {
     expect(result).toMatchObject({
       summary: 'forgot',
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
       removedEntries: [
         {
           topic: 'project',
@@ -679,7 +682,41 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('derives workspace memory forget scopes for legacy responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [],
+                touchedTopics: ['feedback', 'project'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryForget({
+      query: 'old preference',
+    });
+
+    expect(result).toMatchObject({
+      touchedTopics: ['feedback', 'project'],
+      touchedScopes: ['user', 'project'],
+    });
 
     await bridge.shutdown();
   });

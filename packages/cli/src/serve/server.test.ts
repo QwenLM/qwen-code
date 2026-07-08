@@ -361,6 +361,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'multi_workspace_sessions',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'voice_transcribe',
@@ -598,6 +599,7 @@ interface FakeBridgeOpts {
       filePath: string;
     }>;
     touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+    touchedScopes: Array<'user' | 'project'>;
   }>;
   workspaceMemoryDreamImpl?: () => Promise<{
     summary?: string;
@@ -889,6 +891,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summary: 'forgot',
       removedEntries: [],
       touchedTopics: [],
+      touchedScopes: [],
     }));
   const workspaceMemoryDreamImpl =
     opts.workspaceMemoryDreamImpl ??
@@ -2076,6 +2079,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               reloadAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'multi_workspace_sessions') {
+          expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -5942,7 +5961,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('passes explicit cwd through to the bridge', async () => {
+    it('passes explicit primary cwd through to the bridge', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
           sessionId: req.sessionId,
@@ -5952,18 +5971,22 @@ describe('createServeApp', () => {
           state: { configOptions: [] },
         }),
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
       const res = await request(app)
         .post('/session/persisted-2/load')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ cwd: '/work/a' });
+        .send({ cwd: WS_BOUND });
 
       expect(res.status).toBe(200);
       expect(res.body.state).toEqual({ configOptions: [] });
       expect(bridge.loadCalls).toEqual([
         {
           sessionId: 'persisted-2',
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_BOUND,
           historyReplay: 'response',
         },
       ]);
@@ -6119,7 +6142,7 @@ describe('createServeApp', () => {
       });
     });
 
-    it('400 workspace_mismatch when the bridge throws WorkspaceMismatchError', async () => {
+    it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
       const bridge = fakeBridge({
         loadImpl: async () => {
           throw new WorkspaceMismatchError(WS_BOUND, WS_DIFFERENT);
@@ -6141,6 +6164,7 @@ describe('createServeApp', () => {
         boundWorkspace: WS_BOUND,
         requestedWorkspace: WS_DIFFERENT,
       });
+      expect(bridge.loadCalls).toHaveLength(0);
     });
 
     it('503 + Retry-After: 5 when the bridge throws SessionLimitExceededError', async () => {
@@ -8200,24 +8224,24 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/approval-mode (#4175 Wave 4 PR 17)', () => {
-    // Strict-gated route: refuses on no-token loopback defaults. All
-    // tests configure a token and forward `Authorization: Bearer …`.
+    // Non-strict route: works on no-token loopback defaults (matches
+    // POST /session/:id/model). Token-configured tests still forward
+    // `Authorization: Bearer …`.
     const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
     const auth = (req: request.Test): request.Test =>
       req
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+    it('200 on no-token daemon without bearer auth', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .post('/session/session-A/approval-mode')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ mode: 'yolo' });
-      expect(res.status).toBe(401);
-      expect(res.body.code).toBe('token_required');
-      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(bridge.setApprovalModeCalls).toHaveLength(1);
     });
 
     it('200 with the typed result on success and persist defaults to false', async () => {
@@ -10915,15 +10939,11 @@ describe('createServeApp', () => {
       await writeSession(sid);
       let firstCloseStarted!: () => void;
       let releaseFirstClose!: () => void;
-      let secondCloseStarted!: () => void;
       const firstCloseStartedPromise = new Promise<void>((resolve) => {
         firstCloseStarted = resolve;
       });
       const firstCloseReleasedPromise = new Promise<void>((resolve) => {
         releaseFirstClose = resolve;
-      });
-      const secondCloseStartedPromise = new Promise<void>((resolve) => {
-        secondCloseStarted = resolve;
       });
       let closeCount = 0;
       const bridge = fakeBridge({
@@ -10932,8 +10952,6 @@ describe('createServeApp', () => {
           if (closeCount === 1) {
             firstCloseStarted();
             await firstCloseReleasedPromise;
-          } else {
-            secondCloseStarted();
           }
         },
       });
@@ -10955,23 +10973,19 @@ describe('createServeApp', () => {
         .send({ sessionIds: [sid] })
         .then((res) => res);
 
-      const raceResult = await Promise.race([
-        secondCloseStartedPromise.then(() => 'archive-started'),
-        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
-      ]);
+      const archiveRes = await archivePromise;
 
       releaseFirstClose();
       try {
-        expect(raceResult).toBe('blocked');
-        const deleteRes = await deletePromise;
-        expect(deleteRes.status).toBe(200);
-        expect(deleteRes.body.removed).toEqual([sid]);
-        const archiveRes = await archivePromise;
+        expect(closeCount).toBe(1);
         expect(archiveRes.status).toBe(409);
         expect(archiveRes.body).toMatchObject({
           code: 'session_archiving',
           sessionId: sid,
         });
+        const deleteRes = await deletePromise;
+        expect(deleteRes.status).toBe(200);
+        expect(deleteRes.body.removed).toEqual([sid]);
       } finally {
         await Promise.allSettled([deletePromise, archivePromise]);
       }

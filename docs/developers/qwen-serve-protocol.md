@@ -72,18 +72,18 @@ with status `400`.
 
 with status `404`.
 
-`WorkspaceMismatchError` for a `POST /session` whose `cwd` doesn't canonicalize to the daemon's bound workspace (#3803 §02 — 1 daemon = 1 workspace) returns `400` with:
+`WorkspaceMismatchError` for a `POST /session` whose `cwd` doesn't canonicalize to a registered workspace returns `400` with:
 
 ```json
 {
-  "error": "Workspace mismatch: daemon is bound to \"…\" but request asked for \"…\". …",
+  "error": "Workspace mismatch: daemon is bound to \"…\"",
   "code": "workspace_mismatch",
-  "boundWorkspace": "/path/the/daemon/binds",
+  "boundWorkspace": "/path/the/daemon/uses/as-primary",
   "requestedWorkspace": "/path/in/the/request"
 }
 ```
 
-Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` and omit `cwd` from `POST /session` (it falls back to the bound workspace), or route the request to a daemon bound to `requestedWorkspace`.
+Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` and omit `cwd` from `POST /session` (it falls back to the primary workspace), or when `multi_workspace_sessions` is advertised choose one of `workspaces[].cwd`.
 
 `POST /session` past the daemon's `--max-sessions` cap returns `503` with a `Retry-After: 5` header and:
 
@@ -371,7 +371,7 @@ runtime routes return `503`.
 
 `runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `pendingPrompts` counts all accepted prompts that have not settled yet, including the running prompt and FIFO-waiting prompts. `queuedPrompts` counts FIFO-waiting prompts that have been accepted but not dispatched. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
-`limits.maxTotalSessions` is additive. `null` means the daemon-wide fresh-session cap is disabled. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`. It does not change `/capabilities`, does not advertise `workspaces[]`, and does not enable multi-workspace routing by itself.
+`limits.maxTotalSessions` is additive. `null` means the effective daemon-wide fresh-session cap is disabled. In multi-workspace mode, when `--max-total-sessions` is omitted and `maxSessionsPerWorkspace` is finite, the daemon derives the effective total cap as `maxSessionsPerWorkspace * workspaces.length`. When set, it limits fresh session creation across the daemon and reports total-limit failures with the existing `session_limit_exceeded` error shape plus `scope: "total"`.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -417,9 +417,28 @@ the daemon log path; `full` may include it for authenticated operators.
     "supported": ["v1"]
   },
   "mode": "http-bridge",
-  "features": ["health", "daemon_status", "capabilities", "..."],
+  "features": ["health", "daemon_status", "capabilities", "multi_workspace_sessions", "..."],
+  "limits": {
+    "maxPendingPromptsPerSession": 5,
+    "maxSessionsPerWorkspace": 20,
+    "maxTotalSessions": 40
+  },
   "modelServices": [],
-  "workspaceCwd": "/canonical/path/to/workspace"
+  "workspaceCwd": "/canonical/path/to/primary-workspace",
+  "workspaces": [
+    {
+      "id": "stable-workspace-id",
+      "cwd": "/canonical/path/to/primary-workspace",
+      "primary": true,
+      "trusted": true
+    },
+    {
+      "id": "stable-secondary-workspace-id",
+      "cwd": "/canonical/path/to/secondary-workspace",
+      "primary": false,
+      "trusted": true
+    }
+  ]
 }
 ```
 
@@ -429,7 +448,9 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
 
-> **`workspaceCwd`** is the canonical absolute path this daemon binds to (#3803 §02 — 1 daemon = 1 workspace). Use it to (a) detect mismatch before posting `/session` and (b) omit `cwd` on `POST /session` (the route falls back to this path). Multi-workspace deployments expose multiple daemons on different ports, each with its own `workspaceCwd`. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
+> **`workspaceCwd`** is the canonical absolute path for the daemon's primary workspace. Use it to omit `cwd` on `POST /session` (the route falls back to this primary path) and to keep old single-workspace clients compatible. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
+
+> **`workspaces[]`** is present only when `features` contains `multi_workspace_sessions`. Each entry is `{ id, cwd, primary, trusted }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes.
 
 ### Read-only runtime status routes
 
@@ -878,7 +899,7 @@ returned.
 
 ### Workspace file routes
 
-All file paths are resolved through the daemon's bound workspace. Responses use
+All file paths are resolved through the daemon's primary workspace. Responses use
 workspace-relative paths and never return absolute filesystem paths for normal
 success cases. Successful file responses include:
 
@@ -1190,7 +1211,7 @@ Request:
 
 | Field            | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd`            | no       | Absolute path matching the daemon's bound workspace. If omitted, the route falls back to `boundWorkspace` (read it off `/capabilities.workspaceCwd`). A mismatched non-empty `cwd` returns `400 workspace_mismatch` (#3803 §02 — 1 daemon = 1 workspace). Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't reject sessions per spelling.                                                                                                                                                                          |
+| `cwd`            | no       | Absolute path matching one registered workspace. If omitted, the route falls back to the primary workspace (read it off `/capabilities.workspaceCwd`). A mismatched non-empty `cwd` returns `400 workspace_mismatch`. When `features` contains `multi_workspace_sessions`, clients may pass any trusted `workspaces[].cwd`; otherwise only the primary workspace is accepted. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't reject sessions per spelling.                                                      |
 | `modelServiceId` | no       | Selects which configured _model service_ the agent will route through (the back-end provider — Alibaba ModelStudio, OpenRouter, etc). If omitted the agent uses its default. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`. Distinct from `modelId` on `POST /session/:id/model`, which selects the model **within** an already-bound service. The `modelServices` array on `/capabilities` is reserved for advertising configured services; in Stage 1 it is always `[]` (the agent's default service is used and not enumerated over HTTP). |
 | `sessionScope`   | no       | Per-request override for session sharing. `'single'` (the daemon-wide default) makes a second same-workspace `POST /session` reuse the existing session (`attached: true`); `'thread'` forces a fresh distinct session every call. Omit to inherit the daemon-wide default. Values outside the enum return `400 { code: 'invalid_session_scope' }`. Old daemons (pre-#4175 PR 5) silently ignore the field — pre-flight `caps.features.session_scope_override` before sending. The daemon-wide default is hardcoded to `'single'` in production today; #4175 may add a `--sessionScope` CLI flag in a follow-up.         |
 
@@ -1792,7 +1813,7 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_init`. Pure file IO — no ACP roundtrip, **no LLM invocation**.
 
-Scaffold an empty `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns under `--memory-file-name` overrides) at the daemon's bound workspace root. Mechanical only — for AI-driven content fill, follow up with `POST /session/:id/prompt`.
+Scaffold an empty `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns under `--memory-file-name` overrides) at the daemon's primary workspace root. Mechanical only — for AI-driven content fill, follow up with `POST /session/:id/prompt`.
 
 Default refuses to overwrite when the target file exists with non-whitespace content. Whitespace-only files are treated as absent (matches the local `/init` slash command).
 
