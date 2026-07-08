@@ -4204,6 +4204,13 @@ describe('runQwenServe channel worker supervisor', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-exhaust-')),
     );
     const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
     const listenError = new Error('address in use') as NodeJS.ErrnoException;
     listenError.code = 'EADDRINUSE';
     vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
@@ -4229,9 +4236,13 @@ describe('runQwenServe channel worker supervisor', () => {
       ),
     ).rejects.toBe(listenError);
 
+    stderrSpy.mockRestore();
     expect(portsAttempted).toEqual(
       Array.from({ length: 10 }, (_, i) => 4170 + i),
     );
+    expect(
+      stderrWrites.some((w) => w.includes('all ports 4170–4179 are in use')),
+    ).toBe(true);
   });
 
   it('does not retry EADDRINUSE when port is 0 (ephemeral)', async () => {

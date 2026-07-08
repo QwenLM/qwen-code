@@ -3532,31 +3532,31 @@ export async function runQwenServe(
       }
     };
     let server: Server;
+    let httpsServer: https.Server | undefined;
+    if (tlsOptions) {
+      try {
+        httpsServer = https.createServer(tlsOptions, app);
+      } catch (err) {
+        // createSecureContext throws a raw OpenSSL string (e.g.
+        // "error:0B080074:...key values mismatch") when cert/key don't pair.
+        // Wrap it so the operator gets the same actionable framing as the
+        // --tls-cert/--tls-key read errors above.
+        reject(
+          new Error(
+            `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
+              `could not be loaded (do they match?): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return;
+      }
+    }
 
     const tryListen = (attemptPort: number, attempt: number): void => {
       try {
-        if (tlsOptions) {
-          let httpsServer: https.Server;
-          try {
-            httpsServer = https.createServer(tlsOptions, app);
-          } catch (err) {
-            // createSecureContext throws a raw OpenSSL string (e.g.
-            // "error:0B080074:...key values mismatch") when cert/key don't pair.
-            // Wrap it so the operator gets the same actionable framing as the
-            // --tls-cert/--tls-key read errors above.
-            reject(
-              new Error(
-                `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
-                  `could not be loaded (do they match?): ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
-              ),
-            );
-            return;
-          }
-          server = httpsServer.listen(attemptPort, listenHostname, onListening);
-        } else {
-          server = app.listen(attemptPort, listenHostname, onListening);
-        }
+        server = httpsServer
+          ? httpsServer.listen(attemptPort, listenHostname, onListening)
+          : app.listen(attemptPort, listenHostname, onListening);
       } catch (err) {
         // Synchronous listen failure (e.g. invalid address) — not
         // recoverable via port bump.
@@ -3567,16 +3567,23 @@ export async function runQwenServe(
 
       server.once('error', (err: NodeJS.ErrnoException) => {
         server.close();
+        const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
           opts.port !== 0 &&
+          nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1
         ) {
           writeStderrLine(
-            `qwen serve: port ${attemptPort} is in use, trying ${attemptPort + 1}...`,
+            `qwen serve: port ${attemptPort} is in use, trying ${nextPort}...`,
           );
-          tryListen(attemptPort + 1, attempt + 1);
+          tryListen(nextPort, attempt + 1);
         } else {
+          if (err.code === 'EADDRINUSE' && attempt > 0) {
+            writeStderrLine(
+              `qwen serve: all ports ${opts.port}–${attemptPort} are in use`,
+            );
+          }
           removeCurrentServePidfile();
           reject(err);
         }

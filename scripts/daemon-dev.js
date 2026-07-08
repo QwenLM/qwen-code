@@ -25,6 +25,7 @@ const serveOptionNames = new Set([
   '--max-connections',
   '--require-auth',
   '--event-ring-size',
+  '--compacted-replay-max-bytes',
 ]);
 
 function readOption(name) {
@@ -93,15 +94,15 @@ function findAvailablePort(host, startPort) {
   return new Promise((resolveFind, rejectFind) => {
     let attempt = 0;
     const tryNext = () => {
-      if (attempt >= MAX_PORT_ATTEMPTS) {
+      const port = startPort + attempt;
+      if (port > 65535 || attempt >= MAX_PORT_ATTEMPTS) {
         rejectFind(
           new Error(
-            `No available port found in range ${startPort}–${startPort + MAX_PORT_ATTEMPTS - 1}`,
+            `No available port found in range ${startPort}–${Math.min(startPort + MAX_PORT_ATTEMPTS - 1, 65535)}`,
           ),
         );
         return;
       }
-      const port = startPort + attempt;
       const probe = net.createServer();
       probe.once('error', (err) => {
         probe.close();
@@ -255,7 +256,9 @@ const probeHostname =
   hostname.startsWith('[') && hostname.endsWith(']')
     ? hostname.slice(1, -1)
     : hostname;
-const port = String(await findAvailablePort(probeHostname, startPort));
+const port = hasOption('--port')
+  ? String(startPort)
+  : String(await findAvailablePort(probeHostname, startPort));
 const token =
   readOption('--token') ||
   process.env.QWEN_SERVER_TOKEN ||
