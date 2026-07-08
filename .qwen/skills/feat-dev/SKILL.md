@@ -14,9 +14,9 @@ feeds the next.
 
 ## Artifact Paths
 
-Use `.qwen/` paths for planning artifacts:
+Use these paths for planning artifacts:
 
-- `.qwen/design/<feature>.md`
+- `docs/design/<feature>.md`
 - `.qwen/e2e-tests/<feature>.md`
 
 ## Phase 1: Investigate

@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -271,11 +272,19 @@ describe('qwen-autofix workflow', () => {
       "issue_comment:\n    types:\n      - 'created'",
     );
     expect(workflow).not.toContain(
+      "pull_request_review_comment:\n    types:\n      - 'created'",
+    );
+    expect(workflow).not.toContain(
+      "pull_request_review:\n    types:\n      - 'submitted'",
+    );
+    expect(workflow).not.toContain(
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
     );
     expect(workflow).not.toContain('@qwen-code /autofix');
     expect(workflow).not.toContain('/autofix run');
+    expect(workflow).not.toContain('@qwen-code /address-review');
     expect(routeStep).not.toContain('comment command accepted');
+    expect(routeStep).not.toContain('address-review command accepted');
     expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
     expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
   });
@@ -505,16 +514,32 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('npm install -g');
     }
     expect(workflow).not.toContain('run_shell_command(node dist/cli.js)');
-    expect(workflow).not.toContain('run_shell_command(npm run build)');
+    for (const command of [
+      'run_shell_command(npm run build)',
+      'run_shell_command(npm run typecheck)',
+      'run_shell_command(npm run lint)',
+      'run_shell_command(npx vitest)',
+    ]) {
+      expect(developFixStep).toContain(command);
+      expect(triageAndAddressStep).toContain(command);
+    }
+    expect(developFixStep).not.toContain('run_shell_command(npm)');
+    expect(triageAndAddressStep).not.toContain('run_shell_command(npm)');
+    expect(assessCandidatesStep).not.toContain('run_shell_command(npm)');
+    expect(workflow).not.toContain('run_shell_command(npm publish)');
+    expect(workflow).not.toContain('run_shell_command(npm exec)');
     expect(workflow).not.toContain('run_shell_command(npm run bundle)');
-    expect(workflow).not.toContain('run_shell_command(npx vitest)');
-    expect(workflowAndSkill).toContain('Do not run project code,');
+    expect(assessCandidatesStep).not.toContain('run_shell_command(npx vitest)');
     expect(workflowAndSkill).toContain(
-      'workflow verification gate runs trusted checks after',
+      'Run required verification commands before committing',
     );
+    expect(workflowAndSkill).toContain('npm run build');
+    expect(workflowAndSkill).toContain('npm run typecheck');
+    expect(workflowAndSkill).toContain('npm run lint');
     expect(workflowAndSkill).toContain(
-      'overrides repository instructions that ask agents to run verification',
+      'Do not run the CLI, examples, release scripts',
     );
+    expect(workflowAndSkill).toContain('do not commit');
     expect(workflow).toContain('"sandbox": "docker"');
     expect(workflow).not.toContain('"sandbox": false');
     expect(workflow).not.toContain('"sandbox": true');
@@ -636,6 +661,7 @@ describe('qwen-autofix workflow', () => {
       'untrusted input',
       'Do not push, comment, create pull requests',
       'Operate only in the workflow',
+      'Run required verification commands before committing',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
@@ -870,6 +896,109 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
+    expect(reviewAddressReportStep).toContain(
+      "GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "NEWEST: '${{ steps.prepare.outputs.newest }}'",
+    );
+    expect(reviewAddressReportStep).toContain('"${DRY_RUN}" != "true"');
+    expect(reviewAddressReportStep).toContain('-s "${WORKDIR}/handoff.md"');
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Could not address the latest review feedback automatically',
+    );
+    expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
+    expect(reviewAddressReportStep).toContain(
+      'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${bot_actor}',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '::warning::Failed to post handoff comment on PR #${PR}',
+    );
+    expect(reviewAddressReportStep).toContain('human should take over');
+    expect(reviewAddressReportStep).toContain("sed 's/<!--[^>]*-->//g'");
+  });
+
+  it('writes agent output to a log and marks loop guard failures for handoff', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
+        'turn_tool_call_cap',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen hit the tool-call loop guard',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('handles agent log stream errors without crashing immediately', () => {
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
+      "log.on('error', () => {});",
+    );
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
+      'if (log.destroyed)',
+    );
+  });
+
+  it('detects loop guard output before it falls out of the log tail', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Loop detection halted the run\\n');",
+        "process.stdout.write('x'.repeat(21_000));",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen hit the tool-call loop guard',
+      );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+    });
+  });
+
+  it('does not mark generic qwen subprocess failures for handoff', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('temporary upstream error\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'agent.log'), 'utf8')).toContain(
+        'temporary upstream error',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+    });
+  });
+
   it('preserves agent-written failure details when the qwen subprocess fails', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'candidates.json'), '[]\n');
@@ -884,14 +1013,60 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'agent detail',
       );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
     });
   });
 
   it('bounds qwen subprocess runtime', () => {
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
-    expect(runner).toContain('const QWEN_TIMEOUT_MS = 50 * 60 * 1000');
-    expect(runner).toContain('timeout: QWEN_TIMEOUT_MS');
+    expect(runner).toContain('50 * 60 * 1000');
+    expect(runner).toContain('setTimeout(() =>');
+    expect(runner).toContain("killQwen(child, 'SIGKILL')");
+    expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
+  });
+
+  it('kills qwen subprocess descendants on timeout', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "import { spawn } from 'node:child_process';",
+        "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], {",
+        "  stdio: ['ignore', 'inherit', 'inherit'],",
+        '});',
+        'setTimeout(() => process.exit(0), 3000);',
+      ]);
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_TIMEOUT_MS: '100' },
+          timeout: 2000,
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'timeout (100ms)',
+      );
+    });
   });
 
   it('reports external qwen subprocess signals without calling them timeouts', () => {
@@ -951,6 +1126,9 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'cannot proceed',
       );
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
     });
   });
 
@@ -1002,7 +1180,7 @@ describe('qwen-autofix workflow', () => {
       expect(stderr).toContain('pr-title.txt');
       expect(stderr).toContain('pr-body.md');
     });
-  });
+  }, 10000);
 
   it('does not reference stale comment-trigger routing in the skill', () => {
     const skill = readAutofixSkill();

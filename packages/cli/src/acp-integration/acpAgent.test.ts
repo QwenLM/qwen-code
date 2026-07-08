@@ -1354,10 +1354,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ].join(path.delimiter);
 
     try {
-      await expectAcpLocalReadRoots(
-        'session-with-fs-env',
-        [...expectedDefaultAcpLocalReadRoots(), envRootA, envRootB],
-      );
+      await expectAcpLocalReadRoots('session-with-fs-env', [
+        ...expectedDefaultAcpLocalReadRoots(),
+        envRootA,
+        envRootB,
+      ]);
     } finally {
       restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
     }
@@ -3440,6 +3441,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     });
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -3477,6 +3479,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     });
     expect(forget).toHaveBeenCalledWith('/workspace', 'old preference', {
       config: expect.objectContaining({

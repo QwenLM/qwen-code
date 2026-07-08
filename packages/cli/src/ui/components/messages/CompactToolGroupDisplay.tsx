@@ -190,13 +190,42 @@ export function isCollapsibleTool(toolName: string): boolean {
 }
 
 /**
+ * Strip ANSI control sequences and reject JSON-looking error fallbacks.
+ *
+ * When a tool call errors, `useReactToolScheduler` sets description to
+ * `JSON.stringify(request.args)` which produces `{...}` blobs. Return
+ * `undefined` for those so the caller falls back to count format.
+ */
+function safeDescription(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+
+  /* eslint-disable no-control-regex */
+  // Strip all common ANSI escape sequences: OSC, charset, CSI, and single-byte ESC
+  const stripped = raw.replace(
+    /\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[0-9;]*[a-zA-Z]|\x1b./g,
+    '',
+  );
+  // Replace all C0 control characters (including \n, \r) with spaces
+  const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  /* eslint-enable no-control-regex */
+
+  // Reject JSON-looking blobs (error fallback from args)
+  if (cleaned.startsWith('{') || cleaned.startsWith('[')) return undefined;
+
+  return cleaned || undefined;
+}
+
+/**
  * Build a semantic summary line from a batch of tool calls.
  *
- * Single tool  → "Read 1 file" / "Ran 1 command"
- * Multi  same  → "Read 3 files"
- * Multi mixed  → "Read 3 files, edited 2 files, ran 1 command"
+ * Single tool (with description) → "Read a.ts" / "Ran ls -la"
+ * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
+ * Multi  same                    → "Read 3 files"
+ * Multi mixed                    → "Read a.ts, ran npm test, edited b.ts"
  *
  * Uses past tense when all tools are done, present progressive when active.
+ * Falls back to count format when description is empty, contains control
+ * characters, or looks like a JSON blob (e.g. error fallback from args).
  */
 export function buildToolSummary(
   toolCalls: IndividualToolCallDisplay[],
@@ -204,28 +233,35 @@ export function buildToolSummary(
 ): string {
   if (toolCalls.length === 0) return '';
 
-  // Group by category and count
-  const counts = new Map<ToolCategory, number>();
+  // Group by category to preserve tool references for description access
+  const toolsByCategory = new Map<ToolCategory, IndividualToolCallDisplay[]>();
 
   for (const tool of toolCalls) {
     const cat = getToolCategory(tool.name);
-    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    const arr = toolsByCategory.get(cat) ?? [];
+    arr.push(tool);
+    toolsByCategory.set(cat, arr);
   }
 
   const parts: string[] = [];
   for (const cat of CATEGORY_ORDER) {
-    const count = counts.get(cat);
-    if (!count) continue;
+    const tools = toolsByCategory.get(cat);
+    if (!tools || tools.length === 0) continue;
 
     const template = CATEGORY_TEMPLATES[cat];
     const verb = isActive ? template.activeVerb : template.pastVerb;
     const lower = parts.length > 0;
     const v = lower ? verb.toLowerCase() : verb;
 
-    if (count === 1) {
-      parts.push(`${v} 1 ${template.singular}`);
+    if (tools.length === 1) {
+      const safeDesc = safeDescription(tools[0].description);
+      if (safeDesc !== undefined) {
+        parts.push(`${v} ${safeDesc}`);
+      } else {
+        parts.push(`${v} 1 ${template.singular}`);
+      }
     } else {
-      parts.push(`${v} ${count} ${template.plural}`);
+      parts.push(`${v} ${tools.length} ${template.plural}`);
     }
   }
 

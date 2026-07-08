@@ -48,6 +48,8 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonUsageDashboard,
+  DaemonUsageRange,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
@@ -320,13 +322,14 @@ export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
 
 export interface CreateSessionRequest {
   /**
-   * Workspace path the daemon must be bound to. When
+   * Workspace path the daemon must have registered. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
-   * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
-   * to be explicit, or omit it for the daemon-knows-best path. A
-   * non-empty `workspaceCwd` that doesn't canonicalize to the
-   * daemon's bound path yields a `400 workspace_mismatch`
-   * `DaemonHttpError`.
+   * back to its primary workspace. Pass `caps.workspaceCwd` to be
+   * explicit, pass a trusted `caps.workspaces[].cwd` when
+   * `multi_workspace_sessions` is advertised, or omit it for the
+   * daemon-knows-best path. A non-empty `workspaceCwd` that doesn't
+   * canonicalize to a registered workspace yields a
+   * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
   modelServiceId?: string;
@@ -350,8 +353,8 @@ export interface CreateSessionRequest {
 
 export interface RestoreSessionRequest {
   /**
-   * Workspace path the daemon must be bound to. Omit to let the daemon use
-   * its advertised bound workspace, mirroring `createOrAttachSession`.
+   * Workspace path the daemon must have registered. Omit to let the daemon use
+   * its advertised primary workspace, mirroring `createOrAttachSession`.
    */
   workspaceCwd?: string;
 }
@@ -701,6 +704,28 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonStatusReport>(
       `/daemon/status${query}`,
       'GET /daemon/status',
+    );
+  }
+
+  /**
+   * Aggregate local token-usage dashboard (`GET /usage/dashboard`): the
+   * selected range's flattened totals plus a trailing per-day heatmap, read
+   * from the durable local usage history (global, cross-project). `range`
+   * scopes the summary (default `today`); `heatmapDays` sets the heatmap
+   * window (default ~6 months, server-clamped to 1..366).
+   */
+  async usageDashboard(
+    opts: { range?: DaemonUsageRange; heatmapDays?: number } = {},
+  ): Promise<DaemonUsageDashboard> {
+    const params = new URLSearchParams();
+    if (opts.range !== undefined) params.set('range', opts.range);
+    if (opts.heatmapDays !== undefined) {
+      params.set('heatmapDays', String(opts.heatmapDays));
+    }
+    const query = params.toString();
+    return await this.jsonRequest<DaemonUsageDashboard>(
+      `/usage/dashboard${query ? `?${query}` : ''}`,
+      'GET /usage/dashboard',
     );
   }
 
@@ -1370,7 +1395,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSession> {
     // Omitting `cwd` lets the daemon fall back to its
-    // bound workspace. JSON.stringify strips `undefined` values, so
+    // primary workspace. JSON.stringify strips `undefined` values, so
     // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
     // server then takes the documented fallback path.
     //

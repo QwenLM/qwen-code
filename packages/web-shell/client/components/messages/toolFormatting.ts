@@ -4,6 +4,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
   run_shell_command: 'Shell',
@@ -99,11 +100,38 @@ export function getToolDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
 ): string {
+  if (isSkillToolName(tool.toolName)) {
+    const skillName = getStringArg(tool.args, 'skill');
+    if (skillName) return truncateText(skillName, MAX_DESCRIPTION_LENGTH);
+  }
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd);
   if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
   return '';
+}
+
+export function getToolSummaryDescription(
+  tool: ACPToolCall,
+  workspaceCwd?: string,
+): string {
+  if (!isShellToolName(tool.toolName)) {
+    return getToolDescription(tool, workspaceCwd);
+  }
+
+  const description = getStringArg(tool.args, 'description');
+  if (description) return truncateText(description, MAX_DESCRIPTION_LENGTH);
+
+  const fromArgs = getDescriptionFromArgs(tool, workspaceCwd, {
+    includeTimeout: false,
+  });
+  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
+  return '';
+}
+
+export function getShellToolSemanticDescription(tool: ACPToolCall): string {
+  if (!isShellToolName(tool.toolName)) return '';
+  return getStringArg(tool.args, 'description');
 }
 
 export function extractText(tool: ACPToolCall): string | null {
@@ -222,9 +250,11 @@ function parseGrepSummary(text: string): string | null {
 function getDescriptionFromArgs(
   tool: ACPToolCall,
   workspaceCwd?: string,
+  options: { includeTimeout?: boolean } = {},
 ): string {
   const args = tool.args || {};
   const name = tool.toolName.toLowerCase();
+  const includeTimeout = options.includeTimeout ?? true;
 
   if (args.command) {
     let description = String(args.command);
@@ -233,11 +263,12 @@ function getDescriptionFromArgs(
     }
     if (args.is_background) {
       description += ' [background]';
-    } else if (args.timeout) {
+    } else if (includeTimeout && args.timeout) {
       description += ` [timeout: ${String(args.timeout)}ms]`;
     }
-    if (args.description) {
-      description += ` (${String(args.description).replace(/\n/g, ' ')})`;
+    const argDescription = getStringArg(args, 'description');
+    if (argDescription) {
+      description += ` (${argDescription})`;
     }
     return truncateText(description, MAX_DESCRIPTION_LENGTH);
   }
@@ -284,6 +315,14 @@ function getDescriptionFromArgs(
   return '';
 }
 
+function getStringArg(
+  args: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  const value = args?.[key];
+  return typeof value === 'string' ? value.trim().replace(/\n/g, ' ') : '';
+}
+
 export function isShellToolName(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
@@ -292,6 +331,10 @@ export function isShellToolName(name: string): boolean {
     normalized === 'shell' ||
     normalized === 'execute_command'
   );
+}
+
+export function isSkillToolName(name: string): boolean {
+  return name.toLowerCase() === 'skill';
 }
 
 export function toolContainsCallId(

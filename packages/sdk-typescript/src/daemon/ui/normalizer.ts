@@ -159,6 +159,7 @@ export function normalizeDaemonEvent(
     }
     case 'turn_error': {
       const code = getString(event.data, 'code');
+      const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
       return [
         {
@@ -167,6 +168,7 @@ export function normalizeDaemonEvent(
           source: 'turn_error',
           recoverable: true,
           ...(code ? { code } : {}),
+          ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
           text:
             getString(event.data, 'message') ??
@@ -176,6 +178,9 @@ export function normalizeDaemonEvent(
     }
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
+
+    case 'history_truncated':
+      return normalizeHistoryTruncated(event, base);
 
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
@@ -267,6 +272,9 @@ export function normalizeDaemonEvent(
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
 
+    case 'settings_reloaded':
+      return normalizeSettingsReloaded(event, base);
+
     case 'trust_change_requested':
       return normalizeTrustChangeRequested(event, base);
 
@@ -351,6 +359,33 @@ function normalizeStateResyncRequired(
       reason,
       lastDeliveredId,
       earliestAvailableId,
+    },
+  ];
+}
+
+function normalizeHistoryTruncated(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const reason = getString(event.data, 'reason');
+  const truncatedEvents = numberField(event.data, 'truncatedEvents');
+  const retainedEvents = numberField(event.data, 'retainedEvents');
+  const maxBytes = numberField(event.data, 'maxBytes');
+  if (
+    reason !== 'replay_window_exceeded' ||
+    truncatedEvents === undefined ||
+    retainedEvents === undefined ||
+    maxBytes === undefined ||
+    (isRecord(event.data) && event.data['fullTranscriptAvailable'] !== false)
+  ) {
+    return fallbackDebug(event, base, 'malformed history_truncated payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'status',
+      text: `History truncated: retained ${retainedEvents}, dropped ${truncatedEvents} (window ${maxBytes} bytes).`,
+      source: 'history_truncated',
     },
   ];
 }
@@ -531,6 +566,7 @@ function normalizeSessionUpdate(
       ) {
         return [];
       }
+      const meta = extractUpdateMeta(update);
       const content = update['content'];
       const part = extractContentPart(content);
       if (part) {
@@ -555,13 +591,29 @@ function normalizeSessionUpdate(
         }
         if (part.kind === 'text') {
           return part.text
-            ? [{ ...base, type: 'user.text.delta', text: part.text }]
+            ? [
+                {
+                  ...base,
+                  type: 'user.text.delta',
+                  text: part.text,
+                  ...(meta ? { meta } : {}),
+                },
+              ]
             : [];
         }
         return [];
       }
       const text = getTextContent(content);
-      return text ? [{ ...base, type: 'user.text.delta', text }] : [];
+      return text
+        ? [
+            {
+              ...base,
+              type: 'user.text.delta',
+              text,
+              ...(meta ? { meta } : {}),
+            },
+          ]
+        : [];
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
@@ -1220,6 +1272,24 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+    },
+  ];
+}
+
+function normalizeSettingsReloaded(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  if (!isRecord(event.data)) {
+    return fallbackDebug(event, base, 'malformed settings_reloaded payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.settings.changed',
+      key: 'settings_reloaded',
+      scope: 'workspace',
+      value: event.data,
     },
   ];
 }

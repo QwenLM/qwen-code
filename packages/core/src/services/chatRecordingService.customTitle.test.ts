@@ -135,8 +135,9 @@ describe('ChatRecordingService - recordCustomTitle', () => {
   });
 
   describe('finalize', () => {
-    it('should re-append cached custom title to EOF', async () => {
+    it('should re-append cached custom title to EOF after new content', async () => {
       chatRecordingService.recordCustomTitle('my-feature');
+      chatRecordingService.recordUserMessage([{ text: 'new work' }]);
       await chatRecordingService.flush();
       vi.mocked(jsonl.writeLine).mockClear();
 
@@ -153,6 +154,17 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       });
     });
 
+    it('should not write anything when the title is already the latest record', async () => {
+      chatRecordingService.recordCustomTitle('my-feature');
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.finalize();
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
     it('should not write anything when no custom title was set', async () => {
       chatRecordingService.finalize();
       await chatRecordingService.flush();
@@ -160,9 +172,33 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
+    it('should not re-append a resumed title without new content', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const getSessionTitleInfo = vi.fn().mockReturnValue({
+        title: 'resumed-title',
+        source: 'manual',
+      });
+      (
+        mockConfig as unknown as {
+          getSessionService: () => {
+            getSessionTitleInfo: typeof getSessionTitleInfo;
+          };
+        }
+      ).getSessionService = () => ({ getSessionTitleInfo });
+
+      const svc = new ChatRecordingService(mockConfig);
+      svc.finalize();
+      await svc.flush();
+
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
     it('should re-append the latest title after multiple renames', async () => {
       chatRecordingService.recordCustomTitle('first-name');
       chatRecordingService.recordCustomTitle('second-name');
+      chatRecordingService.recordUserMessage([{ text: 'new work' }]);
       await chatRecordingService.flush();
       vi.mocked(jsonl.writeLine).mockClear();
 
@@ -288,10 +324,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       ).getSessionService = () => ({ getSessionTitleInfo });
 
       const svc = new ChatRecordingService(mockConfig);
-      // Constructor's finalize re-appends a custom_title record on resume
-      // — clear it out so we can isolate the threshold-triggered re-anchor.
       await svc.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
 
       const bulkText = 'x'.repeat(2000);
       for (let i = 0; i < 20; i++) {

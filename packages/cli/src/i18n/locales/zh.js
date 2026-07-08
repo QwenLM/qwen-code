@@ -1378,8 +1378,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1392,6 +1392,10 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '将模型选择持久化到项目设置（工作区）',
+  'Persist the model selection to the user settings (global scope)':
+    '将模型选择持久化到用户设置（全局）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Voice Model': '选择语音模型',
@@ -1613,6 +1617,8 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
+  ' (this project)': '（当前项目）',
+  ' (global)': '（全局）',
   'API Key': 'API Key',
   '(default)': '(默认)',
   '(not set)': '(未设置)',
@@ -2343,4 +2349,34 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 个扩展',
+  '{{count}} extensions': '{{count}} 个扩展',
+  '{{count}} command': '{{count}} 个命令',
+  '{{count}} commands': '{{count}} 个命令',
+  '{{count}} skill': '{{count}} 个技能',
+  '{{count}} skills': '{{count}} 个技能',
+  '{{count}} agent': '{{count}} 个代理',
+  '{{count}} agents': '{{count}} 个代理',
+  '{{count}} hook': '{{count}} 个钩子',
+  '{{count}} hooks': '{{count}} 个钩子',
+  '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension MCP servers': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension LSP server': '{{count}} 个扩展 LSP 服务器',
+  '{{count}} extension LSP servers': '{{count}} 个扩展 LSP 服务器',
+  'Reload extension changes from disk': '从磁盘重新加载扩展变更',
+  'Reloaded extensions: {{summary}}': '已重新加载扩展：{{summary}}',
+  'Reload failed: {{message}}': '重新加载失败：{{message}}',
+  'Reload failed.': '重新加载失败。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁盘上的扩展已变更。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败：{{message}}。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '扩展重新加载未完成。运行 /reload-plugins 重试。',
 };

@@ -4615,6 +4615,62 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('commits each completed table when a single table fills the budget (no stall-then-dump)', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, cap?: number) =>
+          cap === undefined ? s.length : Math.min(cap, s.length),
+      );
+
+      // Three COMPLETE tables (each terminated by a blank line), each tall
+      // enough on its own to exceed the fallback commit budget (terminalHeight
+      // 24 → budget 7). fitPendingSlice charges the whole table and returns
+      // kept = its trailing blank line, so the safe boundary sits exactly at
+      // keptLines. The commit loop must still find it and commit each table as
+      // it completes — a regression here stalls after the first table and dumps
+      // every later table at once only when the stream finalizes.
+      const table = (t: number) =>
+        [
+          '| A | B |',
+          '| --- | --- |',
+          ...Array.from({ length: 8 }, (_, r) => `| t${t}r${r} | v${t}r${r} |`),
+        ].join('\n');
+      const content = [table(1), table(2), table(3), 'tail'].join('\n\n');
+
+      const { result } = renderTestHook();
+      const releaseStream = await streamContent(result, content);
+
+      // The completed tables committed incrementally rather than stalling. All
+      // three tables must have committed (a partial stall — one commits, the
+      // other two dump together — would leave fewer than three committed items).
+      const committed = geminiContentItems();
+      expect(committed.length).toBeGreaterThanOrEqual(3);
+      for (const marker of ['t1r0', 't2r0', 't3r0']) {
+        expect(committed.some((item) => item.text.includes(marker))).toBe(true);
+      }
+      // Nothing orphaned: any committed chunk with table rows carries its
+      // separator (a whole table, not a headerless tail).
+      for (const item of committed) {
+        const hasTableRow = item.text
+          .split('\n')
+          .some((l) => /^\s*\|.*\|\s*$/.test(l));
+        if (hasTableRow) {
+          expect(item.text).toMatch(/\|\s*:?-+/);
+        }
+      }
+      // The pending tail is bounded — the whole ~34-line message did not sit
+      // pending waiting for finalize.
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      const pendingLines =
+        pendingText.length === 0 ? 0 : pendingText.split('\n').length;
+      expect(pendingLines).toBeLessThanOrEqual(12);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('does not render leading blank thought chunks as an empty thought item', async () => {
       vi.useFakeTimers();
 
@@ -6008,6 +6064,47 @@ describe('useGeminiStream', () => {
         2,
         ToolConfirmationOutcome.ProceedOnce,
       );
+    });
+
+    it('should not auto-approve prompts that hide always allow', async () => {
+      const mockOnConfirm = vi.fn().mockResolvedValue(undefined);
+      const awaitingApprovalToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'call1',
+            name: 'replace',
+            args: { old_string: 'old', new_string: 'new' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-1',
+          },
+          status: 'awaiting_approval',
+          responseSubmittedToGemini: false,
+          confirmationDetails: {
+            onConfirm: mockOnConfirm,
+            onCancel: vi.fn(),
+            message: 'Confirm hook ask?',
+            displayedText: 'Hook requested confirmation',
+            hideAlwaysAllow: true,
+          },
+          tool: {
+            name: 'replace',
+            displayName: 'replace',
+            description: 'Replace text',
+            build: vi.fn(),
+          } as any,
+          invocation: {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation,
+        } as unknown as TrackedWaitingToolCall,
+      ];
+
+      const { result } = renderTestHook(awaitingApprovalToolCalls);
+
+      await act(async () => {
+        await result.current.handleApprovalModeChange(ApprovalMode.YOLO);
+      });
+
+      expect(mockOnConfirm).not.toHaveBeenCalled();
     });
 
     it('should only auto-approve edit tools when switching to AUTO_EDIT mode', async () => {

@@ -42,7 +42,9 @@ const rootDir = join(__dirname, '..');
 // Bumped from 133KB to 136KB after merging session artifacts plus sessionless
 // workspace memory forget/dream APIs and event validation.
 // Bumped from 136KB to 137KB for EventBus byte-backlog telemetry validation.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 137 * 1024;
+// Bumped from 137KB to 138KB for history_truncated event validation and
+// transcript status projection.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 138 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

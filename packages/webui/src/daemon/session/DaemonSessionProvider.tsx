@@ -73,6 +73,11 @@ import {
   isPendingPromptEvent,
   publishPendingPromptEvent,
 } from '../pendingPromptVersion.js';
+import {
+  MISSING_SESSION_HTTP_STATUSES,
+  isMissingSessionHttpStatus,
+  resolveConnectionErrorStatus,
+} from './status.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -148,7 +153,29 @@ const DaemonSessionNoticesContext = createContext<
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
-const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+/**
+ * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
+ * failures** (vs session-not-found 404/410). Auth failures should NOT enter
+ * the reconnect loop even when `autoReconnect: true` — retrying with the
+ * same bad token loops forever, hammering the server with bad credentials
+ * and risking transcript wipes if reconnect later attaches a different
+ * session and hits the sessionId-change `store.reset()` branch.
+ *
+ * 404/410 (session-not-found) leave the requested session disconnected instead
+ * of silently creating a replacement empty session.
+ */
+const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
+const TERMINAL_SESSION_HTTP_STATUSES = new Set([
+  ...AUTH_FAILURE_HTTP_STATUSES,
+  ...MISSING_SESSION_HTTP_STATUSES,
+]);
+
+interface HeartbeatFailureState {
+  sessionId?: string;
+  consecutiveFailures: number;
+  lastHttpError?: { status: number; message: string };
+}
+
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
 // normalization still rebuilds from retained blocks today, so this high default
@@ -167,18 +194,6 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   authVersion: 0,
 };
 
-/**
- * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
- * failures** (vs session-not-found 404/410). Auth failures should NOT enter
- * the reconnect loop even when `autoReconnect: true` — retrying with the
- * same bad token loops forever, hammering the server with bad credentials
- * and risking transcript wipes if reconnect later attaches a different
- * session and hits the sessionId-change `store.reset()` branch.
- *
- * 404/410 (session-not-found) leave the requested session disconnected instead
- * of silently creating a replacement empty session.
- */
-const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const UNHANDLED_SESSION = Symbol('unhandled session');
 
 export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
@@ -242,6 +257,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
+    consecutiveFailures: 0,
+  });
   const manualSessionClearRef = useRef(false);
   const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
     undefined,
@@ -347,6 +365,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
+        let loadingRequestedSession = false;
         try {
           // ── SSE Reconnection Strategy ────────────────────────────────
           //
@@ -360,12 +379,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           //   store.dispatch() appends to existing blocks. No reset, no
           //   load(), minimal re-render.
           //
-          // PATH B — Full reload (session cleared, terminal/auth errors,
+          // PATH B — Snapshot reload (session cleared, terminal/auth errors,
           //   ring eviction):
           //   `session` is null → enter this block → DaemonSessionClient
           //   .load() fetches compactedReplay + liveJournal → deferred
           //   store.reset() + store.dispatch(replayEvents) rebuilds the
-          //   full transcript in a single synchronous batch.
+          //   current bounded replay window in a single synchronous batch.
           //
           // The `needsStoreReset` flag defers store.reset() to avoid an
           // intermediate empty-blocks state that causes virtualizer
@@ -399,6 +418,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
             const getWorkspaceCapabilities =
               workspaceGetCapabilitiesRef.current;
@@ -484,11 +507,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const requestClientId = clientId
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
+            loadingRequestedSession = Boolean(restoreSessionId);
             if (targetSessionId) {
               setConnection((current) => ({
                 ...current,
                 sessionId: targetSessionId,
                 error: undefined,
+                errorStatus: undefined,
+                missingSession: false,
                 loadingTranscript: true,
               }));
             }
@@ -521,6 +547,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     },
                     requestClientId,
                   );
+            loadingRequestedSession = false;
             if (!clientId && nextSession.clientId) {
               clientIdRef.current = nextSession.clientId;
               persistStableClientId(
@@ -908,6 +935,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'connecting',
               error: undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
           };
           for await (const event of activeSession.events({
@@ -1111,7 +1142,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
-                  // compactedReplay/liveJournal rebuild the full transcript.
+                  // compactedReplay/liveJournal rebuild the bounded replay
+                  // window.
                   console.warn(
                     '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
                     activeSession.sessionId,
@@ -1124,6 +1156,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ...current,
                     status: 'connecting',
                     error: undefined,
+                    errorStatus: resolveConnectionErrorStatus(
+                      undefined,
+                      current.errorStatus,
+                    ),
                   }));
                   break;
                 }
@@ -1182,6 +1218,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: undefined,
+              errorStatus: undefined,
+              missingSession: false,
             }));
             return;
           }
@@ -1212,14 +1250,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((current) => ({
               ...current,
-              status: 'disconnected',
-              error: undefined,
+              status: current.status === 'error' ? 'error' : 'disconnected',
+              error: current.status === 'error' ? current.error : undefined,
+              errorStatus: resolveConnectionErrorStatus(
+                undefined,
+                current.errorStatus,
+              ),
             }));
           }
         } catch (error) {
           if (disposed || abort.signal.aborted) return;
           const message =
             error instanceof Error ? error.message : String(error);
+          const errorStatus = extractHttpStatus(error);
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -1258,14 +1301,45 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
-              setConnection({ status: 'error', error: message });
+              setConnection((current) => ({
+                ...current,
+                status: 'error',
+                sessionId: undefined,
+                error: message,
+                errorStatus: resolveConnectionErrorStatus(
+                  errorStatus,
+                  current.errorStatus,
+                ),
+                missingSession: false,
+                capabilities: capabilities ?? current.capabilities,
+                loadingTranscript: undefined,
+                catchingUp: undefined,
+              }));
               return;
             }
+            const missingLoadedSession =
+              loadingRequestedSession &&
+              isMissingSessionHttpStatus(errorStatus);
+            console.warn(
+              '[DaemonSessionProvider] terminal session error (sessionId=%s, status=%d, message=%s)',
+              failedSessionId,
+              errorStatus,
+              message,
+            );
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
               sessionId: undefined,
               error: message,
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+              // SSE errors should not create the missing-session empty state,
+              // but they also must not clear one confirmed by load/heartbeat.
+              missingSession:
+                missingLoadedSession || current.missingSession === true,
+              capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
             }));
@@ -1286,16 +1360,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (!autoReconnect) {
             session = undefined;
             sessionRef.current = undefined;
-            setConnection({
+            setConnection((current) => ({
+              ...current,
               status: 'error',
               error: message,
-            });
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+              missingSession: false,
+            }));
             return;
           }
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
             error: message,
+            errorStatus: resolveConnectionErrorStatus(
+              errorStatus,
+              current.errorStatus,
+            ),
+            missingSession: false,
             loadingTranscript: undefined,
           }));
         }
@@ -1393,8 +1478,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return undefined;
     }
+    if (heartbeatFailureStateRef.current.sessionId !== connection.sessionId) {
+      heartbeatFailureStateRef.current = {
+        sessionId: connection.sessionId,
+        consecutiveFailures: 0,
+      };
+    }
+    const heartbeatFailureState = heartbeatFailureStateRef.current;
     let disposed = false;
-    let consecutiveFailures = 0;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
@@ -1402,24 +1493,100 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         .heartbeat()
         .then(() => {
           if (disposed) return;
-          if (consecutiveFailures >= heartbeatFailureThreshold) {
+          if (
+            heartbeatFailureState.consecutiveFailures >=
+            heartbeatFailureThreshold
+          ) {
             setConnection((current) =>
               current.sessionId === session.sessionId
-                ? { ...current, status: 'connected', error: undefined }
+                ? {
+                    ...current,
+                    status: 'connected',
+                    error: undefined,
+                    errorStatus: undefined,
+                  }
                 : current,
             );
           }
-          consecutiveFailures = 0;
+          heartbeatFailureState.consecutiveFailures = 0;
+          heartbeatFailureState.lastHttpError = undefined;
         })
         .catch((error: unknown) => {
           if (disposed) return;
-          consecutiveFailures += 1;
-          if (consecutiveFailures < heartbeatFailureThreshold) return;
+          heartbeatFailureState.consecutiveFailures += 1;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
+          const thisErrorStatus = extractHttpStatus(error);
+          if (thisErrorStatus !== undefined) {
+            const lastStatus = heartbeatFailureState.lastHttpError?.status;
+            heartbeatFailureState.lastHttpError = {
+              status:
+                resolveConnectionErrorStatus(thisErrorStatus, lastStatus) ??
+                thisErrorStatus,
+              message: isMissingSessionHttpStatus(lastStatus)
+                ? (heartbeatFailureState.lastHttpError?.message ?? message)
+                : message,
+            };
+          }
+          if (
+            heartbeatFailureState.consecutiveFailures <
+            heartbeatFailureThreshold
+          ) {
+            return;
+          }
+          const errorStatus = heartbeatFailureState.lastHttpError?.status;
+          const effectiveMessage =
+            heartbeatFailureState.lastHttpError?.message ?? message;
+          const authFailure =
+            errorStatus !== undefined &&
+            AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
+          const missingSession = isMissingSessionHttpStatus(errorStatus);
+          if (authFailure || missingSession) {
+            const deadSessionId = session.sessionId;
+            if (missingSession) {
+              console.warn(
+                '[DaemonSessionProvider] heartbeat detected missing session (sessionId=%s, status=%d)',
+                deadSessionId,
+                errorStatus,
+              );
+            } else {
+              console.warn(
+                '[DaemonSessionProvider] heartbeat auth failure (sessionId=%s, status=%d)',
+                deadSessionId,
+                errorStatus,
+              );
+            }
+            const active = activePromptsRef.current.get(deadSessionId);
+            active?.controller.abort();
+            activePromptsRef.current.delete(deadSessionId);
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
+            if (sessionRef.current?.sessionId === deadSessionId) {
+              if (missingSession) {
+                manualSessionClearRef.current = true;
+              }
+              sessionRef.current = undefined;
+            }
+          }
           setConnection((current) =>
             current.sessionId === session.sessionId
-              ? { ...current, status: 'disconnected', error: message }
+              ? {
+                  ...current,
+                  status: authFailure ? 'error' : 'disconnected',
+                  error: effectiveMessage,
+                  errorStatus: resolveConnectionErrorStatus(
+                    errorStatus,
+                    current.errorStatus,
+                  ),
+                  missingSession,
+                  ...(authFailure || missingSession
+                    ? {
+                        sessionId: undefined,
+                        loadingTranscript: undefined,
+                        catchingUp: undefined,
+                      }
+                    : {}),
+                }
               : current,
           );
         });
@@ -1608,6 +1775,7 @@ function normalizeAndFilterEvent(
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
   behavior: { updateConnection?: boolean } = {},
 ): DaemonUiEvent[] {
+  logSettingsReloadEvent(event);
   if (behavior.updateConnection !== false) {
     updateConnectionFromDaemonEvent(event, setConnection);
   }
@@ -1621,6 +1789,53 @@ function normalizeAndFilterEvent(
     return goalStatusEvent ? [goalStatusEvent] : [];
   }
   return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
+}
+
+function logSettingsReloadEvent(event: DaemonEvent): void {
+  if (event.type !== 'settings_reloaded') return;
+  console.debug(
+    '[DaemonSessionProvider] settings reloaded:',
+    getSettingsReloadLogData(event),
+  );
+}
+
+function getSettingsReloadLogData(event: DaemonEvent): Record<string, unknown> {
+  const log: Record<string, unknown> = {};
+  if (event.id !== undefined) log['eventId'] = event.id;
+  if (!isRecord(event.data)) {
+    log['payload'] = 'non-object';
+    return log;
+  }
+
+  const env = getSettingsReloadEnvLog(event.data['env']);
+  const changedKeys = getStringArray(event.data['changedKeys']);
+  const sessionsRefreshed = getStringArray(event.data['sessionsRefreshed']);
+  const sessionsSkipped = getStringArray(event.data['sessionsSkipped']);
+  const childReloaded = event.data['childReloaded'];
+  const childError = getString(event.data, 'childError');
+
+  if (env) log['env'] = env;
+  if (changedKeys) log['changedKeys'] = changedKeys;
+  if (typeof childReloaded === 'boolean') log['childReloaded'] = childReloaded;
+  if (sessionsRefreshed) log['sessionsRefreshed'] = sessionsRefreshed;
+  if (sessionsSkipped) log['sessionsSkipped'] = sessionsSkipped;
+  if (childError) log['childError'] = childError;
+  return log;
+}
+
+function getSettingsReloadEnvLog(
+  value: unknown,
+): { updatedKeys: string[]; removedKeys: string[] } | undefined {
+  if (!isRecord(value)) return undefined;
+  return {
+    updatedKeys: getStringArray(value['updatedKeys']) ?? [],
+    removedKeys: getStringArray(value['removedKeys']) ?? [],
+  };
+}
+
+function getStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 function filterDaemonUiEventsForTranscript(

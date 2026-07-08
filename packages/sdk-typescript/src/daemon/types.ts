@@ -22,6 +22,15 @@ export interface DaemonProtocolVersions {
 
 export interface DaemonCapabilitiesLimits {
   maxPendingPromptsPerSession?: number | null;
+  maxSessionsPerWorkspace?: number | null;
+  maxTotalSessions?: number | null;
+}
+
+export interface DaemonWorkspaceCapability {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -58,13 +67,13 @@ export interface DaemonCapabilities {
   transports?: readonly string[];
   /**
    * Absolute canonical workspace path this daemon is bound to
-   * (1 daemon = 1 workspace). Clients use this to
-   * (a) detect mismatch before posting `/session` (vs. waiting for
-   * a 400 `workspace_mismatch` response), and (b) omit `cwd` on
-   * `POST /session` — the route falls back to this path when the
-   * body has no `cwd` field. Multi-workspace deployments expose
-   * multiple daemons on different ports, each advertising its own
-   * `workspaceCwd`.
+   * as its primary workspace. Clients use this to (a) detect mismatch
+   * before posting `/session` on old single-workspace daemons, and (b)
+   * omit `cwd` on `POST /session` — the route falls back to this path
+   * when the body has no `cwd` field. Newer daemons that advertise
+   * `multi_workspace_sessions` keep this field as the primary workspace
+   * compatibility value and expose every accepted runtime in
+   * `workspaces[]`.
    *
    * Optional at the type level because the field is an additive
    * extension to v=1 envelopes. Daemons
@@ -82,6 +91,12 @@ export interface DaemonCapabilities {
    * "Cannot read properties of undefined".
    */
   workspaceCwd?: string;
+  /**
+   * Registered workspace runtimes. Present only when the daemon advertises
+   * `multi_workspace_sessions`; `workspaceCwd` remains the primary cwd for
+   * old clients.
+   */
+  workspaces?: DaemonWorkspaceCapability[];
 }
 
 /**
@@ -285,6 +300,7 @@ export interface DaemonStatusReport {
   };
   limits: {
     maxSessions: number | null;
+    maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
     eventRingSize: number;
@@ -293,11 +309,14 @@ export interface DaemonStatusReport {
     channelIdleTimeoutMs: number;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
+    compactedReplayMaxBytes: number;
   };
   capabilities: {
     protocolVersions: DaemonProtocolVersions;
     features: string[];
   };
+  /** Present only when one daemon hosts multiple workspace runtimes. */
+  workspaces?: DaemonWorkspaceCapability[];
   runtime: {
     /** Present while the daemon runtime is still starting up. */
     loading?: boolean;
@@ -730,6 +749,8 @@ export const DAEMON_ERROR_KINDS = [
   // An SSE writer's last successful flush was older than the daemon's
   // writer-idle deadline.
   'writer_idle_timeout',
+  // The model response stream ended before a complete turn could be read.
+  'model_stream_interrupted',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
@@ -1083,6 +1104,7 @@ export interface DaemonWorkspaceMemoryForgetResult {
   summary?: string;
   removedEntries: DaemonWorkspaceMemoryForgetMatch[];
   touchedTopics: DaemonWorkspaceMemoryTopic[];
+  touchedScopes: Array<'user' | 'project'>;
 }
 
 export interface DaemonWorkspaceMemoryForgetTask {
@@ -1651,6 +1673,83 @@ export interface DaemonSessionStatsStatus {
     totalFail: number;
     byName: Record<string, DaemonSessionStatsSkillByName>;
   };
+}
+
+/**
+ * Summary window the usage dashboard aggregates over (UI: Today / 7D / 30D).
+ * `week` = trailing 7 days, `month` = trailing 30 days. Mirrors the subset of
+ * core's `TimeRange` the route accepts.
+ */
+export type DaemonUsageRange = 'today' | 'week' | 'month';
+
+/**
+ * Flattened summary totals for the usage dashboard hero + breakdown tiles.
+ * Mirrors core's `UsageDashboardTotals`.
+ */
+export interface DaemonUsageDashboardTotals {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  thoughtsTokens: number;
+  requests: number;
+  sessions: number;
+  toolCalls: number;
+  linesAdded: number;
+  linesRemoved: number;
+  /** cachedTokens / inputTokens as a 0..1 fraction (0 when there is no input). */
+  cacheReadRate: number;
+}
+
+/** One model's token share of the range. Mirrors core's `UsageModelShare`. */
+export interface DaemonUsageModelShare {
+  model: string;
+  totalTokens: number;
+  /** cachedTokens / inputTokens, 0..1. */
+  cacheReadRate: number;
+  /** totalTokens / range total, 0..1. */
+  share: number;
+}
+
+/** One skill's invocation count over the range. Mirrors `UsageSkillCall`. */
+export interface DaemonUsageSkillCall {
+  name: string;
+  count: number;
+}
+
+/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+export interface DaemonUsageDailyPoint {
+  date: string;
+  tokens: number;
+  sessions: number;
+}
+
+/** One heatmap cell: tokens (intensity) + cache rate. Mirrors `UsageHeatmapDay`. */
+export interface DaemonUsageHeatmapDay {
+  tokens: number;
+  /** cachedTokens / inputTokens for that day, 0..1. */
+  cacheReadRate: number;
+}
+
+/**
+ * Returned from `GET /usage/dashboard`. Aggregate local token usage across all
+ * projects, powering the Daemon Status "统计 / Usage" tab. Mirrors core's
+ * `UsageDashboard`.
+ */
+export interface DaemonUsageDashboard {
+  generatedAt: string;
+  /** The window `summary` covers; the heatmap below is always ~6 months. */
+  range: DaemonUsageRange;
+  summary: DaemonUsageDashboardTotals;
+  /** Per-model token share for the range, sorted by tokens desc. */
+  models: DaemonUsageModelShare[];
+  /** Skill invocations for the range, sorted by count desc. */
+  skills: DaemonUsageSkillCall[];
+  /** Per-day tokens + sessions across the range window. */
+  daily: DaemonUsageDailyPoint[];
+  /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
+  heatmap: Record<string, DaemonUsageHeatmapDay>;
+  heatmapDays: number;
 }
 
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
