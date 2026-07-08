@@ -46,6 +46,7 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  effort?: string;
 };
 
 export interface QuerySystemPromptPreset {
@@ -441,6 +442,23 @@ export interface QueryOptions {
    * The tool use of these agent is marked with the parent_tool_use_id of the `task` tool use.
    */
   agents?: SubagentConfig[];
+
+  /**
+   * Initial reasoning effort tier applied at session start.
+   *
+   * Controls the depth of model reasoning/thinking. Higher tiers produce more
+   * thorough reasoning at the cost of latency and tokens. Provider adapters
+   * clamp the tier to what the active model supports.
+   *
+   * - `'low'`: Minimal reasoning, fastest responses
+   * - `'medium'`: Balanced reasoning and speed
+   * - `'high'`: More thorough reasoning
+   * - `'xhigh'`: Extended reasoning for complex tasks
+   * - `'max'`: Maximum reasoning depth
+   *
+   * Use {@link Query.setEffort} to change the tier at runtime.
+   */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
   /**
    * Include partial messages in the response stream.

@@ -306,6 +306,7 @@ export class Query implements AsyncIterable<SDKMessage> {
             ? mcpServersForCli
             : undefined,
         agents: this.options.agents,
+        effort: this.options.effort,
       });
       logger.info('Query initialized successfully');
     } catch (error) {
@@ -980,6 +981,43 @@ export class Query implements AsyncIterable<SDKMessage> {
   ): Promise<Record<string, unknown> | null> {
     return this.sendControlRequest(ControlRequestType.GET_CONTEXT_USAGE, {
       show_details: showDetails,
+    });
+  }
+
+  /**
+   * Set the reasoning effort tier at runtime.
+   *
+   * @param effort - One of 'low', 'medium', 'high', 'xhigh', 'max'
+   * @throws Error if query is closed or effort is invalid
+   */
+  async setEffort(
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.SET_EFFORT, { effort });
+  }
+
+  /**
+   * Get the list of models available for the current auth type.
+   *
+   * @returns Promise resolving to available models data
+   * @throws Error if query is closed
+   */
+  async getAvailableModels(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_AVAILABLE_MODELS);
+  }
+
+  /**
+   * Get usage dashboard data from the CLI.
+   *
+   * @param range - Time range for usage data: 'today' (default), 'week', 'month', 'all'
+   * @returns Promise resolving to usage dashboard data
+   * @throws Error if query is closed
+   */
+  async getUsageInfo(
+    range?: 'today' | 'week' | 'month' | 'all',
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_USAGE_INFO, {
+      ...(range ? { range } : {}),
     });
   }
 

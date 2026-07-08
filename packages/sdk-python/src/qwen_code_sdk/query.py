@@ -110,6 +110,8 @@ class Query:
     async def _initialize(self) -> None:
         try:
             payload: dict[str, Any] = {"hooks": None}
+            if self._options.effort:
+                payload["effort"] = self._options.effort
             await self._send_control_request("initialize", payload)
         except Exception as exc:
             await self._finish_with_error(exc)
@@ -481,6 +483,31 @@ class Query:
     async def mcp_server_status(self) -> dict[str, Any] | None:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
+
+    async def set_effort(self, effort: str) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request("set_effort", {"effort": effort})
+
+    async def get_available_models(self) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request("get_available_models")
+
+    async def get_context_usage(
+        self, show_details: bool = False
+    ) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request(
+            "get_context_usage", {"show_details": show_details}
+        )
+
+    async def get_usage_info(
+        self, range: str | None = None
+    ) -> dict[str, Any] | None:
+        await self._ensure_started()
+        data: dict[str, Any] = {}
+        if range is not None:
+            data["range"] = range
+        return await self._send_control_request("get_usage_info", data)
 
     @property
     def control_request_timeout(self) -> float:
