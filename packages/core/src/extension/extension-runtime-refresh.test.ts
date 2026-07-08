@@ -130,6 +130,32 @@ describe('refreshExtensionRuntime', () => {
     expect(refreshHierarchicalMemory).toHaveBeenCalledOnce();
   });
 
+  it('continues refresh legs when LSP reload throws', async () => {
+    const reinitializeMcpServers = vi.fn();
+    const refreshSkills = vi.fn();
+    const refreshSubagents = vi.fn();
+    const reloadHooks = vi.fn();
+    const refreshHierarchicalMemory = vi.fn();
+
+    const config = {
+      getSettingsMcpServers: () => undefined,
+      reinitializeMcpServers,
+      reinitializeLsp: vi.fn().mockRejectedValue(new Error('lsp failed')),
+      getSkillManager: () => ({ refreshCache: refreshSkills }),
+      getSubagentManager: () => ({ refreshCache: refreshSubagents }),
+      getHookSystem: () => ({ reload: reloadHooks }),
+      refreshHierarchicalMemory,
+    } as unknown as ExtensionRuntimeRefreshConfig;
+
+    await expect(refreshExtensionRuntime(config)).rejects.toThrow('lsp failed');
+
+    expect(reinitializeMcpServers).toHaveBeenCalledOnce();
+    expect(refreshSkills).toHaveBeenCalledOnce();
+    expect(refreshSubagents).toHaveBeenCalledOnce();
+    expect(reloadHooks).toHaveBeenCalledOnce();
+    expect(refreshHierarchicalMemory).toHaveBeenCalledOnce();
+  });
+
   it('continues when a refreshCache leg rejects', async () => {
     const reinitializeMcpServers = vi.fn();
     const refreshSkills = vi.fn().mockRejectedValue(new Error('skills failed'));
@@ -174,6 +200,35 @@ describe('refreshExtensionRuntime', () => {
     await expect(refreshExtensionRuntime(config)).rejects.toThrow(
       'hooks failed',
     );
+
+    expect(reinitializeMcpServers).toHaveBeenCalledOnce();
+    expect(refreshSkills).toHaveBeenCalledOnce();
+    expect(refreshSubagents).toHaveBeenCalledOnce();
+    expect(reloadHooks).toHaveBeenCalledOnce();
+    expect(refreshHierarchicalMemory).toHaveBeenCalledOnce();
+  });
+
+  it('aggregates hook and LSP reload failures', async () => {
+    const reinitializeMcpServers = vi.fn();
+    const refreshSkills = vi.fn();
+    const refreshSubagents = vi.fn();
+    const reloadHooks = vi.fn().mockRejectedValue(new Error('hooks failed'));
+    const refreshHierarchicalMemory = vi.fn();
+
+    const config = {
+      getSettingsMcpServers: () => undefined,
+      reinitializeMcpServers,
+      reinitializeLsp: vi.fn().mockRejectedValue(new Error('lsp failed')),
+      getSkillManager: () => ({ refreshCache: refreshSkills }),
+      getSubagentManager: () => ({ refreshCache: refreshSubagents }),
+      getHookSystem: () => ({ reload: reloadHooks }),
+      refreshHierarchicalMemory,
+    } as unknown as ExtensionRuntimeRefreshConfig;
+
+    await expect(refreshExtensionRuntime(config)).rejects.toMatchObject({
+      message: 'Extension runtime refresh had multiple failures',
+      errors: [expect.any(Error), expect.any(Error)],
+    });
 
     expect(reinitializeMcpServers).toHaveBeenCalledOnce();
     expect(refreshSkills).toHaveBeenCalledOnce();

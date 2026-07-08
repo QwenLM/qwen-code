@@ -475,21 +475,22 @@ export class ExtensionManager {
     scope: SettingScope,
     cwd?: string,
   ): Promise<void> {
+    const currentDir = cwd ?? this.workspaceDir;
+    if (
+      scope === SettingScope.System ||
+      scope === SettingScope.SystemDefaults
+    ) {
+      throw new Error('System and SystemDefaults scopes are not supported.');
+    }
+    const extension = this.getLoadedExtensions().find(
+      (ext) => ext.name === name,
+    );
+    if (!extension) {
+      throw new Error(`Extension with name ${name} does not exist.`);
+    }
+
     const endMutation = this.beginMutation('enableExtension');
     try {
-      const currentDir = cwd ?? this.workspaceDir;
-      if (
-        scope === SettingScope.System ||
-        scope === SettingScope.SystemDefaults
-      ) {
-        throw new Error('System and SystemDefaults scopes are not supported.');
-      }
-      const extension = this.getLoadedExtensions().find(
-        (ext) => ext.name === name,
-      );
-      if (!extension) {
-        throw new Error(`Extension with name ${name} does not exist.`);
-      }
       const scopePath =
         scope === SettingScope.Workspace ? currentDir : os.homedir();
       this.enableByPath(name, true, scopePath);
@@ -510,22 +511,23 @@ export class ExtensionManager {
     scope: SettingScope,
     cwd?: string,
   ): Promise<void> {
+    const currentDir = cwd ?? this.workspaceDir;
+    const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+    if (
+      scope === SettingScope.System ||
+      scope === SettingScope.SystemDefaults
+    ) {
+      throw new Error('System and SystemDefaults scopes are not supported.');
+    }
+    const extension = this.getLoadedExtensions().find(
+      (ext) => ext.name === name,
+    );
+    if (!extension) {
+      throw new Error(`Extension with name ${name} does not exist.`);
+    }
+
     const endMutation = this.beginMutation('disableExtension');
     try {
-      const currentDir = cwd ?? this.workspaceDir;
-      const config = getTelemetryConfig(currentDir, this.telemetrySettings);
-      if (
-        scope === SettingScope.System ||
-        scope === SettingScope.SystemDefaults
-      ) {
-        throw new Error('System and SystemDefaults scopes are not supported.');
-      }
-      const extension = this.getLoadedExtensions().find(
-        (ext) => ext.name === name,
-      );
-      if (!extension) {
-        throw new Error(`Extension with name ${name} does not exist.`);
-      }
       const scopePath =
         scope === SettingScope.Workspace ? currentDir : os.homedir();
       this.disableByPath(name, true, scopePath);
@@ -618,36 +620,37 @@ export class ExtensionManager {
    * marketplace config can be resolved from the source.
    */
   async addSource(source: string): Promise<ExtensionSource> {
-    const endMutation = this.beginMutation('addSource');
-    try {
-      const trimmed = source.trim();
-      if (!trimmed) {
-        throw new Error('Marketplace source cannot be empty.');
+    const trimmed = source.trim();
+    if (!trimmed) {
+      throw new Error('Marketplace source cannot be empty.');
+    }
+    const config = await loadMarketplaceConfigFromSource(trimmed);
+    if (!config) {
+      // A "marketplace" is a Claude-format collection (.claude-plugin/
+      // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
+      // not a marketplace — guide the user to install it directly instead.
+      let isInstallableExtension = false;
+      try {
+        await parseInstallSource(trimmed);
+        isInstallableExtension = true;
+      } catch {
+        // Not a recognizable install source either.
       }
-      const config = await loadMarketplaceConfigFromSource(trimmed);
-      if (!config) {
-        // A "marketplace" is a Claude-format collection (.claude-plugin/
-        // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
-        // not a marketplace — guide the user to install it directly instead.
-        let isInstallableExtension = false;
-        try {
-          await parseInstallSource(trimmed);
-          isInstallableExtension = true;
-        } catch {
-          // Not a recognizable install source either.
-        }
-        const redacted = redactUrlCredentials(trimmed);
-        if (isInstallableExtension) {
-          throw new Error(
-            `"${redacted}" looks like a single extension, not a marketplace. ` +
-              `Install it directly with: /extensions install ${redacted}`,
-          );
-        }
+      const redacted = redactUrlCredentials(trimmed);
+      if (isInstallableExtension) {
         throw new Error(
-          `No marketplace found at "${redacted}". ` +
-            `Expected a .claude-plugin/marketplace.json.`,
+          `"${redacted}" looks like a single extension, not a marketplace. ` +
+            `Install it directly with: /extensions install ${redacted}`,
         );
       }
+      throw new Error(
+        `No marketplace found at "${redacted}". ` +
+          `Expected a .claude-plugin/marketplace.json.`,
+      );
+    }
+
+    const endMutation = this.beginMutation('addSource');
+    try {
       const now = new Date().toISOString();
       const entry: ExtensionSource = {
         name: config.name || trimmed,

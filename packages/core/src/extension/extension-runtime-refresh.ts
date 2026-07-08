@@ -32,13 +32,18 @@ export async function refreshExtensionRuntime(
   // list). A failure here is user-visible because extension MCP tools will be
   // unavailable, so let callers surface it.
   await config.reinitializeMcpServers(config.getSettingsMcpServers());
-  const lspResult = await config.reinitializeLsp?.();
-  const failedLspServers = lspResult?.reconcile.failed ?? [];
   let lspReloadError: unknown;
-  if (failedLspServers.length > 0) {
-    lspReloadError = new Error(
-      `LSP reload partially failed: ${failedLspServers.join(', ')}`,
-    );
+  try {
+    const lspResult = await config.reinitializeLsp?.();
+    const failedLspServers = lspResult?.reconcile.failed ?? [];
+    if (failedLspServers.length > 0) {
+      lspReloadError = new Error(
+        `LSP reload partially failed: ${failedLspServers.join(', ')}`,
+      );
+    }
+  } catch (err) {
+    debugLogger.warn('refreshExtensionRuntime: reinitializeLsp failed:', err);
+    lspReloadError = err;
   }
 
   // Skills, subagents, and hooks refresh in parallel. Use allSettled (rather
@@ -86,10 +91,16 @@ export async function refreshExtensionRuntime(
     );
   }
 
-  if (hookReloadError) {
-    throw hookReloadError;
+  const surfacedErrors = [hookReloadError, lspReloadError].filter(
+    (error): error is unknown => error !== undefined,
+  );
+  if (surfacedErrors.length === 1) {
+    throw surfacedErrors[0];
   }
-  if (lspReloadError) {
-    throw lspReloadError;
+  if (surfacedErrors.length > 1) {
+    throw new AggregateError(
+      surfacedErrors,
+      'Extension runtime refresh had multiple failures',
+    );
   }
 }

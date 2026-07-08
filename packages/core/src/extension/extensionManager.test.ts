@@ -796,7 +796,7 @@ describe('extension tests', () => {
       ]);
     });
 
-    it('should end mutation lifecycle events when extension changes fail', async () => {
+    it('should not emit mutation lifecycle events when validation fails', async () => {
       const manager = createExtensionManager();
       const events: ExtensionMutationEvent[] = [];
       manager.addMutationListener((event) => events.push(event));
@@ -807,10 +807,17 @@ describe('extension tests', () => {
         'Extension with name missing-extension does not exist.',
       );
 
-      expect(events).toEqual([
-        { id: 1, phase: 'start', operation: 'disableExtension' },
-        { id: 1, phase: 'end', operation: 'disableExtension' },
-      ]);
+      await expect(
+        manager.enableExtension('missing-extension', SettingScope.User),
+      ).rejects.toThrow(
+        'Extension with name missing-extension does not exist.',
+      );
+
+      await expect(manager.addSource('   ')).rejects.toThrow(
+        'Marketplace source cannot be empty.',
+      );
+
+      expect(events).toEqual([]);
     });
 
     it('should disable an extension at the user scope', async () => {
