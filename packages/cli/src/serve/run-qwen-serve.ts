@@ -1336,7 +1336,8 @@ function createDelegatingServeApp(
       ) {
         const webhookRequest = isChannelWebhookRequest(req);
         const authGate = webhookRequest
-          ? options.authenticateDeferredChannelWebhookRequest
+          ? (options.authenticateDeferredChannelWebhookRequest ??
+            options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
         if (authGate) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
@@ -1432,7 +1433,11 @@ function readDeferredWebhookSecret(
       channelName,
       rawConfig as Record<string, unknown>,
     )?.sources[source]?.secret;
-  } catch {
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `[webhook-secret] failed to read deferred webhook secret for ${channelName}/${source}: ${reason}\n`,
+    );
     return undefined;
   }
 }
