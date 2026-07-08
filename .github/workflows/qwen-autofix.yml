@@ -69,6 +69,8 @@ env:
   # Identity of the autofix bot. All open in-repo PRs authored by this bot are
   # eligible for the review phase — not limited to autofix/issue-* branches.
   AUTOFIX_BOT: 'qwen-code-dev-bot'
+  # Branch-name prefix used by the issue phase when creating PRs. Also used
+  # for duplicate-PR detection and issue-number extraction from branch names.
   BRANCH_PREFIX: 'autofix/issue-'
   # The automated Qwen PR reviewer posts as this account; its review counts as
   # actionable feedback even though it is not a human collaborator.
@@ -172,13 +174,17 @@ jobs:
                   if [[ "${SENDER_LOGIN}" == "${REVIEW_BOT}" ]]; then
                     sender_is_trusted=true
                   elif [[ -n "${SENDER_LOGIN}" ]]; then
-                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
                       case "${sender_permission}" in
                         admin|maintain|write) sender_is_trusted=true ;;
                       esac
                     else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error:-unknown error}"
                       sender_permission=''
                     fi
+                    rm -f "${api_error_file}"
                   fi
                   if [[ "${sender_is_trusted}" == "true" ]]; then
                     DO_REVIEW=true
@@ -999,13 +1005,16 @@ jobs:
               "${WORKDIR}/rc.json")"
             # Issue-level PR comments (e.g. /review suggestion summaries) are
             # also actionable feedback. Exclude the bot's own eval markers.
+            # Exclude known non-actionable bot comments (triage stages,
+            # coverage reports, suggestion summaries, force-push reminders).
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" '
               [ .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- autofix-eval ") | not) ] | length' \
+                | select((.body // "") | test($bf) | not) ] | length' \
               "${WORKDIR}/ic.json")"
 
             # mergeable: GitHub may report UNKNOWN until it recomputes; treat only
@@ -1192,7 +1201,7 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- autofix-eval ") | not) | .created_at))
+              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not) | .created_at))
             | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json")"
           [[ -z "${NEWEST}" ]] && NEWEST="${WATERMARK}"
           echo "newest=${NEWEST}" >> "${GITHUB_OUTPUT}"
@@ -1234,7 +1243,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- autofix-eval ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
           } > "${WORKDIR}/feedback.md"

@@ -316,6 +316,33 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('includes issue-level comments in review feedback scanning', () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // Must count issue-level comments separately from inline review comments.
+    expect(reviewScanStep).toContain('N_ISSUE_COMMENTS=');
+    // Must fetch issue comments for the count (already fetched for markers).
+    expect(reviewScanStep).toContain('ic.json');
+    // Must exclude known non-actionable bot comments.
+    expect(reviewScanStep).toContain('qwen-triage');
+    expect(reviewScanStep).toContain('qwen-review-suggestion-summary');
+    // The "nothing new" gate must check all three feedback sources.
+    expect(reviewScanStep).toContain('"${N_ISSUE_COMMENTS}" -eq 0');
+    // review-address must also fetch ic.json and render issue-level comments.
+    expect(workflow).toContain(
+      'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
+    );
+    expect(workflow).toContain('## Issue-level comments');
+    // NEWEST watermark must consider issue-level comment timestamps.
+    expect(workflow).toContain('.[2] | map(select((.created_at // "")');
+    // Permission API failures in the review-trigger path must be logged.
+    expect(routeStep).toContain(
+      '::warning::Permission API call failed for ${SENDER_LOGIN}',
+    );
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',
