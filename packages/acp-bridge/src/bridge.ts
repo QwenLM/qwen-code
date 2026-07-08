@@ -33,7 +33,10 @@ import {
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
 } from './eventBus.js';
-import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
+import {
+  normalizeCompactedReplayMaxBytes,
+  TurnBoundaryCompactionEngine,
+} from './compactionEngine.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -1135,6 +1138,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
+  const compactedReplayMaxBytes = normalizeCompactedReplayMaxBytes(
+    opts.compactedReplayMaxBytes,
+  );
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -2456,7 +2462,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   };
 
   const createSessionEventBus = (): EventBus =>
-    new EventBus(eventRingSize, undefined, new TurnBoundaryCompactionEngine());
+    new EventBus(
+      eventRingSize,
+      undefined,
+      new TurnBoundaryCompactionEngine({
+        maxReplayBytes: compactedReplayMaxBytes,
+        onReplayWindowEviction: (eviction) => {
+          teeServeDebugLine(
+            `replay window evicted ${JSON.stringify(eviction)}`,
+          );
+        },
+      }),
+    );
 
   // §2.3 publish helpers — centralise cache + generation + bus publish so
   // every `model_switched` / `approval_mode_changed` site stays atomic.
@@ -3250,6 +3267,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? null
               : maxPendingPromptsPerSession,
           eventRingSize,
+          compactedReplayMaxBytes,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
         },
