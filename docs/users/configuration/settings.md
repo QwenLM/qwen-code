@@ -262,6 +262,12 @@ The `extra_body` field allows you to add custom parameters to the request body s
 | ------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `visionModel` | string | Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Leave empty to auto-pick a same-provider vision model. Can also be set via `/model --vision`. | `""`    |
 
+#### visionBridgeTimeoutMs
+
+| Setting                 | Type    | Description                                                                                                                                                                                                                                                        | Default |
+| ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| `visionBridgeTimeoutMs` | integer | Per-attempt timeout in milliseconds for the vision bridge image transcription call (positive integer up to 2147483647; the bridge retries a timed-out attempt once with a fresh timeout). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints. | unset   |
+
 #### voiceModel
 
 | Setting      | Type   | Description                                                                                                                                             | Default |
