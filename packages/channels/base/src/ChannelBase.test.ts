@@ -266,11 +266,29 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ isGroup: true }));
 
-      const logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
       writeSpy.mockRestore();
       expect(logged).toContain(
         '[Channel:test-chan] preflight rejected reason=group_disabled',
       );
+    });
+
+    it('does not log expected mention-required group drops', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: false }));
+
+      writeSpy.mockRestore();
+      expect(writeSpy).not.toHaveBeenCalled();
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('does not log debug payloads by default', () => {
@@ -313,6 +331,11 @@ describe('ChannelBase', () => {
           signature: 'message-signature',
           encrypt: 'encrypted-body',
           response_url: 'https://example.invalid/hook?token=secret',
+          open_id: 'ou_123',
+          union_id: 'on_123',
+          user_id: { open_id: 'nested-ou' },
+          senderStaffId: 'staff-123',
+          senderId: 'sender-123',
           nested: { aeskey: 'media-key' },
         });
         logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
@@ -333,6 +356,11 @@ describe('ChannelBase', () => {
       expect(logged).toContain('"signature": "[redacted]"');
       expect(logged).toContain('"encrypt": "[redacted]"');
       expect(logged).toContain('"response_url": "[redacted]"');
+      expect(logged).toContain('"open_id": "[redacted]"');
+      expect(logged).toContain('"union_id": "[redacted]"');
+      expect(logged).toContain('"user_id": "[redacted]"');
+      expect(logged).toContain('"senderStaffId": "[redacted]"');
+      expect(logged).toContain('"senderId": "[redacted]"');
       expect(logged).toContain('"aeskey": "[redacted]"');
       expect(logged).not.toContain('secret-token');
       expect(logged).not.toContain('secret-password');
@@ -340,6 +368,38 @@ describe('ChannelBase', () => {
       expect(logged).not.toContain('message-signature');
       expect(logged).not.toContain('encrypted-body');
       expect(logged).not.toContain('media-key');
+      expect(logged).not.toContain('ou_123');
+      expect(logged).not.toContain('on_123');
+      expect(logged).not.toContain('nested-ou');
+      expect(logged).not.toContain('staff-123');
+      expect(logged).not.toContain('sender-123');
+    });
+
+    it('handles debug payload serialization failures gracefully', () => {
+      const ch = createChannel();
+      const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+      process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-chan';
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let logged = '';
+
+      try {
+        const payload: Record<string, unknown> = {};
+        payload['self'] = payload;
+        ch.debugPayloadForTest('Test', payload);
+        logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        if (oldDebugPayload === undefined) {
+          delete process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
+        } else {
+          process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = oldDebugPayload;
+        }
+        writeSpy.mockRestore();
+      }
+
+      expect(logged).toContain('[Test:test-chan] debug payload');
+      expect(logged).toContain('could not be serialized');
     });
 
     it('logs debug payloads for global enable values', () => {
@@ -399,6 +459,43 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
       expect(ch.sent).toEqual([]);
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('logs the preflight rejection reason for DM gates', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=dm_disabled',
+      );
+    });
+
+    it('logs the preflight rejection reason for sender gates', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['user2'],
+      });
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(envelope());
+
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      writeSpy.mockRestore();
+      expect(logged).toContain(
+        '[Channel:test-chan] preflight rejected reason=sender_denied',
+      );
     });
 
     it('allows group messages through when dmPolicy=disabled', async () => {

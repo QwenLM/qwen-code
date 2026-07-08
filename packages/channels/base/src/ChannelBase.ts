@@ -84,6 +84,13 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
     'download',
     'media',
     'webhook',
+    'staff_id',
+    'open_id',
+    'union_id',
+    'user_id',
+    'sender_id',
+    'senderStaffId',
+    'senderId',
   ].join('|'),
   'i',
 );
@@ -2971,8 +2978,9 @@ export abstract class ChannelBase {
     if (!groupResult.allowed) {
       if (groupResult.reason === 'mention_required') {
         this.recordPendingGroupHistory(envelope);
+      } else {
+        this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
       }
-      this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
       return false;
     }
 
