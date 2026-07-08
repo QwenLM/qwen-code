@@ -828,6 +828,55 @@ describe('EventBus + CompactionEngine integration', () => {
     ).toBeUndefined();
   });
 
+  it('seedReplayEvents replaces prior replay and truncation state', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `drop-${'y'.repeat(600)}` },
+          },
+        },
+      },
+    ]);
+    expect(bus.snapshotReplay()!.compactedTurns[0]?.type).toBe(
+      'history_truncated',
+    );
+
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'fresh' },
+          },
+        },
+      },
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.lastEventId).toBe(3);
+    expect(snapshot.liveJournal).toHaveLength(0);
+    expect(snapshot.compactedTurns).toHaveLength(1);
+    expect(snapshot.compactedTurns[0]?.type).toBe('session_update');
+    expect(snapshot.compactedTurns[0]?.id).toBe(3);
+    expect(extractTexts(snapshot.compactedTurns)).toEqual(['fresh']);
+  });
+
   it('seedReplayEvents treats event sizing failures as zero bytes', () => {
     const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 1 });
     const bus = new EventBus(100, undefined, engine);

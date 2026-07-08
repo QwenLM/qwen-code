@@ -150,6 +150,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   seedReplayEvents(events: BridgeEvent[]): void {
     if (this.closed) return;
+    this.resetReplayWindow();
     for (const event of events) {
       this.recordLastEventId(event);
       if (TRANSIENT_TYPES.has(event.type)) continue;
