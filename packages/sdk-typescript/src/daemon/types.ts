@@ -22,6 +22,15 @@ export interface DaemonProtocolVersions {
 
 export interface DaemonCapabilitiesLimits {
   maxPendingPromptsPerSession?: number | null;
+  maxSessionsPerWorkspace?: number | null;
+  maxTotalSessions?: number | null;
+}
+
+export interface DaemonWorkspaceCapability {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -58,13 +67,13 @@ export interface DaemonCapabilities {
   transports?: readonly string[];
   /**
    * Absolute canonical workspace path this daemon is bound to
-   * (1 daemon = 1 workspace). Clients use this to
-   * (a) detect mismatch before posting `/session` (vs. waiting for
-   * a 400 `workspace_mismatch` response), and (b) omit `cwd` on
-   * `POST /session` — the route falls back to this path when the
-   * body has no `cwd` field. Multi-workspace deployments expose
-   * multiple daemons on different ports, each advertising its own
-   * `workspaceCwd`.
+   * as its primary workspace. Clients use this to (a) detect mismatch
+   * before posting `/session` on old single-workspace daemons, and (b)
+   * omit `cwd` on `POST /session` — the route falls back to this path
+   * when the body has no `cwd` field. Newer daemons that advertise
+   * `multi_workspace_sessions` keep this field as the primary workspace
+   * compatibility value and expose every accepted runtime in
+   * `workspaces[]`.
    *
    * Optional at the type level because the field is an additive
    * extension to v=1 envelopes. Daemons
@@ -82,6 +91,12 @@ export interface DaemonCapabilities {
    * "Cannot read properties of undefined".
    */
   workspaceCwd?: string;
+  /**
+   * Registered workspace runtimes. Present only when the daemon advertises
+   * `multi_workspace_sessions`; `workspaceCwd` remains the primary cwd for
+   * old clients.
+   */
+  workspaces?: DaemonWorkspaceCapability[];
 }
 
 /**
@@ -285,6 +300,7 @@ export interface DaemonStatusReport {
   };
   limits: {
     maxSessions: number | null;
+    maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
     eventRingSize: number;
@@ -299,6 +315,8 @@ export interface DaemonStatusReport {
     protocolVersions: DaemonProtocolVersions;
     features: string[];
   };
+  /** Present only when one daemon hosts multiple workspace runtimes. */
+  workspaces?: DaemonWorkspaceCapability[];
   runtime: {
     /** Present while the daemon runtime is still starting up. */
     loading?: boolean;
@@ -1124,6 +1142,7 @@ export interface DaemonWorkspaceMemoryForgetResult {
   summary?: string;
   removedEntries: DaemonWorkspaceMemoryForgetMatch[];
   touchedTopics: DaemonWorkspaceMemoryTopic[];
+  touchedScopes: Array<'user' | 'project'>;
 }
 
 export interface DaemonWorkspaceMemoryForgetTask {

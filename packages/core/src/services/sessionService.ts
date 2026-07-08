@@ -12,6 +12,10 @@ import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  buildOrderedUuidChain,
+  type HistoryGap,
+} from '../utils/conversation-chain.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -187,6 +191,13 @@ export interface ResumedSessionData {
   fileHistorySnapshots?: FileHistorySnapshot[];
   /** Persisted session artifact metadata reconstructed from JSONL records. */
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /**
+   * Breaks in the persisted parentUuid chain that were detected during
+   * reconstruction (an earlier segment of history was physically lost and could
+   * not be recovered). Lets the surface render a visible gap divider. Undefined
+   * when the chain was intact.
+   */
+  historyGaps?: HistoryGap[];
 }
 
 /**
@@ -939,12 +950,19 @@ export class SessionService {
 
   /**
    * Reconstructs a linear conversation from tree-structured records.
+   *
+   * Delegates the parentUuid walk to {@link buildOrderedUuidChain}. With
+   * `detectGaps`, a walk that stops on a physically-missing parent records the
+   * break in the returned `gaps` (see {@link HistoryGap}) so the surface can
+   * mark it — the earlier records are NOT reconstructed (reconnecting them
+   * could resurrect turns the user rewound away). Without `detectGaps` the
+   * result is identical to the historical walk.
    */
   private reconstructHistory(
     records: ChatRecord[],
-    leafUuid?: string,
-  ): ChatRecord[] {
-    if (records.length === 0) return [];
+    opts?: { leafUuid?: string; detectGaps?: boolean },
+  ): { messages: ChatRecord[]; gaps: HistoryGap[] } {
+    if (records.length === 0) return { messages: [], gaps: [] };
 
     const recordsByUuid = new Map<string, ChatRecord[]>();
     for (const record of records) {
@@ -953,29 +971,17 @@ export class SessionService {
       recordsByUuid.set(record.uuid, existing);
     }
 
-    let currentUuid: string | null =
-      leafUuid ?? this.lastConversationRecordUuid(records);
-    const uuidChain: string[] = [];
-    const visited = new Set<string>();
+    const { uuids, gaps } = buildOrderedUuidChain(records, opts);
 
-    while (currentUuid && !visited.has(currentUuid)) {
-      visited.add(currentUuid);
-      uuidChain.push(currentUuid);
-      const recordsForUuid = recordsByUuid.get(currentUuid);
-      if (!recordsForUuid || recordsForUuid.length === 0) break;
-      currentUuid = recordsForUuid[0].parentUuid;
-    }
-
-    uuidChain.reverse();
     const messages: ChatRecord[] = [];
-    for (const uuid of uuidChain) {
+    for (const uuid of uuids) {
       const recordsForUuid = recordsByUuid.get(uuid);
       if (recordsForUuid && recordsForUuid.length > 0) {
         messages.push(this.aggregateRecords(recordsForUuid));
       }
     }
 
-    return messages;
+    return { messages, gaps };
   }
 
   private lastConversationRecordUuid(records: ChatRecord[]): string | null {
@@ -1019,9 +1025,24 @@ export class SessionService {
     }
 
     // Reconstruct linear history
-    const messages = this.reconstructHistory(records);
+    const { messages, gaps } = this.reconstructHistory(records, {
+      detectGaps: true,
+    });
     if (messages.length === 0) {
       return;
+    }
+
+    if (gaps.length > 0) {
+      debugLogger.warn(
+        `loadSession: detected ${gaps.length} unrecoverable history gap(s) ` +
+          `for session ${sessionId}: ` +
+          gaps
+            .map(
+              (g) =>
+                `child=${g.childUuid} missingParent=${g.missingParentUuid}`,
+            )
+            .join('; '),
+      );
     }
 
     const lastMessage = messages[messages.length - 1];
@@ -1086,6 +1107,7 @@ export class SessionService {
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      historyGaps: gaps.length > 0 ? gaps : undefined,
     };
   }
 
@@ -1438,9 +1460,10 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
+    const { messages: activeMessages } = this.reconstructHistory(records);
     const sourceRecords = includeActiveSideArtifactRecords(
       records,
-      this.reconstructHistory(records),
+      activeMessages,
     );
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);

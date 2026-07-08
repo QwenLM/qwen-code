@@ -83,6 +83,81 @@ function deferred<T>(): {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('emits lifecycle events when a fresh session is registered and closed', async () => {
+    const events: Array<{
+      type: string;
+      sessionId: string;
+      workspaceCwd: string;
+      reason?: string;
+    }> = [];
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => {
+        events.push(event);
+      },
+    });
+
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.closeSession(session.sessionId);
+
+    expect(events).toEqual([
+      {
+        type: 'registered',
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        reason: 'spawn',
+      },
+      {
+        type: 'removed',
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        reason: 'client_close',
+      },
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('does not emit another registration for attach-only spawnOrAttach calls', async () => {
+    const events: Array<{ type: string; sessionId: string }> = [];
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: (event) => {
+        events.push(event);
+      },
+    });
+
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(events.filter((event) => event.type === 'registered')).toEqual([
+      expect.objectContaining({
+        type: 'registered',
+        sessionId: first.sessionId,
+      }),
+    ]);
+
+    await bridge.closeSession(first.sessionId);
+    await bridge.shutdown();
+  });
+
+  it('does not fail session lifecycle when the lifecycle callback throws', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+      sessionLifecycle: () => {
+        throw new Error('lifecycle sink failed');
+      },
+    });
+
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(bridge.closeSession(session.sessionId)).resolves.toBe(
+      undefined,
+    );
+
+    await bridge.shutdown();
+  });
+
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in
@@ -621,6 +696,7 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
 
     await bridge.shutdown();
@@ -676,6 +752,7 @@ describe('createAcpSessionBridge', () => {
                   },
                 ],
                 touchedTopics: ['project'],
+                touchedScopes: ['project'],
                 querySeen: params['query'],
               };
             }
@@ -694,6 +771,7 @@ describe('createAcpSessionBridge', () => {
     expect(result).toMatchObject({
       summary: 'forgot',
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
       removedEntries: [
         {
           topic: 'project',
@@ -711,7 +789,41 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('derives workspace memory forget scopes for legacy responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [],
+                touchedTopics: ['feedback', 'project'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryForget({
+      query: 'old preference',
+    });
+
+    expect(result).toMatchObject({
+      touchedTopics: ['feedback', 'project'],
+      touchedScopes: ['user', 'project'],
+    });
 
     await bridge.shutdown();
   });
