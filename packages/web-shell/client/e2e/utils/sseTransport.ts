@@ -45,15 +45,36 @@ export async function installSseTransport<TEvent>(
     const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
     const connections: SseConnectionRecord[] = [];
 
+    function removeController(
+      target: ReadableStreamDefaultController<Uint8Array>,
+    ) {
+      const index = controllers.indexOf(target);
+      if (index >= 0) {
+        controllers.splice(index, 1);
+      }
+    }
+
+    function removeConnection(target: SseConnectionRecord) {
+      const index = connections.indexOf(target);
+      if (index >= 0) {
+        connections.splice(index, 1);
+      }
+    }
+
     function activeControllers() {
-      return controllers.filter((controller) => {
+      const active: ReadableStreamDefaultController<Uint8Array>[] = [];
+      for (const controller of controllers) {
         try {
           const _desiredSize = controller.desiredSize;
-          return true;
+          active.push(controller);
         } catch {
-          return false;
+          continue;
         }
-      });
+      }
+      if (active.length !== controllers.length) {
+        controllers.splice(0, controllers.length, ...active);
+      }
+      return active;
     }
 
     function writeBytes(bytes: Uint8Array) {
@@ -79,16 +100,18 @@ export async function installSseTransport<TEvent>(
         writeBytes(bytes.slice(offset));
       },
       close() {
-        for (const controller of activeControllers()) {
+        const active = activeControllers();
+        controllers.length = 0;
+        for (const controller of active) {
           controller.close();
         }
-        controllers.length = 0;
       },
       error(message: string) {
-        for (const controller of activeControllers()) {
+        const active = activeControllers();
+        controllers.length = 0;
+        for (const controller of active) {
           controller.error(new Error(message));
         }
-        controllers.length = 0;
       },
     };
 
@@ -102,18 +125,28 @@ export async function installSseTransport<TEvent>(
       if (!match) return originalFetch(input, init);
 
       const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+      let streamController: ReadableStreamDefaultController<Uint8Array> | null =
+        null;
+      let connectionRecord: SseConnectionRecord | null = null;
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
+          streamController = controller;
           controllers.push(controller);
-          connections.push({
+          connectionRecord = {
             url: url.href,
             sessionId,
             headers: Object.fromEntries(request.headers.entries()),
             connectedAt: Date.now(),
-          });
+          };
+          connections.push(connectionRecord);
         },
         cancel() {
-          controllers.length = 0;
+          if (streamController) {
+            removeController(streamController);
+          }
+          if (connectionRecord) {
+            removeConnection(connectionRecord);
+          }
         },
       });
 
@@ -146,9 +179,9 @@ export async function installSseTransport<TEvent>(
         { timeout },
       );
       const connections = await transport.connections();
-      const match = connections.find(
-        (connection) => !sessionId || connection.sessionId === sessionId,
-      );
+      const match = [...connections]
+        .reverse()
+        .find((connection) => !sessionId || connection.sessionId === sessionId);
       if (!match) throw new Error('SSE connection was not recorded.');
       return match;
     },

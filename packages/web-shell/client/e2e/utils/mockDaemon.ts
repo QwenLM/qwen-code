@@ -69,6 +69,32 @@ type ScenarioOverrides = Partial<
 
 const now = '2026-07-03T00:00:00.000Z';
 
+export function applyScenarioCurrentModel(
+  scenario: WebShellDaemonScenario,
+  modelId: string,
+): void {
+  scenario.currentModel = modelId;
+  scenario.state.models = {
+    ...scenario.state.models,
+    currentModelId: modelId,
+  };
+  scenario.providers = {
+    ...scenario.providers,
+    current: {
+      ...scenario.providers.current,
+      modelId,
+      fastModelId: modelId,
+    },
+    providers: scenario.providers.providers.map((provider) => ({
+      ...provider,
+      models: provider.models?.map((model) => ({
+        ...model,
+        isCurrent: model.modelId === modelId,
+      })),
+    })),
+  };
+}
+
 export function createWebShellDaemonScenario(
   overrides: ScenarioOverrides = {},
 ): WebShellDaemonScenario {
@@ -539,7 +565,9 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'model') {
-      await json(route, { sessionId, modelId: getModelId(body) });
+      const modelId = getModelId(body);
+      applyScenarioCurrentModel(scenario, modelId);
+      await json(route, { sessionId, modelId });
       return;
     }
     if (action === 'approval-mode') {

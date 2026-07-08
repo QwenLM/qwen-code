@@ -52,6 +52,30 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('keeps later SSE connections alive when an earlier one is cancelled @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await page.reload();
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await completeReplay(page, daemon, scenario.sessionId);
+  await fillComposer(page, 'Second connection should still stream');
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await daemon.sse.split(
+    assistantTextEvent('Reconnect-safe SSE payload', { id: 20 }),
+  );
+  await daemon.sendEvent(turnCompleteEvent('prompt-reconnect', { id: 21 }));
+
+  await expect(page.locator('[data-web-shell-message-list]')).toContainText(
+    'Reconnect-safe SSE payload',
+  );
+});
+
 test('submits permission decisions through the fake daemon @smoke', async ({
   page,
 }, testInfo) => {
@@ -96,6 +120,17 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
     .locator('[data-web-shell-model-option][data-model-id="qwen-test-alt"]')
     .click();
   await expect(page.locator('[data-web-shell-model-dialog]')).toHaveCount(0);
+  await page.reload();
+  await completeReplay(page, daemon);
+  await submitLocalCommand(page, '/model');
+  await expect(page.locator('[data-web-shell-model-dialog]')).toBeVisible();
+  await expect(
+    page.locator(
+      '[data-web-shell-model-option][data-model-id="qwen-test-alt"]',
+    ),
+  ).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'close' }).click();
+  await expect(page.locator('[data-web-shell-model-dialog]')).toHaveCount(0);
 
   await submitLocalCommand(page, '/theme');
   await expect(page.locator('[data-web-shell-theme-dialog]')).toBeVisible();
@@ -133,13 +168,13 @@ async function gotoSession(
 async function completeReplay(
   page: Page,
   daemon: MockDaemonController,
-  sessionId: string,
+  sessionId?: string,
   replayedCount = 0,
 ): Promise<void> {
-  await daemon.sse.waitForConnection(sessionId);
+  const connection = await daemon.sse.waitForConnection(sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({
-      sessionId,
+      sessionId: connection.sessionId,
       replayedCount,
     }),
   );
