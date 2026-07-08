@@ -2440,6 +2440,35 @@ export class GeminiClient {
       const messageDisplayId = messageDisplayEnabled ? randomUUID() : '';
       let messageDisplayState: MessageDisplayState =
         createInitialMessageDisplayState(Date.now());
+      // Final MessageDisplay flush: called from every exit out of the `for await`
+      // loop below (normal completion and each early `return turn`), so a hook
+      // script's `is_final: true` completion signal is never skipped just because
+      // the turn ended via loop detection or a stream error instead of falling off
+      // the bottom of the loop. Not gated on !turn.pendingToolCalls the way the
+      // Stop hook below is, since a message boundary and a Stop-worthy end-of-turn
+      // are different things here. It does re-send the same cumulative text as the
+      // last debounced flush when nothing changed since then — that's intentional,
+      // not a missed dedup: is_final is itself new information (it tells
+      // subscribers this message is done), so the event still needs to fire even
+      // when displayedText didn't change. Gated on there being any text at all so
+      // tool-call-only turns (no Content events ever arrived) don't fire a vacuous
+      // empty-text final event, and on !signal.aborted to match the Stop hook's
+      // cancellation guard below.
+      const flushFinalMessageDisplay = (): void => {
+        if (
+          messageDisplayEnabled &&
+          messageDisplayState.displayedText !== '' &&
+          !signal.aborted
+        ) {
+          this.fireMessageDisplayHook(
+            messageBus,
+            messageDisplayId,
+            messageDisplayState.displayedText,
+            true,
+            signal,
+          );
+        }
+      };
 
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
@@ -2494,6 +2523,7 @@ export class GeminiClient {
           if (isTopLevelInteraction)
             endInteractionSpan('error', { errorMessage: 'loop detected' });
           this.cancelPendingMemoryPrefetch();
+          flushFinalMessageDisplay();
           return turn;
         }
 
@@ -2525,6 +2555,7 @@ export class GeminiClient {
           // finally cleanup catches this, but cancel explicitly to match
           // the cleanup pattern at other early-return sites.
           this.cancelPendingMemoryPrefetch();
+          flushFinalMessageDisplay();
           return turn;
         }
         // Update arena status on Finished events — stats are derived
@@ -2589,36 +2620,12 @@ export class GeminiClient {
           // finally cleanup catches this, but cancel explicitly to match
           // the cleanup pattern at other early-return sites.
           this.cancelPendingMemoryPrefetch();
+          flushFinalMessageDisplay();
           return turn;
         }
       }
 
-      // Final MessageDisplay flush: this turn.run() stream is exhausted, so this
-      // message is done, regardless of whether pending tool calls will trigger a
-      // continuation (that continuation is its own message.run() call and gets its
-      // own message_id — see the const declarations above the loop). Not gated on
-      // !turn.pendingToolCalls the way the Stop hook below is, since a message
-      // boundary and a Stop-worthy end-of-turn are different things here. It does
-      // re-send the same cumulative text as the last debounced flush when nothing
-      // changed since then — that's intentional, not a missed dedup: is_final is
-      // itself new information (it tells subscribers this message is done), so the
-      // event still needs to fire even when displayedText didn't change. Gated on
-      // there being any text at all so tool-call-only turns (no Content events ever
-      // arrived) don't fire a vacuous empty-text final event, and on !signal.aborted
-      // to match the Stop hook's cancellation guard below.
-      if (
-        messageDisplayEnabled &&
-        messageDisplayState.displayedText !== '' &&
-        !signal.aborted
-      ) {
-        this.fireMessageDisplayHook(
-          messageBus,
-          messageDisplayId,
-          messageDisplayState.displayedText,
-          true,
-          signal,
-        );
-      }
+      flushFinalMessageDisplay();
 
       // Track API completion time for thinking block idle cleanup
       this.lastApiCompletionTimestamp = Date.now();
