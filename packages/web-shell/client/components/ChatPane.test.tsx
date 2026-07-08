@@ -25,9 +25,18 @@ let sendPromptAdmit: (() => void) | undefined;
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
+const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
+const setModel = vi.fn(async () => ({}) as any);
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
-  useActions: () => ({ sendPrompt, submitPermission, cancel }),
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+  useActions: () => ({
+    sendPrompt,
+    submitPermission,
+    cancel,
+    setApprovalMode,
+    setModel,
+  }),
   useConnection: () => connectionState,
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
@@ -77,8 +86,31 @@ vi.mock('./ChatEditor', () => ({
         <button data-testid="pane-cancel" onClick={props.onCancel}>
           cancel
         </button>
+        <button
+          data-testid="pane-pick-mode"
+          onClick={() => props.onSelectMode?.('yolo')}
+        >
+          mode
+        </button>
+        <button
+          data-testid="pane-pick-model"
+          onClick={() => props.onSelectModel?.('gpt-x')}
+        >
+          model
+        </button>
         <span data-testid="pane-running">{String(props.isRunning)}</span>
         <span data-testid="pane-dialogopen">{String(props.dialogOpen)}</span>
+        <span data-testid="pane-toolbar">
+          {JSON.stringify(props.visibleToolbarActions ?? null)}
+        </span>
+        <span data-testid="pane-commands">
+          {String((props.commands ?? []).length)}
+        </span>
+        <span data-testid="pane-mode">{String(props.currentMode)}</span>
+        <span data-testid="pane-model">{String(props.currentModel)}</span>
+        <span data-testid="pane-models">
+          {JSON.stringify(props.availableModels ?? null)}
+        </span>
       </div>
     );
   },
@@ -137,6 +169,8 @@ beforeEach(() => {
   );
   submitPermission.mockClear();
   cancel.mockClear();
+  setApprovalMode.mockClear();
+  setModel.mockClear();
 });
 
 afterEach(() => {
@@ -369,5 +403,79 @@ describe('ChatPane', () => {
     expect(testid('pane-streaming')?.getAttribute('data-started-at')).toBe(
       'none',
     );
+  });
+
+  it('enables the interactive composer controls (approval mode, model, voice)', () => {
+    render();
+    expect(testid('pane-toolbar')?.textContent).toBe(
+      JSON.stringify(['approvalMode', 'model', 'voice']),
+    );
+  });
+
+  it("lists the pane session's own commands in the slash menu", () => {
+    connectionState.commands = [
+      { name: 'clear', description: 'Clear', source: 'builtin-command' },
+      { name: 'compress', description: 'Compress', source: 'builtin-command' },
+    ];
+    render();
+    expect(testid('pane-commands')?.textContent).toBe('2');
+  });
+
+  it('hides internal composer models and labels the rest', () => {
+    connectionState.models = [
+      { id: 'coder-model(qwen-oauth)', label: 'Coder' },
+      { id: 'qwen-max', label: 'qwen-max' },
+    ];
+    render();
+    const models = JSON.parse(testid('pane-models')!.textContent!);
+    expect(models.map((m: { id: string }) => m.id)).toEqual(['qwen-max']);
+  });
+
+  it("drives THIS pane's approval mode when one is picked", () => {
+    render();
+    act(() =>
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+  });
+
+  it("switches THIS pane's model when one is picked", () => {
+    render();
+    act(() =>
+      testid('pane-pick-model')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(setModel).toHaveBeenCalledWith('gpt-x');
+  });
+
+  it("reflects the pane session's current mode and model", () => {
+    connectionState.currentMode = 'auto-edit';
+    connectionState.currentModel = 'qwen-max';
+    render();
+    expect(testid('pane-mode')?.textContent).toBe('auto-edit');
+    expect(testid('pane-model')?.textContent).toBe('qwen-max');
+  });
+
+  it('falls back to the default mode and empty model when unset', () => {
+    render();
+    expect(testid('pane-mode')?.textContent).toBe('default');
+    expect(testid('pane-model')?.textContent).toBe('');
+  });
+
+  it('reports a failed model switch to onError', async () => {
+    const onError = vi.fn();
+    setModel.mockRejectedValueOnce(new Error('switch failed'));
+    render({ onError });
+    await act(async () => {
+      testid('pane-pick-model')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalled();
   });
 });
