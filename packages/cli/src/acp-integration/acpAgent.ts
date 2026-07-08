@@ -5871,7 +5871,7 @@ class QwenAgent implements Agent {
                 data: update,
               })),
               ...(nextCursor !== undefined ? { nextCursor } : {}),
-              hasMore: nextCursor !== undefined && page.hasMore,
+              hasMore: page.hasMore,
               startTime: page.startTime,
               lastUpdated: page.lastUpdated,
               ...(replay.replayError !== undefined

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
+  InvalidSessionTranscriptCursorError,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
@@ -177,5 +178,29 @@ describe('SessionTranscriptReader', () => {
       snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
       maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
     });
+  });
+
+  it('rejects tampered cursor snapshots before cache lookup', async () => {
+    await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+      record('u2', 'a1', 'next'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const decoded = JSON.parse(
+      Buffer.from(first.nextCursor ?? '', 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+    const tampered = Buffer.from(
+      JSON.stringify({
+        ...decoded,
+        snapshotSize: 1,
+      }),
+      'utf8',
+    ).toString('base64url');
+
+    await expect(
+      reader.readPage(sessionId, { cursor: tampered }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 });

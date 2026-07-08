@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -110,6 +111,7 @@ interface CacheEntry {
 const INDEX_CACHE_MAX_ENTRIES = 32;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const READ_CHUNK_SIZE = 64 * 1024;
+const CURSOR_HMAC_KEY = randomBytes(32);
 
 const indexCache = new Map<string, CacheEntry>();
 
@@ -121,8 +123,49 @@ function isFiniteNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
+function cursorPayload(
+  state: SessionTranscriptCursorState,
+): Record<string, unknown> {
+  return {
+    v: state.v,
+    sessionId: state.sessionId,
+    fileIdentity: {
+      dev: state.fileIdentity.dev,
+      ino: state.fileIdentity.ino,
+    },
+    snapshotSize: state.snapshotSize,
+    position: state.position,
+    leafUuid: state.leafUuid,
+    startTime: state.startTime,
+    lastUpdated: state.lastUpdated,
+    ...(state.replay !== undefined ? { replay: state.replay } : {}),
+  };
+}
+
+function signCursorPayload(payload: Record<string, unknown>): string {
+  return createHmac('sha256', CURSOR_HMAC_KEY)
+    .update(JSON.stringify(payload))
+    .digest('base64url');
+}
+
+function hasValidCursorMac(
+  payload: Record<string, unknown>,
+  mac: string,
+): boolean {
+  const expected = Buffer.from(signCursorPayload(payload), 'utf8');
+  const actual = Buffer.from(mac, 'utf8');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
 function encodeCursorState(state: SessionTranscriptCursorState): string {
-  return Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+  const payload = cursorPayload(state);
+  return Buffer.from(
+    JSON.stringify({
+      ...payload,
+      mac: signCursorPayload(payload),
+    }),
+    'utf8',
+  ).toString('base64url');
 }
 
 export function encodeSessionTranscriptCursor(
@@ -151,11 +194,12 @@ export function decodeSessionTranscriptCursor(
       !isFiniteNonNegativeInteger(parsed['position']) ||
       typeof parsed['leafUuid'] !== 'string' ||
       typeof parsed['startTime'] !== 'string' ||
-      typeof parsed['lastUpdated'] !== 'string'
+      typeof parsed['lastUpdated'] !== 'string' ||
+      typeof parsed['mac'] !== 'string'
     ) {
       throw new InvalidSessionTranscriptCursorError();
     }
-    return {
+    const state = {
       v: SESSION_TRANSCRIPT_CURSOR_VERSION,
       sessionId: parsed['sessionId'],
       fileIdentity: {
@@ -169,6 +213,10 @@ export function decodeSessionTranscriptCursor(
       lastUpdated: parsed['lastUpdated'],
       ...(parsed['replay'] !== undefined ? { replay: parsed['replay'] } : {}),
     };
+    if (!hasValidCursorMac(cursorPayload(state), parsed['mac'])) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    return state;
   } catch (error) {
     if (error instanceof InvalidSessionTranscriptCursorError) {
       throw error;
