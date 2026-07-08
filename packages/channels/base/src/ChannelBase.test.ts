@@ -200,6 +200,7 @@ function defaultConfig(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'disabled',
+    dmPolicy: 'open',
     groups: {},
     ...overrides,
   };
@@ -256,6 +257,22 @@ describe('ChannelBase', () => {
     it('allows DM messages through', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('silently drops DM messages when dmPolicy=disabled', async () => {
+      const ch = createChannel({ dmPolicy: 'disabled' });
+      await ch.handleInbound(envelope());
+      expect(ch.sent).toEqual([]);
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('allows group messages through when dmPolicy=disabled', async () => {
+      const ch = createChannel({
+        dmPolicy: 'disabled',
+        groupPolicy: 'open',
+      });
+      await ch.handleInbound(envelope({ isGroup: true, isMentioned: true }));
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
@@ -11132,6 +11149,88 @@ describe('ChannelBase', () => {
 
       expect(disable).toHaveBeenCalledWith('job-1');
       expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('disables a stored DM job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'User 1',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('no longer authorized');
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
+    it('allows stored group job when dmPolicy=disabled', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        { dmPolicy: 'disabled', groupPolicy: 'open' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalled();
     });
 
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {
