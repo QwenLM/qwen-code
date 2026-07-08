@@ -19,7 +19,7 @@ const REMEMBER_ERROR_AUTH_SCHEME_INVISIBLE_RE =
 const REMEMBER_ERROR_AUTH_TOKEN_WITH_SEPARATORS_RE =
   /\b(Bearer|QQBot)(?:\s|[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+((?:[A-Za-z0-9._~+/=-]+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*[A-Za-z0-9._~+/=-]+)/giu;
 const REMEMBER_ERROR_BARE_TOKEN_WITH_SEPARATORS_RE =
-  /\bsk-(?:[A-Za-z0-9-]+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*[A-Za-z0-9-]+/gu;
+  /\b(?:sk-|ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[b]-|xox[p]-)(?:[A-Za-z0-9_-]+(?:[\x00-\x1f\x7f-\x9f\p{Cf}\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\p{Variation_Selector})+)*[A-Za-z0-9_-]+/gu;
 const REMEMBER_ERROR_CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
 /* eslint-enable no-control-regex */
 const DETAIL_SUPPRESSED_REMEMBER_ERROR_CODES = new Set([

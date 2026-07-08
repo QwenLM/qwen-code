@@ -231,6 +231,37 @@ describe('extractRememberErrorDetails', () => {
     expect(details).not.toContain('BBBBBBBBBBBBBBB');
   });
 
+  it('redacts platform tokens split by invisible characters', () => {
+    for (const prefix of [
+      'ghp_',
+      'gho_',
+      'ghs_',
+      'ghu_',
+      'github_pat_',
+      'glpat-',
+      'xoxb-',
+      'xoxp-',
+    ]) {
+      const details = extractRememberErrorDetails(
+        new Error(`Platform token ${prefix}AAAAAAAAAA\u200bBBBBBBBBBBBBBBB`),
+      );
+
+      expect(details).toBe('Platform token <redacted>');
+      expect(details).not.toContain('AAAAAAAAAA');
+      expect(details).not.toContain('BBBBBBBBBBBBBBB');
+    }
+  });
+
+  it('redacts platform tokens split by unicode space separators', () => {
+    const details = extractRememberErrorDetails(
+      new Error('Platform token ghp_AAAAAAAAAA\u00a0BBBBBBBBBBBBBBB'),
+    );
+
+    expect(details).toBe('Platform token <redacted>');
+    expect(details).not.toContain('AAAAAAAAAA');
+    expect(details).not.toContain('BBBBBBBBBBBBBBB');
+  });
+
   it('redacts bare bearer tokens separated by invisible characters', () => {
     const details = extractRememberErrorDetails(
       new Error('Bearer\u200BeyJhbGciOiABCDEFGHIJKLMN'),
