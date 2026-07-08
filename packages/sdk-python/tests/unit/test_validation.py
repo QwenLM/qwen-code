@@ -191,6 +191,7 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
     "flag",
     [
         "--model",
+        "-m",
         "--auth-type",
         "--approval-mode",
         "--insecure",
@@ -199,16 +200,27 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "--allowed-tools",
         "--exclude-tools",
         "--resume",
+        "-r",
+        "--continue",
+        "-c",
         "--session-id",
         "--proxy",
         "--channel",
         "--output-format",
+        "-o",
         "--openai-base-url",
         "--openai-api-key",
         "--mcp-config",
         "--prompt",
+        "-p",
+        "--prompt-interactive",
+        "-i",
         "--add-dir",
         "--input-file",
+        "--extensions",
+        "-e",
+        "--sandbox",
+        "-s",
     ],
 )
 def test_rejects_extra_args_with_security_sensitive_flags(flag: str) -> None:
@@ -244,3 +256,17 @@ def test_rejects_fallback_model_exceeding_max() -> None:
 def test_rejects_empty_proxy() -> None:
     with pytest.raises(ValidationError, match="proxy cannot be empty"):
         validate_query_options(QueryOptions(proxy="   "))
+
+
+def test_rejects_fork_session_without_resume() -> None:
+    with pytest.raises(ValidationError, match="fork_session requires resume"):
+        validate_query_options(QueryOptions(fork_session=True))
+
+
+def test_accepts_fork_session_with_resume() -> None:
+    validate_query_options(
+        QueryOptions(
+            fork_session=True,
+            resume="123e4567-e89b-12d3-a456-426614174000",
+        )
+    )

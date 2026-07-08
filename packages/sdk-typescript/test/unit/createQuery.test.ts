@@ -102,6 +102,7 @@ describe('query()', () => {
       prompt: 'hello',
       options: {
         forkSession: true,
+        resume: '123e4567-e89b-12d3-a456-426614174000',
         maxToolCalls: 10,
         maxSubagentDepth: 3,
         includeDirectories: ['/tmp/a', '/tmp/b'],

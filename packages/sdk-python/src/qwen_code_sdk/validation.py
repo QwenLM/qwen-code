@@ -20,8 +20,10 @@ _RESERVED_CLI_FLAGS = frozenset(
     {
         "--input-format",
         "--output-format",
+        "-o",
         "--channel",
         "--model",
+        "-m",
         "--auth-type",
         "--fallback-model",
         "--approval-mode",
@@ -34,7 +36,9 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--max-tool-calls",
         "--max-subagent-depth",
         "--resume",
+        "-r",
         "--continue",
+        "-c",
         "--session-id",
         "--fork-session",
         "--max-session-turns",
@@ -44,8 +48,10 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--add-dir",
         "--allowed-mcp-server-names",
         "--extensions",
+        "-e",
         "--proxy",
         "--sandbox",
+        "-s",
         "--safe-mode",
         "--worktree",
         "--disabled-slash-commands",
@@ -57,7 +63,9 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--openai-api-key",
         "--mcp-config",
         "--prompt",
+        "-p",
         "--prompt-interactive",
+        "-i",
         "--json-schema",
         "--json-fd",
         "--json-file",
@@ -104,6 +112,9 @@ def validate_query_options(options: QueryOptions) -> None:
 
     if options.resume:
         validate_session_id(options.resume, "resume")
+
+    if options.fork_session and not options.resume:
+        raise ValidationError("fork_session requires resume to be set")
 
     if options.max_session_turns is not None and options.max_session_turns < -1:
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")

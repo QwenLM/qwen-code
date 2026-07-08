@@ -40,8 +40,10 @@ describe('QueryOptionsSchema', () => {
   it.each([
     '--input-format',
     '--output-format',
+    '-o',
     '--channel',
     '--model',
+    '-m',
     '--auth-type',
     '--approval-mode',
     '--yolo',
@@ -50,12 +52,22 @@ describe('QueryOptionsSchema', () => {
     '--allowed-tools',
     '--exclude-tools',
     '--resume',
+    '-r',
+    '--continue',
+    '-c',
     '--session-id',
     '--proxy',
     '--openai-base-url',
     '--mcp-config',
     '--prompt',
+    '-p',
+    '--prompt-interactive',
+    '-i',
     '--add-dir',
+    '--extensions',
+    '-e',
+    '--sandbox',
+    '-s',
   ])('rejects extraArgs containing reserved flag %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);
@@ -67,6 +79,7 @@ describe('QueryOptionsSchema', () => {
   it('accepts all new option fields together', () => {
     const result = QueryOptionsSchema.safeParse({
       forkSession: true,
+      resume: 'session-123',
       maxToolCalls: 10,
       maxSubagentDepth: 3,
       includeDirectories: ['/tmp/a'],
@@ -82,6 +95,16 @@ describe('QueryOptionsSchema', () => {
       disabledSlashCommands: ['cmd1'],
     });
     expect(result.success).toBe(true);
+  });
+
+  it('rejects forkSession without resume', () => {
+    const result = QueryOptionsSchema.safeParse({ forkSession: true });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toContain(
+        'forkSession requires resume',
+      );
+    }
   });
 
   it.each([

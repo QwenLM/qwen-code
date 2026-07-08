@@ -49,7 +49,6 @@ export type TransportOptions = {
   forkSession?: boolean;
   maxToolCalls?: number;
   maxSubagentDepth?: number;
-  agents?: SubagentConfig[];
   includeDirectories?: string[];
   extraArgs?: string[];
   extensions?: string[];

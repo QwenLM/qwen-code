@@ -5,8 +5,10 @@ import type { SubagentConfig } from './protocol.js';
 const RESERVED_CLI_FLAGS = new Set([
   '--input-format',
   '--output-format',
+  '-o',
   '--channel',
   '--model',
+  '-m',
   '--auth-type',
   '--fallback-model',
   '--approval-mode',
@@ -19,7 +21,9 @@ const RESERVED_CLI_FLAGS = new Set([
   '--max-tool-calls',
   '--max-subagent-depth',
   '--resume',
+  '-r',
   '--continue',
+  '-c',
   '--session-id',
   '--fork-session',
   '--max-session-turns',
@@ -29,8 +33,10 @@ const RESERVED_CLI_FLAGS = new Set([
   '--add-dir',
   '--allowed-mcp-server-names',
   '--extensions',
+  '-e',
   '--proxy',
   '--sandbox',
+  '-s',
   '--safe-mode',
   '--worktree',
   '--disabled-slash-commands',
@@ -42,7 +48,9 @@ const RESERVED_CLI_FLAGS = new Set([
   '--openai-api-key',
   '--mcp-config',
   '--prompt',
+  '-p',
   '--prompt-interactive',
+  '-i',
   '--json-schema',
   '--json-fd',
   '--json-file',
@@ -215,14 +223,17 @@ export const QueryOptionsSchema = z
       .array(
         z.custom<SubagentConfig>(
           (val) =>
-            val &&
-            typeof val === 'object' &&
-            val.name &&
-            val.description &&
-            val.systemPrompt && {
-              message:
-                'agents must be an array of SubagentConfig objects with non-empty name, description, and systemPrompt',
-            },
+            !!(
+              val &&
+              typeof val === 'object' &&
+              val.name &&
+              val.description &&
+              val.systemPrompt
+            ),
+          {
+            message:
+              'agents must be an array of SubagentConfig objects with non-empty name, description, and systemPrompt',
+          },
         ),
       )
       .optional(),
@@ -237,10 +248,10 @@ export const QueryOptionsSchema = z
       .array(z.string())
       .refine(
         (args) =>
-          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0])),
+          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? '')),
         (args) => {
           const blocked = args.find((arg) =>
-            RESERVED_CLI_FLAGS.has(arg.split('=')[0]),
+            RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
           );
           return {
             message: `extraArgs cannot contain reserved flag: ${blocked}`,
@@ -262,4 +273,7 @@ export const QueryOptionsSchema = z
     disabledSlashCommands: z.array(z.string()).optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((data) => !data.forkSession || data.resume, {
+    message: 'forkSession requires resume to be set',
+  });
