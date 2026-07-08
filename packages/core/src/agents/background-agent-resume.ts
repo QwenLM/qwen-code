@@ -219,17 +219,12 @@ function reconstructHistory(
     if (!firstByUuid.has(record.uuid)) firstByUuid.set(record.uuid, record);
   }
 
-  const { uuids, gaps } = buildOrderedUuidChain(records, {
-    leafUuid,
-    detectGaps: true,
-  });
-
-  if (gaps.length > 0) {
-    debugLogger.warn(
-      `reconstructHistory: detected ${gaps.length} unrecoverable history ` +
-        `gap(s) (childUuids: ${gaps.map((g) => g.childUuid).join(', ')})`,
-    );
-  }
+  // Gap detection is intentionally OFF here. Unlike the interactive `/resume`
+  // (sessionService) and ACP replay (HistoryReplayer) paths, this background
+  // transcript recovery has no surface to render a gap marker on, so detecting
+  // gaps only to drop them would be an inconsistent half-measure. The walk
+  // truncates at a broken parent link either way; here it just truncates.
+  const { uuids } = buildOrderedUuidChain(records, { leafUuid });
 
   return uuids
     .map((uuid) => firstByUuid.get(uuid))
