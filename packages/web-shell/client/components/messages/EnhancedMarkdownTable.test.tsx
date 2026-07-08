@@ -875,6 +875,31 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('flushes pending resize width when the window blurs', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 200 }),
+      );
+      window.dispatchEvent(new Event('blur'));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '260px',
+    );
+  });
+
   it('stops resizing a column when page visibility changes', () => {
     const container = renderTable();
     const resize = button(container, 'Resize Team');
@@ -903,6 +928,38 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
       '160px',
+    );
+  });
+
+  it('keeps resizing when page visibility changes while visible', () => {
+    const container = renderTable();
+    const resize = button(container, 'Resize Team');
+
+    act(() => {
+      resize.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+        }),
+      );
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientX: 220 }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+
+    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
+      '280px',
     );
   });
 
@@ -1005,6 +1062,34 @@ describe('EnhancedMarkdownTable', () => {
         new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
       );
     });
+    expect(teamHandle.className).not.toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(-1);
+  });
+
+  it('keeps the active column when Escape closes an open filter menu first', () => {
+    const container = renderWideTable();
+    const teamHandle = button(container, 'Move Team');
+
+    click(button(container, 'Sort by Team'));
+    click(button(container, 'Filter Team'));
+    expect(container.textContent).toContain('Custom filter');
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+
+    expect(container.textContent).not.toContain('Custom filter');
+    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(teamHandle.tabIndex).toBe(0);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+      );
+    });
+
     expect(teamHandle.className).not.toContain('reorderHandleVisible');
     expect(teamHandle.tabIndex).toBe(-1);
   });

@@ -1344,6 +1344,7 @@ export function EnhancedTable({
     };
     const handleMenuKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         closeFilterMenu();
         return;
       }
@@ -1401,6 +1402,7 @@ export function EnhancedTable({
       }
     };
     const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || openFilterMenu) return;
       if (event.key === 'Escape') setActiveColumn(null);
     };
     document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);
@@ -1412,7 +1414,7 @@ export function EnhancedTable({
       );
       document.removeEventListener('keydown', clearActiveColumnOnEscape);
     };
-  }, []);
+  }, [openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
