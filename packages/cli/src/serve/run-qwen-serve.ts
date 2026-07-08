@@ -3469,11 +3469,11 @@ export async function runQwenServe(
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // Swap the boot-error listener for a runtime-error one
-      // before resolving. `server.once('error', reject)` at the
-      // bottom only catches errors BEFORE listening; post-listen
-      // errors (EMFILE after FD exhaustion, runtime errors on the
-      // listener) would be unhandled and crash the daemon. Use a
-      // persistent listener that logs to stderr instead.
+      // before resolving. `tryListen`'s `server.once('error', ...)`
+      // only catches errors BEFORE listening; post-listen errors
+      // (EMFILE after FD exhaustion, runtime errors on the listener)
+      // would be unhandled and crash the daemon. Use a persistent
+      // listener that logs to stderr instead.
       server.removeAllListeners('error');
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
