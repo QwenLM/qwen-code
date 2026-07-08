@@ -30,6 +30,7 @@ package-lock.json
 .atlarix/
 
 # Qwen Code Configs
+
 .qwen/*
 !.qwen/commands/
 !.qwen/commands/**
@@ -48,6 +49,8 @@ package-lock.json
 .qwen/pending-skills/
 !.qwen/agents/
 !.qwen/agents/**
+!.qwen/chat-src/
+!.qwen/chat-src/**
 # Team memory (memory.enableTeamMemory) is shared with collaborators THROUGH
 # git, so it must be tracked despite the `.qwen/*` ignore above.
 !.qwen/team-memory/
@@ -59,6 +62,9 @@ package-lock.json
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Log files
+logs/
 
 # TypeScript build info files
 *.tsbuildinfo
@@ -87,7 +93,6 @@ packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
-logs/
 .repro-runs/
 # GHA credentials
 gha-creds-*.json
