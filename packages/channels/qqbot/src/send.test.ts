@@ -1497,9 +1497,11 @@ describe('restoreQQState validation filters', () => {
         replyMsgId: Map<string, { msgId: string; timestamp: number }>;
       }
     ).replyMsgId;
-    expect(replyMsgId.size).toBe(2);
+    // Far-future timestamp is rejected by the upper-bound check
+    // (o['timestamp'] <= Date.now() + REPLY_MSG_ID_TTL_MS).
+    expect(replyMsgId.size).toBe(1);
     expect(replyMsgId.get('a')?.msgId).toBe('valid');
-    expect(replyMsgId.has('b')).toBe(true);
+    expect(replyMsgId.has('b')).toBe(false);
   });
 
   it('filters msgSeqMap to only accept non-negative numbers', () => {

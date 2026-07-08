@@ -61,7 +61,8 @@ import {
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
   | 'RETRY_EXHAUSTED'
-  | 'FALLBACK_FAILED';
+  | 'FALLBACK_FAILED'
+  | 'ACTIVE_MSG_DISABLED';
 
 export class DeliveryError extends Error {
   constructor(
@@ -155,7 +156,11 @@ export class QQChannel extends ChannelBase {
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<
     string,
-    { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+    {
+      buffer: string;
+      timer: ReturnType<typeof setTimeout> | null;
+      pendingRetry?: string;
+    }
   > = new Map();
 
   /** Named handler for permanent textChunk listener (cron/non-prompt). */
@@ -266,6 +271,11 @@ export class QQChannel extends ChannelBase {
           if (entry.timer) {
             clearTimeout(entry.timer);
             entry.timer = null;
+            // Recover text from a cancelled retry attempt
+            if (entry.pendingRetry) {
+              entry.buffer = entry.pendingRetry + entry.buffer;
+              entry.pendingRetry = '';
+            }
           }
           entry.buffer += text;
           // Size-cap flush: when buffer exceeds configurable limit, flush immediately.
@@ -289,11 +299,15 @@ export class QQChannel extends ChannelBase {
                     process.stderr.write(
                       `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
                     );
-                    if (code === 'RETRY_EXHAUSTED') {
+                    if (
+                      code === 'RETRY_EXHAUSTED' ||
+                      code === 'ACTIVE_MSG_DISABLED'
+                    ) {
                       this.cronBuffer.delete(sessionId);
                       return;
                     }
                     // Transient (RATE_LIMITED, FALLBACK_FAILED, etc.) — re-schedule flush
+                    entry!.pendingRetry = toFlush;
                     entry!.timer = setTimeout(() => {
                       const retryTarget = this.router.getTarget(sessionId);
                       if (!retryTarget) {
@@ -497,7 +511,7 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] sendMessage blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}${cronCtx}\n`,
       );
       throw new DeliveryError(
-        'RATE_LIMITED',
+        'ACTIVE_MSG_DISABLED',
         `Active messages disabled for ${sanitizeLogText(chatId, 64)}`,
       );
     }
@@ -920,17 +934,28 @@ export class QQChannel extends ChannelBase {
         }
       })
       .catch((e: unknown) => {
-        if (e instanceof DeliveryError && e.code === 'RETRY_EXHAUSTED') {
+        if (
+          e instanceof DeliveryError &&
+          (e.code === 'RETRY_EXHAUSTED' || e.code === 'ACTIVE_MSG_DISABLED')
+        ) {
           process.stderr.write(
             `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}\n`,
           );
-          // RETRY_EXHAUSTED = permanent failure (retries exhausted at QQ
-          // or upstream layers). Don't retry — just clean up state.
+          // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED = permanent failure.
+          // Don't retry — just clean up state.
           const current = this.streamState.get(sessionId);
           if (current === state) {
             current.retryCount = 0;
             if (!current.buffer) {
               this.streamState.delete(sessionId);
+            } else if (!current.timer) {
+              // Schedule idleFlush for residual buffer accumulated
+              // during the failed send (new chunks arrived in-flight).
+              const reconnectId = this._reconnectId;
+              current.timer = setTimeout(() => {
+                this.idleFlush(sessionId, reconnectId);
+              }, QQChannel.IDLE_FLUSH_BACKOFF_MS);
+              current.timer.unref?.();
             }
           }
           if (this.pendingStreamDelete.has(sessionId)) {
@@ -982,9 +1007,16 @@ export class QQChannel extends ChannelBase {
               current.buffer.length >=
               (this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH)
             ) {
-              this.idleFlush(sessionId, this._reconnectId);
-              // Don't return — let .finally() clear flushingSessions.
-              // Skip retry scheduling: idleFlush handles it.
+              current.retryCount++;
+              if (current.retryCount >= QQChannel.MAX_FLUSH_RETRIES) {
+                this.streamState.delete(sessionId);
+                this.flushedSessions.delete(sessionId);
+                process.stderr.write(
+                  `[QQ:${this.name}] ${logLabel} retries exhausted (buffer exceeds limit) for ${sanitizeLogText(sessionId, 64)}\n`,
+                );
+              } else {
+                this.idleFlush(sessionId, this._reconnectId);
+              }
             } else {
               current.retryCount++;
               if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
@@ -1207,7 +1239,8 @@ export class QQChannel extends ChannelBase {
                     typeof o['msgId'] === 'string' &&
                     (o['msgId'] as string).length <= 128 &&
                     typeof o['timestamp'] === 'number' &&
-                    Number.isFinite(o['timestamp'])
+                    Number.isFinite(o['timestamp']) &&
+                    o['timestamp'] <= Date.now() + QQChannel.REPLY_MSG_ID_TTL_MS
                   );
                 })
                 .map(([k, v]) => [
@@ -1771,6 +1804,11 @@ export class QQChannel extends ChannelBase {
         // assigned a new session_id, so in-memory routing state
         // (chatTypeMap, replyMsgId, msgSeqMap) must be reloaded.
         this.coldStart = true;
+        // Note: intentionally NOT refreshing token here. The server's
+        // INVALID_SESSION is more likely from gateway-side session reset
+        // than from token expiry. If the token IS expired, the re-IDENTIFY
+        // will fail with a WS close, and the reconnect path will refresh
+        // the token before the next attempt.
         this.sendIdentify();
         // Guard the re-IDENTIFY READY with a fresh timeout. The initial
         // readyTimeout was cleared by the first READY handler; without this,
@@ -1847,6 +1885,7 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     if (this.isReconnecting) return;
     this.isReconnecting = true;
+    const myReconnectId = this._reconnectId;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       process.stderr.write(
@@ -1858,7 +1897,7 @@ export class QQChannel extends ChannelBase {
 
     const maxGwRetries = 5;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
-      if (this.disposed) return;
+      if (this.disposed || this._reconnectId !== myReconnectId) return;
       try {
         try {
           await this.fetchToken();
@@ -2150,6 +2189,12 @@ export class QQChannel extends ChannelBase {
     if (!result) return;
     const { isSlash, text, senderName, safeName, cleanText } = result;
 
+    // Deduplicate before handleInbound — prepareGroupMessage already ran
+    // so side effects (extractBotOpenId) are applied regardless of dedup.
+    // Also check cross-event dedup: GROUP_MESSAGE_CREATE may also fire for the same message.
+    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
+      return;
+
     if (isSlash) {
       process.stderr.write(
         `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
@@ -2163,12 +2208,6 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] handleGroup: active messages disabled but @-bot allowed through (passive)\n`,
       );
     }
-
-    // Deduplicate before handleInbound — prepareGroupMessage already ran
-    // so side effects (extractBotOpenId) are applied regardless of dedup.
-    // Also check cross-event dedup: GROUP_MESSAGE_CREATE may also fire for the same message.
-    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
-      return;
     const senderId =
       event.author.user_openid || event.author.id || event.author.member_openid;
     if (!senderId) {
@@ -2202,10 +2241,6 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    const chatId = event.group_openid;
-    const isNewGroup = !this.chatTypeMap.has(chatId);
-    this.chatTypeMap.set(chatId, 'group');
-    if (isNewGroup) this.saveQQState();
 
     if (!event.author) {
       process.stderr.write(
@@ -2215,20 +2250,19 @@ export class QQChannel extends ChannelBase {
     }
     if (event.author.bot) {
       process.stderr.write(
-        `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(chatId, 64)}\n`,
+        `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
       return;
     }
 
+    const chatId = event.group_openid;
+    const isNewGroup = !this.chatTypeMap.has(chatId);
+    this.chatTypeMap.set(chatId, 'group');
+    if (isNewGroup) this.saveQQState();
+
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isSlash, text, senderName, isAtBot, safeName, cleanText } = result;
-
-    if (isSlash) {
-      process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
-      );
-    }
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2294,6 +2328,18 @@ export class QQChannel extends ChannelBase {
     if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
       return;
 
+    if (isSlash) {
+      process.stderr.write(
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+      );
+    }
+
+    // Track whether the message passed a non-@-bot policy gate.
+    // isAtBot is true only for @-mentions; messages that pass
+    // keyword or all policy have isAtBot=false but still need
+    // isMentioned=true so GroupGate.requireMention doesn't drop them.
+    const passedPolicyGate = !isAtBot;
+
     const senderId =
       event.author.user_openid || event.author.id || event.author.member_openid;
     if (!senderId) {
@@ -2314,7 +2360,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       messageId: event.id,
       isGroup: true,
-      isMentioned: isAtBot,
+      isMentioned: isAtBot || passedPolicyGate,
       isReplyToBot: isAtBot,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) => {
