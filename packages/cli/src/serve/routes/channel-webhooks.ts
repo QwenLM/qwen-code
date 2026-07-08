@@ -43,7 +43,16 @@ export function registerChannelWebhookRoutes(
       const sources = deps.channelsConfig[channelName]?.webhooks?.sources;
       const sourceConfig =
         sources && Object.hasOwn(sources, source) ? sources[source] : undefined;
-      const secret = sourceConfig?.secret;
+      if (!sourceConfig) {
+        deps.daemonLog?.warn('channel webhook authentication failed', {
+          channelName,
+          source,
+        });
+        res.status(401).json({ error: 'Invalid webhook secret' });
+        return;
+      }
+
+      const secret = sourceConfig.secret;
       if (
         typeof secret !== 'string' ||
         secret.length === 0 ||
