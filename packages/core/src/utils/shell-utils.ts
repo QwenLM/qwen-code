@@ -495,7 +495,6 @@ const XARGS_OPTIONS_WITH_VALUES = new Set([
   '--max-procs',
   '--process-slot-var',
   '--replace',
-  '--exit',
 ]);
 
 function xargsOptionConsumesNext(token: string): boolean {
