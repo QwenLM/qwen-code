@@ -382,8 +382,8 @@
 }
 
 .sessionTimelineDetails {
-  position: absolute;
-  z-index: 6;
+  position: fixed;
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 2);
   box-sizing: border-box;
   display: grid;
   gap: 6px;

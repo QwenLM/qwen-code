@@ -9,11 +9,13 @@ import {
   useCallback,
   useMemo,
   useState,
+  type CSSProperties,
   type ReactNode,
   type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
@@ -1678,7 +1680,17 @@ type SessionTimelineTooltip = {
   top: number;
   left: number;
   clamped: boolean;
+  themeVars: CSSProperties;
 };
+
+const SESSION_TIMELINE_TOOLTIP_THEME_VARS = [
+  '--background',
+  '--foreground',
+  '--muted-foreground',
+  '--border',
+  '--font-sans',
+  '--web-shell-popover-z-index',
+];
 
 const SessionTimeline = memo(function SessionTimeline({
   entries,
@@ -1710,13 +1722,19 @@ const SessionTimeline = memo(function SessionTimeline({
     (entry: SessionTimelineEntry, el: HTMLElement) => {
       const panel = panelRef.current;
       if (!panel) return;
-      const panelRect = panel.getBoundingClientRect();
+      const computedStyle = getComputedStyle(panel);
       const rect = el.getBoundingClientRect();
       setTooltip({
         entry,
-        top: rect.top + rect.height / 2 - panelRect.top,
-        left: rect.right + 8 - panelRect.left,
+        top: rect.top + rect.height / 2,
+        left: rect.right + 8,
         clamped: false,
+        themeVars: Object.fromEntries(
+          SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
+            name,
+            computedStyle.getPropertyValue(name),
+          ]),
+        ) as CSSProperties,
       });
     },
     [],
@@ -1833,30 +1851,37 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
-        {tooltip && (
-          <div
-            ref={tooltipRef}
-            className={styles.sessionTimelineDetails}
-            data-testid="session-timeline-detail"
-            data-title={tooltip.entry.label}
-            data-detail={tooltip.entry.detail}
-            data-scheduled-task={
-              tooltip.entry.isScheduledTask ? 'true' : undefined
-            }
-            role="tooltip"
-            style={{ top: tooltip.top, left: tooltip.left }}
-          >
-            <span className={styles.sessionTimelineDetailsTitle}>
-              {tooltip.entry.isScheduledTask && <TimelineClockIcon />}
-              <span className={styles.sessionTimelineDetailsTitleText}>
-                {tooltip.entry.label}
+        {tooltip &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              ref={tooltipRef}
+              className={styles.sessionTimelineDetails}
+              data-testid="session-timeline-detail"
+              data-title={tooltip.entry.label}
+              data-detail={tooltip.entry.detail}
+              data-scheduled-task={
+                tooltip.entry.isScheduledTask ? 'true' : undefined
+              }
+              role="tooltip"
+              style={{
+                ...tooltip.themeVars,
+                top: tooltip.top,
+                left: tooltip.left,
+              }}
+            >
+              <span className={styles.sessionTimelineDetailsTitle}>
+                {tooltip.entry.isScheduledTask && <TimelineClockIcon />}
+                <span className={styles.sessionTimelineDetailsTitleText}>
+                  {tooltip.entry.label}
+                </span>
               </span>
-            </span>
-            <span className={styles.sessionTimelineDetailsDetail}>
-              {tooltip.entry.detail}
-            </span>
-          </div>
-        )}
+              <span className={styles.sessionTimelineDetailsDetail}>
+                {tooltip.entry.detail}
+              </span>
+            </div>,
+            document.body,
+          )}
       </nav>
     </div>
   );

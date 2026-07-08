@@ -402,7 +402,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       'thought,commentary,tool,plan',
     );
     expect(
-      c.querySelectorAll('[data-testid="session-timeline-detail"]'),
+      document.querySelectorAll('[data-testid="session-timeline-detail"]'),
     ).toHaveLength(0);
     const buttons = Array.from(
       c.querySelectorAll<HTMLButtonElement>(
@@ -454,7 +454,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
-  it('renders timeline details as one floating tooltip outside the scroll viewport', async () => {
+  it('renders timeline details as one body-level tooltip outside the timeline stack', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const c = mount(simpleTurns(4));
     await nextFrame();
@@ -465,18 +465,22 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(firstEntryButton).not.toBeNull();
     focusIn(firstEntryButton!);
 
-    const detail = c.querySelector('[data-testid="session-timeline-detail"]');
+    const detail = document.querySelector(
+      '[data-testid="session-timeline-detail"]',
+    );
     expect(detail).not.toBeNull();
     expect(detail?.getAttribute('data-detail')).toBe('answer');
     expect(
       detail?.closest('[data-testid="session-timeline-viewport"]'),
     ).toBeNull();
-    expect(detail?.closest('[data-testid="session-timeline"]')).not.toBeNull();
+    expect(detail?.closest('[data-testid="session-timeline"]')).toBeNull();
+    expect(detail?.parentElement).toBe(document.body);
+    expect(c.contains(detail!)).toBe(false);
 
     focusOut(firstEntryButton!);
 
     expect(
-      c.querySelector('[data-testid="session-timeline-detail"]'),
+      document.querySelector('[data-testid="session-timeline-detail"]'),
     ).toBeNull();
     rectSpy.mockRestore();
   });
@@ -503,7 +507,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scheduledButton).not.toBeNull();
     focusIn(scheduledButton!);
 
-    const scheduledDetail = c.querySelector(
+    const scheduledDetail = document.querySelector(
       '[data-testid="session-timeline-detail"]',
     );
     expect(scheduledDetail?.getAttribute('data-scheduled-task')).toBe('true');
