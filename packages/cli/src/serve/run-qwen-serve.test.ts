@@ -2206,12 +2206,12 @@ describe('runQwenServe runtime startup failures', () => {
             type: 'dingtalk',
             webhooks: {
               sources: {
-                'github-ci': {
+                'github ci': {
                   secret: 'webhook-secret',
                   targets: {
                     default: {
                       chatId: 'group-1',
-                      senderId: 'webhook:github-ci',
+                      senderId: 'webhook:github ci',
                     },
                   },
                 },
@@ -2260,7 +2260,7 @@ describe('runQwenServe runtime startup failures', () => {
     try {
       expect(createBridge).not.toHaveBeenCalled();
       const res = await fetch(
-        `${handle.url}/channels/dingtalk-main/webhooks/github-ci`,
+        `${handle.url}/channels/dingtalk-main/webhooks/github%20ci`,
         {
           method: 'POST',
           headers: {

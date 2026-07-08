@@ -511,6 +511,7 @@ type ChannelWorkerRuntime = {
     opts: CreateChannelWorkerSupervisorOptions,
   ): ChannelWorkerSupervisor;
   channelServicePidfile: ChannelServicePidfile;
+  findCliEntryPath(): string;
 };
 
 let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
@@ -518,10 +519,12 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
   channelWorkerRuntimePromise ??= Promise.all([
     import('./channel-worker-supervisor.js'),
     import('../commands/channel/pidfile.js'),
+    import('../commands/channel/cli-entry-path.js'),
   ])
-    .then(([supervisor, pidfile]) => ({
+    .then(([supervisor, pidfile, cliEntryPath]) => ({
       createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
       channelServicePidfile: pidfile,
+      findCliEntryPath: cliEntryPath.findCliEntryPath,
     }))
     .catch((err: unknown) => {
       channelWorkerRuntimePromise = undefined;
@@ -1337,8 +1340,8 @@ function createDeferredChannelWebhookAuth(
 ): RequestHandler {
   return (req, res, next) => {
     const match = /^\/channels\/([^/]+)\/webhooks\/([^/]+)\/?$/u.exec(req.path);
-    const channelName = match?.[1];
-    const source = match?.[2];
+    const channelName = decodeDeferredWebhookPathSegment(match?.[1]);
+    const source = decodeDeferredWebhookPathSegment(match?.[2]);
     if (!channelName || !source) {
       res.status(401).json({ error: 'Invalid webhook secret' });
       return;
@@ -1359,17 +1362,28 @@ function createDeferredChannelWebhookAuth(
   };
 }
 
+function decodeDeferredWebhookPathSegment(
+  segment: string | undefined,
+): string | undefined {
+  if (segment === undefined) return undefined;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
+
 function readDeferredWebhookSecret(
   runtime: ChannelWebhookConfigRuntime,
   workspace: string,
   channelName: string,
   source: string,
 ): string | undefined {
-  const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
-  if (typeof rawConfig !== 'object' || rawConfig === null) {
-    return undefined;
-  }
   try {
+    const rawConfig = runtime.loadChannelsConfig(workspace)[channelName];
+    if (typeof rawConfig !== 'object' || rawConfig === null) {
+      return undefined;
+    }
     return runtime.parseChannelWebhookConfig(
       channelName,
       rawConfig as Record<string, unknown>,
@@ -3004,13 +3018,14 @@ export async function runQwenServe(
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             channelRuntime?.createChannelWorkerSupervisor;
-          if (!createSupervisor) {
+          const findCliEntryPath = channelRuntime?.findCliEntryPath;
+          if (!createSupervisor || !findCliEntryPath) {
             throw new Error(
               'Channel worker supervisor runtime is not available.',
             );
           }
           channelWorker = createSupervisor({
-            cliEntryPath: runtime.findCliEntryPath(),
+            cliEntryPath: findCliEntryPath(),
             daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
             ...(token ? { daemonToken: token } : {}),
             workspace: boundWorkspace,
