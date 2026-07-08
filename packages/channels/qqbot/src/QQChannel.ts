@@ -1178,6 +1178,19 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  private _checkGroupAllPolicyRequireMention(): void {
+    const policy = this.qqConfig.groupAllPolicy;
+    if (policy !== 'keyword' && policy !== 'all') return;
+    const groups = this.config.groups;
+    const anyFalse =
+      groups && Object.values(groups).some((g) => g.requireMention === false);
+    if (!anyFalse) {
+      process.stderr.write(
+        `[QQ:${this.name}] WARNING: groupAllPolicy is '${policy}' but requireMention is true (default). Non-@-bot messages passing keyword/all policy will be silently dropped by GroupGate. Set 'groups': { '*': { 'requireMention': false } } in channel config.\n`,
+      );
+    }
+  }
+
   /**
    * Detach the permanent textChunk handler from the current bridge.
    * No-op if not attached or if cron is disabled.
@@ -1758,6 +1771,7 @@ export class QQChannel extends ChannelBase {
                 this.isReconnecting = false;
                 this.coldStart = false;
                 this.attachCronHandler();
+                this._checkGroupAllPolicyRequireMention();
                 onReady();
               })
               .catch(() => {
@@ -1766,6 +1780,7 @@ export class QQChannel extends ChannelBase {
                 this.isReconnecting = false;
                 this.coldStart = false;
                 this.attachCronHandler();
+                this._checkGroupAllPolicyRequireMention();
                 onReady();
               });
           } else {
@@ -1776,6 +1791,7 @@ export class QQChannel extends ChannelBase {
             this.reconnectAttempts = 0;
             this.isReconnecting = false;
             this.attachCronHandler();
+            this._checkGroupAllPolicyRequireMention();
             onReady();
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
@@ -2397,6 +2413,9 @@ export class QQChannel extends ChannelBase {
     // non-@-bot group messages should flow through cron/log only, not trigger AI.
     // Thread #17's fix (setting isMentioned=true for non-@-bot keyword/all matches)
     // was intentionally reverted — it violated principle #1.
+    // Users must set requireMention: false in group config
+    // (e.g., `groups: { '*': { requireMention: false } }`) to allow
+    // non-@-bot keyword/all messages to reach the AI.
 
     const senderId =
       event.author.user_openid || event.author.id || event.author.member_openid;
