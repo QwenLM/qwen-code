@@ -72,7 +72,6 @@ export interface UIActions {
   handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
-  setIsPasting: (isPasting: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;

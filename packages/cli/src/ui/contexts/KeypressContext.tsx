@@ -21,7 +21,7 @@ import {
   useState,
 } from 'react';
 import readline from 'node:readline';
-import { execFile } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
@@ -1388,35 +1388,21 @@ export function KeypressProvider({
             });
             // Probe clipboard size for progress bar. Platform-specific:
             // macOS: pbpaste | wc -c; Linux: xclip/xsel/wl-paste | wc -c
-            const clipCmd =
+            const sizeCmd =
               process.platform === 'darwin'
-                ? 'pbpaste'
+                ? 'pbpaste | wc -c'
                 : process.platform === 'win32'
-                  ? 'powershell.exe'
-                  : 'xclip';
-            const clipArgs =
-              process.platform === 'darwin'
-                ? []
-                : process.platform === 'win32'
-                  ? [
-                      '-command',
-                      'Get-Clipboard -Raw | Measure-Object -Character | Select-Object -ExpandProperty Characters',
-                    ]
-                  : ['-selection', 'clipboard', '-o'];
-            execFile(
-              clipCmd,
-              clipArgs,
-              { timeout: 2000, maxBuffer: 50 * 1024 * 1024 },
-              (err, stdout) => {
-                if (err || !rawPasteAccumulating) return;
-                const bytes = Buffer.byteLength(stdout, 'utf-8');
-                if (bytes > 0) {
-                  setPasteProgress((prev) =>
-                    prev.active ? { ...prev, totalBytes: bytes } : prev,
-                  );
-                }
-              },
-            );
+                  ? 'powershell.exe -command "(Get-Clipboard -Raw).Length"'
+                  : 'xclip -selection clipboard -o 2>/dev/null | wc -c || xsel --clipboard --output 2>/dev/null | wc -c || wl-paste 2>/dev/null | wc -c';
+            exec(sizeCmd, { timeout: 2000 }, (err, stdout) => {
+              if (err || !rawPasteAccumulating) return;
+              const bytes = parseInt(stdout.trim(), 10);
+              if (bytes > 0) {
+                setPasteProgress((prev) =>
+                  prev.active ? { ...prev, totalBytes: bytes } : prev,
+                );
+              }
+            });
             cursor = prefixIdx + pasteModePrefixBuf.length;
           }
         }
