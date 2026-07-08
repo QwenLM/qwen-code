@@ -649,8 +649,14 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
   };
 }
 
-function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
-  return `Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}`;
+function serializeModelSwitchSummary(
+  summary: ModelSwitchSummary,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  return t('model.usingModel', {
+    isRuntime: summary.isRuntime ? 1 : 0,
+    modelId: summary.modelId,
+  });
 }
 
 function isEditToolPermission(request: PermissionRequest): boolean {
@@ -4000,7 +4006,7 @@ export function App({
           if (summary) {
             store.dispatch({
               type: 'debug',
-              text: serializeModelSwitchSummary(summary),
+              text: serializeModelSwitchSummary(summary, t),
               source: 'model_switch_summary',
               data: summary,
             });

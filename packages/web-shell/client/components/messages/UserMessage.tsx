@@ -75,7 +75,7 @@ export const UserMessage = memo(function UserMessage({
                   <img
                     key={index}
                     src={src}
-                    alt={`User uploaded image ${index + 1}`}
+                    alt={t('user.uploadedImage', { index: index + 1 })}
                     className={styles.chatImageThumb}
                     onLoad={measureOverflow}
                   />

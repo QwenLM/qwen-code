@@ -46,6 +46,7 @@ export const MessageItem = memo(function MessageItem({
   showAssistantBranch = false,
   isLocateFlashing = false,
 }: MessageItemProps) {
+  const { t } = useI18n();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -204,7 +205,7 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
       copyText={message.role === 'user' ? message.content : undefined}
-      copyTitle="Copy"
+      copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
