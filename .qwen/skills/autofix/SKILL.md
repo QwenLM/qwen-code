@@ -98,7 +98,7 @@ blocked, write `<workdir>/failure.md` and do not commit.
 
 Inputs: `--pr`, `--issue`, `<workdir>/feedback.md`, `--conflict`, and `--base`.
 
-The workflow already checked out `autofix/issue-<issue>`. Stay on that branch.
+The workflow already checked out the PR's head branch. Stay on it.
 Read `git diff origin/<base>...HEAD` first, then `<workdir>/feedback.md`.
 
 Classify every feedback point:

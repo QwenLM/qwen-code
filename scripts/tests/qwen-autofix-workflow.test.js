@@ -271,12 +271,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       "issue_comment:\n    types:\n      - 'created'",
     );
-    expect(workflow).not.toContain(
-      "pull_request_review_comment:\n    types:\n      - 'created'",
-    );
-    expect(workflow).not.toContain(
-      "pull_request_review:\n    types:\n      - 'submitted'",
-    );
+    // pull_request_review and pull_request_review_comment triggers ARE allowed
+    // (real-time review loop for bot PRs), but the workflow must not accept
+    // arbitrary slash commands from comment bodies.
     expect(workflow).not.toContain(
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
     );

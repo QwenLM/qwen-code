@@ -8,10 +8,12 @@ name: 'Qwen Autofix'
 # The lifecycle is asynchronous — a PR is opened in one run and its review is
 # addressed in a later run once a reviewer has weighed in — so each scheduled
 # tick runs only the phase(s) that make sense, decided by the `route` job:
-#   • every 4h             → review phase (sweep the bot's open PRs)
-#   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
-#   • issues:labeled        → issue phase when ready label, state, and sender match
-#   • workflow_dispatch     → force a phase, an issue, or a PR
+#   • every 4h                   → review phase (sweep the bot's open PRs)
+#   • every 12h (00/12 UTC)      → also the issue phase (locate + fix one new bug)
+#   • issues:labeled             → issue phase when ready label, state, and sender match
+#   • pull_request_review        → review phase (real-time feedback loop for bot PRs)
+#   • pull_request_review_comment → review phase (real-time inline feedback loop)
+#   • workflow_dispatch          → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
 # through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
@@ -21,6 +23,12 @@ on:
   issues:
     types:
       - 'labeled'
+  pull_request_review:
+    types:
+      - 'submitted'
+  pull_request_review_comment:
+    types:
+      - 'created'
   schedule:
     - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
     - cron: '0 4,8,16,20 * * *' # Review only between issue runs
@@ -41,7 +49,7 @@ on:
         required: false
         type: 'string'
       pr_number:
-        description: 'Force a specific autofix PR number (implies the review phase)'
+        description: 'Force a specific bot PR number (implies the review phase)'
         required: false
         type: 'string'
       dry_run:
@@ -58,8 +66,8 @@ permissions:
   contents: 'read'
 
 env:
-  # Identity of the autofix bot and the branches it owns. Only its own in-repo
-  # PRs are ever eligible for the review phase — never a fork or another branch.
+  # Identity of the autofix bot. All open in-repo PRs authored by this bot are
+  # eligible for the review phase — not limited to autofix/issue-* branches.
   AUTOFIX_BOT: 'qwen-code-dev-bot'
   BRANCH_PREFIX: 'autofix/issue-'
   # The automated Qwen PR reviewer posts as this account; its review counts as
@@ -110,6 +118,8 @@ jobs:
           REPO: '${{ github.repository }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
@@ -140,6 +150,18 @@ jobs:
               # Must match the issue-phase cron string on the schedule trigger.
               if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
                 DO_ISSUE=true
+              fi
+              # Real-time review triggers: only process PRs authored by the
+              # dev-bot so arbitrary PR reviews do not kick off expensive runs.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' || "${EVENT_NAME}" == 'pull_request_review_comment' ]]; then
+                DO_ISSUE=false
+                if [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
+                  DO_REVIEW=true
+                  ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
+                  echo "🧭 review event on bot PR #${PR_NUMBER_EVENT} → review phase"
+                else
+                  echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                fi
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
@@ -190,7 +212,7 @@ jobs:
           echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
           echo "issue_number=${ROUTE_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
-          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
+          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
   # ISSUE PHASE — locate one maintainer-ready issue, fix it, open a PR.
@@ -215,7 +237,7 @@ jobs:
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -872,17 +894,16 @@ jobs:
         run: |-
           WORKDIR="$(mktemp -d)"
 
-          # Candidate PRs: open, authored by the autofix bot, on autofix/issue-*.
+          # Candidate PRs: all open, in-repo PRs authored by the dev-bot.
           # A forced PR must still pass these checks.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
               --json number,state,author,headRefName 2> /dev/null || echo '{}')"
-            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg p "${BRANCH_PREFIX}" \
+            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" \
               '(((.state // "") == "OPEN")
-                 and ((.author.login // "") == $ab)
-                 and ((.headRefName // "") | startswith($p)))' <<< "${META}")"
+                 and ((.author.login // "") == $ab))' <<< "${META}")"
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open autofix PR owned by ${AUTOFIX_BOT}"
+              echo "❌ #${FORCED_PR} is not an open PR owned by ${AUTOFIX_BOT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
@@ -890,15 +911,18 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --limit 100 --json number,headRefName > "${WORKDIR}/bot-prs.json"
-            CANDIDATES="$(jq -r --arg p "${BRANCH_PREFIX}" \
-              '.[] | select(.headRefName | startswith($p)) | .number' \
-              "${WORKDIR}/bot-prs.json")"
+            CANDIDATES="$(jq -r '.[] | .number' "${WORKDIR}/bot-prs.json")"
           fi
 
           TARGETS='[]'
           for PR in ${CANDIDATES}; do
             BRANCH="$(gh pr view "${PR}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
-            ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
+            # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
+            if [[ "${BRANCH}" == "${BRANCH_PREFIX}"* ]]; then
+              ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
+            else
+              ISSUE="${PR}"
+            fi
             HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
 
             # Push watermark: the PR's last push. Feedback older than this was in
@@ -997,7 +1021,7 @@ jobs:
       WATERMARK: '${{ matrix.target.watermark }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1121,7 +1145,9 @@ jobs:
 
           # Render the actionable feedback into one prompt-ready file.
           {
-            echo "# Review feedback to triage on PR #${PR} (issue #${ISSUE})"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "# Review feedback to triage on PR #${PR}${ISSUE_REF}"
             echo
             echo "Only feedback newer than the last evaluation (${WATERMARK}) from"
             echo "trusted maintainers or the automated reviewer is listed."
@@ -1364,7 +1390,9 @@ jobs:
           gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
 
           {
-            echo "### PR #${PR} (issue #${ISSUE}) — ${STATUS}"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "### PR #${PR}${ISSUE_REF} — ${STATUS}"
             echo "- Base conflict: ${CONFLICT}"
             echo
             if [[ "${OUTCOME}" == "fixed" ]]; then
@@ -1388,7 +1416,9 @@ jobs:
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
-            echo "### PR #${PR} (issue #${ISSUE}) — outcome=${OUTCOME:-unknown}${SUFFIX}"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "### PR #${PR}${ISSUE_REF} — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo "- Base conflict: ${CONFLICT:-unknown}"
             echo
             for f in address-summary.md no-action.md failure.md handoff.md; do
