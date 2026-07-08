@@ -5816,8 +5816,20 @@ class QwenAgent implements Agent {
             contextMode,
             abortSignal: childSignal,
           });
-          await this.config.refreshHierarchicalMemory();
-          await this.config.getGeminiClient()?.refreshSystemInstruction();
+          try {
+            await this.config.refreshHierarchicalMemory();
+          } catch (err) {
+            debugLogger.warn(
+              `workspace memory remember: refreshHierarchicalMemory failed: ${err}`,
+            );
+          }
+          try {
+            await this.config.getGeminiClient()?.refreshSystemInstruction();
+          } catch (err) {
+            debugLogger.warn(
+              `workspace memory remember: refreshSystemInstruction failed: ${err}`,
+            );
+          }
           return result as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof RequestError) {
