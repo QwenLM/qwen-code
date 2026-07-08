@@ -360,6 +360,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'multi_workspace_sessions',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
   'voice_transcribe',
@@ -2059,6 +2060,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               reloadAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'multi_workspace_sessions') {
+          expect(predicate({ multiWorkspaceSessionsEnabled: true })).toBe(true);
+          expect(predicate({ multiWorkspaceSessionsEnabled: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              multiWorkspaceSessionsEnabled: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -5925,7 +5942,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('passes explicit cwd through to the bridge', async () => {
+    it('passes explicit primary cwd through to the bridge', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
           sessionId: req.sessionId,
@@ -5935,18 +5952,22 @@ describe('createServeApp', () => {
           state: { configOptions: [] },
         }),
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
       const res = await request(app)
         .post('/session/persisted-2/load')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ cwd: '/work/a' });
+        .send({ cwd: WS_BOUND });
 
       expect(res.status).toBe(200);
       expect(res.body.state).toEqual({ configOptions: [] });
       expect(bridge.loadCalls).toEqual([
         {
           sessionId: 'persisted-2',
-          workspaceCwd: '/work/a',
+          workspaceCwd: WS_BOUND,
           historyReplay: 'response',
         },
       ]);
@@ -6102,7 +6123,7 @@ describe('createServeApp', () => {
       });
     });
 
-    it('400 workspace_mismatch when the bridge throws WorkspaceMismatchError', async () => {
+    it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
       const bridge = fakeBridge({
         loadImpl: async () => {
           throw new WorkspaceMismatchError(WS_BOUND, WS_DIFFERENT);
@@ -6124,6 +6145,7 @@ describe('createServeApp', () => {
         boundWorkspace: WS_BOUND,
         requestedWorkspace: WS_DIFFERENT,
       });
+      expect(bridge.loadCalls).toHaveLength(0);
     });
 
     it('503 + Retry-After: 5 when the bridge throws SessionLimitExceededError', async () => {
