@@ -6,6 +6,7 @@
 
 import {
   createDebugLogger,
+  IdeClient,
   initializeTelemetry,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -16,31 +17,56 @@ import { recordStartupEvent } from '../utils/startupProfiler.js';
 
 const debugLogger = createDebugLogger('STARTUP_PREFETCH');
 
-const DEFERRED_IDE_CONNECT_TIMEOUT_MS = 10_000;
+const DEFERRED_IDE_CONNECT_TIMEOUT_MS = 15_000;
 
 const earlyStarted = new WeakSet<Config>();
 const postRenderStarted = new WeakSet<Config>();
 
+/**
+ * Bounds optional startup work without cancelling the underlying promise.
+ *
+ * The original promise can still complete after the timeout branch wins the
+ * race. We keep observing that late result so a late IDE success can be cleaned
+ * up and a late rejection does not become an unhandled rejection.
+ */
 function withTimeout<T>(
   promise: Promise<T>,
   name: string,
   timeoutMs: number,
+  onTimeout: () => Promise<void> | void = () => {},
 ): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
+  const runTimeoutCleanup = () => {
+    void Promise.resolve()
+      .then(onTimeout)
+      .catch((err) => {
+        debugLogger.debug(`${name} timeout cleanup failed:`, err);
+      });
+  };
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
+      runTimeoutCleanup();
       reject(new Error(`${name} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     timeoutId.unref?.();
   });
 
-  promise.catch((err) => {
-    if (timedOut) {
-      debugLogger.debug(`${name} underlying error after timeout:`, err);
-    }
-  });
+  // This rejection handler intentionally mirrors `catch()`: it handles the
+  // underlying promise if it rejects after the timeout has already been reported.
+  void promise.then(
+    () => {
+      if (timedOut) {
+        runTimeoutCleanup();
+      }
+    },
+    (err) => {
+      if (timedOut) {
+        debugLogger.debug(`${name} underlying error after timeout:`, err);
+      }
+    },
+  );
 
   return Promise.race([promise, timeout]).finally(() => {
     if (timeoutId) {
@@ -65,6 +91,19 @@ function runDeferredTask(name: string, task: () => Promise<void> | void): void {
       recordStartupEvent('startup_prefetch_failed', { name });
       debugLogger.warn(`${name} failed:`, err);
     });
+}
+
+/**
+ * Keeps deferred IDE timeout semantics consistent with the visible failure UI.
+ *
+ * A deferred IDE connection cannot be aborted directly, so on timeout we close
+ * the singleton client. If the original connect later succeeds, `withTimeout`
+ * invokes this cleanup again to avoid leaving an active IDE connection behind a
+ * stale startup failure state.
+ */
+async function disconnectIdeAfterDeferredTimeout(): Promise<void> {
+  const ideClient = await IdeClient.getInstance();
+  await ideClient.disconnect();
 }
 
 /**
@@ -129,6 +168,7 @@ export function startPostRenderPrefetches(
           connectIdeForStartup(config),
           'ide_connect',
           DEFERRED_IDE_CONNECT_TIMEOUT_MS,
+          disconnectIdeAfterDeferredTimeout,
         );
         appEvents.emit(AppEvent.StartupIdeConnectionStatusChanged, {
           state: 'connected',
