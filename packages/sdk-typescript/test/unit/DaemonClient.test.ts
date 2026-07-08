@@ -227,6 +227,38 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.capabilities()).resolves.toEqual(envelope);
     });
+
+    it('preserves multi-workspace capabilities metadata', async () => {
+      const envelope: DaemonCapabilities = {
+        v: 1,
+        mode: 'http-bridge',
+        features: ['health', 'capabilities', 'multi_workspace_sessions'],
+        limits: {
+          maxPendingPromptsPerSession: 5,
+          maxSessionsPerWorkspace: 20,
+          maxTotalSessions: null,
+        },
+        modelServices: [],
+        workspaceCwd: '/work/primary',
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/work/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary-id',
+            cwd: '/work/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.capabilities()).resolves.toEqual(envelope);
+    });
   });
 
   describe('session artifacts', () => {
@@ -3942,6 +3974,7 @@ describe('DaemonClient', () => {
           summary: 'forgot',
           removedEntries: [],
           touchedTopics: ['project' as const],
+          touchedScopes: ['project' as const],
         },
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));

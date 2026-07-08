@@ -2065,7 +2065,9 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('logs settings reloads without inserting daemon debug blocks', async () => {
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const debug = vi
+      .spyOn(console, 'debug')
+      .mockImplementation(() => undefined);
     const session = createMockSession({
       events: async function* settingsReloadEvents() {
         yield {
@@ -2877,6 +2879,70 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'initial replay', streaming: false },
     ]);
+  });
+
+  it('renders bounded replay truncation from the loaded snapshot without resync', async () => {
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: false,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained replay' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'status',
+          text: expect.stringContaining('History truncated'),
+        }),
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'retained replay',
+        }),
+      ]),
+    );
   });
 
   it('keeps replayed non-turn events from marking a prompt as waiting', async () => {

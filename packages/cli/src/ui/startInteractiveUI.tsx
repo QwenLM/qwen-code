@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
+import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from '../dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from '../remoteInput/RemoteInputWatcher.js';
@@ -45,6 +46,7 @@ const debugLogger = createDebugLogger('STARTUP');
 export interface StartInteractiveUIOptions {
   postRenderConnectIde?: boolean;
   postRenderInitializeTelemetry?: boolean;
+  extensionRefreshState?: ExtensionRefreshState;
 }
 
 export async function startInteractiveUI(
@@ -164,6 +166,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>

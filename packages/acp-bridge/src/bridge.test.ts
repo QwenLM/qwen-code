@@ -37,6 +37,7 @@ import {
   SessionShellDisabledError,
   SessionBusyError,
   SessionNotFoundError,
+  TotalSessionLimitExceededError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
@@ -108,6 +109,28 @@ describe('createAcpSessionBridge', () => {
     expect(() => makeBridge({ eventRingSize: 80_000_000 })).toThrow(
       /Invalid eventRingSize/,
     );
+  });
+
+  it('accepts and rejects BridgeOptions.compactedReplayMaxBytes at construction time', () => {
+    expect(() => makeBridge({ compactedReplayMaxBytes: 1 })).not.toThrow();
+    expect(() =>
+      makeBridge({ compactedReplayMaxBytes: 4 * 1024 * 1024 }),
+    ).not.toThrow();
+    expect(() => makeBridge({ compactedReplayMaxBytes: 0 })).toThrow(
+      /compactedReplayMaxBytes/,
+    );
+    expect(() => makeBridge({ compactedReplayMaxBytes: -1 })).toThrow(
+      /compactedReplayMaxBytes/,
+    );
+    expect(() => makeBridge({ compactedReplayMaxBytes: 1.5 })).toThrow(
+      /compactedReplayMaxBytes/,
+    );
+    expect(() =>
+      makeBridge({ compactedReplayMaxBytes: Number.POSITIVE_INFINITY }),
+    ).toThrow(/compactedReplayMaxBytes/);
+    expect(() =>
+      makeBridge({ compactedReplayMaxBytes: 512 * 1024 * 1024 }),
+    ).toThrow(/compactedReplayMaxBytes/);
   });
 
   it('sanitizes client artifact provenance fields', async () => {
@@ -566,6 +589,7 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
 
     await bridge.shutdown();
@@ -621,6 +645,7 @@ describe('createAcpSessionBridge', () => {
                   },
                 ],
                 touchedTopics: ['project'],
+                touchedScopes: ['project'],
                 querySeen: params['query'],
               };
             }
@@ -639,6 +664,7 @@ describe('createAcpSessionBridge', () => {
     expect(result).toMatchObject({
       summary: 'forgot',
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
       removedEntries: [
         {
           topic: 'project',
@@ -656,7 +682,41 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('derives workspace memory forget scopes for legacy responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [],
+                touchedTopics: ['feedback', 'project'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryForget({
+      query: 'old preference',
+    });
+
+    expect(result).toMatchObject({
+      touchedTopics: ['feedback', 'project'],
+      touchedScopes: ['user', 'project'],
+    });
 
     await bridge.shutdown();
   });
@@ -1297,9 +1357,9 @@ describe('createAcpSessionBridge', () => {
     expect(loaded.partial).toBe(true);
     expect(loaded.replayError).toBe('replay boom');
     expect(loaded.lastEventId).toBe(2);
-    expect(loaded.compactedReplay).toEqual([]);
-    expect(loaded.liveJournal).toHaveLength(2);
-    expect(loaded.liveJournal?.[0]?._meta?.['serverTimestamp']).toBe(
+    expect(loaded.compactedReplay).toHaveLength(2);
+    expect(loaded.liveJournal).toEqual([]);
+    expect(loaded.compactedReplay?.[0]?._meta?.['serverTimestamp']).toBe(
       1_700_000_000_000,
     );
 
@@ -1312,6 +1372,56 @@ describe('createAcpSessionBridge', () => {
       data: { reason: 'seeded_replay_not_in_ring' },
     });
     await iterator.return?.();
+    await bridge.shutdown();
+  });
+
+  it('bounds response-mode load replay and emits a history_truncated marker', async () => {
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+                },
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+                },
+              ],
+            },
+          },
+        }),
+      }).channel;
+    const bridge = makeBridge({
+      channelFactory: factory,
+      compactedReplayMaxBytes: 512,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-bounded-history',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+
+    expect(loaded.lastEventId).toBe(2);
+    expect(loaded.liveJournal).toEqual([]);
+    expect(loaded.compactedReplay?.[0]?.type).toBe('history_truncated');
+    expect(loaded.compactedReplay?.[0]?.data).toMatchObject({
+      reason: 'replay_window_exceeded',
+      truncatedEvents: 1,
+      retainedEvents: 1,
+      maxBytes: 512,
+      fullTranscriptAvailable: false,
+    });
+    const retained = loaded.compactedReplay?.[1]?.data as {
+      update?: { content?: { text?: string } };
+    };
+    expect(retained.update?.content?.text).toBe(`new-${'y'.repeat(600)}`);
+
     await bridge.shutdown();
   });
 
@@ -1484,12 +1594,14 @@ describe('createAcpSessionBridge', () => {
       historyReplay: 'response',
     });
 
-    expect(loaded.liveJournal?.map((event) => event.type)).toEqual([
+    expect(loaded.compactedReplay?.map((event) => event.type)).toEqual([
       'session_update',
+    ]);
+    expect(loaded.liveJournal?.map((event) => event.type)).toEqual([
       'mcp_budget_warning',
     ]);
-    expect(loaded.liveJournal?.[0]?.id).toBe(1);
-    expect(loaded.liveJournal?.[1]?.id).toBe(2);
+    expect(loaded.compactedReplay?.[0]?.id).toBe(1);
+    expect(loaded.liveJournal?.[0]?.id).toBe(2);
 
     await bridge.shutdown();
   });
@@ -9465,6 +9577,259 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(5);
       // ...but only ONE channelFactory call (= one child process).
       expect(factoryCalls).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('calls freshSessionAdmission for fresh spawns and releases after registration', async () => {
+      const releases: string[] = [];
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'thread',
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(contexts).toMatchObject([
+        { operation: 'spawn', workspaceCwd: WS_A },
+      ]);
+      expect(releases).toEqual(['spawn']);
+      await bridge.shutdown();
+    });
+
+    it('releases fresh spawn admission once the session is live', async () => {
+      const modelSwitchGate = deferred<unknown>();
+      let releaseCount = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => modelSwitchGate.promise;
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+        freshSessionAdmission: () => ({
+          release: () => {
+            releaseCount++;
+          },
+        }),
+      });
+
+      const spawn = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'qwen3-coder',
+      });
+
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(1);
+        expect(releaseCount).toBe(1);
+      });
+      modelSwitchGate.resolve({});
+      await spawn;
+      expect(releaseCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('reports freshSessionAdmission release failures without failing fresh spawns', async () => {
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'thread',
+        freshSessionAdmission: () => ({
+          release: () => {
+            throw new Error('release broken');
+          },
+        }),
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(session.sessionId).toBeTruthy();
+      expect(diagnostics).toEqual([
+        {
+          line: 'qwen serve: fresh session admission release failed: release broken',
+          level: 'warn',
+        },
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('does not call freshSessionAdmission for single-scope attaches', async () => {
+      const freshSessionAdmission = vi.fn(() => ({
+        release: vi.fn(),
+      }));
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'single',
+        freshSessionAdmission,
+      });
+
+      const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      freshSessionAdmission.mockClear();
+      const attached = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(attached.sessionId).toBe(spawned.sessionId);
+      expect(attached.attached).toBe(true);
+      expect(freshSessionAdmission).not.toHaveBeenCalled();
+      await bridge.shutdown();
+    });
+
+    it('fails fresh spawns closed when freshSessionAdmission rejects', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        sessionScope: 'thread',
+        freshSessionAdmission: () => {
+          throw new TotalSessionLimitExceededError(1);
+        },
+      });
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({
+        name: 'TotalSessionLimitExceededError',
+        limit: 1,
+        scope: 'total',
+      });
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('calls freshSessionAdmission for load and resume restores', async () => {
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const releases: string[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+
+      await bridge.loadSession({
+        sessionId: 'load-1',
+        workspaceCwd: WS_A,
+      });
+      await bridge.resumeSession({
+        sessionId: 'resume-1',
+        workspaceCwd: WS_A,
+      });
+
+      expect(contexts).toMatchObject([
+        { operation: 'load', workspaceCwd: WS_A },
+        { operation: 'resume', workspaceCwd: WS_A },
+      ]);
+      expect(releases).toEqual(['load', 'resume']);
+      await bridge.shutdown();
+    });
+
+    it('reserves branchSession before branch extMethod and skips a second restore reservation', async () => {
+      const contexts: Array<{
+        operation: string;
+        workspaceCwd: string;
+        sourceSessionId?: string;
+      }> = [];
+      const releases: string[] = [];
+      let branchExtMethodSawReservation = false;
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) => {
+              if (method !== 'qwen/control/session/branch') return {};
+              branchExtMethodSawReservation =
+                contexts.at(-1)?.operation === 'branch';
+              return { newSessionId: 'branch-1', title: 'Branch 1' };
+            },
+            loadSessionImpl: () => ({}),
+          }).channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      contexts.length = 0;
+      releases.length = 0;
+
+      const branch = await bridge.branchSession(session.sessionId, {
+        name: 'Branch 1',
+      });
+
+      expect(branchExtMethodSawReservation).toBe(true);
+      expect(branch).toMatchObject({ sessionId: 'branch-1' });
+      expect(contexts).toEqual([
+        {
+          operation: 'branch',
+          workspaceCwd: WS_A,
+          sourceSessionId: session.sessionId,
+        },
+      ]);
+      expect(releases).toEqual(['branch']);
+      await bridge.shutdown();
+    });
+
+    it('releases branchSession admission when the branch extMethod fails', async () => {
+      const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
+      const releases: string[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) => {
+              if (method === 'qwen/control/session/branch') {
+                throw new Error('branch failed');
+              }
+              return {};
+            },
+          }).channel,
+        freshSessionAdmission: (context) => {
+          contexts.push(context);
+          return {
+            release: () => releases.push(context.operation),
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      contexts.length = 0;
+      releases.length = 0;
+
+      await expect(
+        bridge.branchSession(session.sessionId, {
+          name: 'Branch 1',
+        }),
+      ).rejects.toThrow();
+
+      expect(contexts).toMatchObject([
+        { operation: 'branch', workspaceCwd: WS_A },
+      ]);
+      expect(releases).toEqual(['branch']);
       await bridge.shutdown();
     });
 

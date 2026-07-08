@@ -5890,6 +5890,7 @@ class QwenAgent implements Agent {
               formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
             removedEntries: result.removedEntries,
             touchedTopics: result.touchedTopics,
+            touchedScopes: result.touchedScopes,
           } as unknown as Record<string, unknown>;
         } catch (err) {
           if (err instanceof RequestError) {
