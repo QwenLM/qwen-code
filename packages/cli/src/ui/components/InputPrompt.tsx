@@ -862,6 +862,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Fleet View: detect double-left-arrow on empty input
       if (
         fleetViewEnabled &&
+        !commandSearchActive &&
         key.name === 'left' &&
         !key.ctrl &&
         !key.meta &&
