@@ -173,6 +173,7 @@ export async function runManagedRememberByAgent(params: {
     hiddenConfig,
     params.projectRoot,
     {
+      bypassBaseAskForScopedPaths: true,
       restrictReadsToMemoryPaths: true,
     },
   );

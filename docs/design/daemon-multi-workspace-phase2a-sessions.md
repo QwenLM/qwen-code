@@ -4,9 +4,9 @@
 
 This document records the Phase 2a contract for issue #6378 after the Phase 1
 `WorkspaceRegistry` PR and the Phase 2a foundation PR. Phase 2a is now split
-into two implementation PRs: PR 1 lands env isolation and total-admission
-guardrails while multi-workspace remains gated; PR 2 will wire non-primary live
-session dispatch and publish the additive capabilities/status schema.
+into two implementation PRs: PR 1 landed env isolation and total-admission
+guardrails while multi-workspace remained gated; PR 2 wires non-primary live
+session dispatch and publishes the additive capabilities/status schema.
 
 Phase 2a remains sessions-only. It does not add plural routes, a
 `WorkspaceDaemonClient`, workspace-qualified ACP/WebSocket, file, memory, MCP,
@@ -22,13 +22,13 @@ runtime construction.
   values are present.
 - A single-item workspace array is treated as the primary workspace and keeps
   the existing single-workspace behavior.
-- Multiple explicit workspaces remain gated and fail before runtime boot.
-- Duplicate canonical workspace inputs fail explicitly.
-- Nested workspace inputs fail explicitly.
-- Distinct non-nested multiple workspace inputs fail with the generic
-  "multi-workspace serve is not enabled" boot error.
-- The first explicit workspace is the future primary workspace once the gate is
-  removed; this foundation batch does not expose that list publicly.
+- PR 1 kept multiple explicit workspaces gated before runtime boot.
+- PR 2 accepts distinct non-nested explicit workspaces for sessions-only
+  multi-workspace mode.
+- Duplicate canonical workspace inputs still fail explicitly.
+- Nested workspace inputs still fail explicitly.
+- The first explicit workspace is the primary workspace and remains mirrored by
+  legacy `workspaceCwd` / `app.locals.boundWorkspace` compatibility fields.
 
 The internal `WorkspaceRuntime` contract now carries stable metadata for later
 Phase 2a work:
@@ -49,10 +49,11 @@ resolution. Live owner resolution scans runtime bridge summaries only; it does
 not scan persisted storage, create children, or route any request yet. Duplicate
 live owners fail closed as an ambiguous result.
 
-`createServeApp` may accept an injected registry for tests and future assembly,
-but route modules still receive the primary runtime only. Existing legacy
-`app.locals.boundWorkspace` and `app.locals.fsFactory` remain primary-only
-compatibility locals.
+`createServeApp` may accept an injected registry for tests and future assembly.
+The foundation PR kept route modules on primary-runtime inputs; PR 2 extends
+only the live session, SSE, and session-permission route wiring with the
+registry needed for owner dispatch. Existing legacy `app.locals.boundWorkspace`
+and `app.locals.fsFactory` remain primary-only compatibility locals.
 
 ## Phase 2a Route Classification
 
@@ -90,7 +91,7 @@ Later or primary-only routes:
 Additional live read routes may be owner-routed in a later Phase 2a slice only
 after tests prove they depend solely on the owning live bridge.
 
-## Later Phase 2a Requirements
+## Phase 2a Cross-PR Requirements
 
 - Keep scan misses as `404 session_not_found`; never fall back to primary.
 - Fail closed if more than one runtime reports the same live session id.
@@ -100,10 +101,10 @@ after tests prove they depend solely on the owning live bridge.
 - Reuse PR 1 `maxTotalSessions` admission at every future fresh-creation seam
   so REST and primary `/acp` cannot bypass it, while attach still bypasses
   admission.
-- Publish `workspaces[]` and `multi_workspace_sessions` only in PR 2 when the
+- PR 2 publishes `workspaces[]` and `multi_workspace_sessions` only after the
   live session dispatch loop is complete.
-- Update SDK capability types when the additive capabilities schema ships, but
-  do not add a workspace client in Phase 2a.
+- PR 2 updates SDK capability types for the additive capabilities schema, but
+  Phase 2a still does not add a workspace client.
 
 ## PR 1 Guardrails
 
@@ -117,13 +118,75 @@ after tests prove they depend solely on the owning live bridge.
   `process.env` reads.
 - `maxTotalSessions` is an optional daemon-wide fresh-session cap. It covers
   spawn, persisted load/resume restore, and branch/fork session creation;
-  attach bypasses it.
+  attach bypasses it. In multi-workspace mode, when the operator leaves it
+  unset and the per-workspace `maxSessions` cap is finite, PR 2 derives the
+  effective total cap as `maxSessionsPerWorkspace * workspaceCount`; single
+  workspace mode keeps the historical unlimited total default.
 - The bridge admission seam is a synchronous reservation hook. Failed fresh
   creation releases the reservation, preventing concurrent oversell across
   runtimes once non-primary bridges exist.
 - `/daemon/status.limits.maxTotalSessions` is additive. `/capabilities` and SDK
   capability types remain unchanged until PR 2 ungates multi-workspace
   sessions.
+
+## PR 2 Sessions Closed Loop
+
+PR 2 removes the explicit multi-workspace boot gate for sessions-only daemon
+mode. Multiple explicit `--workspace` values now create one runtime per
+canonical workspace, with the first workspace as primary. Duplicate and nested
+workspace inputs remain boot errors because they make session ownership
+ambiguous before any route-level dispatch can safely resolve a request.
+
+The production assembly keeps the existing primary runtime responsibilities:
+daemon identity, log identity, telemetry service id, Web Shell, `/acp`, file,
+memory, MCP, settings, voice, channel worker, and legacy workspace-less REST
+routes remain primary-only. Non-primary runtimes are bridge/workspace-service
+runtimes for live REST sessions only. Their ACP child is still lazy: the bridge
+object exists at boot, but no non-primary child is spawned until a trusted
+`POST /session { cwd }` request needs a fresh session.
+
+Session creation resolves `cwd` through `WorkspaceRegistry` exact canonical cwd
+matching. Omitted `cwd` resolves to the primary runtime. Unknown `cwd` returns
+`400 workspace_mismatch`; untrusted non-primary `cwd` returns
+`403 untrusted_workspace`; trusted registered runtimes call that runtime's
+bridge with its own canonical cwd. This intentionally avoids prefix matching,
+nearest-parent matching, or persisted-storage lookup in Phase 2a.
+
+The dispatched live-session routes resolve owner runtime by scanning live bridge
+summaries through `WorkspaceRegistry.resolveLiveSessionOwner(sessionId)`.
+`not_found` maps to `404 session_not_found`, and `ambiguous` maps to a
+fail-closed server error. The scan is synchronous and live-only; it never
+spawns a child and never treats a miss as primary fallback. The dispatched
+route set is exactly:
+
+- `GET /session/:id/events`
+- `POST /session/:id/prompt`
+- `POST /session/:id/cancel`
+- `POST /session/:id/permission/:requestId`
+- `POST /session/:id/heartbeat`
+- `POST /session/:id/detach`
+- `GET /session/:id/pending-prompts`
+- `DELETE /session/:id/pending-prompts/:promptId`
+- `DELETE /session/:id`
+- `GET /session/:id/status`
+
+`GET /workspace/:id/sessions` resolves by exact workspace id first and exact
+canonical cwd second. Primary keeps the existing persisted/live merge and
+organized view behavior. Non-primary returns live sessions only, rejects
+`archiveState=archived`, and rejects organized/group queries because those are
+persisted/organization-backed surfaces reserved for later phases.
+
+`/capabilities` remains backward-compatible: `workspaceCwd` still names the
+primary workspace. When more than one runtime is registered, it additionally
+publishes `workspaces[]`, `multi_workspace_sessions`, and additive session
+limits. `/daemon/status` adds the same `workspaces[]` metadata and aggregates
+live session counters across runtime bridges while leaving full workspace
+sections primary-only.
+
+Phase 2a PR 2 does not add plural routes, workspace-qualified ACP/WebSocket,
+file/memory/MCP/settings/voice/channel-worker migration, dynamic add/remove,
+non-primary persisted load/resume/export/archive/delete, branch/fork/cd/rewind,
+shell/model/language migration, or SDK workspace client APIs.
 
 ## Audit Decisions
 
@@ -137,3 +200,7 @@ after tests prove they depend solely on the owning live bridge.
   runtimes.
 - Single-workspace parent-env behavior remains compatible until true
   multi-workspace mode is ungated.
+- PR 2's safe boundary is the live session closed loop plus additive
+  capabilities/status metadata. If a route needs persisted storage,
+  organization state, workspace settings, or ACP connection-local state, it
+  stays primary-only or later.
