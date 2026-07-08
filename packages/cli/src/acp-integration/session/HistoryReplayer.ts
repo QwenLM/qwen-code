@@ -23,11 +23,20 @@ export const MISSING_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
   'before this tool completed.';
 
-interface PendingReplayToolCall {
+export interface PendingReplayToolCall {
   callId: string;
   toolName: string;
   timestamp?: string;
   recordId: string;
+}
+
+export interface HistoryReplayPageOptions {
+  pendingToolCalls?: PendingReplayToolCall[];
+  finalizeDangling?: boolean;
+}
+
+export interface HistoryReplayPageState {
+  pendingToolCalls: PendingReplayToolCall[];
 }
 
 /**
@@ -58,40 +67,62 @@ export class HistoryReplayer {
    * @param records - Array of chat records to replay
    */
   async replay(records: ChatRecord[]): Promise<void> {
-    this.pendingReplayToolCalls.clear();
     try {
-      let replayError: unknown;
-      try {
-        for (const record of records) {
-          await this.replayRecord(record);
-        }
-      } catch (error) {
-        replayError = error;
-      }
+      await this.replayPage(records, { finalizeDangling: true });
+    } finally {
+      this.pendingReplayToolCalls.clear();
+      this.setActiveRecordId(null);
+    }
+  }
 
-      let danglingError: unknown;
+  async replayPage(
+    records: ChatRecord[],
+    options: HistoryReplayPageOptions = {},
+  ): Promise<HistoryReplayPageState> {
+    this.pendingReplayToolCalls.clear();
+    for (const pending of options.pendingToolCalls ?? []) {
+      this.pendingReplayToolCalls.set(pending.callId, pending);
+    }
+
+    let replayError: unknown;
+    try {
+      for (const record of records) {
+        await this.replayRecord(record);
+      }
+    } catch (error) {
+      replayError = error;
+    }
+
+    let danglingError: unknown;
+    if (options.finalizeDangling === true) {
       try {
         await this.failDanglingToolCalls();
       } catch (error) {
         danglingError = error;
       }
-
-      if (replayError && danglingError) {
-        throw new AggregateError(
-          [replayError, danglingError],
-          'Replay and dangling-cleanup both failed',
-        );
-      }
-      if (replayError) {
-        throw replayError;
-      }
-      if (danglingError) {
-        throw danglingError;
-      }
-    } finally {
-      this.pendingReplayToolCalls.clear();
-      this.setActiveRecordId(null);
     }
+
+    const state = {
+      pendingToolCalls:
+        options.finalizeDangling === true
+          ? []
+          : Array.from(this.pendingReplayToolCalls.values()),
+    };
+    this.setActiveRecordId(null);
+
+    if (replayError && danglingError) {
+      throw new AggregateError(
+        [replayError, danglingError],
+        'Replay and dangling-cleanup both failed',
+      );
+    }
+    if (replayError) {
+      throw replayError;
+    }
+    if (danglingError) {
+      throw danglingError;
+    }
+    return state;
   }
 
   /**

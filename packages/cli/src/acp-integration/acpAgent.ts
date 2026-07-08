@@ -55,6 +55,12 @@ import {
   InvalidMcpConfigError,
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
+  InvalidSessionTranscriptCursorError,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
+  encodeSessionTranscriptCursor,
+  type SessionTranscriptCursorState,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -67,27 +73,25 @@ import {
   IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
   startEventLoopLagMonitor,
+  type AgentParams,
+  type ApprovalMode,
+  type ChatRecord,
+  type Config,
+  type DeviceAuthorizationData,
+  type DiscoveredMCPPrompt,
+  type DiscoveredMCPResource,
+  type HookConfig,
+  type McpBudgetEvent,
+  type McpBudgetMode,
+  type McpTransportKind,
+  type ProviderConfig,
+  type ProviderModelConfig,
+  type ProviderSetupInputs,
+  type ResumedSessionData,
+  type SendSdkMcpMessage,
+  type WorkspaceRememberContextMode,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
-import type {
-  AgentParams,
-  ApprovalMode,
-  Config,
-  DeviceAuthorizationData,
-  HookConfig,
-  McpBudgetEvent,
-  McpBudgetMode,
-  McpTransportKind,
-  ProviderConfig,
-  ProviderModelConfig,
-  ProviderSetupInputs,
-  ResumedSessionData,
-  SendSdkMcpMessage,
-  DiscoveredMCPResource,
-  DiscoveredMCPPrompt,
-  WorkspaceRememberContextMode,
-  ChatRecord,
-} from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
@@ -172,7 +176,10 @@ import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-su
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
-import { HistoryReplayer } from './session/HistoryReplayer.js';
+import {
+  HistoryReplayer,
+  type PendingReplayToolCall,
+} from './session/HistoryReplayer.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -331,6 +338,53 @@ function copyCumulativeUsage(
   target.apiTimeMs = source.apiTimeMs;
 }
 
+function isCumulativeUsage(value: unknown): value is CumulativeUsage {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['promptTokens'] === 'number' &&
+    Number.isFinite(value['promptTokens']) &&
+    typeof value['cachedTokens'] === 'number' &&
+    Number.isFinite(value['cachedTokens']) &&
+    typeof value['candidateTokens'] === 'number' &&
+    Number.isFinite(value['candidateTokens']) &&
+    typeof value['apiTimeMs'] === 'number' &&
+    Number.isFinite(value['apiTimeMs'])
+  );
+}
+
+function isPendingReplayToolCall(
+  value: unknown,
+): value is PendingReplayToolCall {
+  if (!isObjectRecord(value)) return false;
+  return (
+    typeof value['callId'] === 'string' &&
+    typeof value['toolName'] === 'string' &&
+    (value['timestamp'] === undefined ||
+      typeof value['timestamp'] === 'string') &&
+    typeof value['recordId'] === 'string'
+  );
+}
+
+function parseTranscriptReplayState(replay: unknown): {
+  pendingToolCalls: PendingReplayToolCall[];
+  cumulativeUsage: CumulativeUsage;
+} {
+  if (!isObjectRecord(replay)) {
+    return {
+      pendingToolCalls: [],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    };
+  }
+  const rawPending = replay['pendingToolCalls'];
+  const pendingToolCalls = Array.isArray(rawPending)
+    ? rawPending.filter(isPendingReplayToolCall)
+    : [];
+  const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
+    ? { ...replay['cumulativeUsage'] }
+    : createReplayCumulativeUsage();
+  return { pendingToolCalls, cumulativeUsage };
+}
+
 async function collectHistoryReplayUpdates({
   sessionId,
   config,
@@ -366,6 +420,53 @@ async function collectHistoryReplayUpdates({
   }
 
   return { updates };
+}
+
+async function collectHistoryReplayUpdatesPage({
+  sessionId,
+  config,
+  records,
+  cumulativeUsage,
+  pendingToolCalls,
+  finalizeDangling,
+}: {
+  sessionId: string;
+  config: Config;
+  records: ChatRecord[];
+  cumulativeUsage: CumulativeUsage;
+  pendingToolCalls: PendingReplayToolCall[];
+  finalizeDangling: boolean;
+}): Promise<{
+  updates: SessionUpdate[];
+  pendingToolCalls: PendingReplayToolCall[];
+  replayError?: string;
+}> {
+  const updates: SessionUpdate[] = [];
+  const replayContext: SessionContext = {
+    sessionId,
+    config,
+    sendUpdate: async (update) => {
+      updates.push(update);
+    },
+    cumulativeUsage,
+  };
+
+  try {
+    const state = await new HistoryReplayer(replayContext).replayPage(records, {
+      pendingToolCalls,
+      finalizeDangling,
+    });
+    return { updates, pendingToolCalls: state.pendingToolCalls };
+  } catch (error) {
+    const replayError = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(
+      '[historyReplay] Paged history replay failed for session %s (partial updates: %d):',
+      sessionId,
+      updates.length,
+      error,
+    );
+    return { updates, pendingToolCalls, replayError };
+  }
 }
 
 function liftSessionUpdateTimestamps(
@@ -5694,6 +5795,126 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionTranscript: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawCursor = params['cursor'];
+        if (rawCursor !== undefined && typeof rawCursor !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript cursor',
+          );
+        }
+        const rawLimit = params['limit'];
+        if (
+          rawLimit !== undefined &&
+          (!Number.isSafeInteger(rawLimit) ||
+            (rawLimit as number) < 1 ||
+            (rawLimit as number) > SESSION_TRANSCRIPT_MAX_LIMIT)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript limit',
+          );
+        }
+
+        try {
+          const settings = loadSettingsCached(cwd);
+          this.settings = settings;
+          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+            const reader = new SessionTranscriptReader(cwd);
+            const page = await reader.readPage(sessionId, {
+              ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
+              ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+            });
+            const config = await this.newSessionConfig(
+              cwd,
+              [],
+              settings,
+              sessionId,
+              false,
+            );
+            const replayState = parseTranscriptReplayState(page.replay);
+            const replay = await collectHistoryReplayUpdatesPage({
+              sessionId,
+              config,
+              records: page.records,
+              cumulativeUsage: replayState.cumulativeUsage,
+              pendingToolCalls: replayState.pendingToolCalls,
+              finalizeDangling: !page.hasMore,
+            });
+            const updates = liftSessionUpdateTimestamps(replay.updates);
+            let nextCursor: string | undefined;
+            if (page.nextCursorState && replay.replayError === undefined) {
+              const nextCursorState: SessionTranscriptCursorState = {
+                ...page.nextCursorState,
+                replay: {
+                  pendingToolCalls: replay.pendingToolCalls,
+                  cumulativeUsage: replayState.cumulativeUsage,
+                },
+              };
+              nextCursor = encodeSessionTranscriptCursor(nextCursorState);
+            }
+            return {
+              v: 1,
+              sessionId,
+              events: updates.map((update) => ({
+                v: 1,
+                type: 'session_update',
+                data: update,
+              })),
+              ...(nextCursor !== undefined ? { nextCursor } : {}),
+              hasMore: nextCursor !== undefined && page.hasMore,
+              startTime: page.startTime,
+              lastUpdated: page.lastUpdated,
+              ...(replay.replayError !== undefined
+                ? { partial: true, replayError: replay.replayError }
+                : {}),
+            } as Record<string, unknown>;
+          });
+        } catch (error) {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof RangeError
+          ) {
+            throw new RequestError(
+              -32602,
+              error instanceof Error ? error.message : 'Invalid transcript',
+              {
+                errorKind:
+                  error instanceof InvalidSessionTranscriptCursorError
+                    ? 'invalid_transcript_cursor'
+                    : 'invalid_transcript_limit',
+              },
+            );
+          }
+          if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId,
+            });
+          }
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (typeof rawCursor === 'string') {
+              throw new RequestError(
+                -32010,
+                `Transcript snapshot is unavailable for session ${sessionId}`,
+                {
+                  errorKind: 'transcript_snapshot_unavailable',
+                  sessionId,
+                },
+              );
+            }
+            throw RequestError.resourceNotFound(`session:${sessionId}`);
+          }
+          throw error;
+        }
       }
       case SERVE_STATUS_EXT_METHODS.sessionStats: {
         const sessionId = params['sessionId'];

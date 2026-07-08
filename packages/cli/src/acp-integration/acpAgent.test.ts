@@ -153,6 +153,13 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     maxBytes: 10380902,
     maxImagesPerTurn: 4,
   }),
+  SESSION_TRANSCRIPT_MAX_LIMIT: 500,
+  InvalidSessionTranscriptCursorError: class InvalidSessionTranscriptCursorError extends Error {},
+  SessionTranscriptSnapshotUnavailableError: class SessionTranscriptSnapshotUnavailableError extends Error {},
+  encodeSessionTranscriptCursor: vi.fn((state: unknown) =>
+    Buffer.from(JSON.stringify(state), 'utf8').toString('base64url'),
+  ),
+  SessionTranscriptReader: vi.fn(),
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -466,9 +473,14 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 const { mockHistoryReplay } = vi.hoisted(() => ({
   mockHistoryReplay: vi.fn(),
 }));
+const { mockHistoryReplayPage } = vi.hoisted(() => ({
+  mockHistoryReplayPage: vi.fn(),
+}));
 vi.mock('./session/HistoryReplayer.js', () => ({
   HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
     replay: (messages: unknown) => mockHistoryReplay(context, messages),
+    replayPage: (messages: unknown, options: unknown) =>
+      mockHistoryReplayPage(context, messages, options),
   })),
 }));
 
@@ -626,6 +638,7 @@ import {
   buildInstallPlan,
   applyProviderInstallPlan,
   Storage,
+  SessionTranscriptReader,
   unregisterGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
@@ -5264,6 +5277,87 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     })) as { partial?: boolean; replayError?: string };
     expect(result.partial).toBe(true);
     expect(result.replayError).toContain('replay boom');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/status/session/transcript returns id-less replay events from transcript reader pages', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    } as unknown as Config);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'u1' }],
+      hasMore: true,
+      nextCursorState: {
+        v: 1,
+        sessionId: VALID_SESSION_ID,
+        fileIdentity: { dev: 1, ino: 2 },
+        snapshotSize: 123,
+        position: 1,
+        leafUuid: 'u2',
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockImplementation(
+      async (context: { sendUpdate: (u: unknown) => Promise<void> }) => {
+        await context.sendUpdate({
+          sessionUpdate: 'user_message_chunk',
+          _meta: { timestamp: 4242 },
+        });
+        return {
+          pendingToolCalls: [
+            { callId: 'c1', toolName: 'Read', recordId: 'u1' },
+          ],
+        };
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-1',
+        limit: 2,
+      },
+    )) as {
+      events: Array<{ id?: number; type: string; data: { timestamp?: number } }>;
+      nextCursor?: string;
+      hasMore: boolean;
+    };
+
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      cursor: 'cursor-1',
+      limit: 2,
+    });
+    expect(result.events).toEqual([
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          _meta: { timestamp: 4242 },
+          timestamp: 4242,
+        },
+      },
+    ]);
+    expect(result.events[0]).not.toHaveProperty('id');
+    expect(result.hasMore).toBe(true);
+    expect(result.nextCursor).toBeDefined();
 
     mockConnectionState.resolve();
     await agentPromise;

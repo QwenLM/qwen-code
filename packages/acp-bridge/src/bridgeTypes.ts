@@ -140,6 +140,24 @@ export interface BridgeRestoredSession extends BridgeSession {
   lastEventId?: number;
 }
 
+export interface BridgeSessionTranscriptPageRequest {
+  sessionId: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface BridgeSessionTranscriptPage {
+  v: 1;
+  sessionId: string;
+  events: BridgeEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
+  startTime?: string;
+  lastUpdated?: string;
+  partial?: true;
+  replayError?: string;
+}
+
 export interface BridgeBranchSessionRequest {
   name?: string;
 }
@@ -752,6 +770,15 @@ export interface AcpSessionBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /**
+   * Read a page of persisted transcript replay events through the ACP child.
+   * This is workspace-scoped and read-only: implementations must not attach a
+   * session client, seed the EventBus, or create a live SessionEntry.
+   */
+  getSessionTranscriptPage(
+    req: BridgeSessionTranscriptPageRequest,
+  ): Promise<BridgeSessionTranscriptPage>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(

@@ -500,6 +500,24 @@ export interface DaemonSessionExportResult {
   format: DaemonSessionExportFormat;
 }
 
+export interface DaemonSessionTranscriptPageOptions {
+  cursor?: string;
+  limit?: number;
+  clientId?: string;
+}
+
+export interface DaemonSessionTranscriptPage {
+  v: 1;
+  sessionId: string;
+  events: DaemonEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
+  startTime?: string;
+  lastUpdated?: string;
+  partial?: true;
+  replayError?: string;
+}
+
 export type DaemonSessionArchiveState = 'active' | 'archived';
 
 export type DaemonSessionGroupColor =

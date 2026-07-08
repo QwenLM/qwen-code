@@ -521,6 +521,29 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'invalid_transcript_cursor') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      if (kind === 'invalid_transcript_limit') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'invalid_transcript_limit',
+        });
+        return;
+      }
+      if (kind === 'transcript_snapshot_unavailable') {
+        const d = data as { sessionId?: string };
+        res.status(409).json({
+          error: errorMessage(err),
+          code: 'transcript_snapshot_unavailable',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+        });
+        return;
+      }
     }
   }
   // 5xx is the kind of error operators need to see in their daemon log

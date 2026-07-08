@@ -12,6 +12,7 @@ import {
   GROUP_COLOR_OPTIONS,
   SessionService,
   SessionOrganizationError,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
   addDaemonRequestAttribute,
   type ApprovalMode,
   type SessionGroupColor,
@@ -25,6 +26,7 @@ import {
   InvalidClientIdError,
   PromptQueueFullError,
   SessionArtifactValidationError,
+  SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
@@ -107,6 +109,56 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
+}
+
+function parseTranscriptLimitQuery(
+  rawLimit: unknown,
+  res: Response,
+): number | undefined | null {
+  if (rawLimit === undefined) return undefined;
+  if (typeof rawLimit !== 'string' || rawLimit.trim() === '') {
+    res.status(400).json({
+      error: '`limit` must be a positive integer',
+      code: 'invalid_transcript_limit',
+    });
+    return null;
+  }
+  if (!/^\d+$/.test(rawLimit)) {
+    res.status(400).json({
+      error: '`limit` must be a positive integer',
+      code: 'invalid_transcript_limit',
+    });
+    return null;
+  }
+  const limit = Number(rawLimit);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > SESSION_TRANSCRIPT_MAX_LIMIT
+  ) {
+    res.status(400).json({
+      error: `\`limit\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      code: 'invalid_transcript_limit',
+      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
+    });
+    return null;
+  }
+  return limit;
+}
+
+function parseTranscriptCursorQuery(
+  rawCursor: unknown,
+  res: Response,
+): string | undefined | null {
+  if (rawCursor === undefined) return undefined;
+  if (typeof rawCursor !== 'string' || rawCursor.trim() === '') {
+    res.status(400).json({
+      error: '`cursor` must be a non-empty string',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawCursor;
 }
 
 export function registerSessionRoutes(
@@ -520,6 +572,41 @@ export function registerSessionRoutes(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/export',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/transcript', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+    if (limit === null) return;
+    const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
+    if (cursor === null) return;
+
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          const location = await assertSessionLoadable(
+            boundWorkspace,
+            sessionId,
+          );
+          if (location !== 'active') {
+            throw new SessionNotFoundError(sessionId);
+          }
+          return bridge.getSessionTranscriptPage({
+            sessionId,
+            ...(limit !== undefined ? { limit } : {}),
+            ...(cursor !== undefined ? { cursor } : {}),
+          });
+        },
+      );
+      res.status(200).set('Cache-Control', 'no-store').json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/transcript',
         sessionId,
       });
     }

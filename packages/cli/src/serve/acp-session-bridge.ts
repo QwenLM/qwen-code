@@ -70,6 +70,8 @@ export type {
   BridgeRestoreSessionRequest,
   BridgeSessionState,
   BridgeRestoredSession,
+  BridgeSessionTranscriptPage,
+  BridgeSessionTranscriptPageRequest,
   BridgeSessionSummary,
   SessionMetadataUpdate,
   BridgeClientRequestContext,

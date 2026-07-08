@@ -139,6 +139,8 @@ export {
   type DaemonSessionGroupInput,
   type DaemonSessionGroupUpdate,
   type DaemonSessionShellTaskStatus,
+  type DaemonSessionTranscriptPage,
+  type DaemonSessionTranscriptPageOptions,
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,

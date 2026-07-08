@@ -102,6 +102,7 @@ import type {
   BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
+  BridgeSessionTranscriptPage,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -4929,6 +4930,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       );
+    },
+
+    async getSessionTranscriptPage(req) {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_STATUS_EXT_METHODS.sessionTranscript,
+                { ...req, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            initTimeoutMs,
+            SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          ),
+        );
+        return response as unknown as BridgeSessionTranscriptPage;
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'session transcript');
+        }
+      }
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind) {

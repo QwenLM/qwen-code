@@ -36,6 +36,8 @@ import type {
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionTranscriptPage,
+  DaemonSessionTranscriptPageOptions,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -646,6 +648,7 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      mode?: 'transport' | 'rest';
     } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
@@ -664,6 +667,7 @@ export class DaemonClient {
         return (await res.json()) as T;
       },
       opts.timeoutMs,
+      opts.mode,
     );
   }
 
@@ -1578,6 +1582,24 @@ export class DaemonClient {
       },
       undefined,
       'rest',
+    );
+  }
+
+  async getSessionTranscriptPage(
+    sessionId: string,
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const params = new URLSearchParams();
+    if (opts.cursor !== undefined) params.set('cursor', opts.cursor);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const query = params.toString();
+    return await this.jsonRequest<DaemonSessionTranscriptPage>(
+      `/session/${urlEncode(sessionId)}/transcript${query ? `?${query}` : ''}`,
+      'GET /session/:id/transcript',
+      {
+        clientId: opts.clientId,
+        mode: 'rest',
+      },
     );
   }
 
