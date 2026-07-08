@@ -412,7 +412,11 @@ function moveVisibleColumn(
   const visibleColumns = order.filter(
     (columnIndex) => !hiddenColumns.has(columnIndex),
   );
-  const nextVisibleColumns = moveColumn(visibleColumns, fromColumn, toColumn);
+  const nextVisibleColumns = moveColumn(
+    visibleColumns,
+    fromColumn,
+    toColumn,
+  );
   if (nextVisibleColumns === visibleColumns) return order;
   let visibleIndex = 0;
   return order.map((columnIndex) => {
@@ -1670,7 +1674,10 @@ export function EnhancedTable({
   ) => {
     const sourceColumnIndex = draggingColumnRef.current;
     stopColumnDrag();
-    if (sourceColumnIndex === null || !hasColumnDragData(event.dataTransfer)) {
+    if (
+      sourceColumnIndex === null ||
+      !hasColumnDragData(event.dataTransfer)
+    ) {
       return;
     }
     event.preventDefault();

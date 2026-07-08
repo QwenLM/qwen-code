@@ -978,10 +978,7 @@ describe('EnhancedMarkdownTable', () => {
     const source = renderWideTable();
     const target = renderWideTable();
 
-    dragColumnElements(
-      button(source, 'Move Score'),
-      button(target, 'Move Team'),
-    );
+    dragColumnElements(button(source, 'Move Score'), button(target, 'Move Team'));
 
     expect(rowTexts(source)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
     expect(rowTexts(target)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);

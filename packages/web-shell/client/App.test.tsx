@@ -1148,9 +1148,7 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).toBeNull();
+    expect(container.querySelector('[data-testid="split-view-page"]')).toBeNull();
 
     // …and reopen it from the toolbar. The reported panes must be restored, not
     // reset to empty / the current session (the regression this guards).
