@@ -271,11 +271,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       "issue_comment:\n    types:\n      - 'created'",
     );
+    // pull_request_review_comment triggers are NOT used to avoid redundant
+    // runs on multi-comment reviews; only pull_request_review:submitted.
     expect(workflow).not.toContain(
       "pull_request_review_comment:\n    types:\n      - 'created'",
-    );
-    expect(workflow).not.toContain(
-      "pull_request_review:\n    types:\n      - 'submitted'",
     );
     expect(workflow).not.toContain(
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
@@ -287,6 +286,63 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).not.toContain('address-review command accepted');
     expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
     expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
+  });
+
+  it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
+    // Route step must check PR author against AUTOFIX_BOT for review events.
+    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    // Must verify sender is trusted (collaborator or review bot).
+    expect(routeStep).toContain('"${SENDER_LOGIN}" == "${REVIEW_BOT}"');
+    expect(routeStep).toContain(
+      'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
+    );
+    // Must reject fork PRs and non-main targets.
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    // Must set ROUTE_PR from the event payload.
+    expect(routeStep).toContain(
+      'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
+    );
+    // Review-scan must also verify in-repo and base-ref for forced PRs.
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    expect(reviewScanStep).toContain('isCrossRepository');
+    expect(reviewScanStep).toContain('(.baseRefName // "") == "main"');
+    expect(reviewScanStep).toContain('--base main');
+    // review-address must check out trusted base, not PR merge ref.
+    expect(workflow).toContain("'Checkout trusted base'");
+    expect(workflow).toContain(
+      "ref: '${{ github.event.repository.default_branch }}'",
+    );
+  });
+
+  it('includes issue-level comments in review feedback scanning', () => {
+    const reviewScanStep =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
+      )?.[0] ?? '';
+    // Must count issue-level comments separately from inline review comments.
+    expect(reviewScanStep).toContain('N_ISSUE_COMMENTS=');
+    // Must fetch issue comments for the count (already fetched for markers).
+    expect(reviewScanStep).toContain('ic.json');
+    // Must exclude known non-actionable bot comments.
+    expect(reviewScanStep).toContain('qwen-triage');
+    expect(reviewScanStep).toContain('qwen-review-suggestion-summary');
+    // The "nothing new" gate must check all three feedback sources.
+    expect(reviewScanStep).toContain('"${N_ISSUE_COMMENTS}" -eq 0');
+    // review-address must also fetch ic.json and render issue-level comments.
+    expect(workflow).toContain(
+      'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
+    );
+    expect(workflow).toContain('## Issue-level comments');
+    // NEWEST watermark must consider issue-level comment timestamps.
+    expect(workflow).toContain('.[2] | map(select((.created_at // "")');
+    // Permission API failures in the review-trigger path must be logged.
+    expect(routeStep).toContain(
+      '::warning::Permission API call failed for ${SENDER_LOGIN}',
+    );
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
