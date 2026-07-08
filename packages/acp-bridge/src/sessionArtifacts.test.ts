@@ -1043,6 +1043,41 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
+  it('normalizes workspace paths against the resolved workspace cwd', async () => {
+    const symlinkWorkspace = `${workspace}-link`;
+    await fs.symlink(workspace, symlinkWorkspace, 'dir');
+    try {
+      const store = new SessionArtifactStore({
+        sessionId: 's4-symlink-workspace',
+        workspaceCwd: symlinkWorkspace,
+      });
+      await fs.writeFile(path.join(workspace, 'via-link.txt'), 'hello');
+
+      await expect(
+        store.upsertMany(
+          [
+            {
+              title: 'Via link',
+              workspacePath: `../${path.basename(workspace)}/via-link.txt`,
+            },
+          ],
+          { strict: true },
+        ),
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            artifact: {
+              workspacePath: 'via-link.txt',
+              status: 'available',
+            },
+          },
+        ],
+      });
+    } finally {
+      await fs.rm(symlinkWorkspace, { force: true });
+    }
+  });
+
   it('accepts workspace entries whose names start with two dots', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's4-dot-prefix',
@@ -3059,6 +3094,53 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('warns when restored pinned artifacts are downgraded', async () => {
+    const sessionId = 's11-restore-pinned';
+    const url = 'https://example.com/restored-pinned';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [
+          {
+            id: artifactId,
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Pinned',
+            url,
+            retention: 'pinned',
+            clientRetained: true,
+            createdAt: '2026-07-04T00:00:00.000Z',
+            updatedAt: '2026-07-04T00:00:00.000Z',
+          },
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual([
+      `pinned artifact ${artifactId} downgraded to restorable; runtime does not support pinned retention`,
+    ]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'restorable',
+        },
+      ],
+    });
+  });
+
   it('does not mark restored ephemeral artifacts as sticky without a sticky marker', async () => {
     const sessionId = 's11-restore-ephemeral';
     const url = 'https://example.com/restored-ephemeral';
@@ -3598,7 +3680,9 @@ describe('SessionArtifactStore', () => {
       workspaceCwd: workspace,
     });
 
-    await expect(restored.restore(snapshot)).resolves.toEqual([]);
+    await expect(restored.restore(snapshot)).resolves.toEqual([
+      `pinned artifact ${artifactId} downgraded to restorable; runtime does not support pinned retention`,
+    ]);
 
     await expect(restored.list()).resolves.toMatchObject({
       artifacts: [

@@ -558,6 +558,9 @@ export class SessionArtifactStore {
           const input = persistedArtifactToInput(artifact);
           if (input.retention === 'pinned') {
             input.retention = 'restorable';
+            warnings.push(
+              `pinned artifact ${artifact.id} downgraded to restorable; runtime does not support pinned retention`,
+            );
           }
           let normalized = await this.normalizeInput(
             input,
@@ -1026,7 +1029,10 @@ export class SessionArtifactStore {
 
     const trustedPublisher = trustedPublisherFromCaller;
     const workspacePath = input.workspacePath
-      ? normalizeWorkspacePath(input.workspacePath, this.workspaceCwd)
+      ? normalizeWorkspacePath(
+          input.workspacePath,
+          await this.getRealWorkspaceCwdForValidation(),
+        )
       : undefined;
     const managedId = normalizeManagedId(input.managedId);
     const rawStorage = input.storage;
@@ -1194,7 +1200,6 @@ export class SessionArtifactStore {
   }> {
     try {
       return await getWorkspaceStatus(
-        this.workspaceCwd,
         workspacePath,
         this.getRealWorkspaceCwd(),
         expected,
@@ -1218,7 +1223,6 @@ export class SessionArtifactStore {
     }
     try {
       const status = await getWorkspaceStatus(
-        this.workspaceCwd,
         artifact.workspacePath,
         this.getRealWorkspaceCwd(),
         {
@@ -1264,6 +1268,18 @@ export class SessionArtifactStore {
       this.realWorkspaceCwdPromise = promise;
     }
     return this.realWorkspaceCwdPromise;
+  }
+
+  private async getRealWorkspaceCwdForValidation(): Promise<string> {
+    try {
+      return await this.getRealWorkspaceCwd();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SessionArtifactValidationError(
+        `workspacePath could not be inspected: ${reason}`,
+        'workspacePath',
+      );
+    }
   }
 
   private async evictOverflow(
@@ -2332,7 +2348,6 @@ function inferKind(input: {
 }
 
 async function getWorkspaceStatus(
-  workspaceCwd: string,
   workspacePath: string,
   realWorkspaceCwd: Promise<string>,
   expected?: WorkspaceStatusExpected,
@@ -2344,8 +2359,8 @@ async function getWorkspaceStatus(
   mtimeMs?: number;
   escaped?: boolean;
 }> {
-  const absolutePath = path.resolve(workspaceCwd, workspacePath);
   const realWorkspace = await realWorkspaceCwd;
+  const absolutePath = path.resolve(realWorkspace, workspacePath);
   try {
     const realPath = await fs.realpath(absolutePath);
     const relative = path.relative(realWorkspace, realPath);
