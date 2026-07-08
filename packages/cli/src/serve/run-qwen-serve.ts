@@ -179,6 +179,8 @@ function isNonNegativeIntegerMs(value: number): boolean {
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
+const MAX_PORT_ATTEMPTS = 10;
+
 function assertTimerDelayInRange(name: string, value: number): void {
   if (value > MAX_TIMEOUT_MS) {
     throw new TypeError(
@@ -3518,31 +3520,67 @@ export async function runQwenServe(
       }
     };
     let server: Server;
-    if (tlsOptions) {
-      let httpsServer: https.Server;
+
+    const tryListen = (attemptPort: number, attempt: number): void => {
       try {
-        httpsServer = https.createServer(tlsOptions, app);
+        if (tlsOptions) {
+          let httpsServer: https.Server;
+          try {
+            httpsServer = https.createServer(tlsOptions, app);
+          } catch (err) {
+            // createSecureContext throws a raw OpenSSL string (e.g.
+            // "error:0B080074:...key values mismatch") when cert/key don't pair.
+            // Wrap it so the operator gets the same actionable framing as the
+            // --tls-cert/--tls-key read errors above.
+            reject(
+              new Error(
+                `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
+                  `could not be loaded (do they match?): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+            return;
+          }
+          server = httpsServer.listen(attemptPort, listenHostname, onListening);
+        } else {
+          server = app.listen(attemptPort, listenHostname, onListening);
+        }
       } catch (err) {
-        // createSecureContext throws a raw OpenSSL string (e.g.
-        // "error:0B080074:...key values mismatch") when cert/key don't pair.
-        // Wrap it so the operator gets the same actionable framing as the
-        // --tls-cert/--tls-key read errors above.
-        reject(
-          new Error(
-            `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
-              `could not be loaded (do they match?): ` +
-              `${err instanceof Error ? err.message : String(err)}`,
-          ),
-        );
+        // Synchronous listen failure (e.g. invalid address) — not
+        // recoverable via port bump.
+        removeCurrentServePidfile();
+        reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
-      server = httpsServer.listen(opts.port, listenHostname, onListening);
-    } else {
-      server = app.listen(opts.port, listenHostname, onListening);
-    }
-    server.once('error', (err) => {
-      removeCurrentServePidfile();
-      reject(err);
-    });
+
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        server.close();
+        if (
+          err.code === 'EADDRINUSE' &&
+          opts.port !== 0 &&
+          attempt < MAX_PORT_ATTEMPTS - 1
+        ) {
+          writeStderrLine(
+            `qwen serve: port ${attemptPort} is in use, trying ${attemptPort + 1}...`,
+          );
+          tryListen(attemptPort + 1, attempt + 1);
+        } else {
+          removeCurrentServePidfile();
+          reject(err);
+        }
+      });
+
+      server.once('listening', () => {
+        // Listener is up — wire the permanent runtime error handler.
+        // onListening (fired by the same `listening` event) has already
+        // resolved actualPort and printed the startup banner.
+        server.on('error', (runtimeErr) => {
+          removeCurrentServePidfile();
+          reject(runtimeErr);
+        });
+      });
+    };
+
+    tryListen(opts.port, 0);
   });
 }

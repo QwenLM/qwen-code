@@ -4094,6 +4094,88 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
+  it('retries the next port on EADDRINUSE and succeeds', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        if (portsAttempted.length === 1) {
+          const err = new Error('address in use') as NodeJS.ErrnoException;
+          err.code = 'EADDRINUSE';
+          setImmediate(() => srv.emit('error', err));
+        } else {
+          srv.listen(0, '127.0.0.1', () => {
+            setImmediate(() => {
+              srv.emit('listening');
+              if (typeof cb === 'function') cb();
+            });
+          });
+        }
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(handle.url).not.toContain(':4170');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('does not retry on non-EADDRINUSE listen errors', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('permission denied') as NodeJS.ErrnoException;
+    listenError.code = 'EACCES';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port, _host, _cb) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([4170]);
+  });
+
   it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-crash-')),
