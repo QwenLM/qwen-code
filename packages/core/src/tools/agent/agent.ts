@@ -296,11 +296,15 @@ async function resolveExternalWorktreeDir(
   // anything that is not a LINKED worktree (distinguished by comparing the
   // per-worktree git dir against the common git dir; see isLinkedWorktree).
   if (!(await wtService.isLinkedWorktree(resolvedPath))) {
+    // isLinkedWorktree fails closed (returns false) on a git error too, so
+    // the cause is either "it is the main working tree" or "its git metadata
+    // could not be read" — name both rather than assert the former.
     return {
       error:
-        `working_dir "${resolvedPath}" is the repository's main working tree, ` +
-        `not a linked worktree — pinning a sub-agent there would not isolate ` +
-        `it. Pass a linked worktree created via \`git worktree add\`.`,
+        `working_dir "${resolvedPath}" is not a linked worktree (it is the ` +
+        `repository's main working tree, or its git metadata could not be ` +
+        `read) — pinning a sub-agent there would not isolate it. Pass a ` +
+        `linked worktree created via \`git worktree add\`.`,
     };
   }
   return {

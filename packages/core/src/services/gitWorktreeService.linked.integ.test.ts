@@ -86,4 +86,16 @@ describe('GitWorktreeService.isLinkedWorktree() (real git)', () => {
     const svc = new GitWorktreeService(tree);
     expect(await svc.isLinkedWorktree(tree)).toBe(false);
   });
+
+  it('returns false (fail-closed) for a path that is not a git repository', async () => {
+    // rev-parse throws here, exercising the catch block that backs the
+    // fail-closed contract: an unverifiable path is treated as "not linked"
+    // so callers reject rather than mis-isolate.
+    const plain = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-linked-plain-')),
+    );
+    tmpDirs.push(plain);
+    const svc = new GitWorktreeService(plain);
+    expect(await svc.isLinkedWorktree(plain)).toBe(false);
+  });
 });

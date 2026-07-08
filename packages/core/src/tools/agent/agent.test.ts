@@ -1537,6 +1537,39 @@ describe('AgentTool', () => {
       }
     }, 20000);
 
+    it('rejects working_dir when the parent directory is not a git repository', async () => {
+      vi.useRealTimers();
+      const nonRepo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-nogit-')),
+      );
+      try {
+        vi.mocked(config.getProjectRoot).mockReturnValue(nonRepo);
+        vi.mocked(config.getTargetDir).mockReturnValue(nonRepo);
+        vi.mocked(config.getCwd).mockReturnValue(nonRepo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(nonRepo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: 'some-worktree',
+        });
+        const result = await invocation.execute();
+
+        // The isGitRepository() preflight names the real cause instead of
+        // the confusing "not a registered git worktree" fallback.
+        expect(partToString(result.llmContent)).toMatch(
+          /not a git repository/i,
+        );
+        expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(nonRepo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
     it('re-anchors validation at the repo root when launched from a monorepo subdirectory', async () => {
       vi.useRealTimers();
       const repo = fs.realpathSync(
