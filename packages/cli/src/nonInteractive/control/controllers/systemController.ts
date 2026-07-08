@@ -277,9 +277,16 @@ export class SystemController extends BaseController {
       if (normalized) {
         try {
           this.context.config.setReasoningEffort(normalized);
-          debugLogger.info(
-            `[SystemController] Set reasoning effort to: ${normalized}`,
-          );
+
+          if (this.context.config.getReasoningEffort() !== normalized) {
+            debugLogger.warn(
+              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
+            );
+          } else {
+            debugLogger.info(
+              `[SystemController] Set reasoning effort to: ${normalized}`,
+            );
+          }
         } catch (error) {
           debugLogger.error(
             '[SystemController] Failed to set reasoning effort:',
@@ -288,7 +295,7 @@ export class SystemController extends BaseController {
         }
       } else {
         throw new Error(
-          `Invalid effort value: ${payload.effort}. Supported: low, medium, high, xhigh, max`,
+          'Invalid effort value. Supported: low, medium, high, xhigh, max',
         );
       }
     }
@@ -521,20 +528,23 @@ export class SystemController extends BaseController {
     const normalized = normalizeReasoningEffort(effort);
     if (!normalized) {
       throw new Error(
-        `Invalid effort value: ${effort}. Supported: low, medium, high, xhigh, max`,
+        'Invalid effort value. Supported: low, medium, high, xhigh, max',
       );
     }
 
     try {
       this.context.config.setReasoningEffort(normalized);
 
+      const applied = this.context.config.getReasoningEffort() === normalized;
+
       debugLogger.info(
-        `[SystemController] Reasoning effort set to: ${normalized}`,
+        `[SystemController] Reasoning effort set to: ${normalized} (applied: ${applied})`,
       );
 
       return {
         subtype: 'set_effort',
         effort: normalized,
+        applied,
       };
     } catch (error) {
       const errorMessage =
