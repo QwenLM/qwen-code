@@ -104,6 +104,7 @@ function buildBridgeStub(opts: {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     }));
   const dreamImpl =
     opts.dreamImpl ??
@@ -305,6 +306,7 @@ describe('workspace memory remember routes', () => {
             },
           ],
           touchedTopics: ['user', 'reference'],
+          touchedScopes: ['user'],
         }),
       ),
     });
@@ -331,6 +333,7 @@ describe('workspace memory remember routes', () => {
       result: {
         summary: 'forgot',
         touchedTopics: ['user', 'reference'],
+        touchedScopes: ['user'],
         removedEntries: [
           {
             topic: 'user',
@@ -348,7 +351,7 @@ describe('workspace memory remember routes', () => {
         scope: 'managed',
         source: 'workspace_memory_forget',
         taskId,
-        touchedScopes: ['user', 'project'],
+        touchedScopes: ['user'],
       },
     });
   });
@@ -603,6 +606,7 @@ describe('workspace memory remember routes', () => {
     pendingForget.resolve({
       removedEntries: [],
       touchedTopics: [],
+      touchedScopes: [],
     });
   });
 
@@ -719,7 +723,11 @@ describe('workspace memory remember routes', () => {
     remember.resolve({ filesTouched: [], touchedScopes: [] });
     await waitFor(() => starts.length === 2);
     expect(starts).toEqual(['remember', 'forget']);
-    forget.resolve({ removedEntries: [], touchedTopics: [] });
+    forget.resolve({
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    });
     await waitFor(() => starts.length === 3);
     expect(starts).toEqual(['remember', 'forget', 'dream']);
     dream.resolve({ touchedTopics: [], dedupedEntries: 0 });
@@ -754,6 +762,7 @@ describe('workspace memory remember routes', () => {
         summary: 'nothing matched',
         removedEntries: [],
         touchedTopics: [],
+        touchedScopes: [],
       })),
       dreamImpl: vi.fn(async () => ({
         summary: 'nothing changed',
