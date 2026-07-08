@@ -524,12 +524,14 @@ export function listLiveWorkspaceSessionsForResponse(
     options?.cursor !== undefined
       ? parseLiveSessionCursor(options.cursor)
       : undefined;
-  const sessions = bridge.listWorkspaceSessions(workspaceCwd).sort((a, b) => {
-    return compareLiveSessionCursorKeys(
-      getLiveSessionCursorKey(a),
-      getLiveSessionCursorKey(b),
+  const sessions = bridge
+    .listWorkspaceSessions(workspaceCwd)
+    .sort((a, b) =>
+      compareLiveSessionCursorKeys(
+        getLiveSessionCursorKey(a),
+        getLiveSessionCursorKey(b),
+      ),
     );
-  });
   const afterCursor =
     cursorKey === undefined
       ? sessions

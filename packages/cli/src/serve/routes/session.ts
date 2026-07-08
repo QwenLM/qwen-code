@@ -283,15 +283,14 @@ export function registerSessionRoutes(
     sessionId: string,
     res: Response,
     route: string,
-  ): WorkspaceRuntime | undefined => {
-    return requireSessionRuntime({
+  ): WorkspaceRuntime | undefined =>
+    requireSessionRuntime({
       sessionId,
       route,
       res,
       workspaceRegistry,
       daemonLog,
     });
-  };
 
   const sendNonPrimarySessionRouteUnsupported = (
     res: Response,
