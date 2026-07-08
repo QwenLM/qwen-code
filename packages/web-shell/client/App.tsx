@@ -4229,7 +4229,6 @@ export function App({
   };
 
   const commands = useMemo(() => {
-    const skillNames = new Set(connection.skills ?? []);
     return localizeBuiltinDescriptions(
       mergeCommands(connection.commands ?? [], getLocalCommands(t)),
       t,
@@ -4238,17 +4237,15 @@ export function App({
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
-        if (!skillNames.has(command.name)) return command;
         const skillKey = skillDescriptionKey(command.name);
+        if (!skillKey) return command;
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: skillKey
-            ? t(skillKey)
-            : command.description || t('skills.run'),
+          description: t(skillKey),
         };
       });
-  }, [connection.commands, connection.skills, hiddenCommands, t]);
+  }, [connection.commands, hiddenCommands, t]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
