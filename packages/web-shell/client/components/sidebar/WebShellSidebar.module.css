@@ -945,6 +945,13 @@
 
 .footerButton {
   flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.footerButtonLabel {
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .collapseButton {
