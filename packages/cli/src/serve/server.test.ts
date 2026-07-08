@@ -377,6 +377,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_sessions',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
+  'browser_automation_mcp',
   'voice_transcribe',
 ] as const;
 
@@ -2145,6 +2146,22 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'browser_automation_mcp') {
+          expect(predicate({ browserAutomationMcpAvailable: true })).toBe(true);
+          expect(predicate({ browserAutomationMcpAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              browserAutomationMcpAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'voice_transcribe') {
           expect(predicate({ voiceWsAvailable: true })).toBe(true);
           expect(predicate({ voiceWsAvailable: false })).toBe(false);
@@ -2581,6 +2598,41 @@ describe('createServeApp', () => {
       expect(res.body.limits).toMatchObject({
         maxPendingPromptsPerSession: 12,
       });
+    });
+
+    it('advertises browser automation MCP only when the CDP adapter can connect', async () => {
+      const previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
+      const previousAcpHttp = process.env['QWEN_SERVE_ACP_HTTP'];
+      try {
+        process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/qwen-cdp-mcp-adapter';
+        delete process.env['QWEN_SERVE_ACP_HTTP'];
+
+        const enabledApp = createServeApp({
+          ...baseOpts,
+          cdpTunnelOverWs: true,
+        });
+        const enabledRes = await request(enabledApp)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(enabledRes.status).toBe(200);
+        expect(enabledRes.body.features).toContain('browser_automation_mcp');
+
+        process.env['QWEN_SERVE_ACP_HTTP'] = '0';
+        const disabledApp = createServeApp({
+          ...baseOpts,
+          cdpTunnelOverWs: true,
+        });
+        const disabledRes = await request(disabledApp)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(disabledRes.status).toBe(200);
+        expect(disabledRes.body.features).not.toContain(
+          'browser_automation_mcp',
+        );
+      } finally {
+        restoreEnv('QWEN_CDP_MCP_COMMAND', previousCdpMcpCommand);
+        restoreEnv('QWEN_SERVE_ACP_HTTP', previousAcpHttp);
+      }
     });
 
     it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
