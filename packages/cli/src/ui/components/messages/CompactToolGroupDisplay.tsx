@@ -199,12 +199,15 @@ export function isCollapsibleTool(toolName: string): boolean {
 function safeDescription(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
 
-  // Strip ANSI escape sequences
-  // eslint-disable-next-line no-control-regex
-  const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-  // Reject control characters (except tab/newline)
-  // eslint-disable-next-line no-control-regex
-  const cleaned = stripped.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  /* eslint-disable no-control-regex */
+  // Strip all common ANSI escape sequences: OSC, charset, CSI, and single-byte ESC
+  const stripped = raw.replace(
+    /\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[0-9;]*[a-zA-Z]|\x1b./g,
+    '',
+  );
+  // Replace all C0 control characters (including \n, \r) with spaces
+  const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  /* eslint-enable no-control-regex */
 
   // Reject JSON-looking blobs (error fallback from args)
   if (cleaned.startsWith('{') || cleaned.startsWith('[')) return undefined;

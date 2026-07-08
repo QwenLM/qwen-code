@@ -245,7 +245,7 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe('Ran 1 command');
   });
 
-  it('strips ANSI escape sequences from description', () => {
+  it('strips ANSI CSI escape sequences from description', () => {
     const tools = [
       make({
         callId: 'c1',
@@ -254,6 +254,24 @@ describe('buildToolSummary', () => {
       }),
     ];
     expect(buildToolSummary(tools, false)).toBe('Read a.ts');
+  });
+
+  it('strips non-CSI ANSI sequences (charset, OSC) from description', () => {
+    const tools = [
+      make({ callId: 'c1', name: 'Shell', description: '\x1b(Bls -la\x1b[0m' }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran ls -la');
+  });
+
+  it('replaces embedded newlines with spaces in description', () => {
+    const tools = [
+      make({
+        callId: 'c1',
+        name: 'Shell',
+        description: 'echo hello\nworld',
+      }),
+    ];
+    expect(buildToolSummary(tools, false)).toBe('Ran echo hello world');
   });
 
   it('mixed group with count per category', () => {
