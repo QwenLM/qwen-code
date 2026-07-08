@@ -281,6 +281,28 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('');
     });
 
+    it('should handle E404 from versions list in true greenfield scenario', () => {
+      const mockGreenfieldVersionsE404 = (command) => {
+        if (command.includes('npm view') && command.includes('versions --json'))
+          throw new Error('npm error code E404');
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=') &&
+          !command.includes('versions --json')
+        ) {
+          throw new Error('npm error code E404');
+        }
+
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockGreenfieldVersionsE404);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.8.0');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('');
+    });
+
     it('should derive baseline from versions list when dist-tag is missing but versions exist', () => {
       const mockWithVersionsButNoTag = (command) => {
         if (
