@@ -103,6 +103,58 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('reuses the primary bridge snapshot when a workspace registry is installed', async () => {
+    const primarySnapshot = vi.fn(() => ({
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 1,
+    }));
+    const secondarySnapshot = vi.fn(() => ({
+      ...BASE_BRIDGE_SNAPSHOT,
+      sessionCount: 2,
+    }));
+    const primaryBridge = {
+      getDaemonStatusSnapshot: primarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const secondaryBridge = {
+      getDaemonStatusSnapshot: secondarySnapshot,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const options = makeOptions();
+    options.bridge = primaryBridge;
+    options.workspaceRegistry = {
+      primary: {
+        workspaceId: 'primary',
+        workspaceCwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+      },
+      list: () => [
+        {
+          workspaceId: 'primary',
+          workspaceCwd: BASE_WORKSPACE,
+          primary: true,
+          trusted: true,
+          bridge: primaryBridge,
+        },
+        {
+          workspaceId: 'secondary',
+          workspaceCwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+          bridge: secondaryBridge,
+        },
+      ],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(primarySnapshot).toHaveBeenCalledTimes(1);
+    expect(secondarySnapshot).toHaveBeenCalledTimes(1);
+    expect(response.runtime.sessions.active).toBe(3);
+  });
+
   it('reports every runtime issue code from daemon counters', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',

@@ -463,6 +463,78 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
+  it('uses each workspace settings policy when constructing its bridge', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const secondaryCwd = canonicalizeWorkspace(secondary);
+    const primaryBridge = makeRuntimeBridge();
+    const secondaryBridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        primaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      )
+      .mockReturnValueOnce(
+        secondaryBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
+      (workspace) => {
+        const workspaceCwd =
+          typeof workspace === 'string' ? canonicalizeWorkspace(workspace) : '';
+        return {
+          merged:
+            workspaceCwd === secondaryCwd
+              ? {
+                  policy: {
+                    permissionStrategy: 'consensus',
+                    consensusQuorum: 2,
+                  },
+                }
+              : {},
+        } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
+      },
+    );
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        bootSettings: { policy: { permissionStrategy: 'local-only' } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        permissionPolicy: 'local-only',
+      });
+      expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        permissionPolicy: 'consensus',
+        permissionConsensusQuorum: 2,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('accepts a single workspace array input as the primary workspace', async () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
@@ -2012,6 +2084,80 @@ describe('runQwenServe runtime startup failures', () => {
         error: 'Daemon runtime is still starting',
         code: 'daemon_runtime_starting',
       });
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.close();
+    }
+  });
+
+  it('returns bootstrap 503 for multi-workspace capabilities until runtime routes mount', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-starting-caps-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    const telemetryPromise = new Promise<qwenCore.ResolvedTelemetrySettings>(
+      (resolve) => {
+        resolveTelemetry = resolve;
+      },
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      telemetryPromise,
+    );
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        runtimeStartupTimeoutMs: 0,
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+
+    try {
+      const bootstrapRes = await fetch(`${handle.url}/capabilities`);
+      expect(bootstrapRes.status).toBe(503);
+      expect(bootstrapRes.headers.get('retry-after')).toBe('1');
+      expect(await bootstrapRes.json()).toMatchObject({
+        error: 'Daemon runtime is still starting',
+        code: 'daemon_runtime_starting',
+      });
+      expect(createBridge).not.toHaveBeenCalled();
+
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.runtimeReady;
+      const runtimeRes = await fetch(`${handle.url}/capabilities`);
+      expect(runtimeRes.status).toBe(200);
+      const runtimeBody = (await runtimeRes.json()) as { features: string[] };
+      expect(runtimeBody.features).toContain('multi_workspace_sessions');
     } finally {
       resolveTelemetry?.({
         enabled: false,

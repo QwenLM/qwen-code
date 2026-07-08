@@ -46,6 +46,18 @@ interface FakeBridge extends AcpSessionBridge {
   readonly closeCalls: string[];
   readonly heartbeatCalls: string[];
   readonly detachCalls: string[];
+  readonly eventsCalls: Array<{ sessionId: string; options?: unknown }>;
+  readonly permissionCalls: Array<{
+    sessionId: string;
+    requestId: string;
+    response: unknown;
+    context?: unknown;
+  }>;
+  readonly pendingPromptCalls: string[];
+  readonly removePendingPromptCalls: Array<{
+    sessionId: string;
+    promptId: string;
+  }>;
   readonly restoreCalls: Array<{
     action: 'load' | 'resume';
     req: BridgeRestoreSessionRequest;
@@ -81,6 +93,10 @@ function makeBridge(
   const closeCalls: string[] = [];
   const heartbeatCalls: string[] = [];
   const detachCalls: string[] = [];
+  const eventsCalls: FakeBridge['eventsCalls'] = [];
+  const permissionCalls: FakeBridge['permissionCalls'] = [];
+  const pendingPromptCalls: string[] = [];
+  const removePendingPromptCalls: FakeBridge['removePendingPromptCalls'] = [];
   const restoreCalls: FakeBridge['restoreCalls'] = [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
@@ -90,6 +106,10 @@ function makeBridge(
     closeCalls,
     heartbeatCalls,
     detachCalls,
+    eventsCalls,
+    permissionCalls,
+    pendingPromptCalls,
+    removePendingPromptCalls,
     restoreCalls,
     get sessionCount() {
       return live.size;
@@ -199,6 +219,7 @@ function makeBridge(
     },
     getPendingPrompts(sessionId: string) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
+      pendingPromptCalls.push(sessionId);
       return [
         {
           promptId: 'prompt-1',
@@ -210,17 +231,25 @@ function makeBridge(
     },
     removePendingPrompt(sessionId: string, promptId: string) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
+      removePendingPromptCalls.push({ sessionId, promptId });
       return { removed: promptId === 'prompt-1' };
     },
-    respondToSessionPermission(sessionId: string) {
+    respondToSessionPermission(
+      sessionId: string,
+      requestId: string,
+      response: unknown,
+      context?: unknown,
+    ) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
+      permissionCalls.push({ sessionId, requestId, response, context });
       return true;
     },
     respondToPermission() {
       return false;
     },
-    subscribeEvents(sessionId: string) {
+    subscribeEvents(sessionId: string, options?: unknown) {
       if (!live.has(sessionId)) throw new SessionNotFoundError(sessionId);
+      eventsCalls.push({ sessionId, options });
       return (async function* () {})();
     },
     isChannelLive() {
@@ -440,6 +469,62 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.cancelCalls).toEqual(['secondary-session']);
     expect(secondaryBridge.heartbeatCalls).toEqual(['secondary-session']);
     expect(secondaryBridge.detachCalls).toEqual(['secondary-session']);
+  });
+
+  it('dispatches secondary events, permissions, pending prompts, and close', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    await request(app)
+      .get('/session/secondary-session/events?snapshot=1&maxQueued=16')
+      .set('Host', host())
+      .expect(200);
+    expect(primaryBridge.eventsCalls).toEqual([]);
+    expect(secondaryBridge.eventsCalls).toEqual([
+      expect.objectContaining({ sessionId: 'secondary-session' }),
+    ]);
+
+    await request(app)
+      .post('/session/secondary-session/permission/perm-1')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-2')
+      .send({ outcome: { outcome: 'cancelled' } })
+      .expect(200);
+    expect(primaryBridge.permissionCalls).toEqual([]);
+    expect(secondaryBridge.permissionCalls).toEqual([
+      expect.objectContaining({
+        sessionId: 'secondary-session',
+        requestId: 'perm-1',
+      }),
+    ]);
+
+    const pending = await request(app)
+      .get('/session/secondary-session/pending-prompts')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-2')
+      .expect(200);
+    expect(pending.body.pendingPrompts).toEqual([
+      expect.objectContaining({ promptId: 'prompt-1' }),
+    ]);
+
+    await request(app)
+      .delete('/session/secondary-session/pending-prompts/prompt-1')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-2')
+      .expect(200);
+    expect(primaryBridge.pendingPromptCalls).toEqual([]);
+    expect(primaryBridge.removePendingPromptCalls).toEqual([]);
+    expect(secondaryBridge.pendingPromptCalls).toEqual(['secondary-session']);
+    expect(secondaryBridge.removePendingPromptCalls).toEqual([
+      { sessionId: 'secondary-session', promptId: 'prompt-1' },
+    ]);
+
+    await request(app)
+      .delete('/session/secondary-session')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-2')
+      .expect(204);
+    expect(primaryBridge.closeCalls).toEqual([]);
+    expect(secondaryBridge.closeCalls).toEqual(['secondary-session']);
   });
 
   it('returns session_not_found instead of falling back to primary on live owner miss', async () => {

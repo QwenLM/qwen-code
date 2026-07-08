@@ -289,8 +289,14 @@ export async function buildDaemonStatusResponse(
   const workspaceSnapshots: WorkspaceBridgeStatusSnapshot[] =
     workspaceRuntimes?.map((runtime) => ({
       workspaceCwd: runtime.workspaceCwd,
-      snapshot: runtime.bridge.getDaemonStatusSnapshot(),
-      lastActivity: runtime.bridge.lastActivityAt ?? null,
+      snapshot:
+        runtime.bridge === input.bridge
+          ? bridgeSnapshot
+          : runtime.bridge.getDaemonStatusSnapshot(),
+      lastActivity:
+        runtime.bridge === input.bridge
+          ? lastActivity
+          : (runtime.bridge.lastActivityAt ?? null),
     })) ?? [
       {
         workspaceCwd: input.boundWorkspace,
@@ -298,9 +304,6 @@ export async function buildDaemonStatusResponse(
         lastActivity,
       },
     ];
-  const aggregatedFullSessions = workspaceSnapshots.flatMap(
-    (item) => item.snapshot.sessions,
-  );
   const aggregatedSessionCount = workspaceSnapshots.reduce(
     (sum, item) => sum + item.snapshot.sessionCount,
     0,
@@ -360,7 +363,11 @@ export async function buildDaemonStatusResponse(
   );
 
   if (detail === 'full') {
-    full = await buildFullStatus(input, acpSnapshot, aggregatedFullSessions);
+    full = await buildFullStatus(
+      input,
+      acpSnapshot,
+      workspaceSnapshots.flatMap((item) => item.snapshot.sessions),
+    );
     pushFullIssues(issues, full);
   }
 

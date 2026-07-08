@@ -1044,6 +1044,7 @@ function createBootstrapServeApp(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
+  multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
   getChannelWorkerSnapshot: () => ReturnType<
     ChannelWorkerSupervisor['snapshot']
@@ -1059,6 +1060,7 @@ function createBootstrapServeApp(input: {
     qwenCodeVersion,
     sessionShellCommandEnabled,
     permissionPolicy,
+    multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
     getChannelWorkerSnapshot,
     onHealthServed,
@@ -1101,6 +1103,21 @@ function createBootstrapServeApp(input: {
   }
 
   app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
+    if (multiWorkspaceCapabilitiesRequireRuntime) {
+      const runtimeError = getRuntimeError();
+      if (runtimeError === undefined) {
+        res.setHeader('Retry-After', '1');
+      }
+      res.status(503).json({
+        error: runtimeError
+          ? 'Daemon runtime failed to start'
+          : 'Daemon runtime is still starting',
+        code: runtimeError
+          ? 'daemon_runtime_failed'
+          : 'daemon_runtime_starting',
+      });
+      return;
+    }
     res.status(200).json(
       createBootstrapCapabilities({
         opts,
@@ -2740,6 +2757,9 @@ export async function runQwenServe(
         workspaceInput.cwd,
         secondarySettings,
       );
+      const secondaryPolicy = validatePolicyConfig(
+        secondarySettings?.merged.policy ?? {},
+      );
       const secondaryWorkspaceHash = core.hashDaemonWorkspace(
         workspaceInput.cwd,
       );
@@ -2799,9 +2819,14 @@ export async function runQwenServe(
         channelFactory: secondaryChannelFactory,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
-        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-        ...(permissionConsensusQuorum !== undefined
-          ? { permissionConsensusQuorum }
+        ...(secondaryPolicy.permissionPolicy !== undefined
+          ? { permissionPolicy: secondaryPolicy.permissionPolicy }
+          : {}),
+        ...(secondaryPolicy.permissionConsensusQuorum !== undefined
+          ? {
+              permissionConsensusQuorum:
+                secondaryPolicy.permissionConsensusQuorum,
+            }
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
@@ -3164,6 +3189,7 @@ export async function runQwenServe(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     permissionPolicy,
+    multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
     getChannelWorkerSnapshot,
     onHealthServed: deferRuntimeUntilFirstHealth
