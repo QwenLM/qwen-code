@@ -2807,6 +2807,9 @@ export async function runQwenServe(
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
           : {}),
+        ...(opts.compactedReplayMaxBytes !== undefined
+          ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),

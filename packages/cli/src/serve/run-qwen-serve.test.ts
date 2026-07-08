@@ -464,7 +464,7 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('uses the daemon-wide settings policy when constructing workspace bridges', async () => {
+  it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -513,6 +513,8 @@ describe('runQwenServe telemetry validation', () => {
         mode: 'http-bridge',
         workspace: [primary, secondary],
         maxSessions: 1,
+        eventRingSize: 1234,
+        compactedReplayMaxBytes: 1024,
         serveWebShell: false,
       },
       {
@@ -525,9 +527,13 @@ describe('runQwenServe telemetry validation', () => {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        compactedReplayMaxBytes: 1024,
+        eventRingSize: 1234,
         permissionPolicy: 'local-only',
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        compactedReplayMaxBytes: 1024,
+        eventRingSize: 1234,
         permissionPolicy: 'local-only',
       });
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
