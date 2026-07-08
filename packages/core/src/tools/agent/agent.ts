@@ -280,21 +280,11 @@ async function resolveExternalWorktreeDir(
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
 
-  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
-  if (!info) {
-    return {
-      error:
-        `working_dir "${resolvedPath}" is not a registered git worktree of ` +
-        `this repository. Create it first (e.g. \`git worktree add <path> ` +
-        `<ref>\`), then pass its path.`,
-    };
-  }
-  // getRegisteredWorktreeBranch also accepts the repository's OWN primary
-  // working tree (its --git-common-dir and --show-toplevel both match), so
-  // `working_dir: "."` or the repo root would pass — and it can even be fooled
-  // by a hand-crafted directory carrying a copied `.git` file. Gate on the
-  // authoritative worktree registry: the path must be a REGISTERED linked
-  // worktree (present in `git worktree list`, and not the main tree).
+  // The single authoritative gate: the path must be a REGISTERED linked
+  // worktree of this repository (present in `git worktree list`, and not the
+  // main tree). That one check rejects the primary working tree, a plain
+  // sub-directory, a worktree belonging to another repo, and a hand-crafted
+  // directory carrying a copied `.git` file.
   if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
     // Fails closed (returns false) on a git error too, so the cause is either
     // "not a registered linked worktree" (main tree / unregistered) or "its
@@ -308,9 +298,16 @@ async function resolveExternalWorktreeDir(
         `\`git worktree add\`.`,
     };
   }
+  // Best-effort branch label only — never a gate. A detached-HEAD worktree
+  // (`git worktree add --detach`, or a checkout of a bare commit) is a
+  // legitimate configuration with no branch, and `getRegisteredWorktreeBranch`
+  // returns null for it. `branch` is unused for caller-owned worktrees anyway
+  // (cleanup short-circuits on `externallyManaged`); it is carried only for
+  // parity with the isolation path.
+  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
   return {
     path: resolvedPath,
-    branch: info.branch,
+    branch: info?.branch ?? '',
     slug: path.basename(resolvedPath),
     repoRoot,
   };

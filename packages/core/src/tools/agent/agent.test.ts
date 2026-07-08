@@ -1501,7 +1501,7 @@ describe('AgentTool', () => {
         const result = await invocation.execute();
 
         expect(partToString(result.llmContent)).toMatch(
-          /not a registered git worktree/i,
+          /not a registered linked worktree/i,
         );
         expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       } finally {
@@ -1640,6 +1640,115 @@ describe('AgentTool', () => {
         expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       } finally {
         fs.rmSync(nonRepo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('accepts a registered worktree in detached HEAD state (no branch)', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-detached-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        // A detached worktree is registered but has no branch, so
+        // getRegisteredWorktreeBranch returns null for it. That must not gate
+        // the pin — `git worktree add --detach` is a legitimate setup.
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync('git', ['worktree', 'add', '--detach', wt, 'HEAD'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(agentConfig.getTargetDir()).toBe(wt);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('leaves the caller-owned worktree in place when the sub-agent fails', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-failpath-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        // The sub-agent throws mid-execution, so the finally / outer-catch
+        // path runs cleanupWorktreeIsolation(). The externallyManaged guard
+        // must still stop it from removing the caller's worktree — this is the
+        // error-recovery path where teardown bugs hide.
+        vi.mocked(mockAgent.execute).mockRejectedValue(
+          new Error('subagent boom'),
+        );
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        const result = await invocation.execute();
+
+        expect(fs.existsSync(wt)).toBe(true);
+        expect(partToString(result.llmContent)).not.toContain(
+          '[worktree preserved',
+        );
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
       }
     }, 20000);
