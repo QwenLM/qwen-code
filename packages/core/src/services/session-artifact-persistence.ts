@@ -11,6 +11,7 @@ const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 const MAX_PERSISTED_ARTIFACTS = 500;
+const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
 const MAX_PERSISTED_ID_CHARS = 200;
 const MAX_PERSISTED_TITLE_CHARS = 200;
@@ -436,8 +437,10 @@ export function normalizeEventPayload(
   const sessionId = getString(value, 'sessionId', MAX_PERSISTED_ID_CHARS);
   if (!sessionId) return undefined;
   const rawChanges = value['changes'];
-  if (rawChanges.length > MAX_PERSISTED_ARTIFACTS) {
-    warnings.push(`event change list truncated to ${MAX_PERSISTED_ARTIFACTS}`);
+  if (rawChanges.length > MAX_PERSISTED_EVENT_CHANGES) {
+    warnings.push(
+      `event change list truncated to ${MAX_PERSISTED_EVENT_CHANGES}`,
+    );
   }
   return {
     v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -447,7 +450,7 @@ export function normalizeEventPayload(
       getString(value, 'recordedAt', MAX_PERSISTED_TIMESTAMP_CHARS) ??
       new Date(0).toISOString(),
     changes: rawChanges
-      .slice(0, MAX_PERSISTED_ARTIFACTS)
+      .slice(0, MAX_PERSISTED_EVENT_CHANGES)
       .map((change) => normalizePersistedChange(change, warnings))
       .filter((change) => change !== undefined),
   };

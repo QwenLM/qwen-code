@@ -1726,6 +1726,18 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'url' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Token value',
+            url: 'https://example.com/report?data=sk-test-token-1234567890',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
   });
 
   it('accepts line whitespace in descriptions but not titles', async () => {

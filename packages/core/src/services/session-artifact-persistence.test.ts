@@ -693,7 +693,7 @@ describe('session artifact persistence records', () => {
 
   it('normalizes inbound event payloads with bounded changes', () => {
     const warnings: string[] = [];
-    const changes = Array.from({ length: 501 }, (_, index) => {
+    const changes = Array.from({ length: 801 }, (_, index) => {
       const item = artifact('session-A', `https://example.com/event-${index}`);
       return {
         action: 'created' as const,
@@ -713,8 +713,8 @@ describe('session artifact persistence records', () => {
       warnings,
     );
 
-    expect(normalized?.changes).toHaveLength(500);
-    expect(warnings).toContain('event change list truncated to 500');
+    expect(normalized?.changes).toHaveLength(800);
+    expect(warnings).toContain('event change list truncated to 800');
   });
 
   it('drops overlong persisted string array items', () => {

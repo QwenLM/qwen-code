@@ -65,6 +65,8 @@ const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
 const MAX_TOMBSTONED_IDS = 500;
 const MAX_STICKY_EPHEMERAL_IDS = 500;
 const MAX_WORKSPACE_HASH_BYTES = 100 * 1024 * 1024;
+const SECRET_TOKEN_VALUE_PATTERN =
+  /(?:^|\s)(?:bearer\s+\S{8,}|sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_/-]{12,}|[a-f0-9]{40,}|[A-Za-z0-9+/]{48,}={0,2})(?:$|\s)/i;
 const RESTORE_FAILED_WARNING_PREFIX = 'artifact snapshot restore failed';
 const RESTORE_PARTIAL_FAILED_WARNING_PREFIX =
   'artifact snapshot restore partially failed';
@@ -2157,13 +2159,16 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
 }
 
 function hasSecretLikeUrlComponent(parsed: URL): boolean {
-  for (const key of parsed.searchParams.keys()) {
-    if (isSecretLikeUrlText(key)) {
+  for (const [key, value] of parsed.searchParams) {
+    if (isSecretLikeUrlText(key) || isSecretLikeUrlValue(value)) {
       return true;
     }
   }
   const fragment = parsed.hash.slice(1);
-  return fragment !== '' && isSecretLikeUrlText(fragment);
+  return (
+    fragment !== '' &&
+    (isSecretLikeUrlText(fragment) || isSecretLikeUrlValue(fragment))
+  );
 }
 
 function isSecretLikeUrlText(value: string): boolean {
@@ -2171,6 +2176,10 @@ function isSecretLikeUrlText(value: string): boolean {
   return /(?:^|[-_.])(token|secret|password|passwd|pwd|cookie|authorization|credential|signature|sig|api[-_]?key|access[-_]?key)(?:$|[-_.=&#])/i.test(
     normalized,
   );
+}
+
+function isSecretLikeUrlValue(value: string): boolean {
+  return SECRET_TOKEN_VALUE_PATTERN.test(value.trim());
 }
 
 function normalizeMetadata(
