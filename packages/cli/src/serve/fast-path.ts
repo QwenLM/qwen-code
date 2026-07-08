@@ -5,10 +5,7 @@
  */
 
 import type { RunHandle } from './run-qwen-serve.js';
-import {
-  MAX_COMPACTED_REPLAY_MAX_BYTES,
-  normalizeCompactedReplayMaxBytes,
-} from '@qwen-code/acp-bridge/compactionEngine';
+import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -199,15 +196,16 @@ function getServeFastPathValidationError(
   }
 
   const compactedReplayMaxBytes = parsed.options.compactedReplayMaxBytes;
-  if (compactedReplayMaxBytes !== undefined) {
-    try {
-      normalizeCompactedReplayMaxBytes(compactedReplayMaxBytes);
-    } catch {
-      return (
-        'qwen serve: --compacted-replay-max-bytes must be a positive ' +
-        `safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`
-      );
-    }
+  if (
+    compactedReplayMaxBytes !== undefined &&
+    (!Number.isSafeInteger(compactedReplayMaxBytes) ||
+      compactedReplayMaxBytes < 1 ||
+      compactedReplayMaxBytes > MAX_COMPACTED_REPLAY_MAX_BYTES)
+  ) {
+    return (
+      'qwen serve: --compacted-replay-max-bytes must be a positive ' +
+      `safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`
+    );
   }
 
   return null;

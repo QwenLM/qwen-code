@@ -11,8 +11,14 @@ import {
   type CompactionEngine,
   type SessionReplaySnapshot,
 } from './eventBus.js';
+import { normalizeCompactedReplayMaxBytes } from './replayWindowLimits.js';
 
 export type { CompactionEngine, SessionReplaySnapshot };
+export {
+  DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  MAX_COMPACTED_REPLAY_MAX_BYTES,
+  normalizeCompactedReplayMaxBytes,
+} from './replayWindowLimits.js';
 
 interface SessionUpdateData {
   update?: {
@@ -60,26 +66,6 @@ interface ReplaySegment {
 
 export interface TurnBoundaryCompactionEngineOptions {
   maxReplayBytes?: number;
-}
-
-export const DEFAULT_COMPACTED_REPLAY_MAX_BYTES = 4 * 1024 * 1024;
-export const MAX_COMPACTED_REPLAY_MAX_BYTES = 256 * 1024 * 1024;
-
-export function normalizeCompactedReplayMaxBytes(
-  value: number | undefined,
-): number {
-  if (value === undefined) return DEFAULT_COMPACTED_REPLAY_MAX_BYTES;
-  if (
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > MAX_COMPACTED_REPLAY_MAX_BYTES
-  ) {
-    throw new TypeError(
-      `Invalid compactedReplayMaxBytes: ${value}. ` +
-        `Must be a positive safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`,
-    );
-  }
-  return value;
 }
 
 /**

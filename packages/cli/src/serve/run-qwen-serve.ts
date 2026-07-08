@@ -22,7 +22,7 @@ import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
-} from '@qwen-code/acp-bridge/compactionEngine';
+} from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';

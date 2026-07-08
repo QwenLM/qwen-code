@@ -14,7 +14,7 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
-import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/compactionEngine';
+import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
