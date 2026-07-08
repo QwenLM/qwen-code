@@ -9,9 +9,9 @@ import {
   useState,
 } from 'react';
 import {
-  getComposerTagRenderParts,
-  useComposerTagReferences,
-} from '../composerTagRender';
+  getComposerTagViewModel,
+  splitComposerTagContent,
+} from '../../utils/composerTag';
 import { isSafeImageSrc } from './Markdown';
 import {
   useWebShellCustomization,
@@ -35,7 +35,7 @@ interface UserMessageProps {
 
 function UserMessageReferenceChip({ tag }: { tag: WebShellComposerTag }) {
   const { tagLabel, tagValue, iconUrl, fallback } =
-    getComposerTagRenderParts(tag);
+    getComposerTagViewModel(tag);
   return (
     <span className={styles.referenceChip} title={tag.serialized}>
       {iconUrl && (
@@ -52,7 +52,9 @@ function UserMessageReferenceChip({ tag }: { tag: WebShellComposerTag }) {
 }
 
 function DefaultUserMessageContent({ content }: { content: string }) {
-  const segments = useComposerTagReferences(content);
+  // The default user renderer upgrades serialized @ references to chips while
+  // still allowing hosts to replace message rendering entirely.
+  const segments = useMemo(() => splitComposerTagContent(content), [content]);
   return (
     <>
       {segments.map((segment, index) =>

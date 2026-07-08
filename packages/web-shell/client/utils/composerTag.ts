@@ -1,22 +1,46 @@
-import { useMemo } from 'react';
+import extensionIconUrl from '../assets/icons/at-extension.svg';
+import fileIconUrl from '../assets/icons/at-file.svg';
+import mcpIconUrl from '../assets/icons/at-mcp.svg';
+import skillIconUrl from '../assets/icons/at-skill.svg';
 import type {
+  WebShellBuiltinComposerTagKind,
   WebShellComposerTag,
   WebShellComposerTagIconMap,
+  WebShellComposerTagKind,
 } from '../customization';
-import { getComposerTagIconUrl } from './composerTagIcons';
 
-export interface ComposerTagRenderParts {
+// Shared UI-facing shape for composer tags across React and CodeMirror.
+export interface ComposerTagViewModel {
   tagLabel: string;
   tagValue: string;
   fallback: string;
   iconUrl?: string;
 }
 
-export type ComposerTagReferenceSegment =
+export type ComposerTagContentSegment =
   | { type: 'text'; text: string }
   | { type: 'reference'; tag: WebShellComposerTag };
 
+// Resolves tag kind metadata to asset URLs; it does not render icon components.
+const builtinTagIconUrls: Record<WebShellBuiltinComposerTagKind, string> = {
+  extension: extensionIconUrl,
+  file: fileIconUrl,
+  mcp: mcpIconUrl,
+  skill: skillIconUrl,
+};
+
 const AT_REFERENCE_CHAR_RE = /[\p{L}\p{N}_./:-]/u;
+
+function getOwnIconUrl(
+  iconUrls: WebShellComposerTagIconMap | undefined,
+  kind: string,
+): string | undefined {
+  if (!iconUrls || !Object.prototype.hasOwnProperty.call(iconUrls, kind)) {
+    return undefined;
+  }
+  const iconUrl = iconUrls[kind];
+  return typeof iconUrl === 'string' ? iconUrl : undefined;
+}
 
 function isAtReferenceBoundary(char: string | undefined): boolean {
   return char === undefined || /[\s([{'"]/.test(char);
@@ -67,10 +91,23 @@ function createComposerTagFromReference(raw: string): WebShellComposerTag {
   };
 }
 
-export function splitComposerTagReferences(
+export function getComposerTagIconUrl(
+  kind: WebShellComposerTagKind | undefined,
+  customIconUrls?: WebShellComposerTagIconMap,
+): string | undefined {
+  if (!kind) return undefined;
+  return (
+    getOwnIconUrl(customIconUrls, kind) ??
+    getOwnIconUrl(builtinTagIconUrls, kind)
+  );
+}
+
+// Sent user messages persist serialized prompt text, so reference chips must be
+// reconstructed from @ references when rendering the transcript.
+export function splitComposerTagContent(
   content: string,
-): ComposerTagReferenceSegment[] {
-  const segments: ComposerTagReferenceSegment[] = [];
+): ComposerTagContentSegment[] {
+  const segments: ComposerTagContentSegment[] = [];
   let cursor = 0;
   for (let index = 0; index < content.length; index += 1) {
     if (
@@ -97,16 +134,11 @@ export function splitComposerTagReferences(
   return segments.length > 0 ? segments : [{ type: 'text', text: content }];
 }
 
-export function useComposerTagReferences(
-  content: string,
-): ComposerTagReferenceSegment[] {
-  return useMemo(() => splitComposerTagReferences(content), [content]);
-}
-
-export function getComposerTagRenderParts(
+// Normalizes display fields so each renderer can keep its own shell and styles.
+export function getComposerTagViewModel(
   tag: WebShellComposerTag,
   composerTagIcons?: WebShellComposerTagIconMap,
-): ComposerTagRenderParts {
+): ComposerTagViewModel {
   const rawTagLabel = tag.label?.trim() ?? '';
   const tagValue = tag.value?.trim() ?? '';
   return {

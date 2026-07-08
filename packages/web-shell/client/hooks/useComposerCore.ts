@@ -53,8 +53,10 @@ import {
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
-import { getComposerTagRenderParts } from '../components/composerTagRender';
-import { getComposerTagIconUrl } from '../components/composerTagIcons';
+import {
+  getComposerTagIconUrl,
+  getComposerTagViewModel,
+} from '../utils/composerTag';
 import type {
   WebShellComposerApi,
   WebShellComposerInput,
@@ -559,7 +561,7 @@ class ComposerTagWidget extends WidgetType {
     chip.style.cssText =
       'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
     const { tagLabel, tagValue, iconUrl } =
-      getComposerTagRenderParts(this.tag);
+      getComposerTagViewModel(this.tag);
     const resolvedIconUrl = this.tag.iconUrl ?? iconUrl;
 
     if (resolvedIconUrl) {

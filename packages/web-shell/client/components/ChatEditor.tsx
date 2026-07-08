@@ -32,7 +32,7 @@ import {
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { getComposerTagRenderParts } from './composerTagRender';
+import { getComposerTagViewModel } from '../utils/composerTag';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -1268,7 +1268,7 @@ export const ChatEditor = memo(
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
       const { tagLabel, tagValue, iconUrl, fallback } =
-        getComposerTagRenderParts(tag, composerTagIcons);
+        getComposerTagViewModel(tag, composerTagIcons);
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{fallback}</span>;
       }
