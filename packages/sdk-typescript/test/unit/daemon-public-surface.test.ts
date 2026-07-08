@@ -30,6 +30,8 @@ import type {
   DaemonGithubSetupRequest,
   DaemonGithubSetupResult,
   DaemonGithubSetupWorkflowResult,
+  DaemonHistoryTruncatedData,
+  DaemonHistoryTruncatedEvent,
   DaemonKnownEventType,
   DaemonModelSwitchedData,
   DaemonModelSwitchedEvent,
@@ -171,6 +173,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonModelSwitchFailedEvent>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedEvent>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedEvent>().not.toBeNever();
+    expectTypeOf<DaemonHistoryTruncatedEvent>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorEvent>().not.toBeNever();
 
     expectTypeOf<DaemonSessionUpdateData>().not.toBeNever();
@@ -185,6 +188,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonModelSwitchFailedData>().not.toBeNever();
     expectTypeOf<DaemonSessionDiedData>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
+    expectTypeOf<DaemonHistoryTruncatedData>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
@@ -236,6 +240,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
+    expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
+      compactedReplayMaxBytes: number;
+    }>();
     expectTypeOf<DaemonStatusReportDetail>().not.toBeNever();
     expectTypeOf<DaemonStatusReportIssue>().not.toBeNever();
     expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();

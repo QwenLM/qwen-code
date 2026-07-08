@@ -71,6 +71,8 @@ export {
   type DaemonErrorKind,
   type DaemonClientEvictedData,
   type DaemonClientEvictedEvent,
+  type DaemonHistoryTruncatedData,
+  type DaemonHistoryTruncatedEvent,
   type DaemonPendingPromptAddedData,
   type DaemonPendingPromptAddedEvent,
   type DaemonPendingPromptStartedData,

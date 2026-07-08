@@ -196,7 +196,7 @@ sequenceDiagram
     Note over EB,SR: If subscriber queue >= maxQueued,<br/>EventBus emits client_evicted terminal frame<br/>and closes subscriber.
 ```
 
-The ring buffer is bounded (`eventRingSize`, default 8000). A reconnecting client whose `Last-Event-ID` is older than the ring's head receives a synthetic catch-up signal and must call `loadSession` / `resumeSession` to rebuild deeper state. Slow clients trigger `slow_client_warning` at 75% queue fill and `client_evicted` at the cap.
+The ring buffer is bounded (`eventRingSize`, default 8000). A reconnecting client whose `Last-Event-ID` is older than the ring's head receives `state_resync_required` and must rebuild from `loadSession`'s bounded replay snapshot window or use `resumeSession` when it already has local history. Slow clients trigger `slow_client_warning` at 75% queue fill and `client_evicted` at the cap.
 
 ## Workflow 3: Multi-client permission mediation
 
