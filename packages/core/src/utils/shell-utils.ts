@@ -888,20 +888,20 @@ function pgrepTargetsSelf(tokens: string[], command = 'pgrep'): boolean {
 
     const normalized = optionKey(token);
     if (
+      normalized === '-v' ||
+      normalized === '--inverse' ||
+      shortOptionBundleHasFlag(token, '-v')
+    ) {
+      usesInverse = true;
+    }
+
+    if (
       normalized === '-f' ||
       normalized === '--full' ||
       shortOptionBundleHasFlag(token, '-f')
     ) {
       usesFullCommandLine = true;
       continue;
-    }
-
-    if (
-      normalized === '-v' ||
-      normalized === '--inverse' ||
-      shortOptionBundleHasFlag(token, '-v')
-    ) {
-      usesInverse = true;
     }
 
     if (isOptionToken(token)) {
@@ -1023,8 +1023,14 @@ function downstreamSegmentContainsKill(segment: string | undefined): boolean {
   if (root === 'parallel') {
     const postParallel = tokens.slice(1);
     let cmdIndex = 0;
-    while (cmdIndex < postParallel.length && isOptionToken(postParallel[cmdIndex]!)) {
-      if (xargsOptionConsumesNext(postParallel[cmdIndex]!) && cmdIndex + 1 < postParallel.length) {
+    while (
+      cmdIndex < postParallel.length &&
+      isOptionToken(postParallel[cmdIndex]!)
+    ) {
+      if (
+        xargsOptionConsumesNext(postParallel[cmdIndex]!) &&
+        cmdIndex + 1 < postParallel.length
+      ) {
         cmdIndex++;
       }
       cmdIndex++;
@@ -1033,8 +1039,9 @@ function downstreamSegmentContainsKill(segment: string | undefined): boolean {
     return commandToken ? tokenInvokesKill(commandToken) : false;
   }
   return (
-    /\bwhile\b[\s\S]*?\bread\b[\s\S]*?;\s*do\b[\s\S]*?\bkill\b/i.test(segment) ||
-    /^\s*do\s+kill\b/i.test(segment)
+    /\bwhile\b[\s\S]*?\bread\b[\s\S]*?;\s*do\b[\s\S]*?\bkill\b/i.test(
+      segment,
+    ) || /^\s*do\s+kill\b/i.test(segment)
   );
 }
 

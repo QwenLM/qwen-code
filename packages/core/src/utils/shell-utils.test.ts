@@ -881,7 +881,9 @@ describe('detectSelfKillCommand', () => {
     expect(Date.now() - start1).toBeLessThan(1000);
 
     const adversarialWhile =
-      'while ' + 'a'.repeat(200) + ' read line; do kill -9 $pid; done < <(pgrep node)';
+      'while ' +
+      'a'.repeat(200) +
+      ' read line; do kill -9 $pid; done < <(pgrep node)';
     const start2 = Date.now();
     detectSelfKillCommand(adversarialWhile);
     expect(Date.now() - start2).toBeLessThan(1000);
@@ -917,18 +919,62 @@ describe('detectSelfKillCommand', () => {
     expect(
       detectSelfKillCommand('pgrep node | parallel --max-procs 4 kill'),
     ).toBe(true);
-    expect(
-      detectSelfKillCommand('pgrep node | parallel -P 4 kill'),
-    ).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | parallel -P 4 kill')).toBe(true);
   });
 
   it('handles xargs long-form options', () => {
     expect(
       detectSelfKillCommand('pgrep node | xargs --max-args 1 kill -9'),
     ).toBe(true);
+    expect(detectSelfKillCommand('pgrep node | xargs --max-procs 4 kill')).toBe(
+      true,
+    );
+  });
+
+  it('handles pgrep -vf combined flags (inverse + full)', () => {
+    expect(detectSelfKillCommand('kill -9 $(pgrep -vf node)')).toBe(false);
+    expect(detectSelfKillCommand('kill -9 $(pgrep -vf nginx)')).toBe(true);
+  });
+
+  it('handles xargs long options with = syntax', () => {
     expect(
-      detectSelfKillCommand('pgrep node | xargs --max-procs 4 kill'),
+      detectSelfKillCommand('pgrep node | xargs --max-args=5 kill -9'),
     ).toBe(true);
+    expect(
+      detectSelfKillCommand('pgrep node | xargs --replace={} kill -9 {}'),
+    ).toBe(true);
+  });
+
+  it('for loop still detected correctly after ReDoS fix', () => {
+    expect(
+      detectSelfKillCommand('for pid in $(pgrep node); do kill -9 $pid; done'),
+    ).toBe(true);
+    expect(detectSelfKillCommand('for i in 1 2 3; do echo $i; done')).toBe(
+      false,
+    );
+  });
+
+  it('nice -n10 inside command substitution (regex bypass)', () => {
+    expect(detectSelfKillCommand('kill -9 $(nice -n10 pgrep node)')).toBe(
+      false,
+    );
+  });
+
+  it('process substitution non-self target', () => {
+    expect(detectSelfKillCommand('kill -9 < <(pgrep nginx)')).toBe(false);
+  });
+
+  it('SHELL_WRAPPER with complex redirections', () => {
+    expect(
+      detectSelfKillCommand("kill -9 $(bash -c 'pgrep node' >/dev/null 2>&1)"),
+    ).toBe(true);
+    expect(
+      detectSelfKillCommand("kill -9 $(bash -c 'echo hello' 2>/dev/null)"),
+    ).toBe(false);
+  });
+
+  it('parallel with -P value argument skips correctly', () => {
+    expect(detectSelfKillCommand('pgrep node | parallel -P 4 kill')).toBe(true);
   });
 });
 
