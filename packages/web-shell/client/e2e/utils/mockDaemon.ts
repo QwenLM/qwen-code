@@ -74,8 +74,12 @@ export function applyScenarioCurrentModel(
   modelId: string,
 ): void {
   scenario.currentModel = modelId;
+  const models =
+    scenario.state.models && typeof scenario.state.models === 'object'
+      ? scenario.state.models
+      : {};
   scenario.state.models = {
-    ...scenario.state.models,
+    ...models,
     currentModelId: modelId,
   };
   scenario.providers = {
