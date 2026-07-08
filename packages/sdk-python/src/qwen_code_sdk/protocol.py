@@ -255,7 +255,7 @@ class CLIControlGetAvailableModelsRequest(TypedDict):
 
 class CLIControlGetUsageInfoRequest(TypedDict):
     subtype: Literal["get_usage_info"]
-    range: NotRequired[str]
+    range: NotRequired[Literal["today", "week", "month", "all"]]
 
 
 ControlRequestPayload: TypeAlias = (

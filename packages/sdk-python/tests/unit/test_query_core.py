@@ -557,6 +557,147 @@ async def test_initialize_failure_no_unhandled_task_exception(
 
 
 @pytest.mark.asyncio
+async def test_set_effort_sends_control_request() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    task = asyncio.create_task(query.set_effort("high"))
+    request = await _wait_for_request(transport, "set_effort")
+
+    assert request["request"]["effort"] == "high"
+
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request["request_id"],
+                "response": {"subtype": "set_effort", "effort": "high"},
+            },
+        }
+    )
+
+    result = await task
+    assert result == {"subtype": "set_effort", "effort": "high"}
+    await query.close()
+
+
+@pytest.mark.asyncio
+async def test_get_available_models_sends_control_request() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    task = asyncio.create_task(query.get_available_models())
+    request = await _wait_for_request(transport, "get_available_models")
+
+    assert request["request"]["subtype"] == "get_available_models"
+
+    models = [{"id": "qwen-max", "label": "Qwen Max"}]
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request["request_id"],
+                "response": {"subtype": "get_available_models", "models": models},
+            },
+        }
+    )
+
+    result = await task
+    assert result == {"subtype": "get_available_models", "models": models}
+    await query.close()
+
+
+@pytest.mark.asyncio
+async def test_get_context_usage_sends_control_request() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    task = asyncio.create_task(query.get_context_usage(show_details=True))
+    request = await _wait_for_request(transport, "get_context_usage")
+
+    assert request["request"]["show_details"] is True
+
+    context_data = {"used_tokens": 1000, "total_tokens": 200000}
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request["request_id"],
+                "response": context_data,
+            },
+        }
+    )
+
+    result = await task
+    assert result == context_data
+    await query.close()
+
+
+@pytest.mark.asyncio
+async def test_get_usage_info_sends_control_request() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    task = asyncio.create_task(query.get_usage_info(range="week"))
+    request = await _wait_for_request(transport, "get_usage_info")
+
+    assert request["request"]["range"] == "week"
+
+    usage_data = {"range": "week", "summary": {"totalTokens": 50000}}
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request["request_id"],
+                "response": usage_data,
+            },
+        }
+    )
+
+    result = await task
+    assert result == usage_data
+    await query.close()
+
+
+@pytest.mark.asyncio
+async def test_initialize_sends_effort() -> None:
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            effort="high",
+            timeout=TimeoutOptions(
+                can_use_tool=0.05,
+                control_request=0.05,
+                stream_close=0.05,
+            ),
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query._ensure_started()
+
+    init_request = await _wait_for_request(transport, "initialize")
+    assert init_request["request"]["effort"] == "high"
+
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": init_request["request_id"],
+                "response": {},
+            },
+        }
+    )
+    await query.close()
+
+
+@pytest.mark.asyncio
 async def test_async_context_manager_closes_on_exit() -> None:
     transport = FakeTransport()
     query = Query(

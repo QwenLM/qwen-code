@@ -1270,6 +1270,123 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should provide setEffort() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const setEffortPromise = query.setEffort('high');
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const setEffortMsg = findControlRequest(
+          messages,
+          ControlRequestType.SET_EFFORT,
+        );
+        expect(setEffortMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const setEffortMsg = findControlRequest(
+        messages,
+        ControlRequestType.SET_EFFORT,
+      )!;
+
+      expect((setEffortMsg.request as Record<string, unknown>).effort).toBe(
+        'high',
+      );
+
+      transport.simulateMessage(
+        createControlResponse(setEffortMsg.request_id, true, {
+          subtype: 'set_effort',
+          effort: 'high',
+        }),
+      );
+
+      const result = await setEffortPromise;
+      expect(result).toMatchObject({ subtype: 'set_effort', effort: 'high' });
+
+      await query.close();
+    });
+
+    it('should provide getAvailableModels() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const modelsPromise = query.getAvailableModels();
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const modelsMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_AVAILABLE_MODELS,
+        );
+        expect(modelsMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const modelsMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_AVAILABLE_MODELS,
+      )!;
+
+      transport.simulateMessage(
+        createControlResponse(modelsMsg.request_id, true, {
+          subtype: 'get_available_models',
+          models: [{ id: 'qwen-max', label: 'Qwen Max' }],
+        }),
+      );
+
+      const result = await modelsPromise;
+      expect(result).toMatchObject({
+        subtype: 'get_available_models',
+        models: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      });
+
+      await query.close();
+    });
+
+    it('should provide getUsageInfo() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const usagePromise = query.getUsageInfo('week');
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const usageMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_USAGE_INFO,
+        );
+        expect(usageMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const usageMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_USAGE_INFO,
+      )!;
+
+      expect((usageMsg.request as Record<string, unknown>).range).toBe('week');
+
+      transport.simulateMessage(
+        createControlResponse(usageMsg.request_id, true, {
+          range: 'week',
+          summary: { totalTokens: 50000 },
+        }),
+      );
+
+      const result = await usagePromise;
+      expect(result).toMatchObject({
+        range: 'week',
+        summary: { totalTokens: 50000 },
+      });
+
+      await query.close();
+    });
+
     it('should throw if methods called on closed query', async () => {
       const query = new Query(transport, { cwd: '/test' });
       await respondToInitialize(transport, query);
@@ -1285,6 +1402,11 @@ describe('Query', () => {
       );
       await expect(query.mcpServerStatus()).rejects.toThrow('Query is closed');
       await expect(query.getContextUsage()).rejects.toThrow('Query is closed');
+      await expect(query.setEffort('high')).rejects.toThrow('Query is closed');
+      await expect(query.getAvailableModels()).rejects.toThrow(
+        'Query is closed',
+      );
+      await expect(query.getUsageInfo()).rejects.toThrow('Query is closed');
     });
   });
 

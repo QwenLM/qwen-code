@@ -590,16 +590,8 @@ export class SystemController extends BaseController {
     }
 
     try {
-      if (signal.aborted) {
-        throw new Error('Request aborted');
-      }
-
       const range = payload.range;
       const dashboard = await loadUsageDashboard(range ? { range } : undefined);
-
-      if (signal.aborted) {
-        throw new Error('Request aborted');
-      }
 
       return {
         subtype: 'get_usage_info',

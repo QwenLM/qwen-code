@@ -500,9 +500,7 @@ class Query:
             "get_context_usage", {"show_details": show_details}
         )
 
-    async def get_usage_info(
-        self, range: str | None = None
-    ) -> dict[str, Any] | None:
+    async def get_usage_info(self, range: str | None = None) -> dict[str, Any] | None:
         await self._ensure_started()
         data: dict[str, Any] = {}
         if range is not None:
