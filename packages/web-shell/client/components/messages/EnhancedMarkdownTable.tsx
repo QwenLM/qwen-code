@@ -336,6 +336,24 @@ function sanitizeForClipboard(value: string): string {
   return /^[=+\-@]/.test(inspectedValue) ? `'${value}` : value;
 }
 
+function applyColumnWidth(
+  current: Record<number, number>,
+  columnIndex: number,
+  nextWidth: number,
+): Record<number, number> {
+  const currentWidth = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+  if (currentWidth === nextWidth) return current;
+  if (nextWidth === DEFAULT_COLUMN_WIDTH) {
+    const next = { ...current };
+    delete next[columnIndex];
+    return next;
+  }
+  return {
+    ...current,
+    [columnIndex]: nextWidth,
+  };
+}
+
 function getSelectionText(
   range: SelectionRange | null,
   rows: EnhancedTableRow[],
@@ -1185,6 +1203,8 @@ export function EnhancedTable({
     columnIndex: number;
   } | null>(null);
   const selectionFrameRef = useRef(0);
+  const resizeFrameRef = useRef(0);
+  const pendingResizeWidthRef = useRef<number | null>(null);
   const draggingColumnRef = useRef<number | null>(null);
   const tableStructureKey = useMemo(
     () =>
@@ -1333,6 +1353,7 @@ export function EnhancedTable({
     };
     const handleMenuKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         closeFilterMenu();
         return;
       }
@@ -1382,6 +1403,28 @@ export function EnhancedTable({
     };
   }, [closeFilterMenu, openFilterMenu]);
 
+  useEffect(() => {
+    const clearActiveColumnOnOutsideMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !shellRef.current?.contains(target)) {
+        setActiveColumn(null);
+      }
+    };
+    const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || openFilterMenu) return;
+      if (event.key === 'Escape') setActiveColumn(null);
+    };
+    document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);
+    document.addEventListener('keydown', clearActiveColumnOnEscape);
+    return () => {
+      document.removeEventListener(
+        'mousedown',
+        clearActiveColumnOnOutsideMouseDown,
+      );
+      document.removeEventListener('keydown', clearActiveColumnOnEscape);
+    };
+  }, [openFilterMenu]);
+
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
     [filters, table.rows],
@@ -1423,35 +1466,46 @@ export function EnhancedTable({
 
   useEffect(() => {
     if (!resizingColumn) return;
+    const applyPendingResize = () => {
+      const nextWidth = pendingResizeWidthRef.current;
+      pendingResizeWidthRef.current = null;
+      if (resizeFrameRef.current) {
+        cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = 0;
+      }
+      if (nextWidth === null) return;
+      setColumnWidths((current) =>
+        applyColumnWidth(current, resizingColumn.columnIndex, nextWidth),
+      );
+    };
     const resizeColumn = (event: MouseEvent) => {
-      const nextWidth = clampColumnWidth(
+      pendingResizeWidthRef.current = clampColumnWidth(
         resizingColumn.startWidth + event.clientX - resizingColumn.startX,
       );
-      setColumnWidths((current) => {
-        const currentWidth =
-          current[resizingColumn.columnIndex] ?? DEFAULT_COLUMN_WIDTH;
-        if (currentWidth === nextWidth) return current;
-        if (nextWidth === DEFAULT_COLUMN_WIDTH) {
-          const next = { ...current };
-          delete next[resizingColumn.columnIndex];
-          return next;
-        }
-        return {
-          ...current,
-          [resizingColumn.columnIndex]: nextWidth,
-        };
-      });
+      if (resizeFrameRef.current) return;
+      resizeFrameRef.current = requestAnimationFrame(applyPendingResize);
     };
-    const stopResize = () => setResizingColumn(null);
+    const stopResize = () => {
+      applyPendingResize();
+      setResizingColumn(null);
+    };
+    const stopResizeWhenHidden = () => {
+      if (document.hidden) stopResize();
+    };
     window.addEventListener('mousemove', resizeColumn);
     window.addEventListener('mouseup', stopResize);
     window.addEventListener('blur', stopResize);
-    document.addEventListener('visibilitychange', stopResize);
+    document.addEventListener('visibilitychange', stopResizeWhenHidden);
     return () => {
       window.removeEventListener('mousemove', resizeColumn);
       window.removeEventListener('mouseup', stopResize);
       window.removeEventListener('blur', stopResize);
-      document.removeEventListener('visibilitychange', stopResize);
+      document.removeEventListener('visibilitychange', stopResizeWhenHidden);
+      if (resizeFrameRef.current) {
+        cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = 0;
+      }
+      pendingResizeWidthRef.current = null;
     };
   }, [resizingColumn]);
 
@@ -1664,6 +1718,9 @@ export function EnhancedTable({
     event: ReactKeyboardEvent<HTMLButtonElement>,
     columnIndex: number,
   ) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+      return;
+
     let delta = 0;
     if (event.key === 'ArrowRight') {
       delta = KEYBOARD_COLUMN_RESIZE_STEP;
@@ -1678,16 +1735,7 @@ export function EnhancedTable({
     setColumnWidths((current) => {
       const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
       const nextWidth = clampColumnWidth(width + delta);
-      if (width === nextWidth) return current;
-      if (nextWidth === DEFAULT_COLUMN_WIDTH) {
-        const next = { ...current };
-        delete next[columnIndex];
-        return next;
-      }
-      return {
-        ...current,
-        [columnIndex]: nextWidth,
-      };
+      return applyColumnWidth(current, columnIndex, nextWidth);
     });
   };
 
@@ -1744,6 +1792,7 @@ export function EnhancedTable({
     if (openFilterMenu !== null) {
       setOpenFilterMenu(null);
     }
+    setActiveColumn(null);
     draggingRef.current = true;
     setSelection({
       anchorRow: rowIndex,
