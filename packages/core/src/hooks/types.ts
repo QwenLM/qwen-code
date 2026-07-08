@@ -929,6 +929,22 @@ export interface ContextUsageData {
 export interface StopInput extends HookInput, Partial<ContextUsageData> {
   stop_hook_active: boolean;
   last_assistant_message: string;
+  /** Snapshot of running background agent tasks at the time the stop event fires. */
+  background_tasks?: Array<{
+    id: string;
+    status: string;
+    description: string;
+    subagentType?: string;
+  }>;
+  /** Snapshot of active cron jobs at the time the stop event fires. */
+  crons?: Array<{
+    id: string;
+    cronExpr: string;
+    prompt: string;
+    recurring: boolean;
+    durable: boolean;
+    status: string;
+  }>;
 }
 
 /**
@@ -1102,6 +1118,22 @@ export interface SubagentStopInput extends HookInput {
   agent_type: AgentType | string;
   agent_transcript_path: string;
   last_assistant_message: string;
+  /** Snapshot of running background agent tasks at the time the subagent stop event fires. */
+  background_tasks?: Array<{
+    id: string;
+    status: string;
+    description: string;
+    subagentType?: string;
+  }>;
+  /** Snapshot of active cron jobs at the time the subagent stop event fires. */
+  crons?: Array<{
+    id: string;
+    cronExpr: string;
+    prompt: string;
+    recurring: boolean;
+    durable: boolean;
+    status: string;
+  }>;
 }
 
 /**

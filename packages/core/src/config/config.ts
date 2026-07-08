@@ -2146,6 +2146,22 @@ export class Config {
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
                   contextUsageData,
+                  this.backgroundTaskRegistry.getAll().map(t => ({
+                    id: t.id,
+                    status: t.status,
+                    description: t.description,
+                    subagentType: t.subagentType,
+                  })),
+                  this.isCronEnabled()
+                    ? this.getCronScheduler().list().map(j => ({
+                        id: j.id,
+                        cronExpr: j.cronExpr,
+                        prompt: j.prompt,
+                        recurring: j.recurring,
+                        durable: j.durable || false,
+                        status: 'active',
+                      }))
+                    : undefined,
                   signal,
                 );
                 result = stopResult.finalOutput
@@ -2246,6 +2262,22 @@ export class Config {
                   (input['stop_hook_active'] as boolean) || false,
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
+                  this.backgroundTaskRegistry.getAll().map(t => ({
+                    id: t.id,
+                    status: t.status,
+                    description: t.description,
+                    subagentType: t.subagentType,
+                  })),
+                  this.isCronEnabled()
+                    ? this.getCronScheduler().list().map(j => ({
+                        id: j.id,
+                        cronExpr: j.cronExpr,
+                        prompt: j.prompt,
+                        recurring: j.recurring,
+                        durable: j.durable || false,
+                        status: 'active',
+                      }))
+                    : undefined,
                   signal,
                 );
                 break;

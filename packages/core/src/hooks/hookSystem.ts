@@ -205,12 +205,16 @@ export class HookSystem {
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
     contextUsage?: ContextUsageData,
+    backgroundTasks?: StopInput['background_tasks'],
+    crons?: StopInput['crons'],
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
       contextUsage,
+      backgroundTasks,
+      crons,
       signal,
     );
   }
@@ -411,6 +415,8 @@ export class HookSystem {
     lastAssistantMessage: string,
     stopHookActive: boolean,
     permissionMode: PermissionMode,
+    backgroundTasks?: SubagentStopInput['background_tasks'],
+    crons?: SubagentStopInput['crons'],
     signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireSubagentStopEvent(
@@ -420,6 +426,8 @@ export class HookSystem {
       lastAssistantMessage,
       stopHookActive,
       permissionMode,
+      backgroundTasks,
+      crons,
       signal,
     );
     return result.finalOutput

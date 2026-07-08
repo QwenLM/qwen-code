@@ -190,6 +190,8 @@ export class HookEventHandler {
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
     contextUsage?: ContextUsageData,
+    backgroundTasks?: StopInput['background_tasks'],
+    crons?: StopInput['crons'],
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: StopInput = {
@@ -197,6 +199,8 @@ export class HookEventHandler {
       stop_hook_active: stopHookActive,
       last_assistant_message: lastAssistantMessage,
       ...contextUsage,
+      ...(backgroundTasks ? { background_tasks: backgroundTasks } : {}),
+      ...(crons ? { crons } : {}),
     };
 
     return this.executeHooks(HookEventName.Stop, input, undefined, signal);
@@ -536,6 +540,8 @@ export class HookEventHandler {
     lastAssistantMessage: string,
     stopHookActive: boolean,
     permissionMode: PermissionMode,
+    backgroundTasks?: SubagentStopInput['background_tasks'],
+    crons?: SubagentStopInput['crons'],
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: SubagentStopInput = {
@@ -546,6 +552,8 @@ export class HookEventHandler {
       agent_type: agentType,
       agent_transcript_path: agentTranscriptPath,
       last_assistant_message: lastAssistantMessage,
+      ...(backgroundTasks ? { background_tasks: backgroundTasks } : {}),
+      ...(crons ? { crons } : {}),
     };
 
     // Pass agentType as context for matcher filtering
