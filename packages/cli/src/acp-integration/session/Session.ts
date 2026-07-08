@@ -72,6 +72,7 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
+  MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
@@ -1826,6 +1827,9 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
+                const messageDisplay = this.#createMessageDisplayDispatcher(
+                  pendingSend.signal,
+                );
 
                 try {
                   const sendResult =
@@ -1870,6 +1874,9 @@ export class Session implements SessionContext {
                           'assistant',
                           part.thought,
                         );
+                        if (!part.thought) {
+                          messageDisplay?.addChunk(part.text);
+                        }
                       }
                     }
 
@@ -1953,6 +1960,11 @@ export class Session implements SessionContext {
                   }
 
                   throw error;
+                } finally {
+                  // Deliver is_final (skipped on abort) and drain before the
+                  // turn proceeds, on every exit: normal end-of-stream,
+                  // cancellation returns, and thrown stream errors alike.
+                  await messageDisplay?.finish();
                 }
 
                 if (usageMetadata) {
@@ -2155,6 +2167,9 @@ export class Session implements SessionContext {
           const functionCalls: FunctionCall[] = [];
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
+          const messageDisplay = this.#createMessageDisplayDispatcher(
+            pendingSend.signal,
+          );
 
           try {
             const continueSendResult =
@@ -2192,6 +2207,9 @@ export class Session implements SessionContext {
                     'assistant',
                     part.thought,
                   );
+                  if (!part.thought) {
+                    messageDisplay?.addChunk(part.text);
+                  }
                 }
               }
 
@@ -2245,6 +2263,10 @@ export class Session implements SessionContext {
             }
 
             throw error;
+          } finally {
+            // Same contract as the main prompt loop: is_final (skipped on
+            // abort) is delivered and drained on every exit path.
+            await messageDisplay?.finish();
           }
 
           if (usageMetadata) {
@@ -2312,6 +2334,33 @@ export class Session implements SessionContext {
    * stop reason when the provider send should be skipped because the request
    * was cancelled or the session token limit was exceeded.
    */
+  /**
+   * Create the MessageDisplay hook dispatcher for one model call's streamed
+   * reply, or null when the hook isn't registered (the common case — keeps
+   * the streaming loops zero-cost). The ACP surface consumes GeminiChat's
+   * raw stream directly rather than going through
+   * GeminiClient.sendMessageStream, so it has to fire this hook itself —
+   * with the same contract as the terminal UI path in client.ts: debounced
+   * cumulative text, one message_id per model call, and an is_final firing
+   * on every non-aborted exit (delivered by awaiting `finish()` in a
+   * finally around each streaming loop).
+   */
+  #createMessageDisplayDispatcher(
+    signal: AbortSignal,
+  ): MessageDisplayDispatcher | null {
+    const messageBus = this.config.getMessageBus?.();
+    if (
+      this.config.getDisableAllHooks?.() ||
+      !messageBus ||
+      !this.config.hasHooksForEvent?.('MessageDisplay')
+    ) {
+      return null;
+    }
+    return new MessageDisplayDispatcher(messageBus, signal, (message) =>
+      debugLogger.warn(message),
+    );
+  }
+
   async #sendMessageStreamWithAutoCompression(
     promptId: string,
     message: Part[],
@@ -3095,42 +3144,54 @@ export class Session implements SessionContext {
                   this.loopTickResolver?.markDelivered();
                 }
                 nextMessage = null;
+                const messageDisplay = this.#createMessageDisplayDispatcher(
+                  ac.signal,
+                );
 
-                for await (const resp of responseStream) {
-                  if (ac.signal.aborted) return;
+                try {
+                  for await (const resp of responseStream) {
+                    if (ac.signal.aborted) return;
 
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.candidates &&
-                    resp.value.candidates.length > 0
-                  ) {
-                    const candidate = resp.value.candidates[0];
-                    for (const part of candidate.content?.parts ?? []) {
-                      if (!part.text) continue;
-                      this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        part.thought,
-                      );
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.candidates &&
+                      resp.value.candidates.length > 0
+                    ) {
+                      const candidate = resp.value.candidates[0];
+                      for (const part of candidate.content?.parts ?? []) {
+                        if (!part.text) continue;
+                        this.messageEmitter.emitMessage(
+                          part.text,
+                          'assistant',
+                          part.thought,
+                        );
+                        if (!part.thought) {
+                          messageDisplay?.addChunk(part.text);
+                        }
+                      }
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.usageMetadata
+                    ) {
+                      usageMetadata = resp.value.usageMetadata;
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.functionCalls
+                    ) {
+                      functionCalls.push(...resp.value.functionCalls);
+                    }
+                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                      functionCalls.length = 0;
                     }
                   }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.usageMetadata
-                  ) {
-                    usageMetadata = resp.value.usageMetadata;
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.functionCalls
-                  ) {
-                    functionCalls.push(...resp.value.functionCalls);
-                  }
-                  if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                    functionCalls.length = 0;
-                  }
+                } finally {
+                  // is_final (skipped on abort) delivered and drained on
+                  // every exit path, same as the interactive prompt loops.
+                  await messageDisplay?.finish();
                 }
 
                 if (usageMetadata) {
@@ -3400,49 +3461,59 @@ export class Session implements SessionContext {
 
             const responseStream = sendResult.responseStream;
             nextMessage = null;
+            const messageDisplay = this.#createMessageDisplayDispatcher(
+              ac.signal,
+            );
 
-            for await (const resp of responseStream) {
-              if (ac.signal.aborted) {
-                await this.#emitBackgroundNotificationEndTurn('cancelled');
-                return;
-              }
+            try {
+              for await (const resp of responseStream) {
+                if (ac.signal.aborted) {
+                  await this.#emitBackgroundNotificationEndTurn('cancelled');
+                  return;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  if (part.thought) {
-                    await this.messageEmitter.emitMessage(
-                      part.text,
-                      'assistant',
-                      true,
-                    );
-                  } else {
-                    responseText += part.text;
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.candidates &&
+                  resp.value.candidates.length > 0
+                ) {
+                  const candidate = resp.value.candidates[0];
+                  for (const part of candidate.content?.parts ?? []) {
+                    if (!part.text) continue;
+                    if (part.thought) {
+                      await this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        true,
+                      );
+                    } else {
+                      responseText += part.text;
+                      messageDisplay?.addChunk(part.text);
+                    }
                   }
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
-              }
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.usageMetadata
+                ) {
+                  usageMetadata = resp.value.usageMetadata;
+                }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+                if (
+                  resp.type === StreamEventType.CHUNK &&
+                  resp.value.functionCalls
+                ) {
+                  functionCalls.push(...resp.value.functionCalls);
+                }
+                if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                  functionCalls.length = 0;
+                }
               }
-              if (resp.type === StreamEventType.MODEL_FALLBACK) {
-                functionCalls.length = 0;
-              }
+            } finally {
+              // is_final (skipped on abort) delivered and drained on every
+              // exit path, same as the interactive prompt loops.
+              await messageDisplay?.finish();
             }
 
             if (responseText.length > 0) {

@@ -581,9 +581,17 @@ The `permissionDecision` value controls whether the tool runs:
 }
 ```
 
-`displayed_text` is cumulative rather than a delta so hook scripts never need to reassemble chunks themselves — each firing carries the full text so far. Firing is debounced (at most every ~200ms) except for the final firing (`is_final: true`), which always fires immediately once the message ends, so the reply's tail is never dropped waiting on the debounce window.
+`displayed_text` is cumulative rather than a delta so hook scripts never need to reassemble chunks themselves — each firing carries the full text so far. Firing is debounced (at most every ~200ms) except for the final firing (`is_final: true`), which always fires once the message ends, so the reply's tail is never dropped waiting on the debounce window.
 
-**Note**: Fires in both the terminal UI and ACP (IDE/editor) sessions — they share the same underlying streaming event loop.
+**Delivery semantics** — what a hook script can rely on:
+
+- **Slow hooks see fewer, newer payloads.** At most one hook execution per message is in flight at a time; while one runs, newer debounced payloads _replace_ the queued one rather than piling up behind it. A hook slower than the debounce window therefore skips intermediate snapshots — lossless, since each payload carries the full cumulative text. The `is_final` payload itself is never dropped.
+- **`is_final` delivery completes before the turn does.** The turn's end (and the `Stop` hook, when it fires) waits for the final `MessageDisplay` delivery, so a headless run (`qwen -p ...`) exits only after your hook received it, and a consumer combining `MessageDisplay` with `Stop` always sees `is_final` first.
+- **A cancelled turn fires no `is_final`.** Cancellation (<kbd>Esc</kbd>, an aborted request) stops firings without a terminal event — the message didn't end, it was abandoned. A consumer that buffers until `is_final` should treat cancellation-silence as its flush/discard signal (e.g. a timeout fallback).
+- **`displayed_text` is provisional until `is_final`.** It reflects what has streamed so far; treat intermediate payloads as display state, not as authoritative final content.
+- **A tool-using turn produces multiple messages.** Each model call gets its own `message_id` with its own `is_final: true` firing: the text before a tool call is one message, the continuation after the tool result is another. Model calls that produce no displayed text (tool-call-only) fire nothing.
+
+**Note**: Fires in the terminal UI, headless (`-p`), and ACP (IDE/editor/`qwen serve`) sessions, with the same payload contract on every surface.
 
 #### Stop
 

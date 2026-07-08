@@ -63,6 +63,18 @@ describe('messageDisplayBuffer', () => {
       expect(step.flush).toEqual({ displayedText: '', isFinal: true });
     });
 
+    it('flushes on isFinal even when the text is unchanged since the last flush and the window has not elapsed', () => {
+      let state = createInitialMessageDisplayState(0);
+      const first = stepMessageDisplay(state, 'Hello', 200, 200, false);
+      expect(first.flush).toEqual({ displayedText: 'Hello', isFinal: false });
+      state = first.next;
+
+      // Nothing new to say AND still inside the debounce window: isFinal must
+      // be the sole reason this flushes.
+      const final = stepMessageDisplay(state, '', 250, 200, true);
+      expect(final.flush).toEqual({ displayedText: 'Hello', isFinal: true });
+    });
+
     it('isFinal flush carries the full cumulative text, including the final chunk', () => {
       let state = createInitialMessageDisplayState(0);
       state = stepMessageDisplay(state, 'Hello, ', 10, 200, false).next;

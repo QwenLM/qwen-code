@@ -7661,13 +7661,6 @@ Other open files:
         await vi.advanceTimersByTimeAsync(MESSAGE_DISPLAY_DEBOUNCE_MS);
         releaseSecondChunk();
         await consumed;
-        // fireMessageDisplayHook chains requests for the same message_id through
-        // a promise so a slow hook can't run concurrently with itself — that
-        // chain settles a few microtask ticks after the generator itself
-        // finishes, since it's deliberately not awaited by the caller.
-        for (let i = 0; i < 10; i++) {
-          await Promise.resolve();
-        }
 
         expect(mockMessageBus.request).toHaveBeenCalledTimes(2);
         const [midStreamCall, finalCall] = mockMessageBus.request.mock.calls;
@@ -7679,6 +7672,10 @@ Other open files:
           eventName: 'MessageDisplay',
           input: { displayed_text: 'Hello, world.', is_final: true },
         });
+        // Both firings belong to the same streamed message.
+        expect(finalCall[0].input.message_id).toBe(
+          midStreamCall[0].input.message_id,
+        );
       });
 
       it('logs and swallows a rejected MessageDisplay hook request', async () => {
@@ -7715,16 +7712,70 @@ Other open files:
         for await (const _ of stream) {
           // consume stream
         }
-        // fireMessageDisplayHook is fire-and-forget; give its chained promise a
-        // tick to settle before asserting on the logger.
-        await Promise.resolve();
-        await Promise.resolve();
 
+        // The log line carries the message_id so a failure can be correlated
+        // to its turn when debug logging is enabled.
         expect(debugLogger.warn).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'MessageDisplay hook failed: Error: hook process failed',
+          expect.stringMatching(
+            /^MessageDisplay hook failed \[[0-9a-f-]{36}\]: Error: hook process failed$/,
           ),
         );
+      });
+
+      it('does not end the turn until the final MessageDisplay payload has been delivered', async () => {
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'MessageDisplay',
+        );
+
+        // A slow hook: the final MessageDisplay request stays unresolved
+        // until the test releases it.
+        let releaseHook!: () => void;
+        mockMessageBus.request.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              releaseHook = () => resolve({});
+            }),
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'Hello, world.' };
+          })(),
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-message-display-drain',
+        );
+        let turnEnded = false;
+        const consumed = (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+          turnEnded = true;
+        })();
+
+        // Give the generator ample time to run to its end if it (wrongly)
+        // didn't wait for the hook delivery.
+        for (let i = 0; i < 20; i++) {
+          await Promise.resolve();
+        }
+        expect(mockMessageBus.request).toHaveBeenCalledTimes(1);
+        // Regression: in a short-lived process (headless -p), returning here
+        // would drop the queued is_final payload on process exit.
+        expect(turnEnded).toBe(false);
+
+        releaseHook();
+        await consumed;
+        expect(turnEnded).toBe(true);
       });
 
       it('fires the final MessageDisplay flush when the always-on loop-detection safety trips mid-stream', async () => {

@@ -1682,6 +1682,89 @@ describe('Session', () => {
       ).toHaveBeenCalledWith(latestSnapshot);
     });
 
+    it('fires MessageDisplay with cumulative non-thought text and is_final on the ACP prompt path', async () => {
+      // Regression: the ACP surface consumes GeminiChat's stream directly
+      // (never entering GeminiClient.sendMessageStream), so it must fire the
+      // MessageDisplay hook itself — without this, an IDE/daemon client sees
+      // the hook advertised but never receives an event.
+      const messageBus = { request: vi.fn().mockResolvedValue({}) };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((event: string) => event === 'MessageDisplay');
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      { text: 'Let me think...', thought: true },
+                      { text: 'Hello, ' },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'world.' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      const messageDisplayCalls = messageBus.request.mock.calls.filter(
+        ([request]) => request.eventName === 'MessageDisplay',
+      );
+      expect(messageDisplayCalls.length).toBeGreaterThan(0);
+      const finalCall = messageDisplayCalls[messageDisplayCalls.length - 1][0];
+      // Cumulative text of the displayed (non-thought) parts only.
+      expect(finalCall.input).toMatchObject({
+        displayed_text: 'Hello, world.',
+        is_final: true,
+      });
+      expect(finalCall.input.message_id).toEqual(expect.any(String));
+      // Exactly one is_final firing for the message.
+      expect(
+        messageDisplayCalls.filter(([request]) => request.input.is_final),
+      ).toHaveLength(1);
+    });
+
+    it('does not fire MessageDisplay on the ACP prompt path when the hook is not registered', async () => {
+      const messageBus = { request: vi.fn().mockResolvedValue({}) };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'Hello.' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+
+      expect(messageBus.request).not.toHaveBeenCalled();
+    });
+
     it('drains background task notifications through ACP after the prompt is idle', async () => {
       mockChat.sendMessageStream = vi
         .fn()

@@ -135,13 +135,7 @@ import {
 import { partToString } from '../utils/partUtils.js';
 import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 import fsPromises from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import {
-  createInitialMessageDisplayState,
-  stepMessageDisplay,
-  MESSAGE_DISPLAY_DEBOUNCE_MS,
-  type MessageDisplayState,
-} from './message-display-buffer.js';
+import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
@@ -229,10 +223,6 @@ export class GeminiClient {
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
-  // Per-message-id chain of in-flight MessageDisplay hook requests, so a slow
-  // hook command doesn't let concurrent processes for the same message pile
-  // up unboundedly — see fireMessageDisplayHook.
-  private readonly messageDisplayChains = new Map<string, Promise<void>>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -1232,58 +1222,6 @@ export class GeminiClient {
     }
   }
 
-  /**
-   * Fire one MessageDisplay batch through MessageBus, WITHOUT being awaited by the
-   * caller — the streaming loop calls this and immediately continues to the next
-   * event, so a slow or hung hook command never stalls the reply's display. Errors
-   * are caught and logged here since there is no caller left to observe them.
-   *
-   * Batches for the same messageId are chained (not run concurrently): each waits
-   * for the previous batch's hook process to finish before its own request goes
-   * out. This bounds concurrent hook processes per message to one, so a slow or
-   * hung `command` hook can't let them pile up, while still preserving arrival
-   * order (important since `displayed_text` is cumulative — an out-of-order
-   * delivery would let an older, shorter payload land after a newer one).
-   */
-  private fireMessageDisplayHook(
-    messageBus: ReturnType<Config['getMessageBus']>,
-    messageId: string,
-    displayedText: string,
-    isFinal: boolean,
-    signal: AbortSignal,
-  ): void {
-    if (!messageBus) {
-      return;
-    }
-    const prior = this.messageDisplayChains.get(messageId) ?? Promise.resolve();
-    const next = prior
-      .then(() =>
-        messageBus.request<HookExecutionRequest, HookExecutionResponse>(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            eventName: 'MessageDisplay',
-            input: {
-              message_id: messageId,
-              displayed_text: displayedText,
-              is_final: isFinal,
-            },
-            signal,
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-        ),
-      )
-      .then(() => undefined)
-      .catch((err) => {
-        this.config.getDebugLogger().warn(`MessageDisplay hook failed: ${err}`);
-      })
-      .finally(() => {
-        if (this.messageDisplayChains.get(messageId) === next) {
-          this.messageDisplayChains.delete(messageId);
-        }
-      });
-    this.messageDisplayChains.set(messageId, next);
-  }
-
   async startChat(
     extraHistory?: Content[],
     sessionStartSource = extraHistory
@@ -2042,6 +1980,10 @@ export class GeminiClient {
     // early-return) leaves this `false`, and the `finally` block aborts the
     // prefetch as a safety net.
     let normalCompletion = false;
+    // Declared outside the try so the finally block can close it out on
+    // uncaught-exception exits too; created (when the hook is registered)
+    // right before the turn's streaming loop below.
+    let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (
         messageType === SendMessageType.UserQuery ||
@@ -2429,68 +2371,33 @@ export class GeminiClient {
         };
       };
 
-      // MessageDisplay hook: fires repeatedly as this turn's reply streams (before
-      // Stop, which fires once at the end). One id/buffer per turn.run() call —
-      // recursion into sendMessageStream (hook-forced continuations) naturally
-      // gets its own id since these locals are re-declared on each invocation.
-      const messageDisplayEnabled =
+      // MessageDisplay hook: fires repeatedly as this turn's reply streams
+      // (before Stop, which fires once at the end). One dispatcher — one
+      // message_id and one debounce accumulator — per turn.run() call;
+      // recursion into sendMessageStream (tool continuations, hook-forced
+      // continuations) naturally gets its own since this local is re-created
+      // on each invocation. `finish()` is awaited at every exit out of the
+      // `for await` loop below (normal completion and each early `return
+      // turn`) plus the outer finally, so a hook script's `is_final: true`
+      // completion signal is neither skipped when the turn ends via loop
+      // detection or a stream error, nor silently dropped by a process that
+      // exits (headless `-p`) before a slow hook's queue drained. Not gated
+      // on !turn.pendingToolCalls the way the Stop hook below is, since a
+      // message boundary and a Stop-worthy end-of-turn are different things.
+      messageDisplay =
         hooksEnabled &&
-        !!messageBus &&
-        this.config.hasHooksForEvent('MessageDisplay');
-      const messageDisplayId = messageDisplayEnabled ? randomUUID() : '';
-      let messageDisplayState: MessageDisplayState =
-        createInitialMessageDisplayState(Date.now());
-      // Final MessageDisplay flush: called from every exit out of the `for await`
-      // loop below (normal completion and each early `return turn`), so a hook
-      // script's `is_final: true` completion signal is never skipped just because
-      // the turn ended via loop detection or a stream error instead of falling off
-      // the bottom of the loop. Not gated on !turn.pendingToolCalls the way the
-      // Stop hook below is, since a message boundary and a Stop-worthy end-of-turn
-      // are different things here. It does re-send the same cumulative text as the
-      // last debounced flush when nothing changed since then — that's intentional,
-      // not a missed dedup: is_final is itself new information (it tells
-      // subscribers this message is done), so the event still needs to fire even
-      // when displayedText didn't change. Gated on there being any text at all so
-      // tool-call-only turns (no Content events ever arrived) don't fire a vacuous
-      // empty-text final event, and on !signal.aborted to match the Stop hook's
-      // cancellation guard below.
-      const flushFinalMessageDisplay = (): void => {
-        if (
-          messageDisplayEnabled &&
-          messageDisplayState.displayedText !== '' &&
-          !signal.aborted
-        ) {
-          this.fireMessageDisplayHook(
-            messageBus,
-            messageDisplayId,
-            messageDisplayState.displayedText,
-            true,
-            signal,
-          );
-        }
-      };
+        messageBus &&
+        this.config.hasHooksForEvent('MessageDisplay')
+          ? new MessageDisplayDispatcher(messageBus, signal, (message) =>
+              this.config.getDebugLogger().warn(message),
+            )
+          : null;
 
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
-        if (messageDisplayEnabled && event.type === GeminiEventType.Content) {
-          const step = stepMessageDisplay(
-            messageDisplayState,
-            event.value,
-            Date.now(),
-            MESSAGE_DISPLAY_DEBOUNCE_MS,
-            false,
-          );
-          messageDisplayState = step.next;
-          if (step.flush) {
-            this.fireMessageDisplayHook(
-              messageBus,
-              messageDisplayId,
-              step.flush.displayedText,
-              step.flush.isFinal,
-              signal,
-            );
-          }
+        if (messageDisplay && event.type === GeminiEventType.Content) {
+          messageDisplay.addChunk(event.value);
         }
         if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
           this.lastSentIdeContext = nextIdeContext;
@@ -2523,7 +2430,7 @@ export class GeminiClient {
           if (isTopLevelInteraction)
             endInteractionSpan('error', { errorMessage: 'loop detected' });
           this.cancelPendingMemoryPrefetch();
-          flushFinalMessageDisplay();
+          await messageDisplay?.finish();
           return turn;
         }
 
@@ -2555,7 +2462,7 @@ export class GeminiClient {
           // finally cleanup catches this, but cancel explicitly to match
           // the cleanup pattern at other early-return sites.
           this.cancelPendingMemoryPrefetch();
-          flushFinalMessageDisplay();
+          await messageDisplay?.finish();
           return turn;
         }
         // Update arena status on Finished events — stats are derived
@@ -2620,12 +2527,16 @@ export class GeminiClient {
           // finally cleanup catches this, but cancel explicitly to match
           // the cleanup pattern at other early-return sites.
           this.cancelPendingMemoryPrefetch();
-          flushFinalMessageDisplay();
+          await messageDisplay?.finish();
           return turn;
         }
       }
 
-      flushFinalMessageDisplay();
+      // Deliver `is_final: true` (and drain any still-queued mid-stream
+      // payload) BEFORE the Stop hook below fires, so consumers combining the
+      // two events can rely on receiving MessageDisplay's completion signal
+      // first.
+      await messageDisplay?.finish();
 
       // Track API completion time for thinking block idle cleanup
       this.lastApiCompletionTimestamp = Date.now();
@@ -2904,9 +2815,15 @@ export class GeminiClient {
       return turn;
     } finally {
       restoreStrippedRetryEntries();
-      // Belt-and-suspenders: abort the prefetch on any exit other than the
-      // bottom-of-try `return turn`. Catches uncaught exceptions and guards
-      // against future early-return sites that forget to call cancel.
+      // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
+      // exit the explicit finish() sites above didn't cover (an uncaught
+      // exception thrown out of the streaming loop still ends the message,
+      // and buffering hook consumers need the is_final signal). finish() is
+      // idempotent, so on the normal paths this resolves immediately.
+      await messageDisplay?.finish();
+      // Abort the prefetch on any exit other than the bottom-of-try
+      // `return turn`. Catches uncaught exceptions and guards against
+      // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
         this.cancelPendingMemoryPrefetch();
       }
