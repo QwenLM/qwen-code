@@ -141,4 +141,23 @@ describe('GitWorktreeService.isRegisteredLinkedWorktree() (real git)', () => {
     const svc = new GitWorktreeService(repo);
     expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
   });
+
+  it('is not fooled by a worktree path containing a newline that fakes a registry entry', async () => {
+    // A worktree whose path embeds "\nworktree <other>" injects a bogus record
+    // into a *newline*-split parse of `git worktree list --porcelain`. Parsing
+    // the NUL-separated (`-z`) form keeps it as a single record.
+    const repo = initRepo('qwen-linked-nl-');
+    const fake = path.join(repo, 'fake');
+    fs.mkdirSync(fake);
+    const evil = `${path.join(repo, 'evil')}\nworktree ${fake}`;
+    execFileSync('git', ['worktree', 'add', '-b', 'evil', evil, 'HEAD'], {
+      cwd: repo,
+    });
+
+    const svc = new GitWorktreeService(repo);
+    // The injected path must NOT be accepted as a registered worktree.
+    expect(await svc.isRegisteredLinkedWorktree(fake)).toBe(false);
+    // ...while the real (awkwardly named) worktree still validates.
+    expect(await svc.isRegisteredLinkedWorktree(evil)).toBe(true);
+  });
 });

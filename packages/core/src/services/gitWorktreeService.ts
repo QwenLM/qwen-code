@@ -1234,11 +1234,25 @@ export class GitWorktreeService {
       // `-z`: each attribute is NUL-terminated, so a worktree path that itself
       // contains a newline stays one record instead of injecting a fake
       // `worktree <path>` line into a newline-split parse.
-      const out = await this.git.raw(['worktree', 'list', '--porcelain', '-z']);
+      let out: string;
+      let nulSeparated = true;
+      try {
+        out = await this.git.raw(['worktree', 'list', '--porcelain', '-z']);
+      } catch {
+        // `worktree list -z` requires Git >= 2.36. On older git, fall back to
+        // the newline-separated form rather than rejecting every valid
+        // worktree: that parse can be fooled by a worktree path containing a
+        // newline, which is a far narrower exposure than a hard failure.
+        out = await this.git.raw(['worktree', 'list', '--porcelain']);
+        nulSeparated = false;
+      }
       const registered: string[] = [];
-      for (const attr of out.split('\0')) {
+      for (const attr of out.split(nulSeparated ? '\0' : '\n')) {
         if (attr.startsWith('worktree ')) {
-          registered.push(attr.slice('worktree '.length));
+          const value = attr.slice('worktree '.length);
+          // Do not trim in the NUL form — trailing whitespace can legitimately
+          // be part of a path. The newline form needs it to drop a stray \r.
+          registered.push(nulSeparated ? value : value.trim());
         }
       }
       if (registered.length === 0) return false;
