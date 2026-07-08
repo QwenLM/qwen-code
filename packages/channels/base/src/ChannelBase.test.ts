@@ -9229,6 +9229,20 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).not.toHaveBeenCalled();
       });
 
+      it('rejects single session scope before prompting', async () => {
+        const ch = createChannel({
+          approvalMode: 'yolo',
+          sessionScope: 'single',
+          webhooks,
+        });
+        ch.proactiveSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'Webhook tasks are not supported when sessionScope is single.',
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      });
+
       it.each([undefined, 'default', 'auto-edit', 'auto'] as const)(
         'rejects %s approval mode before prompting',
         async (approvalMode) => {
@@ -9431,6 +9445,44 @@ describe('ChannelBase', () => {
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'first response' },
         ]);
+      });
+
+      it('does not claim first-session context when clear races after context prep', async () => {
+        const channelMemory = {
+          readChannelMemory: vi.fn().mockImplementation(async () => {
+            (
+              ch as unknown as {
+                sessionGenerations: Map<string, number>;
+              }
+            ).sessionGenerations.set('s-1', 1);
+            return 'Use staging by default.\n';
+          }),
+          appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+          clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        };
+        const ch = createChannel(
+          {
+            approvalMode: 'yolo',
+            webhooks,
+            allowedUsers: ['webhook:github-ci'],
+            instructions: 'Use repo conventions.',
+          },
+          { channelMemory },
+        );
+        ch.proactiveSupported = true;
+
+        await expect(ch.runWebhookTask(webhookTask)).rejects.toThrow(
+          'session was cleared before it ran',
+        );
+
+        expect(
+          (
+            ch as unknown as {
+              instructedSessions: Set<string>;
+            }
+          ).instructedSessions.has('s-1'),
+        ).toBe(false);
+        expect(bridge.prompt).not.toHaveBeenCalled();
       });
 
       it('drains collected messages after a webhook task completes', async () => {

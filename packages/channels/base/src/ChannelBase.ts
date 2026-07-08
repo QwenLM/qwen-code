@@ -844,6 +844,11 @@ export abstract class ChannelBase {
     if (!isUnattendedWebhookApprovalMode(this.config.approvalMode)) {
       throw new Error('Webhook tasks require unattended approval mode.');
     }
+    if (this.config.sessionScope === 'single') {
+      throw new Error(
+        'Webhook tasks are not supported when sessionScope is single.',
+      );
+    }
     if (!this.config.webhooks) {
       throw new Error(`Unknown webhook source "${task.source}".`);
     }
@@ -903,9 +908,6 @@ export abstract class ChannelBase {
         promptToSend = sessionContext.promptText;
         shouldClaimSessionContext = sessionContext.shouldClaimSessionContext;
       }
-      if (shouldClaimSessionContext) {
-        this.instructedSessions.add(sessionId);
-      }
       if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
         process.stderr.write(
           `[${this.name}] dropped webhook ${taskId} for session ${sessionId}: session was cleared before it ran\n`,
@@ -913,6 +915,9 @@ export abstract class ChannelBase {
         throw new ChannelLoopSkippedError(
           'webhook task dropped because session was cleared before it ran',
         );
+      }
+      if (shouldClaimSessionContext) {
+        this.instructedSessions.add(sessionId);
       }
       let doneResolve: () => void = () => {};
       const done = new Promise<void>((resolve) => {
@@ -926,6 +931,7 @@ export abstract class ChannelBase {
         messageId: taskId,
         senderId: target.senderId,
         senderName: target.senderId,
+        loopPrompt: true,
       };
       this.activePrompts.set(sessionId, promptState);
       this.emitTaskLifecycle({

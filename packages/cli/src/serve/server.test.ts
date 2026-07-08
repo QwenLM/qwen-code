@@ -12167,6 +12167,14 @@ describe('createServeApp', () => {
           });
         expect(webhookSecretOnly.status).toBe(202);
 
+        const invalidSecretMalformedJson = await request(withBearerAuth)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Content-Type', 'application/json')
+          .set('x-qwen-webhook-secret', 'wrong')
+          .send('{');
+        expect(invalidSecretMalformedJson.status).toBe(401);
+
         const withBothSecrets = await request(withBearerAuth)
           .post('/channels/dingtalk-main/webhooks/github-ci')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -12204,6 +12212,41 @@ describe('createServeApp', () => {
         expect(preflight.headers['access-control-allow-headers']).toContain(
           'X-Qwen-Webhook-Secret',
         );
+
+        const rateLimited = createServeApp(
+          {
+            ...baseOpts,
+            workspace,
+            rateLimit: true,
+            rateLimitMutation: 1,
+            rateLimitWindowMs: 60_000,
+          },
+          undefined,
+          {
+            bridge: fakeBridge(),
+            enqueueChannelWebhookTask,
+          },
+        );
+        const firstWebhook = await request(rateLimited)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(firstWebhook.status).toBe(202);
+        const secondWebhook = await request(rateLimited)
+          .post('/channels/dingtalk-main/webhooks/github-ci')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('x-qwen-webhook-secret', 'secret-value')
+          .send({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          });
+        expect(secondWebhook.status).toBe(429);
       } finally {
         await fsp.rm(tempHome, { recursive: true, force: true });
         await fsp.rm(workspace, { recursive: true, force: true });
@@ -12256,7 +12299,7 @@ describe('createServeApp', () => {
             title: 'CI failed',
           });
 
-        expect(res.status).toBe(404);
+        expect(res.status).toBe(401);
         expect(enqueueChannelWebhookTask).not.toHaveBeenCalled();
         expect(
           stderrSpy.mock.calls.some(([chunk]) =>

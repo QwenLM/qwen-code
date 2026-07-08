@@ -1263,6 +1263,7 @@ function createDelegatingServeApp(
       ) {
         if (
           options.authenticateDeferredRuntimeRequest &&
+          !isChannelWebhookRequest(req) &&
           !runSynchronousRequestGate(
             options.authenticateDeferredRuntimeRequest,
             req,
@@ -1298,6 +1299,13 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isChannelWebhookRequest(req: Request): boolean {
+  return (
+    req.method === 'POST' &&
+    /^\/channels\/[^/]+\/webhooks\/[^/]+\/?$/u.test(req.path)
+  );
 }
 
 function isCorsPreflightRequest(req: Request): boolean {

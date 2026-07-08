@@ -708,6 +708,9 @@ export function createServeApp(
     app.use(denyBrowserOriginCors);
   }
   app.use(hostAllowlist(opts.hostname, getPort));
+  const rateLimiter = installRateLimiter(app, opts, daemonLog, {
+    mount: false,
+  });
 
   const healthDemoRoutes = createHealthDemoRoutes({
     opts,
@@ -750,13 +753,13 @@ export function createServeApp(
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
 
-  installJsonBodyParser(app);
-
   if (deps.enqueueChannelWebhookTask) {
     registerChannelWebhookRoutes(app, {
       channelsConfig: loadServeChannelWebhookConfigs(primaryBoundWorkspace),
       safeBody,
       enqueueWebhookTask: deps.enqueueChannelWebhookTask,
+      rateLimitMiddleware: rateLimiter?.middleware,
+      daemonLog,
     });
   }
 
@@ -764,7 +767,9 @@ export function createServeApp(
 
   // Rate limiter: after auth (only count authenticated requests), except
   // webhook routes which use their own shared-secret auth before bearerAuth.
-  const rateLimiter = installRateLimiter(app, opts, daemonLog);
+  if (rateLimiter) {
+    app.use(rateLimiter.middleware);
+  }
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -774,6 +779,8 @@ export function createServeApp(
     // leaks the full API surface).
     healthDemoRoutes.register(app);
   }
+
+  installJsonBodyParser(app);
 
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.

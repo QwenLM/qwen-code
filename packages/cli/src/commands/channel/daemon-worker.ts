@@ -14,6 +14,7 @@ import {
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelWebhookRunOptions,
   ChannelWebhookTask,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
@@ -95,7 +96,10 @@ interface ChannelDaemonWorkerReady {
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
   validateWebhookTask(task: ChannelWebhookTask): void;
-  runWebhookTask(task: ChannelWebhookTask): Promise<void>;
+  runWebhookTask(
+    task: ChannelWebhookTask,
+    options?: ChannelWebhookRunOptions,
+  ): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -410,12 +414,19 @@ export async function runChannelDaemonWorker(
         }
         channel.validateWebhookTask(task);
       },
-      async runWebhookTask(task: ChannelWebhookTask): Promise<void> {
+      async runWebhookTask(
+        task: ChannelWebhookTask,
+        options?: ChannelWebhookRunOptions,
+      ): Promise<void> {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
           throw new Error(`Channel "${task.channelName}" is not running.`);
         }
-        await channel.runWebhookTask(task);
+        if (options) {
+          await channel.runWebhookTask(task, options);
+        } else {
+          await channel.runWebhookTask(task);
+        }
       },
       async close() {
         disconnectAll();
@@ -573,20 +584,22 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           return;
         }
         sendWebhookTaskResult(message.id, { ok: true });
-        void handle.runWebhookTask(message.task).catch((err: unknown) => {
-          const safeMessage = sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            512,
-          );
-          const safeId = sanitizeLogText(message.id, 128);
-          const safeChannel = sanitizeLogText(message.task.channelName, 128);
-          const safeSource = sanitizeLogText(message.task.source, 128);
-          writeStderrLine(
-            `[Channel] webhook task failed ` +
-              `(id=${safeId}, channel=${safeChannel}, source=${safeSource}): ` +
-              safeMessage,
-          );
-        });
+        void handle
+          .runWebhookTask(message.task, { timeoutMs: 5 * 60_000 })
+          .catch((err: unknown) => {
+            const safeMessage = sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              512,
+            );
+            const safeId = sanitizeLogText(message.id, 128);
+            const safeChannel = sanitizeLogText(message.task.channelName, 128);
+            const safeSource = sanitizeLogText(message.task.source, 128);
+            writeStderrLine(
+              `[Channel] webhook task failed ` +
+                `(id=${safeId}, channel=${safeChannel}, source=${safeSource}): ` +
+                safeMessage,
+            );
+          });
       };
       const clearHeartbeat = () => {
         if (!heartbeatTimer) return;

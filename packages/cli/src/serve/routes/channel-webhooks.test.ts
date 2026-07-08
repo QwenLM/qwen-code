@@ -11,7 +11,6 @@ import { registerChannelWebhookRoutes } from './channel-webhooks.js';
 
 function appHarness(opts?: { enqueueWebhookTask?: ReturnType<typeof vi.fn> }) {
   const app = express();
-  app.use(express.json());
   let jsonCallCount = 0;
   app.use((_req, res, next) => {
     const originalJson = res.json.bind(res);
@@ -142,6 +141,23 @@ describe('channel webhook routes', () => {
       });
 
     expect(res.status).toBe(401);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('returns a uniform auth failure for unknown sources', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/missing-source')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'Invalid webhook secret' });
     expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
   });
 

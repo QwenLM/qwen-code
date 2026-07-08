@@ -1609,7 +1609,9 @@ describe('daemonWorkerCommand', () => {
         ok: true,
       });
       expect(validateWebhookTask).toHaveBeenCalledWith(webhookTask);
-      expect(runWebhookTask).toHaveBeenCalledWith(webhookTask);
+      expect(runWebhookTask).toHaveBeenCalledWith(webhookTask, {
+        timeoutMs: 5 * 60_000,
+      });
 
       process.emit('SIGTERM', 'SIGTERM');
       await handler;

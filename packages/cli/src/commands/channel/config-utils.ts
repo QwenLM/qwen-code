@@ -237,11 +237,13 @@ function parseWebhookSource(
         requireStringField(channelName, `${path}.secret`, record['secret']),
       )
     : resolveEnvVars(
-        `$${requireStringField(
-          channelName,
-          `${path}.secretEnv`,
-          record['secretEnv'],
-        )}`,
+        normalizeSecretEnvRef(
+          requireStringField(
+            channelName,
+            `${path}.secretEnv`,
+            record['secretEnv'],
+          ),
+        ),
       );
   if (secret.length === 0) {
     throw new Error(
@@ -250,6 +252,10 @@ function parseWebhookSource(
   }
 
   return { secret, targets };
+}
+
+function normalizeSecretEnvRef(secretEnv: string): string {
+  return secretEnv.startsWith('$') ? secretEnv : `$${secretEnv}`;
 }
 
 function parseWebhookConfig(

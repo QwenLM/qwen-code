@@ -475,6 +475,30 @@ describe('parseChannelConfig', () => {
     delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
   });
 
+  it('accepts webhook secretEnv refs with the standard $ prefix', async () => {
+    process.env['QWEN_TEST_WEBHOOK_SECRET'] = 'env-secret';
+    const config = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          'github-ci': {
+            secretEnv: '$QWEN_TEST_WEBHOOK_SECRET',
+            targets: {
+              default: {
+                chatId: 'group-1',
+                senderId: 'webhook:github-ci',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(config.webhooks?.sources['github-ci']?.secret).toBe('env-secret');
+    delete process.env['QWEN_TEST_WEBHOOK_SECRET'];
+  });
+
   it('rejects webhook targets without chatId or senderId', async () => {
     await expect(
       parseChannelConfig('dingtalk-main', {

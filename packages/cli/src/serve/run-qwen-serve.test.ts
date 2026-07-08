@@ -2188,6 +2188,71 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('starts deferred runtime for webhook routes without bearer auth', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-webhook-start-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
+      const app = express();
+      app.post('/channels/:channelName/webhooks/:source', (_req, res) => {
+        res.status(202).json({ accepted: true });
+      });
+      return app;
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      expect(createBridge).not.toHaveBeenCalled();
+      const res = await fetch(
+        `${handle.url}/channels/dingtalk-main/webhooks/github-ci`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-webhook-secret': 'webhook-secret',
+          },
+          body: JSON.stringify({
+            eventType: 'ci_failed',
+            targetRef: 'default',
+            title: 'CI failed',
+          }),
+        },
+      );
+      expect(res.status).toBe(202);
+      expect(await res.json()).toEqual({ accepted: true });
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('allows deferred runtime CORS preflight without auth or runtime startup', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-preflight-')),
@@ -3357,9 +3422,9 @@ describe('runQwenServe channel worker supervisor', () => {
       stop: vi.fn().mockResolvedValue(undefined),
       killAllSync: vi.fn(),
       snapshot: vi.fn(() => snapshot),
-      enqueueWebhookTask: vi.fn().mockRejectedValue(
-        new Error('Channel worker is not running.'),
-      ),
+      enqueueWebhookTask: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
     };
   }
 

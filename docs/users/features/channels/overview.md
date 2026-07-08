@@ -425,17 +425,16 @@ Example channel config:
 
 For DingTalk, `chatId` must be the group `openConversationId`; other adapters may require their own proactive target shape.
 
-Start `qwen serve` with bearer auth for webhook channels:
+Start `qwen serve` with the channel worker enabled:
 
 ```bash
-QWEN_SERVER_TOKEN="$QWEN_SERVER_TOKEN" qwen serve --require-auth
+QWEN_SERVER_TOKEN="$QWEN_SERVER_TOKEN" qwen serve --require-auth --channel dingtalk-main
 ```
 
 Example request:
 
 ```bash
 curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
-  -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
   -H "x-qwen-webhook-secret: $QWEN_CHANNEL_GITHUB_CI_SECRET" \
   -H "Content-Type: application/json" \
   -d '{
@@ -450,7 +449,7 @@ curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
   }'
 ```
 
-The bearer header is required when `qwen serve` is running with bearer auth enabled; the webhook secret header is always required for the webhook source. A `202 {"accepted": true}` response means the channel worker accepted ownership of the task, not that the final response has already been delivered to chat. Check daemon and channel worker logs, plus `/daemon/status`, when troubleshooting delivery failures.
+Webhook routes authenticate with the webhook secret header, even when `qwen serve` is running with bearer auth enabled. Do not share the daemon bearer token with webhook providers. Webhook config and `secretEnv` values are loaded when the daemon starts; restart `qwen serve` after changing webhook sources or rotating secrets. A `202 {"accepted": true}` response means the channel worker accepted ownership of the task, not that the final response has already been delivered to chat. Check daemon and channel worker logs, plus `/daemon/status`, when troubleshooting delivery failures.
 
 ### Multi-Channel Mode
 
