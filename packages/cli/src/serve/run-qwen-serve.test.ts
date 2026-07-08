@@ -23,6 +23,7 @@ import {
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
@@ -1281,6 +1282,15 @@ describe('runQwenServe runtime startup failures', () => {
     );
 
     expect(features).not.toContain('browser_automation_mcp');
+  });
+
+  it('does not enable browser automation MCP on bearer-protected endpoints', () => {
+    expect(
+      isBrowserAutomationMcpAvailable({
+        cdpTunnelOverWs: true,
+        token: 'secret-token',
+      }),
+    ).toBe(false);
   });
 
   it('forwards auto-enabled CDP tunnel state to the ACP child env', async () => {

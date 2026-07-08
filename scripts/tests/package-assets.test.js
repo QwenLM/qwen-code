@@ -289,7 +289,7 @@ describe('package asset scripts', () => {
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
     ).toThrow(
-      /Prepared package contains scanner-sensitive literal in chunks\/server\.js/,
+      /Prepared package contains forbidden string "chrome-devtools-mcp" in chunks\/server\.js/,
     );
   });
 
