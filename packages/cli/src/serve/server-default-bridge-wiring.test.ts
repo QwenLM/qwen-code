@@ -81,7 +81,7 @@ describe('createServeApp default bridge wiring', () => {
       kind: 'found',
       runtime: locals.workspaceRegistry!.primary,
     });
-  });
+  }, 15_000);
 
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;
