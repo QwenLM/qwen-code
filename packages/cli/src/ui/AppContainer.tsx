@@ -204,11 +204,6 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
-import {
-  ThinkingViewerProvider,
-  type ThinkingViewerData,
-} from './contexts/ThinkingViewerContext.js';
-import { ThinkingViewer } from './components/ThinkingViewer.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -565,18 +560,25 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
-  // Thinking viewer overlay state
-  const [thinkingViewerData, setThinkingViewerData] =
-    useState<ThinkingViewerData | null>(null);
-  const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
-    setThinkingViewerData(data);
-  }, []);
-  const closeThinkingViewer = useCallback(() => {
-    setThinkingViewerData(null);
-  }, []);
-
-  // Alt+T inline expansion toggle for thinking blocks
+  // Alt+T inline expansion toggle for thinking blocks (expands all at once).
   const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  // Per-thought inline expansion: head ids the user expanded by clicking the
+  // collapsed thinking line (VP mode). Replaces the old full-screen viewer —
+  // the thought expands in place and scrolls with the conversation.
+  const [expandedThoughtHeadIds, setExpandedThoughtHeadIds] = useState<
+    ReadonlySet<number>
+  >(() => new Set<number>());
+  const toggleThoughtExpanded = useCallback((headId: number) => {
+    setExpandedThoughtHeadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(headId)) {
+        next.delete(headId);
+      } else {
+        next.add(headId);
+      }
+      return next;
+    });
+  }, []);
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -1050,6 +1052,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
@@ -3414,16 +3417,6 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
-      // ThinkingViewer owns all input while open.
-      // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
-      if (thinkingViewerData) {
-        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
-          closeThinkingViewer();
-        } else {
-          return;
-        }
-      }
-
       // Alt+T: toggle inline expansion of thinking blocks.
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
@@ -3697,8 +3690,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleDoubleEscRewind,
       vimEnabled,
       vimMode,
-      thinkingViewerData,
-      closeThinkingViewer,
       setThoughtExpanded,
     ],
   );
@@ -3869,6 +3860,7 @@ export const AppContainer = (props: AppContainerProps) => {
       contextFileNames,
       availableTerminalHeight,
       useTerminalBuffer,
+      showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -4010,6 +4002,7 @@ export const AppContainer = (props: AppContainerProps) => {
       contextFileNames,
       availableTerminalHeight,
       useTerminalBuffer,
+      showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -4269,9 +4262,13 @@ export const AppContainer = (props: AppContainerProps) => {
     [renderMode, setRenderMode],
   );
 
-  const thinkingViewerValue = useMemo(
-    () => ({ openThinkingViewer }),
-    [openThinkingViewer],
+  const thoughtExpandedValue = useMemo(
+    () => ({
+      allExpanded: thoughtExpanded,
+      expandedHeadIds: expandedThoughtHeadIds,
+      toggle: toggleThoughtExpanded,
+    }),
+    [thoughtExpanded, expandedThoughtHeadIds, toggleThoughtExpanded],
   );
 
   return (
@@ -4285,22 +4282,12 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <CompactModeProvider value={compactModeValue}>
-              <ThoughtExpandedProvider value={thoughtExpanded}>
+              <ThoughtExpandedProvider value={thoughtExpandedValue}>
                 <RenderModeProvider value={renderModeValue}>
                   <TerminalOutputProvider value={writeRaw}>
-                    <ThinkingViewerProvider value={thinkingViewerValue}>
-                      <ShellFocusContext.Provider value={isFocused}>
-                        {thinkingViewerData ? (
-                          <ThinkingViewer
-                            data={thinkingViewerData}
-                            onClose={closeThinkingViewer}
-                            useAlternateScreen={!useTerminalBuffer}
-                          />
-                        ) : (
-                          <App />
-                        )}
-                      </ShellFocusContext.Provider>
-                    </ThinkingViewerProvider>
+                    <ShellFocusContext.Provider value={isFocused}>
+                      <App />
+                    </ShellFocusContext.Provider>
                   </TerminalOutputProvider>
                 </RenderModeProvider>
               </ThoughtExpandedProvider>
