@@ -2558,7 +2558,7 @@ describe('ContentGenerationPipeline', () => {
           messages: mockMessages,
           temperature: 0.7, // Config parameter used since request overrides are not being applied in current implementation
           top_p: 0.9, // Config parameter used since request overrides are not being applied in current implementation
-          max_tokens: 1000, // Config parameter used since request overrides are not being applied in current implementation
+          max_tokens: 500, // min(config 1000, request 500): the smaller wins so the window clamp survives samplingParams passthrough
         }),
         expect.objectContaining({
           signal: undefined,

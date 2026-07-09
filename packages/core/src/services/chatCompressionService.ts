@@ -50,16 +50,19 @@ const debugLogger = createDebugLogger('COMPRESSION');
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
 /**
- * Default proportional auto-compaction threshold. Used as a small-window
- * fallback / safety net inside computeThresholds — when the window is so
- * small that the absolute branch becomes degenerate, the proportional
- * branch keeps the trigger usable.
+ * Default proportional auto-compaction threshold: compact when the prompt
+ * crosses 85% of the window. For typical windows (≤ ~220K) the proportional
+ * branch dominates the ladder, so this is the effective default trigger;
+ * on larger windows the absolute branch (window − ~33K) takes over. Also
+ * acts as the small-window safety net inside computeThresholds — when the
+ * window is so small that the absolute branch becomes degenerate, the
+ * proportional branch keeps the trigger usable.
  */
-export const DEFAULT_PCT = 0.7;
+export const DEFAULT_PCT = 0.85;
 
 /**
  * Offset from DEFAULT_PCT used to position the warn tier proportionally
- * (warn-pct = 0.7 - 0.1 = 0.6). Three-tier ladder makes warn fire
+ * (warn-pct = 0.85 - 0.1 = 0.75). Three-tier ladder makes warn fire
  * meaningfully before auto on small windows where the absolute formula
  * would otherwise compress warn flush against auto.
  */
@@ -156,7 +159,7 @@ export interface CompactionThresholds {
  * `pct` defaults to DEFAULT_PCT when not provided. Small windows (where
  * the absolute branch goes negative) automatically fall back to the
  * proportional branch. Large windows are dominated by the absolute branch,
- * capping wasted reservation to ~33K instead of 30% of the window.
+ * capping wasted reservation to ~33K instead of 15% of the window.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
@@ -249,13 +252,6 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
-  /**
-   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
-   * When provided, the cheap-gate subtracts this from the context window
-   * before computing thresholds so auto-compression fires based on the
-   * real available input budget rather than the full window.
-   */
-  reservedOutputTokens?: number;
 }
 
 /**
@@ -359,13 +355,13 @@ export class ChatCompressionService {
     }
 
     if (!force) {
-      const rawContextLimit =
+      // Thresholds run against the FULL window: the send-path output clamp
+      // guarantees `prompt + max_tokens ≤ window`, so no output budget needs
+      // to be reserved out of the window here (this replaced the
+      // #5957/#6266 reservedOutputTokens machinery).
+      const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      const contextLimit = Math.max(
-        0,
-        rawContextLimit - (opts.reservedOutputTokens ?? 0),
-      );
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
@@ -406,9 +402,7 @@ export class ChatCompressionService {
         if (!screenshotOverflow) {
           debugLogger.debug(
             `[compaction] cheap-gate NOOP: effectiveTokens=${effectiveTokens}, ` +
-              `auto=${auto}, contextLimit=${contextLimit}, ` +
-              `rawContextLimit=${rawContextLimit}, ` +
-              `reservedOutputTokens=${opts.reservedOutputTokens ?? 0}`,
+              `auto=${auto}, contextLimit=${contextLimit}`,
           );
           return {
             newHistory: null,

@@ -20,6 +20,7 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
@@ -683,8 +684,20 @@ export class ContentGenerationPipeline {
     // When samplingParams is set, its keys pass through to the wire verbatim.
     // This lets users target provider-specific parameter names
     // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
+    // One exception: a user-set max_tokens is a ceiling, not an exemption from
+    // the window clamp — when the request carries a (clamped) maxOutputTokens
+    // and it is lower, it wins, so `prompt + max_tokens ≤ window` holds even
+    // for samplingParams users. When samplingParams omits max_tokens entirely,
+    // nothing is injected (the user opted into verbatim wire control).
     // When absent, the historical default behavior applies.
     if (configSamplingParams !== undefined) {
+      const reconciled = reconcileMaxTokens(
+        configSamplingParams.max_tokens,
+        request.config?.maxOutputTokens,
+      );
+      if (reconciled !== undefined) {
+        return { ...configSamplingParams, max_tokens: reconciled };
+      }
       return { ...configSamplingParams };
     }
 

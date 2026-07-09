@@ -795,7 +795,7 @@
           "type": "number",
           "minimum": 0.01,
           "maximum": 1,
-          "description": "Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%)."
+          "description": "Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.85 (85%)."
         }
       }
     },
