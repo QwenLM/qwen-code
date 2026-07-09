@@ -130,20 +130,18 @@ function PivotRow({
 }: {
   metric: string;
   values: React.ReactNode[];
-  variant?: 'normal' | 'section' | 'sub' | 'nested';
+  variant?: 'normal' | 'section' | 'sub';
 }) {
   const cellClass =
     variant === 'section'
       ? styles.metricCellSection
       : variant === 'sub'
         ? styles.metricCellSub
-        : variant === 'nested'
-          ? styles.metricCellNested
-          : styles.metricCell;
+        : styles.metricCell;
   return (
     <div className={styles.pivotRow}>
       <span className={cellClass}>
-        {variant === 'sub' || variant === 'nested' ? `↳ ${metric}` : metric}
+        {variant === 'sub' ? `↳ ${metric}` : metric}
       </span>
       {values.map((v, i) => (
         <span key={i} className={styles.modelCell}>
@@ -398,7 +396,7 @@ function ModelStatsCard({ status }: { status: DaemonSessionStatsStatus }) {
         <PivotRow
           metric={t('stats.thoughts')}
           values={vals((m) => m.tokens.thoughts.toLocaleString())}
-          variant="nested"
+          variant="sub"
         />
       )}
     </div>

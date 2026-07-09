@@ -61,14 +61,6 @@
   white-space: nowrap;
 }
 
-.metricCellNested {
-  flex: 0 0 24ch;
-  min-width: 24ch;
-  padding-left: 4ch;
-  color: var(--muted-foreground);
-  white-space: nowrap;
-}
-
 .modelCell {
   flex: 1 1 20ch;
   min-width: 16ch;
@@ -159,7 +151,7 @@
 }
 
 .tableValueCol {
-  min-width: 10ch;
+  min-width: 9ch;
   color: var(--foreground);
   text-align: right;
   white-space: nowrap;
