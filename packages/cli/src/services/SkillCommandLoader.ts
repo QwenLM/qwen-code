@@ -116,6 +116,9 @@ export class SkillCommandLoader implements ICommandLoader {
             description: skill.description,
             body: skill.body,
             level: skill.level,
+            ...(isExtension && skill.extensionName
+              ? { extensionName: skill.extensionName }
+              : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
             // Auto-approve the skill's declared allowedTools before its body is submitted.
