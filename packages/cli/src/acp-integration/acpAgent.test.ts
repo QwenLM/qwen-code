@@ -7435,6 +7435,54 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rewindSession extension method returns an empty artifact snapshot when reload has no artifact records', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          loadSession: vi.fn().mockResolvedValue({ conversation: {} }),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const response = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      artifactSnapshot: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: 0,
+        artifacts: [],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      },
+    });
+    expect(response).not.toHaveProperty('artifactSnapshotUnavailable');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession extension method can skip file rewind', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);

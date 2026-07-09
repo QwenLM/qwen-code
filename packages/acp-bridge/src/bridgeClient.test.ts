@@ -766,6 +766,7 @@ describe('BridgeClient — artifact ingress', () => {
                 storage: 'published',
                 url: artifactUrl,
                 managedId: 'managed-1',
+                retention: 'ephemeral',
               },
             ],
           },
@@ -789,6 +790,7 @@ describe('BridgeClient — artifact ingress', () => {
               artifact: expect.objectContaining({
                 title: 'Dashboard',
                 storage: 'published',
+                retention: 'ephemeral',
               }),
             }),
           },
@@ -800,6 +802,7 @@ describe('BridgeClient — artifact ingress', () => {
             title: 'Dashboard',
             storage: 'published',
             managedId: 'managed-1',
+            retention: 'ephemeral',
           },
         ],
       });
@@ -1081,6 +1084,7 @@ describe('BridgeClient — artifact ingress', () => {
           {
             title: 'Hook dashboard',
             url: 'https://example.com/hook-dashboard',
+            retention: 'ephemeral',
           },
         ],
       });
@@ -1096,6 +1100,7 @@ describe('BridgeClient — artifact ingress', () => {
                 source: 'hook',
                 hookEventName: 'PostToolUse',
                 title: 'Hook dashboard',
+                retention: 'ephemeral',
               }),
             }),
           },
@@ -1107,6 +1112,7 @@ describe('BridgeClient — artifact ingress', () => {
             source: 'hook',
             hookEventName: 'PostToolUse',
             title: 'Hook dashboard',
+            retention: 'ephemeral',
           },
         ],
       });

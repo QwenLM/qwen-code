@@ -395,6 +395,14 @@ export class SessionArtifactStore {
                   existing.persistedAt !== undefined,
               });
               this.artifacts.delete(existing.id);
+            } else if (shouldRecordEphemeralUnpin(existing, artifact)) {
+              changes.push({
+                action: 'removed',
+                artifactId: existing.id,
+                artifact: toPublicArtifact(existing),
+                reason: 'unpin_to_ephemeral',
+                durableTombstoneRequired: true,
+              });
             }
             this.artifacts.set(updated.artifact.id, updated.artifact);
             changes.push({
@@ -690,6 +698,20 @@ export class SessionArtifactStore {
           restoredCount === 0
             ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
             : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; restored ${restoredCount}/${snapshot.artifacts.length} artifacts; kept existing live artifacts`,
+        ];
+        this.setLastRestoreWarnings(rollbackWarnings);
+        return rollbackWarnings;
+      }
+      if (
+        previousState.artifacts.size > 0 &&
+        baselineWarnings.some(isArtifactSnapshotCompletenessWarning)
+      ) {
+        this.restoreState(previousState);
+        const rollbackWarnings = [
+          ...baselineWarnings,
+          restoredCount === 0
+            ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
+            : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
@@ -1557,7 +1579,10 @@ function mergeArtifact(
       incoming.retentionExplicit && incoming.retention !== 'ephemeral'
         ? incoming.persistenceWarning
         : (existing.persistenceWarning ?? incoming.persistenceWarning),
-    persistedAt: existing.persistedAt ?? incoming.persistedAt,
+    persistedAt:
+      incoming.retentionExplicit && incoming.retention === 'ephemeral'
+        ? undefined
+        : (existing.persistedAt ?? incoming.persistedAt),
     source: existing.source,
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
@@ -1584,6 +1609,19 @@ function mergeArtifact(
     next.updatedAt = now;
   }
   return { artifact: changed ? next : existing, changed };
+}
+
+function shouldRecordEphemeralUnpin(
+  existing: StoredArtifact,
+  incoming: NormalizedArtifact,
+): boolean {
+  return (
+    incoming.retentionExplicit &&
+    incoming.retention === 'ephemeral' &&
+    (existing.retention !== 'ephemeral' ||
+      existing.persistedAt !== undefined ||
+      existing.durableTombstoneRequired === true)
+  );
 }
 
 export function publicArtifactsEqual(
@@ -1945,6 +1983,12 @@ function isFileArtifactUrl(raw: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+function isArtifactSnapshotCompletenessWarning(warning: string): boolean {
+  return (
+    warning.startsWith('skipped ') || warning.includes(' list truncated to ')
+  );
 }
 
 function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
@@ -2385,6 +2429,12 @@ function isSecretLikeUrlValue(value: string): boolean {
   return SECRET_TOKEN_VALUE_PATTERN.test(value.trim());
 }
 
+function isSecretLikeMetadataValue(value: string): boolean {
+  return /^(?:bearer\s+\S{8,}|sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_/-]{12,})$/i.test(
+    value.trim(),
+  );
+}
+
 function normalizeMetadata(
   metadata: unknown,
   options: { budget?: 'user' | 'persisted' } = {},
@@ -2428,6 +2478,12 @@ function normalizeMetadata(
         'metadata',
       );
     }
+    if (isSecretLikeUrlText(key)) {
+      throw new SessionArtifactValidationError(
+        'metadata keys must not contain secret-like names',
+        'metadata',
+      );
+    }
     if (
       value !== null &&
       typeof value !== 'string' &&
@@ -2451,6 +2507,16 @@ function normalizeMetadata(
     ) {
       throw new SessionArtifactValidationError(
         'metadata string values contain unsafe content',
+        'metadata',
+      );
+    }
+    if (
+      typeof value === 'string' &&
+      !isReservedWorkspaceMetadataKey(key) &&
+      isSecretLikeMetadataValue(value)
+    ) {
+      throw new SessionArtifactValidationError(
+        'metadata string values must not contain secret-like tokens',
         'metadata',
       );
     }

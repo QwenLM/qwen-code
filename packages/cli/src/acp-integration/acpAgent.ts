@@ -7582,11 +7582,23 @@ class QwenAgent implements Agent {
               return sessionService.loadSession(sessionId);
             },
           );
-          if (sessionData?.artifactSnapshot) {
-            artifactSnapshot = sessionData.artifactSnapshot;
-          } else {
+          if (sessionData === undefined) {
             artifactSnapshotUnavailable =
               'session data unavailable after rewind';
+          } else if (sessionData.artifactSnapshot) {
+            artifactSnapshot = sessionData.artifactSnapshot;
+          } else {
+            // A successful reload with no artifact records is a valid empty
+            // artifact timeline, distinct from an unavailable reload.
+            artifactSnapshot = {
+              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+              sessionId,
+              sequence: 0,
+              artifacts: [],
+              tombstonedIds: [],
+              stickyEphemeralIds: [],
+              warnings: [],
+            };
           }
         } catch (err) {
           artifactSnapshotUnavailable =

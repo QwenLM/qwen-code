@@ -1488,6 +1488,51 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('persists explicit durable to ephemeral updates as sticky markers', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's5-explicit-ephemeral-marker',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const url = 'https://example.com/explicit-ephemeral-marker';
+
+    const created = await store.upsertMany([{ title: 'Durable', url }], {
+      strict: true,
+    });
+    const artifactId = created.changes[0]!.artifactId;
+    const updated = await store.upsertMany(
+      [{ title: 'Durable', url, retention: 'ephemeral' }],
+      { strict: true },
+    );
+
+    expect(updated.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId,
+        reason: 'unpin_to_ephemeral',
+      }),
+      expect.objectContaining({
+        action: 'updated',
+        artifactId,
+        artifact: expect.objectContaining({ retention: 'ephemeral' }),
+      }),
+    ]);
+    expect(updated.changes[1]?.artifact).not.toHaveProperty('persistedAt');
+    expect(events.at(-1)?.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId,
+        reason: 'unpin_to_ephemeral',
+      }),
+    ]);
+  });
+
   it('infers artifact kind from storage and workspace extensions', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-kind',
@@ -1607,6 +1652,34 @@ describe('SessionArtifactStore', () => {
       store.upsertMany(
         [
           {
+            title: 'Metadata key',
+            url: 'https://example.com/metadata-key',
+            metadata: { apiKey: 'not-persisted' },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Metadata value',
+            url: 'https://example.com/metadata-value',
+            metadata: {
+              preview: 'sk-test-token-1234567890',
+            },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
             title: 'safe\u2028evil',
             url: 'https://example.com/line-separator',
           },
@@ -1711,6 +1784,32 @@ describe('SessionArtifactStore', () => {
             title: 'Report',
             url: 'https://example.com/metadata-key',
             metadata: { '<script>': 'unsafe key' },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            url: 'https://example.com/metadata-secret-key',
+            metadata: { apiKey: 'not-persisted' },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            url: 'https://example.com/metadata-secret-value',
+            metadata: { preview: 'sk-test-token-1234567890' },
           },
         ],
         { strict: true },
@@ -3577,6 +3676,46 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('does not restore artifacts with secret-like metadata', async () => {
+    const sessionId = 's11-restore-secret-metadata';
+    const url = 'https://example.com/restore-secret-metadata';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 8,
+      artifacts: [
+        {
+          id: artifactId,
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Secret metadata',
+          url,
+          metadata: { authorization: 'Bearer abc123' },
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
   it('restores workspace artifacts with stat-only content checks', async () => {
     const workspacePath = 'restore-stat-only.txt';
     const content = 'same content';
@@ -3760,6 +3899,59 @@ describe('SessionArtifactStore', () => {
 
     expect(warnings).toEqual([
       'artifact snapshot restore partially failed; restored 1/2 artifacts; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('keeps live artifacts when a normalized snapshot has completeness warnings', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-normalized-warning',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Good', url: 'https://example.com/restore-normalized-good' }],
+      { strict: true },
+    );
+    const good = sourceEvents[0]!.changes[0]!.artifact!;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-normalized-warning',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      {
+        title: 'Live',
+        url: 'https://example.com/live-normalized-warning',
+      },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-normalized-warning',
+      sequence: 8,
+      artifacts: [good],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: ['artifact snapshot artifacts list truncated to 500 entries'],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot artifacts list truncated to 500 entries',
+      'artifact snapshot restore partially failed; kept existing live artifacts',
     ]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [

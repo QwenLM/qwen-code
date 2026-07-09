@@ -98,6 +98,7 @@ function artifactPayloadFields(
     mimeType: artifact['mimeType'] as string | undefined,
     sizeBytes: artifact['sizeBytes'] as number | undefined,
     metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
+    retention: artifact['retention'] as SessionArtifactInput['retention'],
   };
 }
 
