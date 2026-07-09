@@ -10916,6 +10916,47 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('rejects transcript pages owned by an untrusted secondary workspace', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-acacacacacac';
+      const secondaryDir = path.join(runtimeDir, 'untrusted-secondary');
+      await fsp.mkdir(secondaryDir, { recursive: true });
+      const secondaryWs = realpathSync(secondaryDir);
+      await writeTranscriptSession(sid, 'active', secondaryWs);
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary',
+          workspaceCwd: secondaryWs,
+          primary: false,
+          trusted: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'untrusted_workspace',
+        sessionId: sid,
+        workspaceId: 'secondary',
+      });
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
+    });
+
     it('rejects archived sessions before touching the bridge', async () => {
       const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbb';
       const bridge = fakeBridge();

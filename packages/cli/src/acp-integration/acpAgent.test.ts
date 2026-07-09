@@ -5955,10 +5955,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const settings = makeCoreSettings();
     mockRunExitCleanup.mockResolvedValue(undefined);
     const gaps = [{ childUuid: 'u1', missingParentUuid: 'missing-a1' }];
-    vi.mocked(loadCliConfig).mockResolvedValue({
+    const transcriptConfig = {
       ...makeInnerConfig(),
       enableFileCheckpointing: vi.fn(),
-    } as unknown as Config);
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      transcriptConfig as unknown as Config,
+    );
     const readPage = vi.fn().mockResolvedValue({
       sessionId: VALID_SESSION_ID,
       records: [{ uuid: 'u1' }],
@@ -6060,6 +6063,49 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .mock.calls.at(-1)?.[1] as CliArgs | undefined;
     expect(transcriptConfigArgv?.sessionId).toBeUndefined();
     expect(transcriptConfigArgv?.resume).toBeUndefined();
+    expect(transcriptConfig.enableFileCheckpointing).not.toHaveBeenCalled();
+    expect(transcriptConfig.initialize).toHaveBeenCalledWith({
+      sendSdkMcpMessage: expect.any(Function),
+      skipMcpDiscovery: true,
+      skipHooks: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/status/session/transcript rejects malformed cursor and limit params before reading', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi.fn();
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        cursor: 123,
+      }),
+    ).rejects.toThrow('Invalid transcript cursor');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        limit: '10',
+      }),
+    ).rejects.toThrow('Invalid transcript limit');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        limit: 1.5,
+      }),
+    ).rejects.toThrow('Invalid transcript limit');
+    expect(readPage).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

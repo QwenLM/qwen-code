@@ -78,6 +78,7 @@ import {
   type ApprovalMode,
   type ChatRecord,
   type Config,
+  type ConfigInitializeOptions,
   type DeviceAuthorizationData,
   type DiscoveredMCPPrompt,
   type DiscoveredMCPResource,
@@ -8341,7 +8342,12 @@ class QwenAgent implements Agent {
     }
 
     const entry: TranscriptReplayConfigCacheEntry = { settings };
-    const pending = this.newSessionConfig(cwd, [], settings, undefined, false);
+    const pending = this.newSessionConfig(cwd, [], settings, undefined, false, {
+      skipMcpDiscovery: true,
+      skipHooks: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+    });
     entry.pending = pending;
     this.transcriptReplayConfigCache.set(key, entry);
     try {
@@ -8367,6 +8373,7 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
     sessionId?: string,
     resume?: boolean,
+    initializeOptions: ConfigInitializeOptions = {},
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -8465,7 +8472,10 @@ class QwenAgent implements Agent {
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
     // explicitly so /rewind works across daemon session resume.
-    if (typeof config.enableFileCheckpointing === 'function') {
+    if (
+      !initializeOptions.skipFileCheckpointing &&
+      typeof config.enableFileCheckpointing === 'function'
+    ) {
       config.enableFileCheckpointing();
     }
     // Reverse tool channel (issue #5626, Phase 2). Runtime-added MCP servers
@@ -8535,6 +8545,7 @@ class QwenAgent implements Agent {
       });
     }
     await config.initialize({
+      ...initializeOptions,
       // Reverse tool channel (issue #5626, Phase 2): bind the session
       // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
       // client-hosted (extension) MCP server added at runtime reaches the

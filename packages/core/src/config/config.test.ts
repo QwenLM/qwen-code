@@ -2318,6 +2318,28 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
     it('registers loop_wakeup when cron is enabled', async () => {
       const config = new Config({ ...baseParams, cronEnabled: true });
       await config.initialize();

@@ -1368,6 +1368,21 @@ export interface ConfigInitializeOptions {
    * AND closes the 2N subprocess leak.
    */
   skipMcpDiscovery?: boolean;
+  /**
+   * Skip hook system and hook MessageBus initialization. Read-only replay
+   * helpers use this to avoid loading or subscribing user/workspace hooks.
+   */
+  skipHooks?: boolean;
+  /**
+   * Skip SkillManager creation and file watching. Read-only replay helpers do
+   * not need skill discovery and must not start long-lived watchers.
+   */
+  skipSkillManager?: boolean;
+  /**
+   * Force file checkpointing off for read-only replay helpers, even when the
+   * Config was constructed with checkpointing enabled.
+   */
+  skipFileCheckpointing?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -2093,6 +2108,10 @@ export class Config {
     }
     this.initialized = true;
     this.debugLogger.info('Config initialization started');
+    if (options?.skipFileCheckpointing === true) {
+      this.fileCheckpointingEnabled = false;
+      this.fileHistoryService = undefined;
+    }
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -2113,8 +2132,8 @@ export class Config {
     }
     this.debugLogger.debug('Extension manager initialized');
 
-    // Bare mode skips all hook loading and execution.
-    if (!this.getDisableAllHooks()) {
+    // Bare mode and read-only replay helpers skip all hook loading and execution.
+    if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -2317,13 +2336,18 @@ export class Config {
     }
 
     this.subagentManager = new SubagentManager(this);
-    this.skillManager = new SkillManager(this);
-    if (this.getBareMode() || this.isSafeMode()) {
-      await this.skillManager.refreshCache();
+    if (!options?.skipSkillManager) {
+      this.skillManager = new SkillManager(this);
+      if (this.getBareMode() || this.isSafeMode()) {
+        await this.skillManager.refreshCache();
+      } else {
+        await this.skillManager.startWatching();
+      }
+      this.debugLogger.debug('Skill manager initialized');
     } else {
-      await this.skillManager.startWatching();
+      this.skillManager = null;
+      this.debugLogger.debug('Skill manager skipped');
     }
-    this.debugLogger.debug('Skill manager initialized');
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(

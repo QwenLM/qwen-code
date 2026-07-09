@@ -17,6 +17,7 @@ import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
 
@@ -145,6 +146,94 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it('rejects cursors from another session before touching transcript files', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const otherSessionId = '660e8400-e29b-41d4-a716-446655440000';
+
+    await expect(
+      reader.readPage(otherSessionId, {
+        cursor: encodeCursor(first.nextCursorState!),
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
+  it('rejects a cursor after the frozen snapshot is truncated', async () => {
+    const filePath = await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    await fs.truncate(filePath, 1);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor(first.nextCursorState!),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('rejects a cursor when the frozen file identity no longer matches', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          fileIdentity: { dev: 999_999, ino: 999_999 },
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('rejects cursors whose position is past the active chain', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+      record('u2', 'a1', 'second'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          position: 999,
+        }),
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+  });
+
+  it('terminates cyclic parentUuid chains without looping', async () => {
+    await writeRecords([
+      record('u1', 'a1', 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const page = await reader.readPage(sessionId, { limit: 10 });
+
+    expect(page.records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
+    expect(page.hasMore).toBe(false);
+  });
+
   it('aggregates multiple physical records for the same active uuid', async () => {
     await writeRecords([
       record('u1', null, 'hello'),
@@ -229,6 +318,25 @@ describe('SessionTranscriptReader', () => {
       { text: 'hello' },
       { text: ' world' },
     ]);
+  });
+
+  it('skips a cached segment when the raw fragment uuid no longer matches', async () => {
+    const initial = `${JSON.stringify(record('u1', null, 'hello'))}\n`;
+    const filePath = await writeRawTranscript(initial);
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    await expect(reader.readPage(sessionId)).resolves.toMatchObject({
+      records: [expect.objectContaining({ uuid: 'u1' })],
+    });
+
+    await fs.writeFile(
+      filePath,
+      initial.replace('"uuid":"u1"', '"uuid":"x1"'),
+      'utf8',
+    );
+
+    const reread = await reader.readPage(sessionId);
+    expect(reread.records).toEqual([]);
   });
 
   it('does not repeatedly copy pending bytes for one large record', async () => {
