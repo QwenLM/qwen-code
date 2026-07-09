@@ -164,6 +164,7 @@ import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
+import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
 import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
@@ -292,6 +293,13 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  /**
+   * Stop and relaunch the daemon-managed channel worker so it re-reads
+   * settings.json. Wired only when the daemon owns a channel worker; its
+   * presence gates the `channel_reload` capability and the
+   * `POST /workspace/channel/reload` route.
+   */
+  reloadChannelWorker?: () => Promise<ChannelWorkerSnapshot>;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -323,6 +331,7 @@ export interface ServeAppDeps {
       value: unknown;
     }>,
   ) => Promise<void>;
+  sessionArtifactsPersistenceAvailable?: boolean;
   /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
@@ -535,10 +544,18 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      sessionArtifactsPersistenceAvailable:
+        deps.sessionArtifactsPersistenceAvailable !== false,
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
         deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
+      // Advertise `channel_reload` only when BOTH deps the route needs are
+      // wired — the same condition that gates route registration below — so an
+      // embedder can never see the capability advertised while the route 404s.
+      channelReloadAvailable:
+        deps.getChannelWorkerSnapshot !== undefined &&
+        deps.reloadChannelWorker !== undefined,
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled:
         (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
@@ -1092,6 +1109,18 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  if (deps.getChannelWorkerSnapshot && deps.reloadChannelWorker) {
+    const getChannelWorkerSnapshot = deps.getChannelWorkerSnapshot;
+    const reloadChannelWorker = deps.reloadChannelWorker;
+    registerWorkspaceChannelControlRoutes(app, {
+      getChannelWorkerSnapshot,
+      reloadChannelWorker,
+      mutate,
+      sendBridgeError,
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    });
+  }
   registerWorkspaceLifecycleRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,

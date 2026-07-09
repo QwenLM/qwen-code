@@ -96,6 +96,7 @@ import type {
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonReloadResponse,
+  DaemonChannelReloadResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
@@ -2505,6 +2506,36 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /workspace/reload');
         }
         return (await res.json()) as DaemonReloadResponse;
+      },
+      opts?.timeoutMs,
+    );
+  }
+
+  /**
+   * Reload the daemon-managed channel worker: the daemon stops and relaunches
+   * it so it re-reads settings.json (channels / proxy / per-channel model).
+   * Requires the daemon to have been started with `--channel`; otherwise the
+   * route responds 409. Pre-flight the `channel_reload` capability.
+   */
+  async reloadChannelWorker(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonChannelReloadResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/channel/reload`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/channel/reload');
+        }
+        return (await res.json()) as DaemonChannelReloadResult;
       },
       opts?.timeoutMs,
     );

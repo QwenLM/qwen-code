@@ -3017,6 +3017,52 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('reloadChannelWorker', () => {
+    it('POSTs /workspace/channel/reload with an empty body and returns the typed result', async () => {
+      const worker = {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        pid: 4321,
+        restartCount: 1,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { reloaded: true, worker }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.reloadChannelWorker();
+      expect(result).toEqual({ reloaded: true, worker });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/channel/reload');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('forwards the client id header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          reloaded: true,
+          worker: { enabled: true, state: 'running', channels: [] },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.reloadChannelWorker({ clientId: 'client-9' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-9');
+    });
+
+    it('rejects on a non-2xx response (channels not enabled)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'no channel worker',
+          code: 'channel_worker_not_enabled',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.reloadChannelWorker()).rejects.toMatchObject({
+        status: 409,
+      });
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>

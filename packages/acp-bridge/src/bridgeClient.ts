@@ -27,7 +27,14 @@ import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
-import type { ClientMcpMessageSender } from './bridgeOptions.js';
+import type {
+  ClientMcpMessageSender,
+  CreateSubSessionHandler,
+} from './bridgeOptions.js';
+import {
+  MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_PROMPT_CHARS,
+} from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
@@ -98,6 +105,7 @@ function artifactPayloadFields(
     mimeType: artifact['mimeType'] as string | undefined,
     sizeBytes: artifact['sizeBytes'] as number | undefined,
     metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
+    retention: artifact['retention'] as SessionArtifactInput['retention'],
   };
 }
 
@@ -502,6 +510,15 @@ export class BridgeClient implements Client {
       outputTokens: number,
       durationMs?: number,
     ) => void,
+    /**
+     * Daemon-host seam for the `create_sub_session` tool. Invoked from the
+     * `extMethod` dispatch (a child→daemon REQUEST, so it returns a Promise the
+     * child awaits) with the prompt, completion mode, and optional model/name;
+     * the host spawns a sub-session and, for `'first-turn'`, returns its result.
+     * Omitted by tests / Mode A / non-daemon — the method then reports
+     * `methodNotFound` and the tool surfaces itself as daemon-only.
+     */
+    private readonly onCreateSubSession?: CreateSubSessionHandler,
   ) {}
 
   async requestPermission(
@@ -701,6 +718,7 @@ export class BridgeClient implements Client {
   async seedSessionUpdates(
     entry: BridgeClientSessionEntry,
     updates: SessionUpdate[],
+    options: { ingestArtifacts?: boolean } = {},
   ): Promise<void> {
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     const artifactBatches: Array<{
@@ -713,7 +731,7 @@ export class BridgeClient implements Client {
         entry,
       );
       frames.push(...prepared.frames);
-      if (prepared.artifacts.length > 0) {
+      if (options.ingestArtifacts !== false && prepared.artifacts.length > 0) {
         artifactBatches.push({
           artifacts: prepared.artifacts,
           trustedPublisher: prepared.trustedPublisher,
@@ -818,9 +836,12 @@ export class BridgeClient implements Client {
 
   /**
    * Handle child->bridge ACP `extMethod` requests (calls that expect a
-   * response, unlike `extNotification`). The only method served today is
-   * `craft/drainMidTurnQueue`: the ACP child calls it between tool batches to
-   * pull any messages the browser queued mid-turn. We splice the per-session
+   * response, unlike `extNotification`). Served methods:
+   * `qwen/control/client_mcp/message` (reverse tool channel),
+   * `qwen/control/create-sub-session` (the `create_sub_session` tool → daemon
+   * spawns a sub-session and, for `'first-turn'`, returns its first-turn
+   * result), and `craft/drainMidTurnQueue`: the ACP child calls the last one
+   * between tool batches to pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
    * those messages out of its pending queue (a dedupe signal, not a transcript
@@ -841,6 +862,9 @@ export class BridgeClient implements Client {
     // extension and returns the correlated response.
     if (method === SERVE_CONTROL_EXT_METHODS.clientMcpMessage) {
       return this.handleClientMcpMessage(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
+      return this.handleCreateSubSession(params);
     }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
@@ -943,6 +967,89 @@ export class BridgeClient implements Client {
   }
 
   /**
+   * Handle the `create_sub_session` tool's request: validate, then forward to
+   * the daemon-host `onCreateSubSession` callback (which spawns a fresh
+   * top-level sub-session and, for `'first-turn'`, waits for its first turn and
+   * returns the result). No host wired → `methodNotFound`, which the tool
+   * surfaces as "daemon-only".
+   */
+  private async handleCreateSubSession(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onCreateSubSession) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+      );
+    }
+    const prompt = params['prompt'];
+    if (typeof prompt !== 'string' || prompt.length === 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`prompt` must be a non-empty string',
+      );
+    }
+    // The child is a separate process; this is a trust boundary. Without a cap
+    // it can hand the daemon a multi-MB string to deserialize, copy for the
+    // display name, and dispatch into a new session. Same ceiling the
+    // scheduled-task REST route applies to the prompts it accepts.
+    if (prompt.length > MAX_SUB_SESSION_PROMPT_CHARS) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`prompt\` exceeds the ${MAX_SUB_SESSION_PROMPT_CHARS}-character limit`,
+      );
+    }
+    const completion = params['completion'];
+    if (completion !== 'sent' && completion !== 'first-turn') {
+      throw RequestError.invalidParams(
+        undefined,
+        "`completion` must be 'sent' or 'first-turn'",
+      );
+    }
+    const name = params['name'];
+    if (typeof name === 'string' && name.length > MAX_SUB_SESSION_NAME_CHARS) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`name\` exceeds the ${MAX_SUB_SESSION_NAME_CHARS}-character limit`,
+      );
+    }
+    // `callerSessionId` keys the launcher's per-caller concurrency bucket AND
+    // its depth-1 nesting gate. A child that names a session it does not own
+    // could evade its own cap (a fabricated id starts every bucket at zero) or
+    // exhaust a victim session's; a child that OMITS the field would get an
+    // anonymous per-call bucket and skip the nesting gate entirely. Neither is
+    // acceptable, so it is required and authenticated. Every real caller has
+    // one — the tool runs inside a session's turn.
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    const model = params['model'];
+    const result = await this.onCreateSubSession({
+      prompt,
+      completion,
+      ...(typeof model === 'string' && model.length > 0 && model.length <= 128
+        ? { model }
+        : {}),
+      ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      callerSessionId,
+    });
+    return {
+      sessionId: result.sessionId,
+      ...(result.result !== undefined ? { result: result.result } : {}),
+      ...(result.stopReason !== undefined
+        ? { stopReason: result.stopReason }
+        : {}),
+    };
+  }
+
+  /**
    * Handle child->bridge ACP `extNotification` calls. Recognized methods are
    * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
@@ -951,8 +1058,8 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
-   * session-scoped SSE frame. Unknown methods are dropped silently
-   * for forward-compat.
+   * session-scoped SSE frame. Unknown methods are dropped silently for
+   * forward-compat.
    */
   async extNotification(
     method: string,

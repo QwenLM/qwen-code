@@ -112,7 +112,8 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 
 **What gets posted:**
 
-- High-confidence Critical and Suggestion findings as inline comments on specific lines
+- High-confidence Critical and Suggestion findings as inline comments on specific lines, each prefixed with `**[Critical]**` or `**[Suggestion]**` so blockers are distinguishable from recommendations
+- Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
 - Model attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review_)
