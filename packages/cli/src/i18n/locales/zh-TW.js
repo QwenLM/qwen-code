@@ -220,7 +220,7 @@ export default {
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
   'Auto mode': '自動模式',
-  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.':
+  'auto_mode.entry_notice':
     '已啟用自動模式。\n   LLM 分類器會評估每次工具呼叫 — 安全操作將自動批准，\n   有風險的操作將被阻止。退出：Shift+Tab 或 /approval-mode default。',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',

@@ -63,6 +63,11 @@ export interface PrintCheckI18nOptions {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WRITE_UNUSED_KEYS_FLAG = '--write-unused-locale-keys';
 const WRITE_UNUSED_KEYS_ENV = 'QWEN_CHECK_I18N_WRITE_UNUSED_KEYS';
+const EN_SEMANTIC_KEY_EXCEPTIONS: ReadonlySet<string> = new Set([
+  // Multi-line copy is intentionally keyed by a stable identifier so wording
+  // changes do not silently break locale lookup.
+  'auto_mode.entry_notice',
+]);
 
 export function shouldWriteUnusedKeysJson(): boolean {
   return (
@@ -288,7 +293,7 @@ function checkKeyValueConsistency(enTranslations: TranslationDict): string[] {
       continue;
     }
 
-    if (key !== value) {
+    if (key !== value && !EN_SEMANTIC_KEY_EXCEPTIONS.has(key)) {
       errors.push(`Key-value mismatch in en.js: "${key}" !== "${value}"`);
     }
   }

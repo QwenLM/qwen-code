@@ -19,7 +19,7 @@ export default {
   'Shell mode': 'シェルモード',
   'YOLO mode': 'YOLOモード',
   'Auto mode': 'Autoモード',
-  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.':
+  'auto_mode.entry_notice':
     '自動モードが有効です。\n   LLM 分類器が各ツール呼び出しを評価します — 安全な操作は自動承認され、\n   危険な操作はブロックされます。終了: Shift+Tab または /approval-mode default。',
   'plan mode': 'プランモード',
   'auto-accept edits': '編集を自動承認',

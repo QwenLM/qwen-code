@@ -16,8 +16,7 @@ import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
-const AUTO_MODE_FIRST_TIME_MESSAGE_KEY =
-  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
+const AUTO_MODE_FIRST_TIME_MESSAGE_KEY = 'auto_mode.entry_notice';
 
 const getAutoModeFirstTimeMessage = () => t(AUTO_MODE_FIRST_TIME_MESSAGE_KEY);
 
@@ -166,6 +165,8 @@ export function emitAutoModeEntryNotices(opts: {
     stripped &&
     (stripped.persistent.length > 0 || stripped.session.length > 0)
   ) {
+    // Intentionally untranslated operational notice: rule text is copied from
+    // user/session allow-rule configuration and may contain command syntax.
     const lines = [
       'ℹ Auto mode temporarily disabled these allow rules',
       '   (they would bypass the classifier):',

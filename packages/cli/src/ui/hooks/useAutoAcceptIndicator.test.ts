@@ -498,7 +498,8 @@ describe('useAutoAcceptIndicator', () => {
     );
   });
 
-  it('should emit the localizable AUTO mode entry notice', () => {
+  it('should emit the localizable AUTO mode entry notice', async () => {
+    await setLanguageAsync('en');
     const mockAddItem = vi.fn();
 
     emitAutoModeEntryNotices({

@@ -19,7 +19,7 @@ export default {
   'Shell mode': 'Modo shell',
   'YOLO mode': 'Modo YOLO',
   'Auto mode': 'Modo auto',
-  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.':
+  'auto_mode.entry_notice':
     'Modo auto ativado.\n   Um classificador LLM avalia cada chamada de ferramenta — ações seguras são aprovadas automaticamente,\n   ações arriscadas são bloqueadas. Sair: Shift+Tab ou /approval-mode default.',
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',

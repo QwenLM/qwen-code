@@ -94,7 +94,7 @@ export const MUST_TRANSLATE_KEYS = [
   '? for shortcuts',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}',
   'Approval mode set to "{{mode}}"',
-  'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
+  'auto_mode.entry_notice',
   "Set up Qwen Code's status line UI",
   'Cached (included in Input): {{tokens}}',
   'By source:',
