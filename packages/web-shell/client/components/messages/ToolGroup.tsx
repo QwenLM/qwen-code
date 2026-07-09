@@ -1083,12 +1083,15 @@ export const ToolLine = memo(function ToolLine({
       ? `${t('agent.label')} (${info.explicitAgentType})`
       : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
-    const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
+    const progressLabel =
+      tool.status === 'pending' ? t('subagent.pending') : t('subagent.running');
     const runningMeta = [progressLabel, info.elapsed]
       .filter(Boolean)
       .join(' · ');
     const completeMeta = [
-      info.subToolCount > 0 ? `${info.subToolCount} tools` : '',
+      info.subToolCount > 0
+        ? t('subagent.toolsCount', { count: info.subToolCount })
+        : '',
       info.elapsed,
       info.tokens,
       info.reason ? truncateText(info.reason, 80) : '',

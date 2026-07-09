@@ -7,6 +7,16 @@
 import { act } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+} from '@qwen-code/qwen-code-core';
 import { MemoryDialog } from './MemoryDialog.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -29,16 +39,88 @@ vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
 }));
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const fsMock = {
+    access: vi.fn(),
+    mkdir: vi.fn(),
+    readFile: vi.fn(() => Promise.reject(new Error('not found'))),
+    writeFile: vi.fn(),
+  };
+  return {
+    ...actual,
+    ...fsMock,
+    default: { ...actual, ...fsMock },
+  };
+});
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const { EventEmitter } = await import('node:events');
+  const spawnMock = vi.fn(() => {
+    const child = new EventEmitter() as EventEmitter & {
+      unref: ReturnType<typeof vi.fn>;
+    };
+    child.unref = vi.fn();
+    queueMicrotask(() => child.emit('spawn'));
+    return child;
+  });
+  return {
+    ...actual,
+    spawn: spawnMock,
+    default: { ...actual, spawn: spawnMock },
+  };
+});
+
 const mockedUseConfig = vi.mocked(useConfig);
 const mockedUseSettings = vi.mocked(useSettings);
 const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 const mockedUseKeypress = vi.mocked(useKeypress);
+const mockedSpawn = vi.mocked(spawn);
+const mockedFs = vi.mocked(fs);
+const originalPlatform = process.platform;
+
+type MockSpawnChild = EventEmitter & { unref: ReturnType<typeof vi.fn> };
+const folderOpenCommandByPlatform: Partial<Record<NodeJS.Platform, string>> = {
+  darwin: 'open',
+  win32: 'explorer',
+};
+
+function createMockSpawnChild(
+  event: 'spawn' | 'error' = 'spawn',
+  error?: Error,
+): MockSpawnChild {
+  const child = new EventEmitter() as MockSpawnChild;
+  child.unref = vi.fn();
+  queueMicrotask(() => {
+    child.emit(event, error);
+  });
+  return child;
+}
+
+function stubPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+  });
+}
+
+function expectedFolderOpenCommand(platform = process.platform): string {
+  return folderOpenCommandByPlatform[platform] ?? 'xdg-open';
+}
 
 describe('MemoryDialog', () => {
   let setAutoSkillEnabled: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('DISPLAY', ':99');
+    vi.stubEnv('QWEN_HOME', path.join(os.homedir(), '.qwen'));
+    vi.stubEnv(
+      'QWEN_CODE_MEMORY_BASE_DIR',
+      path.join(os.homedir(), '.qwen-memory-test'),
+    );
+    clearAutoMemoryRootCache();
 
     setAutoSkillEnabled = vi.fn();
     mockedUseConfig.mockReturnValue({
@@ -51,6 +133,7 @@ describe('MemoryDialog', () => {
       getManagedAutoMemoryEnabled: vi.fn(() => false),
       getManagedAutoDreamEnabled: vi.fn(() => false),
       getAutoSkillEnabled: vi.fn(() => false),
+      isManagedMemoryAvailable: vi.fn(() => true),
       setAutoSkillEnabled,
     } as never);
 
@@ -69,21 +152,185 @@ describe('MemoryDialog', () => {
   });
 
   afterEach(() => {
+    stubPlatform(originalPlatform);
+    clearAutoMemoryRootCache();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
-  it('moves selection with down arrow key events', () => {
+  it('renders managed memory folders without advertising QWEN.md', () => {
     const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
 
     expect(lastFrame()).toContain('› 1. User memory');
+    expect(lastFrame()).toContain('2. Project memory');
+    expect(lastFrame()).toContain('/memories');
+    expect(lastFrame()).toContain('/memory');
+    expect(lastFrame()).not.toContain('QWEN.md');
+    expect(lastFrame()).not.toContain('Open auto-memory folder');
+  });
+
+  it('opens managed memory folders instead of launching an editor', async () => {
+    const onClose = vi.fn();
+    const launchEditor = vi.fn();
+    mockedUseLaunchEditor.mockReturnValue(launchEditor);
+
+    render(<MemoryDialog onClose={onClose} />);
 
     const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockedSpawn).toHaveBeenCalledWith(
+      expectedFolderOpenCommand(),
+      [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
+    );
+    expect(mockedFs.mkdir).toHaveBeenCalledWith(
+      path.join(os.homedir(), '.qwen-memory-test', 'memories'),
+      { recursive: true },
+    );
+    expect(
+      (mockedSpawn.mock.results[0]?.value as MockSpawnChild).unref,
+    ).toHaveBeenCalled();
+    expect(launchEditor).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it.each(['darwin', 'win32'] as const)(
+    'opens managed memory folders on %s without display variables',
+    async (platform) => {
+      stubPlatform(platform);
+      vi.stubEnv('DISPLAY', '');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+      vi.stubEnv('MIR_SOCKET', '');
+      const onClose = vi.fn();
+      const launchEditor = vi.fn();
+      mockedUseLaunchEditor.mockReturnValue(launchEditor);
+
+      render(<MemoryDialog onClose={onClose} />);
+
+      const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+      await act(async () => {
+        keypressHandler({ name: 'return' } as never);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        expectedFolderOpenCommand(platform),
+        [path.join(os.homedir(), '.qwen-memory-test', 'memories')],
+        expect.objectContaining({ detached: true, stdio: 'ignore' }),
+      );
+      expect(launchEditor).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+    },
+  );
+
+  it('opens the project managed memory folder after moving selection down', async () => {
+    const onClose = vi.fn();
+    const launchEditor = vi.fn();
+    mockedUseLaunchEditor.mockReturnValue(launchEditor);
+    const { lastFrame } = render(<MemoryDialog onClose={onClose} />);
+
+    expect(lastFrame()).toContain('› 1. User memory');
 
     act(() => {
-      keypressHandler({ name: 'down' } as never);
+      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'down' } as never);
     });
 
     expect(lastFrame()).toContain('› 2. Project memory');
+
+    await act(async () => {
+      mockedUseKeypress.mock.calls.at(-1)![0]({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockedSpawn).toHaveBeenCalledWith(
+      expectedFolderOpenCommand(),
+      [getAutoMemoryRoot('/tmp/project')],
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
+    );
+    expect(launchEditor).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('opens the second visible item with its numeric shortcut', async () => {
+    const onClose = vi.fn();
+    render(<MemoryDialog onClose={onClose} />);
+
+    const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: '2', sequence: '2' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockedSpawn).toHaveBeenCalledWith(
+      expectedFolderOpenCommand(),
+      [getAutoMemoryRoot('/tmp/project')],
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
+    );
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('opens the managed memory index in an editor on headless Linux', async () => {
+    stubPlatform('linux');
+    vi.stubEnv('DISPLAY', '');
+    vi.stubEnv('WAYLAND_DISPLAY', '');
+    vi.stubEnv('MIR_SOCKET', '');
+    const onClose = vi.fn();
+    const launchEditor = vi.fn();
+    mockedUseLaunchEditor.mockReturnValue(launchEditor);
+
+    render(<MemoryDialog onClose={onClose} />);
+
+    const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockedSpawn).not.toHaveBeenCalled();
+    expect(mockedFs.access).toHaveBeenCalledWith(
+      path.join(
+        os.homedir(),
+        '.qwen-memory-test',
+        'memories',
+        AUTO_MEMORY_INDEX_FILENAME,
+      ),
+    );
+    expect(launchEditor).toHaveBeenCalledWith(
+      path.join(
+        os.homedir(),
+        '.qwen-memory-test',
+        'memories',
+        AUTO_MEMORY_INDEX_FILENAME,
+      ),
+    );
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('shows an error when opening a managed memory folder fails', async () => {
+    const onClose = vi.fn();
+    mockedSpawn.mockImplementationOnce(
+      () => createMockSpawnChild('error', new Error('ENOENT')) as never,
+    );
+    const { lastFrame } = render(<MemoryDialog onClose={onClose} />);
+
+    const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(lastFrame()).toContain('ENOENT');
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('moves selection with Ctrl+N/P readline aliases', () => {
@@ -270,6 +517,67 @@ describe('MemoryDialog', () => {
       false,
     );
     expect(lastFrame()).toContain('› Confirm auto-skills before saving: off');
+  });
+
+  it('keeps QWEN.md editor entries when managed memory is unavailable', async () => {
+    const launchEditor = vi.fn();
+    mockedUseLaunchEditor.mockReturnValue(launchEditor);
+    mockedUseConfig.mockReturnValue({
+      getWorkingDir: vi.fn(() => '/tmp/project'),
+      getProjectRoot: vi.fn(() => '/tmp/project'),
+      getBareMode: vi.fn(() => true),
+      isSafeMode: vi.fn(() => false),
+      getManagedAutoMemoryEnabled: vi.fn(() => false),
+      getManagedAutoDreamEnabled: vi.fn(() => false),
+      getAutoSkillEnabled: vi.fn(() => false),
+      isManagedMemoryAvailable: vi.fn(() => false),
+    } as never);
+
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    expect(lastFrame()).toContain('› 1. User memory');
+    expect(lastFrame()).toContain('Saved in ~/.qwen/QWEN.md');
+    expect(lastFrame()).toContain('2. Project memory');
+    expect(lastFrame()).toContain('Saved in QWEN.md');
+
+    const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: 'return' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(launchEditor).toHaveBeenCalledWith(
+      expect.stringMatching(/\/\.qwen\/QWEN\.md$/),
+    );
+    expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it('opens the project QWEN.md editor entry when managed memory is unavailable', async () => {
+    const launchEditor = vi.fn();
+    mockedUseLaunchEditor.mockReturnValue(launchEditor);
+    mockedUseConfig.mockReturnValue({
+      getWorkingDir: vi.fn(() => '/tmp/project'),
+      getProjectRoot: vi.fn(() => '/tmp/project'),
+      getBareMode: vi.fn(() => true),
+      isSafeMode: vi.fn(() => false),
+      getManagedAutoMemoryEnabled: vi.fn(() => false),
+      getManagedAutoDreamEnabled: vi.fn(() => false),
+      getAutoSkillEnabled: vi.fn(() => false),
+      isManagedMemoryAvailable: vi.fn(() => false),
+    } as never);
+
+    render(<MemoryDialog onClose={vi.fn()} />);
+
+    const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+    await act(async () => {
+      keypressHandler({ name: '2', sequence: '2' } as never);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(launchEditor).toHaveBeenCalledWith('/tmp/project/QWEN.md');
+    expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
   it('reflects the persisted value when the dialog is reopened (remounted)', () => {

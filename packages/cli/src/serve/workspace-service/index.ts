@@ -69,6 +69,8 @@ import type {
   WorkspaceTrustChangeRequest,
   WorkspacePermissionRulesUpdate,
   WorkspaceVoiceSettingsUpdate,
+  WorkspaceAcpPreheatResult,
+  WorkspaceAcpStatusResult,
 } from './types.js';
 
 // Re-export types for consumers.
@@ -82,6 +84,8 @@ export type {
   WorkspaceTrustDesiredState,
   WorkspacePermissionRulesUpdate,
   WorkspaceVoiceSettingsUpdate,
+  WorkspaceAcpPreheatResult,
+  WorkspaceAcpStatusResult,
   EnvReloadResult,
   ReloadResponse,
 } from './types.js';
@@ -150,6 +154,30 @@ async function verifyParentPostOpen(
   );
 }
 
+class TimeoutError extends Error {}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new TimeoutError(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timeout);
+        reject(err);
+      },
+    );
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -167,6 +195,7 @@ export function createDaemonWorkspaceService(
     persistDisabledTools,
     persistSetting,
     persistSettings,
+    preheatAcpChild: preheatAcpChildOnBridge,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
     refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
@@ -177,6 +206,7 @@ export function createDaemonWorkspaceService(
   // skill-backed slash commands (e.g. `/review`) keep autocompleting after
   // the child channel has been reaped. See `getWorkspaceSkillsStatus`.
   let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
+  let inFlightAcpPreheat: Promise<void> | undefined;
 
   // -- Facade --
   return {
@@ -254,6 +284,75 @@ export function createDaemonWorkspaceService(
         SERVE_STATUS_EXT_METHODS.workspaceProviders,
         () => createIdleWorkspaceProvidersStatus(boundWorkspace),
       );
+    },
+
+    async preheatAcpChild(
+      _ctx: WorkspaceRequestContext,
+      opts?: { timeoutMs?: number },
+    ): Promise<WorkspaceAcpPreheatResult> {
+      const startedAt = Date.now();
+      const channelLive = () => isChannelLive?.() ?? false;
+      const finish = (
+        result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
+      ): WorkspaceAcpPreheatResult => ({
+        ...result,
+        durationMs: Date.now() - startedAt,
+      });
+
+      if (channelLive()) {
+        return finish({ ready: true, channelLive: true });
+      }
+      if (!preheatAcpChildOnBridge) {
+        return finish({
+          ready: false,
+          channelLive: false,
+          reason: 'error',
+          error: 'ACP preheat is not wired',
+        });
+      }
+
+      if (!inFlightAcpPreheat) {
+        inFlightAcpPreheat = preheatAcpChildOnBridge().finally(() => {
+          inFlightAcpPreheat = undefined;
+        });
+        void inFlightAcpPreheat.catch((err) => {
+          writeStderrLine(
+            `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }
+
+      try {
+        await withTimeout(
+          inFlightAcpPreheat,
+          opts?.timeoutMs ?? 5_000,
+          'ACP preheat',
+        );
+      } catch (err) {
+        if (err instanceof TimeoutError) {
+          inFlightAcpPreheat = undefined;
+          writeStderrLine(
+            `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
+          );
+        }
+        const live = channelLive();
+        const message = err instanceof Error ? err.message : String(err);
+        return finish({
+          ready: live,
+          channelLive: live,
+          reason: err instanceof TimeoutError ? 'timeout' : 'error',
+          error: message,
+        });
+      }
+
+      const live = channelLive();
+      return finish({ ready: live, channelLive: live });
+    },
+
+    async getWorkspaceAcpStatus(
+      _ctx: WorkspaceRequestContext,
+    ): Promise<WorkspaceAcpStatusResult> {
+      return { channelLive: isChannelLive?.() ?? false };
     },
 
     async getWorkspaceEnvStatus(_ctx: WorkspaceRequestContext) {
@@ -860,6 +959,10 @@ export function createDaemonWorkspaceService(
       };
     },
 
+    invalidateWorkspaceSkillsStatus() {
+      lastWorkspaceSkillsStatus = undefined;
+    },
+
     async refreshExtensionsForAllSessions() {
       try {
         if (!refreshExtensionsForAllSessionsOnBridge) {
@@ -871,6 +974,8 @@ export function createDaemonWorkspaceService(
           `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
         );
         return { refreshed: 0, failed: 1 };
+      } finally {
+        lastWorkspaceSkillsStatus = undefined;
       }
     },
   };

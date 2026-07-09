@@ -451,11 +451,13 @@ tr:hover .selectedCell {
   background: var(--card);
 }
 
+.activeHeaderCell.frozenHeaderCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
 .evenRow .stickyActionCell,
 .evenRow .frozenCell {
-  background:
-    linear-gradient(var(--subtle-bg), var(--subtle-bg)),
-    var(--card);
+  background: linear-gradient(var(--subtle-bg), var(--subtle-bg)), var(--card);
 }
 
 tr:hover .stickyActionCell,

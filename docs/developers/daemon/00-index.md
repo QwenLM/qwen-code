@@ -78,7 +78,7 @@ Pick the path that matches your goal:
 - **PoolEntry** - `packages/core/src/tools/mcp-pool-entry.ts`. One entry in `McpTransportPool`: one MCP transport, a refcount of attached sessions, and an idle drain timer.
 - **Session scope** - `single` (one ACP session shared by all clients) or `thread` (one session per conversation thread). The default is `single`.
 - **SSE** - Server-Sent Events. The daemon outbound event channel (`GET /session/:id/events`).
-- **Workspace** - the directory the daemon was bound to at boot (`--workspace` or `cwd`). One daemon process equals one workspace.
+- **Workspace** - a directory registered at daemon boot (`--workspace` or `cwd`). `workspaceCwd` is the primary workspace; when `multi_workspace_sessions` is advertised, `workspaces[]` lists additional sessions-only runtimes.
 
 ## Implementation source anchors
 

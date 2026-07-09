@@ -7,7 +7,7 @@
 ## Responsibilities
 
 - Parse and validate `ServeOptions`: listen address, auth, workspace, session / connection caps, MCP budget / pool, CORS, prompt / SSE / session idle timeouts, rate limit, and related toggles.
-- **Canonicalize** the bound workspace exactly once. The same canonical form is shared by `/capabilities`, the `POST /session` fallback, and the bridge.
+- **Canonicalize** the primary workspace exactly once, and canonicalize every repeated `--workspace` before registering session runtimes. The primary canonical form is shared by `/capabilities.workspaceCwd`, the `POST /session` fallback, and the primary bridge.
 - Reject unsafe or invalid startup configurations: non-loopback bind without token, `--require-auth` without token, `--allow-origin '*'` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, a nonexistent or non-directory `--workspace`, and invalid timeout or rate-limit values.
 - Construct the `WorkspaceFileSystem` factory, permission audit publisher, `DaemonStatusProvider`, and `acp-bridge`.
 - Build the Express app, wire middleware (`denyBrowserOriginCors` / `allowOriginCors` -> `hostAllowlist` -> access log -> `bearerAuth` -> rate limit -> JSON parser -> telemetry -> per-route `mutationGate`), and mount session, workspace CRUD, file, device-flow auth, permission vote, and ACP HTTP routes.
@@ -123,7 +123,7 @@ Calling `createServeApp` directly returns only an `Application`; the embedder ow
 | Env             | `QWEN_SERVE_DEBUG=1`                                                                            | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                              |
 | Flags           | `--hostname`, `--port`                                                                          | Listen binding.                                                                                       |
 | Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                           | Bearer token, loopback auth hardening, and explicit shell execution switch.                           |
-| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`.                                                                            |
+| Flag            | `--workspace`                                                                                   | Overrides `process.cwd()`; repeat to register additional sessions-only workspaces.                    |
 | Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size` | Bridge / Express caps.                                                                                |
 | Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                 | Forwarded to the ACP child.                                                                           |
 | Flags           | `--allow-origin`, `--allow-private-auth-base-url`                                               | Browser CORS allowlist and localhost/private auth provider installation switch.                       |

@@ -125,6 +125,7 @@ import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
+  createWorkspaceSessionOwnerIndex,
   type WorkspaceRegistry,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
@@ -371,9 +372,9 @@ export function createServeApp(
   // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
   // only the `runQwenServe` path piped the option through.
   //
-  // The daemon is bound to exactly one workspace. The value advertised
-  // on `/capabilities`, used for the `POST /session` cwd fallback,
-  // AND passed into the bridge must be the SAME canonical form.
+  // The primary workspace value advertised on `/capabilities`, used for the
+  // `POST /session` cwd fallback, AND passed into the primary bridge must be
+  // the SAME canonical form.
   // `deps.boundWorkspace` is the pre-canonicalized fast-path from
   // `runQwenServe`; when omitted we canonicalize ourselves.
   const injectedWorkspaceRegistry = deps.workspaceRegistry;
@@ -503,6 +504,8 @@ export function createServeApp(
       reloadAvailable:
         deps.workspace !== undefined || injectedWorkspaceRegistry !== undefined,
       sessionShellCommandEnabled,
+      multiWorkspaceSessionsEnabled:
+        (injectedWorkspaceRegistry?.list().length ?? 1) > 1,
     });
   const statusProvider =
     deps.statusProvider ??
@@ -518,6 +521,9 @@ export function createServeApp(
             defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
         })
       : undefined;
+  const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
+    ? createWorkspaceSessionOwnerIndex()
+    : undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -526,8 +532,15 @@ export function createServeApp(
       ...(totalSessionAdmission
         ? { freshSessionAdmission: totalSessionAdmission.admit }
         : {}),
+      ...(defaultSessionOwnerIndex
+        ? {
+            sessionLifecycle:
+              defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
+          }
+        : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -598,6 +611,7 @@ export function createServeApp(
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+      preheatAcpChild: () => bridge.preheat(),
       refreshExtensionsForAllSessions: () =>
         bridge.refreshExtensionsForAllSessions(),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
@@ -616,20 +630,25 @@ export function createServeApp(
     });
   const workspaceRegistry =
     injectedWorkspaceRegistry ??
-    createSingleWorkspaceRegistry({
-      workspaceId: hashDaemonWorkspace(boundWorkspace),
-      workspaceCwd: boundWorkspace,
-      primary: true,
-      trusted: deps.primaryWorkspaceTrusted ?? false,
-      env: primaryRuntimeEnvMetadata ?? {
-        mode: 'parent-process',
-        overlayKeys: [],
+    createSingleWorkspaceRegistry(
+      {
+        workspaceId: hashDaemonWorkspace(boundWorkspace),
+        workspaceCwd: boundWorkspace,
+        primary: true,
+        trusted: deps.primaryWorkspaceTrusted ?? false,
+        env: primaryRuntimeEnvMetadata ?? {
+          mode: 'parent-process',
+          overlayKeys: [],
+        },
+        bridge,
+        workspaceService: workspace,
+        routeFileSystemFactory: fsFactory,
+        clientMcpSenderRegistry,
       },
-      bridge,
-      workspaceService: workspace,
-      routeFileSystemFactory: fsFactory,
-      clientMcpSenderRegistry,
-    });
+      defaultSessionOwnerIndex
+        ? { sessionOwnerIndex: defaultSessionOwnerIndex }
+        : {},
+    );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   const primaryRuntime = workspaceRegistry.primary;
@@ -753,6 +772,7 @@ export function createServeApp(
     opts,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    workspaceRegistry,
     workspace: primaryWorkspace,
     daemonLog,
     startup: deps.startup,
@@ -776,7 +796,10 @@ export function createServeApp(
     mode: opts.mode,
     currentServeFeatures,
     boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxSessionsPerWorkspace: opts.maxSessions,
+    maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     languageCodes,
   });
@@ -785,6 +808,7 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
+    mutate,
     sendBridgeError,
   });
 
@@ -815,6 +839,7 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
+    mutate,
     sendBridgeError,
   });
 
@@ -938,6 +963,7 @@ export function createServeApp(
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    workspaceRegistry,
     archiveCoordinator,
     mutate,
     sendBridgeError,
@@ -1054,12 +1080,15 @@ export function createServeApp(
 
   registerPermissionRoutes(app, {
     bridge: primaryBridge,
+    workspaceRegistry,
+    daemonLog,
     mutate,
     sendPermissionVoteError,
   });
 
   registerSseEventsRoutes(app, {
     bridge: primaryBridge,
+    workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
