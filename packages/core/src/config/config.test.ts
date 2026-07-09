@@ -6295,6 +6295,34 @@ describe('setApprovalMode with folder trust', () => {
       vi.clearAllMocks();
     });
 
+    it('should not register zvec-grep tool by default', async () => {
+      const config = new Config({ ...baseParams, useRipgrep: false });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const zvecGrepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.ZVEC_GREP,
+      );
+
+      expect(zvecGrepRegistrations.length).toBe(0);
+    });
+
+    it('should register zvec-grep tool when enabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        useRipgrep: false,
+        zvecGrepEnabled: true,
+      });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const zvecGrepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.ZVEC_GREP,
+      );
+
+      expect(zvecGrepRegistrations.length).toBe(1);
+    });
+
     it('should register grep tool when useRipgrep is true and it is available', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({ ...baseParams, useRipgrep: true });

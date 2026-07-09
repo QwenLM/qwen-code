@@ -2006,6 +2006,24 @@ describe('mergeExcludeTools', () => {
     expect(config.getPermissionsDeny()).toContain('tool_search');
   });
 
+  it('should leave zvec_grep disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isZvecGrepEnabled()).toBe(false);
+  });
+
+  it('should enable zvec_grep when tools.zvecGrep.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { zvecGrep: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isZvecGrepEnabled()).toBe(true);
+  });
+
   it('should auto-disable tool_search for deepseek-v4 models', async () => {
     process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
     const argv = await parseArguments();

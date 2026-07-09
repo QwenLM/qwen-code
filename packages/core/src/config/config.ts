@@ -891,6 +891,7 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  zvecGrepEnabled?: boolean;
   /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
@@ -1639,6 +1640,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly zvecGrepEnabled: boolean;
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1901,6 +1903,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.zvecGrepEnabled = params.zvecGrepEnabled ?? false;
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
       (params.visibleTools ?? []).filter(
@@ -4258,6 +4261,10 @@ export class Config {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
+  isZvecGrepEnabled(): boolean {
+    return this.zvecGrepEnabled;
+  }
+
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
@@ -6513,6 +6520,13 @@ export class Config {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
     });
+
+    if (this.isZvecGrepEnabled()) {
+      await registerLazy(ToolNames.ZVEC_GREP, async () => {
+        const { ZvecGrepTool } = await import('../tools/zvec-grep.js');
+        return new ZvecGrepTool(this);
+      });
+    }
 
     // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {

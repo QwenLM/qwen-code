@@ -2224,6 +2224,27 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      zvecGrep: {
+        type: 'object',
+        label: 'Zvec Grep',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings for the zvec-grep built-in search tool.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Zvec Grep',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'When enabled, registers the zvec_grep built-in tool. Disabled by default.',
+            showInDialog: false,
+          },
+        },
+      },
       shell: {
         type: 'object',
         label: 'Shell',

@@ -133,6 +133,7 @@ tmp/
 # code graph skills
 .venv
 .codegraph
+.zvec-grep/
 .qwen/computer-use/installed.json
 # Auto-generated computer-use marker can also appear under nested packages.
 **/.qwen/computer-use/

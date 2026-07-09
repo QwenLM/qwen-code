@@ -469,6 +469,7 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
   ToolNames.GREP,
+  ToolNames.ZVEC_GREP,
   ToolNames.GLOB,
   ToolNames.LS,
   ToolNames.LSP,
@@ -658,6 +659,24 @@ export function extractToolFilePaths(
             globField,
           ),
         );
+      }
+      return out;
+    }
+
+    case ToolNames.ZVEC_GREP: {
+      const pathsField = obj['paths'];
+      const globField = obj['glob'];
+      const excludeField = obj['exclude'];
+      if (Array.isArray(pathsField)) {
+        for (const item of pathsField) {
+          push(item);
+        }
+      }
+      push(globField);
+      if (Array.isArray(excludeField)) {
+        for (const item of excludeField) {
+          push(item);
+        }
       }
       return out;
     }
