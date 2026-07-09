@@ -28,9 +28,11 @@ export interface ServeDeviceFlowRuntime {
   getSupportedDeviceFlowProviders: () => DeviceFlowProviderId[];
 }
 
-export function setupDeviceFlowRegistry(
-  deps: SetupDeviceFlowRegistryDeps,
-): ServeDeviceFlowRuntime {
+export function createDeviceFlowRegistry(deps: {
+  bridge: AcpSessionBridge;
+  registry?: DeviceFlowRegistry;
+  providers?: DeviceFlowProvider[];
+}): ServeDeviceFlowRuntime {
   const deviceFlowProviderMap = new Map<
     DeviceFlowProviderId,
     DeviceFlowProvider
@@ -89,11 +91,28 @@ export function setupDeviceFlowRegistry(
       resolveProvider: (providerId) => deviceFlowProviderMap.get(providerId),
     });
 
-  setDeviceFlowRegistry(deps.app, deviceFlowRegistry);
-
   return {
     deviceFlowRegistry,
     getSupportedDeviceFlowProviders: () =>
       Array.from(deviceFlowProviderMap.keys()),
   };
+}
+
+/**
+ * Set up the primary (app-global) device-flow registry: builds the registry via
+ * {@link createDeviceFlowRegistry} and exposes it on `app.locals` for the legacy
+ * REST auth routes. Non-primary runtimes call {@link createDeviceFlowRegistry}
+ * directly so their device-flow state stays bound to their own bridge without
+ * touching `app.locals`.
+ */
+export function setupDeviceFlowRegistry(
+  deps: SetupDeviceFlowRegistryDeps,
+): ServeDeviceFlowRuntime {
+  const runtime = createDeviceFlowRegistry({
+    bridge: deps.bridge,
+    registry: deps.registry,
+    providers: deps.providers,
+  });
+  setDeviceFlowRegistry(deps.app, runtime.deviceFlowRegistry);
+  return runtime;
 }

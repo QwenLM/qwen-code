@@ -1254,6 +1254,9 @@ export function createServeApp(
   // route through the JSON error contract below.
   acpHandleRef.current = mountAcpHttp(app, primaryBridge, {
     boundWorkspace: primaryBoundWorkspace,
+    // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
+    // mounts a per-runtime ACP dispatcher for each registered workspace.
+    workspaceRegistry,
     archiveCoordinator,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,

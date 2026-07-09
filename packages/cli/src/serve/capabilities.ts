@@ -277,6 +277,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // persistence. ACP/WebSocket, auth, voice, and extensions stay on their
   // existing primary-workspace routes in this phase.
   workspace_qualified_rest_core: { since: 'v1' },
+  // Workspace-qualified ACP transport (issue #6378 Phase 4):
+  // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
+  // WebSocket) for each registered workspace, with per-runtime device-flow and
+  // reverse client-MCP. Legacy `/acp` stays bound to the primary runtime.
+  // Advertised only when the daemon hosts more than one workspace runtime.
+  workspace_qualified_acp: { since: 'v1' },
   // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
   // the Chrome extension) can host an MCP server that the daemon's agent
   // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
@@ -426,6 +432,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   [
     'multi_workspace_sessions',
+    (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
+  ],
+  [
+    'workspace_qualified_acp',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,
   ],
   ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
