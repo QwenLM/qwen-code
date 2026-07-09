@@ -108,11 +108,16 @@ For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff 
 
 A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
 
-For **local-diff and file-path reviews**, capture the diff to a file the same way before launching agents, and count its source lines yourself to choose the topology:
+For **local-diff and file-path reviews**, capture the diff to a file the same way before launching agents, and count its source lines yourself to choose the topology. Pin the same flags `fetch-pr` pins — a user's `color.diff=always` alone makes the diff unparseable, and `diff.mnemonicPrefix` rewrites every path:
 
 ```bash
-git diff > .qwen/tmp/qwen-review-local-diff.txt   # or: git diff HEAD -- <file>
+git diff --no-ext-diff --no-textconv --no-color --unified=3 \
+  --src-prefix=a/ --dst-prefix=b/ --find-renames --no-relative \
+  HEAD > .qwen/tmp/qwen-review-local-diff.txt        # staged AND unstaged
+# for a file-path review, append: -- <file>
 ```
+
+`git diff HEAD` is what covers the whole local scope; a bare `git diff` omits staged changes.
 
 If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
 
@@ -166,6 +171,7 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 
 - `diffPathAbsolute`, its own `offset` (= `startLine - 1`) and `limit` (= `endLine - startLine + 1`), and its `files[]` list. Tell it to read exactly that range, and that the surrounding chunks belong to other agents.
 - **An instruction to page.** Ordinary chunks are sized to fit one un-truncated read, but a chunk whose `oversized` flag is set is a single hunk that offered no safe place to cut, and its `chars` can exceed one read's ~25 000. Tell the agent: if the read comes back with `isTruncated`, keep calling `read_file` with a larger `offset` until it has the whole range. An agent that returns a `Covered:` receipt for a range it only half read makes the coverage guarantee a lie — which is worse than not having one.
+- **What to do when paging cannot help.** A chunk whose `maxLineChars` exceeds ~25 000 contains a single line longer than one read returns — a minified bundle, a base64 blob. Paging starts every page at a line boundary, so the tail of that line is unreachable by any `offset`. Such a chunk MUST NOT be receipted as covered. Tell the agent to return, instead of the receipt: `Uncoverable: chunk <id> — line exceeds the read limit`. Report those chunks to the user in Step 6 and do not let the verdict be Approve on their strength.
 - Permission to read the **full source files** it covers (via `read_file` on the worktree path) whenever a hunk's correctness depends on code outside the hunk. Diff context lines are three lines deep; state invariants are not. A source file over ~25 000 characters comes back with `isTruncated` set — page through it rather than reasoning from the first screenful.
 - The review focus: it owns **all** of Agents 1–6's dimensions (correctness, security, code quality, performance, test coverage, and the three adversarial personas) **for its territory only**.
 - Project-specific rules from Step 2 (if any).
@@ -182,7 +188,9 @@ Ten agents all reading the same diff multiplies redundant reading of the early h
 
 When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
 
-Give this agent the **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads), plus the file's changed line ranges, which you can read off the `chunks[].files[]` entries for that path. It reads the whole file so it can see both ends of an invariant; the changed ranges tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion). A violation counts when **at least one** of its two locations is inside a changed range.
+Give each agent the **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads), plus the file's changed line ranges, taken from **`files[].hunks[]`** in the fetch report. It reads the whole file so it can see both ends of an invariant; the changed ranges tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion). A violation counts when **at least one** of its two locations is inside a changed range.
+
+Use `files[].hunks[]`, not `chunks[].files[]`. The latter is a chunk's _coverage span_ — hunks at lines 10-12 and 900-902 merge into `10-902` — so an agent given those would treat nine hundred untouched lines as newly changed and report defects that were there before the PR.
 
 Each agent's job is to build a model of the object's mutable state and lifecycle, then walk **its own slice** of the checklist. Report a **Critical** for each violation.
 
@@ -546,7 +554,7 @@ Skip this step if the review target is not a PR, or if BOTH of the following are
 
 **Use the "Create Review" API to submit verdict + inline comments in a single call** (like Copilot Code Review). This eliminates separate summary comments — the inline comments ARE the review.
 
-**Validate every anchor before you submit, and never validate one by posting.** GitHub rejects the whole review with a 422 if any comment's `(path, line)` falls outside every hunk of that file. The fetch report's `files[]` carries each file's `hunks[]` as new-side `newStart`/`newEnd` ranges, so the check is a lookup: an anchor is valid iff its `line` falls inside one of the ranges for its `path`. Do this for every comment, and drop or relocate the ones that fail, **before** the single Create Review call.
+**Validate every anchor before you submit, and never validate one by posting.** GitHub rejects the whole review with a 422 if any comment's `(path, line)` falls outside every hunk of that file. The fetch report's `files[]` carries each file's `hunks[]` as new-side `newStart`/`newEnd` ranges, so the check is a lookup: an anchor is valid iff its `line` falls inside one of the ranges for its `path`. Pure-deletion hunks are already omitted from that list — they hold no right-side line, and the review never sets `side`, so nothing can be anchored in them. Do this for every comment, and drop or relocate the ones that fail, **before** the single Create Review call.
 
 Do **not** submit a review — with a placeholder body, a one-character body, or any body at all — merely to discover whether an anchor sticks. Each such attempt is a permanent, public review on someone's pull request. This has happened: a run against a real PR left five reviews carrying the bodies `Test`, `Test`, `t`, `t`, `t` before submitting the real one. One Create Review call, after the lookup, is the only write this step makes.
 

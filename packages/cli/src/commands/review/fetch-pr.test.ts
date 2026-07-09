@@ -107,7 +107,10 @@ describe('classifyHeavy', () => {
     ).toBe(false);
   });
 
-  it('handles a deleted file (post-image has no lines)', () => {
+  it('never flags a deleted file, which has no post-image to read', () => {
+    // 900 changed lines clears the volume threshold, but the invariant agents
+    // are told to read the post-change file — and there isn't one. Launching
+    // three of them against nothing is pure waste.
     const r = classifyHeavy({
       preLines: 900,
       fileLines: 0,
@@ -116,10 +119,7 @@ describe('classifyHeavy', () => {
       kind: 'source',
     });
     expect(r.rewriteRatio).toBe(0);
-    // 900 changed lines clears the volume threshold, so it is still heavy —
-    // but a deletion has no post-image to read, so Step 3B skips it. The
-    // metric is honest; the skill decides what to do with it.
-    expect(r.heavy).toBe(true);
+    expect(r.heavy).toBe(false);
   });
 
   it('never flags a test or generated file', () => {

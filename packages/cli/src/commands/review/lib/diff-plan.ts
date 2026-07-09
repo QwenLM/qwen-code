@@ -31,6 +31,13 @@ export interface DiffHunk {
   /** Range within the post-change ("+") side of the source file. */
   newStart: number;
   newEnd: number;
+  /**
+   * How many lines the hunk occupies on the new side. Zero for a pure deletion
+   * (`@@ -3,4 +2,0 @@`): the range is then empty and no RIGHT-side inline
+   * comment can be anchored inside it. GitHub answers such an anchor with a 422
+   * that sinks the entire review.
+   */
+  newCount: number;
 }
 
 /**
@@ -82,8 +89,17 @@ export interface DiffChunk {
   startLine: number;
   endLine: number;
   lines: number;
-  /** Characters in the range. Above ~25 000 a single `read_file` truncates. */
+  /** Characters in the range. Above `READ_FILE_CHAR_CAP` one read truncates. */
   chars: number;
+  /**
+   * Longest single line in the range.
+   *
+   * Paging recovers a chunk that is merely long, because `read_file` takes a
+   * line `offset`. It cannot recover a single *line* longer than the read cap:
+   * every page starts at a line boundary, so the tail of that line is
+   * unreachable. Such a chunk cannot honestly be receipted as fully reviewed.
+   */
+  maxLineChars: number;
   /**
    * True when this chunk is a single hunk that exceeds `maxChunkLines` or
    * `MAX_CHUNK_CHARS` and offered no safe interior boundary to split on. Such
@@ -127,6 +143,12 @@ export const DEFAULT_MAX_CHUNK_LINES = 400;
  * one minified or long-line file would blow past 25 000, so bound both.
  */
 export const MAX_CHUNK_CHARS = 20_000;
+
+/**
+ * What one `read_file` call returns before it truncates and sets `isTruncated`
+ * (`Config.getTruncateToolOutputThreshold()`, default 25 000).
+ */
+export const READ_FILE_CHAR_CAP = 25_000;
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
@@ -290,26 +312,33 @@ export function parseDiff(diffText: string): {
       cur.binary = true;
       continue;
     }
-    // A rename states its new path outright, and without an `a/`/`b/` prefix.
-    if (line.startsWith('rename to ')) {
-      cur.path = unquote(line.slice('rename to '.length));
-      continue;
-    }
-    // `diff --git a/x b/x` is ambiguous when a path contains a space (git only
-    // C-quotes non-ASCII and control bytes, not spaces), so prefer the
-    // unambiguous `+++` / `---` headers. For a deletion `+++` is `/dev/null`,
-    // and the old path from `---` is the right label.
-    if (line.startsWith('--- ')) {
-      const p = line.slice(4);
-      if (p !== '/dev/null') oldPath = cleanPath(p);
-      continue;
-    }
-    if (line.startsWith('+++ ')) {
-      const p = line.slice(4);
-      if (p !== '/dev/null') cur.path = cleanPath(p);
-      else if (oldPath) cur.path = oldPath;
-      cur.kind = classifyPath(cur.path);
-      continue;
+    // Metadata only exists BEFORE the first hunk of a file. Inside a hunk body
+    // a removed line whose content starts with `-- ` is emitted as `--- ...`,
+    // and an added line whose content starts with `++ ` as `+++ ...` — SQL and
+    // Lua comments, for instance. Treating those as headers overwrites the
+    // file's path and swallows the line from the add/remove counts.
+    if (!curHunk) {
+      if (line.startsWith('rename to ')) {
+        // A rename states its new path outright, without an `a/`/`b/` prefix.
+        cur.path = unquote(line.slice('rename to '.length));
+        continue;
+      }
+      // `diff --git a/x b/x` is ambiguous when a path contains a space (git
+      // only C-quotes non-ASCII and control bytes, not spaces), so prefer the
+      // unambiguous `+++` / `---` headers. For a deletion `+++` is `/dev/null`,
+      // and the old path from `---` is the right label.
+      if (line.startsWith('--- ')) {
+        const p = line.slice(4);
+        if (p !== '/dev/null') oldPath = cleanPath(p);
+        continue;
+      }
+      if (line.startsWith('+++ ')) {
+        const p = line.slice(4);
+        if (p !== '/dev/null') cur.path = cleanPath(p);
+        else if (oldPath) cur.path = oldPath;
+        cur.kind = classifyPath(cur.path);
+        continue;
+      }
     }
 
     const hm = HUNK_RE.exec(line);
@@ -320,10 +349,12 @@ export function parseDiff(diffText: string): {
       curHunk = {
         diffStart: n,
         diffEnd: n,
-        // A pure deletion hunk is `+N,0`: it occupies no new-side lines. Clamp
-        // to an empty range anchored at N so consumers never see newEnd < 0.
+        // A pure deletion hunk is `+N,0`: it occupies no new-side lines. Keep
+        // `newStart`/`newEnd` clamped so chunk labelling stays sane, and let
+        // `newCount` be the authority on whether the range is real.
         newStart,
         newEnd: newCount === 0 ? newStart : newStart + newCount - 1,
+        newCount,
       };
       cur.hunks.push(curHunk);
       continue;
@@ -369,10 +400,11 @@ function isSafeSplitPoint(lines: string[], n: number): boolean {
   const cur = lines[n - 1];
   const prev = lines[n - 2];
   if (cur === undefined || prev === undefined) return false;
-  // The segment must *start* on a line that exists in the post-change file:
-  // a `-` line is old-side only, so a boundary there does not correspond to a
-  // top-level declaration in the file an invariant agent will later read.
-  if (!/^[+ ]/.test(cur) || !/^[+\- ]/.test(prev)) return false;
+  // Both lines must exist in the post-change file — that is the file an agent
+  // reads, and the claim being made is about *it*: a top-level declaration
+  // preceded by a blank line. A `-` line is old-side only, so neither the
+  // declaration nor the blank line before it can be one.
+  if (!/^[+ ]/.test(cur) || !/^[+ ]/.test(prev)) return false;
   const content = cur.slice(1);
   if (content.length === 0 || /^\s/.test(content)) return false;
   return /^\s*$/.test(prev.slice(1));
@@ -537,6 +569,11 @@ export function planChunks(
     if (cur) {
       cur.lines = cur.endLine - cur.startLine + 1;
       cur.chars = charsIn(prefix, cur.startLine, cur.endLine);
+      let widest = 0;
+      for (let n = cur.startLine; n <= cur.endLine; n++) {
+        if (lines[n - 1].length > widest) widest = lines[n - 1].length;
+      }
+      cur.maxLineChars = widest;
       chunks.push(cur);
       cur = null;
     }
@@ -560,6 +597,7 @@ export function planChunks(
         endLine: u.end,
         lines: uLines,
         chars: 0, // set in flush(), once the chunk's final range is known
+        maxLineChars: 0, // ditto
         oversized:
           uLines > maxChunkLines ||
           charsIn(prefix, u.start, u.end) > MAX_CHUNK_CHARS,
@@ -596,6 +634,18 @@ export function buildDiffPlan(
     files
       .filter((f) => f.kind === kind)
       .reduce((n, f) => n + (f.diffEnd - f.diffStart + 1), 0);
+  const chunks = planChunks(files, lines, maxChunkLines);
+  // The tiling invariant is the whole point: every diff line belongs to exactly
+  // one chunk, so a missing coverage receipt means a territory nobody read. It
+  // was only ever asserted in tests. A parser regression would have shipped a
+  // plan with a hole in it and the review would have reported "no blockers"
+  // over the gap. Fail loudly instead.
+  if (!chunksCoverDiff(chunks, diffLines)) {
+    throw new Error(
+      `diff-plan: chunks do not tile the diff (${chunks.length} chunks over ` +
+        `${diffLines} lines). Refusing to plan a review with a coverage hole.`,
+    );
+  }
   return {
     diffLines,
     diffChars: diffText.length,
@@ -603,7 +653,7 @@ export function buildDiffPlan(
     testDiffLines: linesOf('test'),
     generatedDiffLines: linesOf('generated'),
     files,
-    chunks: planChunks(files, lines, maxChunkLines),
+    chunks,
   };
 }
 

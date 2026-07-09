@@ -10,6 +10,9 @@
 
 import { execFileSync } from 'node:child_process';
 
+/** Deadline for a single `git` invocation. Generous; a hang must still end. */
+const GIT_TIMEOUT_MS = 120_000;
+
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
   return execFileSync('git', args, { encoding: 'utf8' })
@@ -56,5 +59,9 @@ export function gitRaw(...args: string[]): Buffer {
   return execFileSync('git', args, {
     maxBuffer: 512 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Without a deadline a hung `git` — a credential prompt on headless CI, a
+    // stalled network fetch, a corrupt pack — blocks the event loop forever,
+    // indistinguishable from a deadlock and with no diagnostic.
+    timeout: GIT_TIMEOUT_MS,
   });
 }

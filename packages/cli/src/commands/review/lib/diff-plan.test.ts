@@ -204,6 +204,55 @@ describe('parseDiff', () => {
     expect(parseDiff(diff).files[0].path).toBe('d/new name.ts');
   });
 
+  it('does not read a hunk payload line as a `---` / `+++` header', () => {
+    // Verbatim `git diff`: deleting a line whose content is `-- old comment`
+    // emits `--- old comment`; adding one whose content is `++ plus line`
+    // emits `+++ plus line`. SQL, Lua and Haskell comments start with `-- `.
+    // Reading those as headers overwrote the file's path and swallowed the
+    // line from the add/remove counts.
+    const diff = [
+      'diff --git a/c.txt b/c.txt',
+      '--- a/c.txt',
+      '+++ b/c.txt',
+      '@@ -1 +1,2 @@',
+      ' x',
+      '+++ plus line',
+      'diff --git a/q.sql b/q.sql',
+      '--- a/q.sql',
+      '+++ b/q.sql',
+      '@@ -1,2 +1 @@',
+      '--- old comment',
+      '-SELECT 1;',
+      '+SELECT 2;',
+    ].join('\n');
+
+    const { files } = parseDiff(diff);
+    expect(files.map((f) => f.path)).toEqual(['c.txt', 'q.sql']);
+    expect(files[0].addedLines).toBe(1); // `+++ plus line` is payload, not metadata
+    expect(files[1].removedLines).toBe(2); // `--- old comment` and `-SELECT 1;`
+    expect(files[1].addedLines).toBe(1);
+  });
+
+  it('records how many new-side lines each hunk occupies', () => {
+    const diff = [
+      'diff --git a/x.ts b/x.ts',
+      '--- a/x.ts',
+      '+++ b/x.ts',
+      '@@ -1,3 +1,2 @@',
+      ' keep',
+      '-gone',
+      ' keep2',
+      '@@ -10,2 +9,0 @@',
+      '-only',
+      '-deletions',
+    ].join('\n');
+    const h = parseDiff(diff).files[0].hunks;
+    expect(h[0].newCount).toBe(2);
+    // A `+9,0` hunk occupies no new-side line: nothing can be anchored there,
+    // and Step 7 must not offer it as a RIGHT-side comment target.
+    expect(h[1].newCount).toBe(0);
+  });
+
   it('marks binary sections and gives them no hunks', () => {
     const diff = [
       'diff --git a/logo.png b/logo.png',
@@ -323,6 +372,34 @@ describe('planChunks', () => {
     }
     // The one over-budget segment is the unavoidable wall; the rest are bounded.
     expect(plan.chunks.filter((c) => c.lines > 400)).toHaveLength(1);
+  });
+
+  it('does not treat a deleted blank line as the blank before a declaration', () => {
+    // The heuristic claims "a top-level declaration preceded by a blank line".
+    // Both must exist in the post-change file. A `-` blank exists only in the
+    // old one, so it is no evidence about what precedes the declaration in the
+    // file an agent will read.
+    const blk = (i: number) => [
+      `+function f${i}() {`,
+      ...Array.from({ length: 28 }, (_, k) => `+  const x${k} = ${k};`),
+      '+}',
+      '-', // a blank line the change DELETES — not a new-file blank
+    ];
+    const hunkBody = Array.from({ length: 20 }, (_, i) => blk(i)).flat();
+    const diff = [
+      'diff --git a/src/x.ts b/src/x.ts',
+      '--- a/src/x.ts',
+      '+++ b/src/x.ts',
+      `@@ -1,${hunkBody.length} +1,${hunkBody.length} @@`,
+      ...hunkBody,
+    ].join('\n');
+
+    const plan = buildDiffPlan(diff, 200);
+    expect(chunksCoverDiff(plan.chunks, plan.diffLines)).toBe(true);
+    // Every candidate is preceded only by a deleted blank, so none qualifies:
+    // the hunk stays whole rather than being cut on false evidence.
+    expect(plan.chunks).toHaveLength(1);
+    expect(plan.chunks[0].oversized).toBe(true);
   });
 
   it('never starts a chunk on a deleted line', () => {
@@ -524,6 +601,7 @@ describe('chunksCoverDiff', () => {
             endLine: 5,
             lines: 5,
             chars: 0,
+            maxLineChars: 0,
             oversized: false,
             files: [],
           },
@@ -533,6 +611,7 @@ describe('chunksCoverDiff', () => {
             endLine: 9,
             lines: 3,
             chars: 0,
+            maxLineChars: 0,
             oversized: false,
             files: [],
           },
@@ -550,6 +629,7 @@ describe('chunksCoverDiff', () => {
         endLine: 5,
         lines: 5,
         chars: 0,
+        maxLineChars: 0,
         oversized: false,
         files: [],
       },
@@ -559,6 +639,7 @@ describe('chunksCoverDiff', () => {
         endLine: 9,
         lines: 5,
         chars: 0,
+        maxLineChars: 0,
         oversized: false,
         files: [],
       },
@@ -571,6 +652,7 @@ describe('chunksCoverDiff', () => {
         endLine: 5,
         lines: 5,
         chars: 0,
+        maxLineChars: 0,
         oversized: false,
         files: [],
       },

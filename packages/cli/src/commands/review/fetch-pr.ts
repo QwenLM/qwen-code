@@ -77,6 +77,8 @@ interface FetchPrResult {
   diffStat: { files: number; additions: number; deletions: number };
   /** Merge-base of the PR head and its base branch — the diff's left side. */
   mergeBaseSha: string | null;
+  /** True when the base branch could not be fetched; `mergeBaseSha` may be stale. */
+  baseFetchFailed: boolean;
   /** Project-relative path to the captured diff (null if capture failed). */
   diffPath: string | null;
   /** Absolute path — `read_file` rejects relative paths. Agents use this. */
@@ -103,11 +105,14 @@ interface FileMetric {
   /**
    * New-side line ranges this file's hunks occupy, 1-based inclusive.
    *
-   * Step 7 anchors an inline comment at `(path, line)`, and GitHub rejects the
-   * whole review with a 422 if any line falls outside every hunk. Shipping the
-   * ranges here makes that check a lookup. Without it the model has been seen
-   * probing GitHub instead — posting throwaway reviews to discover which
-   * anchors stick, which leaves junk comments on the PR.
+   * Two uses, both exact. Step 7 anchors an inline comment at `(path, line)`
+   * and GitHub rejects the whole review with a 422 if any line falls outside
+   * every hunk, so validation is a lookup here rather than trial-and-error
+   * against the API. Step 3B's whole-file invariant agents use the same ranges
+   * to know which lines are *new*, so they do not report pre-existing defects.
+   *
+   * Pure-deletion hunks (`@@ -3,4 +2,0 @@`) are omitted: they occupy no new-side
+   * line, nothing can be anchored in them, and nothing in them is new.
    */
   hunks: Array<{ newStart: number; newEnd: number }>;
   addedLines: number;
@@ -167,6 +172,9 @@ export function classifyHeavy(input: {
   const heavy =
     !binary &&
     kind === 'source' &&
+    // A deletion clears the volume threshold trivially but has no post-image,
+    // and the whole-file invariant agents are told to read exactly that.
+    fileLines > 0 &&
     preLines >= HEAVY_MIN_PRE_LINES &&
     (exactRatio >= HEAVY_REWRITE_RATIO || changedLines >= HEAVY_CHANGED_LINES);
   return { rewriteRatio: Math.round(exactRatio * 100) / 100, heavy };
@@ -208,7 +216,9 @@ function fileMetrics(plan: DiffPlan, headSha: string): FileMetric[] {
     return {
       path: f.path,
       kind: f.kind,
-      hunks: f.hunks.map((h) => ({ newStart: h.newStart, newEnd: h.newEnd })),
+      hunks: f.hunks
+        .filter((h) => h.newCount > 0)
+        .map((h) => ({ newStart: h.newStart, newEnd: h.newEnd })),
       addedLines: f.addedLines,
       removedLines: f.removedLines,
       changedLines,
@@ -232,14 +242,18 @@ function resolveMergeBase(
   remote: string,
   baseRefName: string,
   headRef: string,
-): string | null {
-  gitOpt('fetch', remote, baseRefName);
+): { sha: string | null; baseFetchFailed: boolean } {
+  // A failed fetch is not fatal — a local tracking ref may still exist — but it
+  // may be stale. If the base branch was force-pushed, `merge-base` resolves
+  // against the old tip and the review silently examines the wrong diff, in a
+  // report that looks structurally complete. Say so.
+  const baseFetchFailed = gitOpt('fetch', remote, baseRefName) === null;
   for (const candidate of [`${remote}/${baseRefName}`, baseRefName]) {
     if (!refExists(candidate)) continue;
     const mb = gitOpt('merge-base', candidate, headRef);
-    if (mb) return mb;
+    if (mb) return { sha: mb, baseFetchFailed };
   }
-  return null;
+  return { sha: null, baseFetchFailed };
 }
 
 function tryRemove(action: () => void): void {
@@ -333,7 +347,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // 5. Capture the diff to a file and partition it. Written as raw bytes:
   //    CRLF normalisation would rewrite every hunk of a CRLF file, and the
   //    diff must keep its trailing newline to stay a valid patch.
-  const mergeBaseSha = resolveMergeBase(remote, meta.baseRefName, ref);
+  const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
+    remote,
+    meta.baseRefName,
+    ref,
+  );
+  if (baseFetchFailed) {
+    writeStderrLine(
+      `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
+        `is resolved from a possibly stale local ref, so the diff may not be ` +
+        `the one under review.`,
+    );
+  }
   const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');
   let diffPath: string | null = null;
   let diffPathAbsolute: string | null = null;
@@ -354,6 +379,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         '--unified=3',
         '--src-prefix=a/',
         '--dst-prefix=b/',
+        // `diff.renames=false` would report a move as delete + add, so the new
+        // path's `preLines` would derive to 0 and a wholesale rewrite would
+        // never be flagged heavy. `diff.relative` would strip the repo prefix
+        // from every path when the command runs from a subdirectory.
+        '--find-renames',
+        '--no-relative',
         `${mergeBaseSha}..${fetchedSha}`,
       );
       writeFileSync(diffRel, buf);
@@ -388,6 +419,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       deletions: meta.deletions,
     },
     mergeBaseSha,
+    baseFetchFailed,
     diffPath,
     diffPathAbsolute,
     diffLines: plan.diffLines,
