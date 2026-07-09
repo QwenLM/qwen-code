@@ -4702,19 +4702,13 @@ class QwenAgent implements Agent {
     if (sessions.length === 0) {
       return;
     }
-    const results = await Promise.allSettled(
+    await Promise.all(
       sessions.map((session) =>
         refreshMemoryInstruction(session.getConfig(), {
           logContext: `${logContext} session ${session.getId()}`,
         }),
       ),
     );
-    const failedCount = results.filter((r) => r.status === 'rejected').length;
-    if (failedCount > 0) {
-      debugLogger.warn(
-        `${logContext}: memory refresh failed for ${failedCount}/${results.length} live session(s)`,
-      );
-    }
   }
 
   private buildSessionContextStatus(

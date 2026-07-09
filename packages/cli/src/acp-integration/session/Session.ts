@@ -4170,88 +4170,56 @@ export class Session implements SessionContext {
     };
 
     const parts: Part[] = [];
-    for (const batch of batches) {
-      if (batch.kind === 'duplicate') {
-        await emitDuplicateBatch(batch);
-        parts.push(...batch.response.responseParts);
-        continue;
-      }
-      if (batch.concurrent && batch.calls.length > 1) {
-        const batchAbortController = new AbortController();
-        let batchStopAfterPermissionCancel = false;
-        const propagateAbort = () => {
-          batchAbortController.abort(abortSignal.reason);
-        };
-        if (abortSignal.aborted) {
-          propagateAbort();
-        } else {
-          abortSignal.addEventListener('abort', propagateAbort, {
-            once: true,
-          });
+    try {
+      for (const batch of batches) {
+        if (batch.kind === 'duplicate') {
+          await emitDuplicateBatch(batch);
+          parts.push(...batch.response.responseParts);
+          continue;
         }
-        const stopBatchAfterPermissionCancel = () => {
-          batchStopAfterPermissionCancel = true;
-          batchAbortController.abort(USER_CANCEL_ABORT_REASON);
-        };
-        let results: RunToolResult[];
-        try {
-          results = await runBounded(
-            batch.calls,
-            batchAbortController.signal,
-            stopBatchAfterPermissionCancel,
-            () => batchAbortController.abort('loop_detected'),
-            () => batchStopAfterPermissionCancel,
-          );
-        } finally {
-          abortSignal.removeEventListener('abort', propagateAbort);
-        }
-        let shouldStop = false;
-        let shouldStopForLoop = false;
-        for (const r of results) {
-          parts.push(...r.parts);
-          collectMemoryWriteCandidates(r);
-          shouldStop ||= r.stopAfterPermissionCancel;
-          shouldStopForLoop ||= r.loopDetected === true;
-        }
-        if (shouldStopForLoop) {
-          await appendSkippedAfter(
-            parts,
-            batch.calls[batch.calls.length - 1],
-            LOOP_DETECTED_SKIP_MESSAGE,
-          );
-          await refreshMemoryIfNeeded();
-          return {
-            parts,
-            stopAfterPermissionCancel: false,
-            loopDetected: true,
-            memoryWriteCandidates,
+        if (batch.concurrent && batch.calls.length > 1) {
+          const batchAbortController = new AbortController();
+          let batchStopAfterPermissionCancel = false;
+          const propagateAbort = () => {
+            batchAbortController.abort(abortSignal.reason);
           };
-        }
-        if (shouldStop) {
-          await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          await refreshMemoryIfNeeded();
-          return {
-            parts,
-            stopAfterPermissionCancel: true,
-            repeatedDuplicateProviderToolCall: false,
-            memoryWriteCandidates,
+          if (abortSignal.aborted) {
+            propagateAbort();
+          } else {
+            abortSignal.addEventListener('abort', propagateAbort, {
+              once: true,
+            });
+          }
+          const stopBatchAfterPermissionCancel = () => {
+            batchStopAfterPermissionCancel = true;
+            batchAbortController.abort(USER_CANCEL_ABORT_REASON);
           };
-        }
-      } else {
-        for (const fc of batch.calls) {
-          const r = await this.runTool(
-            abortSignal,
-            promptId,
-            fc,
-            undefined,
-            toolLoopState,
-            recordSkippedToolCall,
-          );
-          parts.push(...r.parts);
-          collectMemoryWriteCandidates(r);
-          if (r.loopDetected) {
-            await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
-            await refreshMemoryIfNeeded();
+          let results: RunToolResult[];
+          try {
+            results = await runBounded(
+              batch.calls,
+              batchAbortController.signal,
+              stopBatchAfterPermissionCancel,
+              () => batchAbortController.abort('loop_detected'),
+              () => batchStopAfterPermissionCancel,
+            );
+          } finally {
+            abortSignal.removeEventListener('abort', propagateAbort);
+          }
+          let shouldStop = false;
+          let shouldStopForLoop = false;
+          for (const r of results) {
+            parts.push(...r.parts);
+            collectMemoryWriteCandidates(r);
+            shouldStop ||= r.stopAfterPermissionCancel;
+            shouldStopForLoop ||= r.loopDetected === true;
+          }
+          if (shouldStopForLoop) {
+            await appendSkippedAfter(
+              parts,
+              batch.calls[batch.calls.length - 1],
+              LOOP_DETECTED_SKIP_MESSAGE,
+            );
             return {
               parts,
               stopAfterPermissionCancel: false,
@@ -4259,9 +4227,11 @@ export class Session implements SessionContext {
               memoryWriteCandidates,
             };
           }
-          if (r.stopAfterPermissionCancel) {
-            await appendSkippedAfter(parts, fc);
-            await refreshMemoryIfNeeded();
+          if (shouldStop) {
+            await appendSkippedAfter(
+              parts,
+              batch.calls[batch.calls.length - 1],
+            );
             return {
               parts,
               stopAfterPermissionCancel: true,
@@ -4269,16 +4239,48 @@ export class Session implements SessionContext {
               memoryWriteCandidates,
             };
           }
+        } else {
+          for (const fc of batch.calls) {
+            const r = await this.runTool(
+              abortSignal,
+              promptId,
+              fc,
+              undefined,
+              toolLoopState,
+              recordSkippedToolCall,
+            );
+            parts.push(...r.parts);
+            collectMemoryWriteCandidates(r);
+            if (r.loopDetected) {
+              await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
+              return {
+                parts,
+                stopAfterPermissionCancel: false,
+                loopDetected: true,
+                memoryWriteCandidates,
+              };
+            }
+            if (r.stopAfterPermissionCancel) {
+              await appendSkippedAfter(parts, fc);
+              return {
+                parts,
+                stopAfterPermissionCancel: true,
+                repeatedDuplicateProviderToolCall: false,
+                memoryWriteCandidates,
+              };
+            }
+          }
         }
       }
+      return {
+        parts,
+        stopAfterPermissionCancel: false,
+        repeatedDuplicateProviderToolCall: false,
+        memoryWriteCandidates,
+      };
+    } finally {
+      await refreshMemoryIfNeeded();
     }
-    await refreshMemoryIfNeeded();
-    return {
-      parts,
-      stopAfterPermissionCancel: false,
-      repeatedDuplicateProviderToolCall: false,
-      memoryWriteCandidates,
-    };
   }
 
   /**
