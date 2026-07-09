@@ -1111,4 +1111,65 @@ describe('BackgroundTasksDialog', () => {
       expect(frame).toContain('no longer running');
     });
   });
+
+  describe('subagent observability (issue #6569)', () => {
+    it('renders the newest activity in full across wrapped lines instead of truncating', () => {
+      // A command far wider than the 80-col harness terminal. The tail
+      // marker can only appear in the frame if the live row wraps instead
+      // of truncating to one line.
+      const longCommand = `git log --format='%H %s' --since='2 weeks ago' -- packages/core/src/agents packages/cli/src/ui/components/background-view END_OF_COMMAND`;
+      const running = entry({
+        recentActivities: [
+          { name: 'read_file', description: 'old-read.ts', at: 1 },
+          { name: 'run_shell_command', description: longCommand, at: 2 },
+        ],
+      });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(frame).toContain('END_OF_COMMAND');
+    });
+
+    it('still truncates non-live activity rows to one line', () => {
+      const longOldCommand = `find . -name '*.ts' -not -path './node_modules/*' -exec grep -l 'subagent' {} + OLD_COMMAND_TAIL`;
+      const running = entry({
+        recentActivities: [
+          { name: 'run_shell_command', description: longOldCommand, at: 1 },
+          { name: 'read_file', description: 'src/index.ts', at: 2 },
+        ],
+      });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = (h.lastFrame() ?? '').replace(/\n\s*/g, ' ');
+      expect(frame).not.toContain('OLD_COMMAND_TAIL');
+      expect(frame).toContain('src/index.ts');
+    });
+
+    it('shows the Transcript section with the JSONL trace path', () => {
+      const running = entry({ outputFile: '/tmp/subagents/agent-abc.jsonl' });
+      const h = setup([running]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).toContain('Transcript');
+      expect(frame).toContain('/tmp/subagents/agent-abc.jsonl');
+    });
+
+    it('renders up to 10 progress rows in the detail view', () => {
+      const activities = Array.from({ length: 12 }, (_, i) => ({
+        name: 'read_file',
+        description: `file-${i}.ts`,
+        at: i,
+      }));
+      const h = setup([entry({ recentActivities: activities })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+      expect(frame).not.toContain('file-1.ts');
+      expect(frame).toContain('file-2.ts');
+      expect(frame).toContain('file-11.ts');
+    });
+  });
 });

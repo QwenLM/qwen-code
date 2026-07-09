@@ -24,7 +24,11 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
+import {
+  ToolDisplayNames,
+  ToolNames,
+  ToolNamesMigration,
+} from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -58,6 +62,16 @@ const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
     .filter(([, canonical]) => canonical === ToolNames.AGENT)
     .map(([legacy]) => legacy),
 ]);
+
+// Internal-tool-name → display-name lookup (`run_shell_command` → `Shell`).
+// Mirrors the maps in LiveAgentPanel / BackgroundTasksDialog so the approval
+// context lines use the same vocabulary as the other subagent surfaces.
+const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
+  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
+    ToolNames[key],
+    ToolDisplayNames[key],
+  ]),
+);
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -281,6 +295,46 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
+ * The last few tool calls the subagent made before parking a permission
+ * request — rendered between the "Approval requested by" header and the
+ * confirmation prompt so the user can judge WHY the agent wants to run
+ * this call instead of approving an isolated command blind (the
+ * permission-context ask of issue #6569).
+ */
+const SubagentApprovalContext: React.FC<{
+  data: AgentResultDisplay;
+}> = ({ data }) => {
+  const priorCalls = (data.toolCalls ?? [])
+    .filter((call) => call.status !== 'awaiting_approval')
+    .slice(-3);
+  if (priorCalls.length === 0) return null;
+  return (
+    <Box flexDirection="column">
+      {priorCalls.map((call) => {
+        const glyph =
+          call.status === 'failed'
+            ? '✖'
+            : call.status === 'success'
+              ? '✔'
+              : '○';
+        const displayName = localizeToolDisplayName(
+          TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
+        );
+        const desc = (call.description ?? '').replace(/\s*\n\s*/g, ' ').trim();
+        const label = desc ? `${displayName} ${desc}` : displayName;
+        return (
+          <Box key={call.callId}>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {`  ${glyph} ${escapeAnsiCtrlCodes(label)}`}
+            </Text>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
+
+/**
  * Component to render subagent execution results.
  *
  * The verbose inline frame has been retired. Three surfaces remain:
@@ -334,6 +388,7 @@ const SubagentExecutionRenderer: React.FC<{
           </Text>
           <Text color={theme.text.secondary}>:</Text>
         </Box>
+        <SubagentApprovalContext data={data} />
         <ToolConfirmationMessage
           confirmationDetails={data.pendingConfirmation}
           isFocused={isFocused}

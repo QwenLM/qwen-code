@@ -430,6 +430,12 @@ describe('<ToolMessage />', () => {
         pendingConfirmation?: object;
         terminateReason?: string;
         executionSummary?: object;
+        toolCalls?: Array<{
+          callId: string;
+          name: string;
+          status: 'executing' | 'awaiting_approval' | 'success' | 'failed';
+          description?: string;
+        }>;
       };
       isFocused?: boolean;
       isPending?: boolean;
@@ -663,6 +669,70 @@ describe('<ToolMessage />', () => {
       expect(output).toContain('Approval requested by');
       expect(output).toContain('fg-agent');
       expect(output).toContain('MockApprovalPrompt');
+    });
+
+    it('focused approval shows the last three prior tool calls as context', () => {
+      // Permission-context ask of issue #6569: the user should see what
+      // the subagent was doing before it parked this request, not an
+      // isolated command. The call awaiting approval itself is excluded
+      // (the confirmation prompt below already shows it in full).
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'fg-agent',
+              taskDescription: 'Investigate flaky test',
+              taskPrompt: 'Investigate',
+              status: 'running',
+              pendingConfirmation: {} as object,
+              toolCalls: [
+                {
+                  callId: 'c1',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'vitest.config.ts',
+                },
+                {
+                  callId: 'c2',
+                  name: 'read_file',
+                  status: 'success',
+                  description: 'flaky.test.ts',
+                },
+                {
+                  callId: 'c3',
+                  name: 'run_shell_command',
+                  status: 'failed',
+                  description: 'npx vitest run flaky.test.ts',
+                },
+                {
+                  callId: 'c4',
+                  name: 'run_shell_command',
+                  status: 'success',
+                  description: 'git log --oneline -5',
+                },
+                {
+                  callId: 'c5',
+                  name: 'run_shell_command',
+                  status: 'awaiting_approval',
+                  description: 'git checkout HEAD~1',
+                },
+              ],
+            },
+            isFocused: true,
+          })}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Approval requested by');
+      // Last three prior calls, oldest dropped.
+      expect(output).not.toContain('vitest.config.ts');
+      expect(output).toContain('flaky.test.ts');
+      expect(output).toContain('✖');
+      expect(output).toContain('npx vitest run flaky.test.ts');
+      expect(output).toContain('git log --oneline -5');
+      // The awaiting call is not repeated above the prompt.
+      expect(output).not.toContain('git checkout HEAD~1');
     });
 
     it('pendingConfirmation && !isFocused → renders queued marker (one-line)', () => {

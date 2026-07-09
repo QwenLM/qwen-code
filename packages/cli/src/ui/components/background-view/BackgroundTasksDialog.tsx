@@ -695,9 +695,9 @@ const AgentDetailBody: React.FC<{
   const hiddenChildCount = childAgents.length - visibleChildAgents.length;
 
   // Registry stores activities newest-last; keep that order so the live
-  // row sits at the bottom of the Progress block. Cap at 5 in case the
+  // row sits at the bottom of the Progress block. Cap at 10 in case the
   // registry ever raises its buffer.
-  const activities = (entry.recentActivities ?? []).slice(-5);
+  const activities = (entry.recentActivities ?? []).slice(-10);
   const blockedReason = entry.resumeBlockedReason;
   const hasError = Boolean(entry.error);
   const hasBlockedReason = Boolean(blockedReason);
@@ -796,15 +796,38 @@ const AgentDetailBody: React.FC<{
             // other rows. Unicode chevrons rendered with inconsistent width
             // broke alignment in some fonts.
             const prefix = isLast ? '> ' : '  ';
+            const fullLabel = escapeAnsiCtrlCodes(
+              formatActivityLabel(a.name, a.description),
+            );
+            if (isLast) {
+              // The live row is the one the user opens this view to
+              // inspect ("is this command stuck or still reasonable?"),
+              // so it renders in full and wraps; MaxSizedBox owns the
+              // overall height budget. Earlier rows stay one-line.
+              // The 4096-char cap only bounds MaxSizedBox's per-tick
+              // layout work against pathological descriptions (e.g. a
+              // heredoc script) — it exceeds what any terminal budget
+              // can show, so it never truncates visible content.
+              const liveLabel =
+                fullLabel.length > 4096
+                  ? `${fullLabel.slice(0, 4096)}…`
+                  : fullLabel;
+              return (
+                <Box key={`${a.at}-${i}`}>
+                  <Text color={theme.text.primary} wrap="truncate">
+                    {prefix}
+                  </Text>
+                  <Text color={theme.text.primary}>{liveLabel}</Text>
+                </Box>
+              );
+            }
             const label = truncateToWidth(
-              escapeAnsiCtrlCodes(formatActivityLabel(a.name, a.description)),
+              fullLabel,
               Math.max(0, maxWidth - stringWidth(prefix)),
             );
             return (
               <Box key={`${a.at}-${i}`}>
-                <Text
-                  color={isLast ? theme.text.primary : theme.text.secondary}
-                >
+                <Text color={theme.text.secondary}>
                   {prefix}
                   {label}
                 </Text>
@@ -829,6 +852,22 @@ const AgentDetailBody: React.FC<{
               </Text>
             </Box>
           ))}
+        </Fragment>
+      )}
+
+      {entry.outputFile && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Transcript')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {`  ${entry.outputFile}`}
+            </Text>
+          </Box>
         </Fragment>
       )}
 
@@ -1237,11 +1276,11 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   } = useBackgroundTaskViewActions();
   const config = useConfig();
 
-  // Progress and Prompt are each self-capped at 5 rows inside DetailBody,
-  // so the body never grows unbounded. Use all available height (minus the
-  // dialog chrome) as the MaxSizedBox budget so nothing gets clipped just
-  // because the terminal is short. Chrome = border(2) + title(1) + two
-  // marginTops(2) + hint(1) = 6 rows.
+  // Progress (10 rows + the wrapped live row) and Prompt (5 rows) are each
+  // self-capped inside DetailBody, so the body never grows unbounded. Use
+  // all available height (minus the dialog chrome) as the MaxSizedBox
+  // budget so nothing gets clipped just because the terminal is short.
+  // Chrome = border(2) + title(1) + two marginTops(2) + hint(1) = 6 rows.
   const detailContentHeight = Math.max(10, availableTerminalHeight - 6);
   // Rounded border + paddingX=1 on the outer Box ≈ 4 horizontal cells.
   const detailContentWidth = Math.max(10, terminalWidth - 4);

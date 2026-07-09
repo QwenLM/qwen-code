@@ -2054,6 +2054,7 @@ export default {
   'Resume blocked': '恢復受阻',
   'Working dir': '工作目錄',
   'Output file': '輸出檔案',
+  Transcript: '執行記錄',
   'Topics touched ({{count}})': '觸及的主題（{{count}}）',
   '{{count}} more': '{{count}} 個',
   'Lock release warning': '鎖釋放警告',

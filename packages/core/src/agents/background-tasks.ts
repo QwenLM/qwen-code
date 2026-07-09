@@ -38,7 +38,7 @@ import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
-const MAX_RECENT_ACTIVITIES = 5;
+const MAX_RECENT_ACTIVITIES = 10;
 export const DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS = 10;
 export const BACKGROUND_AGENT_CONCURRENCY_ENV =
   'QWEN_CODE_MAX_BACKGROUND_AGENTS';

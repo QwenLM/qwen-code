@@ -1981,6 +1981,7 @@ export default {
   'Resume blocked': 'Resume blocked',
   'Working dir': 'Working dir',
   'Output file': 'Output file',
+  Transcript: 'Transcript',
   'Topics touched ({{count}})': 'Topics touched ({{count}})',
   '{{count}} more': '{{count}} more',
   'Lock release warning': 'Lock release warning',
