@@ -83,6 +83,17 @@ export async function installSseTransport<TEvent>(
       }
     }
 
+    function finishActiveStreams(
+      finish: (controller: ReadableStreamDefaultController<Uint8Array>) => void,
+    ) {
+      const active = activeControllers();
+      controllers.length = 0;
+      connections.length = 0;
+      for (const controller of active) {
+        finish(controller);
+      }
+    }
+
     window.__webShellSseHarness = {
       connections,
       writeFrame(frame: string) {
@@ -100,18 +111,12 @@ export async function installSseTransport<TEvent>(
         writeBytes(bytes.slice(offset));
       },
       close() {
-        const active = activeControllers();
-        controllers.length = 0;
-        for (const controller of active) {
-          controller.close();
-        }
+        finishActiveStreams((controller) => controller.close());
       },
       error(message: string) {
-        const active = activeControllers();
-        controllers.length = 0;
-        for (const controller of active) {
-          controller.error(new Error(message));
-        }
+        finishActiveStreams((controller) =>
+          controller.error(new Error(message)),
+        );
       },
     };
 

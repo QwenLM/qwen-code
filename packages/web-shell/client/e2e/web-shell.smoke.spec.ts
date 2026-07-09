@@ -85,6 +85,37 @@ test('keeps later SSE connections alive when an earlier one is cancelled @smoke'
   );
 });
 
+test('clears fake SSE connection records when streams close or error @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const baseURL = String(testInfo.project.use.baseURL);
+
+  await page.goto('data:text/html,<html></html>');
+  await openRawSseConnection(page, baseURL, scenario.sessionId);
+  const firstConnection = await daemon.sse.waitForConnection(
+    scenario.sessionId,
+  );
+  expect(firstConnection.sessionId).toBe(scenario.sessionId);
+
+  await daemon.sse.close();
+  await expect
+    .poll(async () => (await daemon.sse.connections()).length)
+    .toBe(0);
+
+  await openRawSseConnection(page, baseURL, scenario.sessionId);
+  const secondConnection = await daemon.sse.waitForConnection(
+    scenario.sessionId,
+  );
+  expect(secondConnection.sessionId).toBe(scenario.sessionId);
+
+  await daemon.sse.error('test SSE error');
+  await expect
+    .poll(async () => (await daemon.sse.connections()).length)
+    .toBe(0);
+});
+
 test('submits permission decisions through the fake daemon @smoke', async ({
   page,
 }, testInfo) => {
@@ -219,6 +250,26 @@ async function fillComposer(page: Page, text: string): Promise<void> {
 async function submitLocalCommand(page: Page, text: string): Promise<void> {
   await fillComposer(page, text);
   await page.locator('[data-web-shell-composer-submit]').click();
+}
+
+async function openRawSseConnection(
+  page: Page,
+  baseURL: string,
+  sessionId: string,
+): Promise<void> {
+  await page.evaluate(
+    async ({ baseURL, sessionId }) => {
+      const response = await fetch(
+        `${baseURL}/session/${encodeURIComponent(sessionId)}/events`,
+      );
+      const holder = window as Window & {
+        __webShellRawSseResponses?: Response[];
+      };
+      holder.__webShellRawSseResponses ??= [];
+      holder.__webShellRawSseResponses.push(response);
+    },
+    { baseURL, sessionId },
+  );
 }
 
 function firstRequest(
