@@ -4,22 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { NextFunction, Request, Response } from 'express';
+
+const coreMocks = vi.hoisted(() => ({
+  hashDaemonWorkspace: vi.fn((workspace: string) => `hash:${workspace}`),
+  recordDaemonError: vi.fn(),
+  recordDaemonHttpRequest: vi.fn(),
+  recordDaemonHttpResponse: vi.fn(),
+  withDaemonRequestSpan: vi.fn(
+    (_attrs: unknown, fn: (span: unknown) => Promise<void>) => fn({}),
+  ),
+}));
 
 // The middleware only touches these five core helpers; stub them so the test is
 // a pure unit on the `recordRequest` seam. `withDaemonRequestSpan` just runs the
 // wrapped fn (which registers the res listeners and calls next()).
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  hashDaemonWorkspace: () => 'ws-hash',
-  recordDaemonError: vi.fn(),
-  recordDaemonHttpRequest: vi.fn(),
-  recordDaemonHttpResponse: vi.fn(),
-  withDaemonRequestSpan: (
-    _attrs: unknown,
-    fn: (span: unknown) => Promise<void>,
-  ) => fn({}),
+  ...coreMocks,
 }));
 
 import { daemonTelemetryMiddleware } from './telemetry.js';
@@ -35,9 +38,13 @@ function mockRes(statusCode: number): Response & EventEmitter {
 }
 
 describe('daemonTelemetryMiddleware — recordRequest seam', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('calls recordRequest with (durationMs, statusCode) once the response finishes on a matched route', () => {
     const recordRequest = vi.fn();
-    const mw = daemonTelemetryMiddleware('/ws', recordRequest);
+    const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
     const res = mockRes(200);
     const next = vi.fn() as unknown as NextFunction;
 
@@ -53,7 +60,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 
   it('records the real status code (not just 200) on error responses', () => {
     const recordRequest = vi.fn();
-    const mw = daemonTelemetryMiddleware('/ws', recordRequest);
+    const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
     const res = mockRes(503);
     mw(
       mockReq('POST', '/session/abc/prompt'),
@@ -66,7 +73,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 
   it('fires exactly once even if both finish and close emit', () => {
     const recordRequest = vi.fn();
-    const mw = daemonTelemetryMiddleware('/ws', recordRequest);
+    const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
     const res = mockRes(200);
     mw(
       mockReq('GET', '/session/abc/artifacts'),
@@ -80,7 +87,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 
   it('does NOT call recordRequest for an unmatched route', () => {
     const recordRequest = vi.fn();
-    const mw = daemonTelemetryMiddleware('/ws', recordRequest);
+    const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
     const res = mockRes(200);
     const next = vi.fn() as unknown as NextFunction;
     mw(mockReq('GET', '/not-a-daemon-route'), res, next);
@@ -89,9 +96,62 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     expect(recordRequest).not.toHaveBeenCalled();
   });
 
+  it('maps plural workspace session listing to the existing route label', () => {
+    const recordRequest = vi.fn();
+    const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/sessions'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(recordRequest).toHaveBeenCalledTimes(1);
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspace/:id/sessions',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('normalizes plural workspace agent routes to stable route labels', () => {
+    const mw = daemonTelemetryMiddleware(() => '/ws');
+    for (const [method, path, route] of [
+      ['GET', '/workspaces/ws-secondary/agents', 'GET /workspace/agents'],
+      [
+        'GET',
+        '/workspaces/ws-secondary/agents/reviewer',
+        'GET /workspace/agents/:agentType',
+      ],
+      ['POST', '/workspaces/ws-secondary/agents', 'POST /workspace/agents'],
+      [
+        'POST',
+        '/workspaces/ws-secondary/agents/reviewer',
+        'POST /workspace/agents/:agentType',
+      ],
+      [
+        'DELETE',
+        '/workspaces/ws-secondary/agents/reviewer',
+        'DELETE /workspace/agents/:agentType',
+      ],
+    ] as const) {
+      const res = mockRes(200);
+      mw(mockReq(method, path), res, vi.fn() as unknown as NextFunction);
+      res.emit('finish');
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({ method, route }),
+        expect.any(Function),
+      );
+    }
+  });
+
   it('excludes the dashboard status poll (GET /daemon/status) from recordRequest', () => {
     const recordRequest = vi.fn();
-    const mw = daemonTelemetryMiddleware('/ws', recordRequest);
+    const mw = daemonTelemetryMiddleware(() => '/ws', recordRequest);
     const res = mockRes(200);
     // GET /daemon/status IS a matched telemetry route, but the metrics ring must
     // not count the dashboard's own 5s poll as request traffic.
@@ -105,7 +165,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
   });
 
   it('is a silent no-op when recordRequest is omitted (the optional-chaining path)', () => {
-    const mw = daemonTelemetryMiddleware('/ws');
+    const mw = daemonTelemetryMiddleware(() => '/ws');
     const res = mockRes(200);
     expect(() => {
       mw(
@@ -115,5 +175,66 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       );
       res.emit('finish');
     }).not.toThrow();
+  });
+
+  it('resolves workspace hash per request instead of closing over the primary workspace', () => {
+    let workspace = '/workspace/one';
+    const mw = daemonTelemetryMiddleware(() => workspace);
+    const firstRes = mockRes(200);
+
+    mw(
+      mockReq('POST', '/session'),
+      firstRes,
+      vi.fn() as unknown as NextFunction,
+    );
+    firstRes.emit('finish');
+
+    workspace = '/workspace/two';
+    const secondRes = mockRes(200);
+    mw(
+      mockReq('POST', '/session/abc/prompt'),
+      secondRes,
+      vi.fn() as unknown as NextFunction,
+    );
+    secondRes.emit('finish');
+
+    expect(coreMocks.hashDaemonWorkspace).toHaveBeenNthCalledWith(
+      1,
+      '/workspace/one',
+    );
+    expect(coreMocks.hashDaemonWorkspace).toHaveBeenNthCalledWith(
+      2,
+      '/workspace/two',
+    );
+    expect(coreMocks.withDaemonRequestSpan.mock.calls[0]?.[0]).toMatchObject({
+      workspaceHash: 'hash:/workspace/one',
+    });
+    expect(coreMocks.withDaemonRequestSpan.mock.calls[1]?.[0]).toMatchObject({
+      workspaceHash: 'hash:/workspace/two',
+    });
+  });
+
+  it('memoizes workspace hashes by resolved workspace cwd', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/one');
+    const firstRes = mockRes(200);
+    const secondRes = mockRes(200);
+
+    mw(
+      mockReq('POST', '/session'),
+      firstRes,
+      vi.fn() as unknown as NextFunction,
+    );
+    firstRes.emit('finish');
+    mw(
+      mockReq('POST', '/session/abc/prompt'),
+      secondRes,
+      vi.fn() as unknown as NextFunction,
+    );
+    secondRes.emit('finish');
+
+    expect(coreMocks.hashDaemonWorkspace).toHaveBeenCalledTimes(1);
+    expect(coreMocks.hashDaemonWorkspace).toHaveBeenCalledWith(
+      '/workspace/one',
+    );
   });
 });

@@ -1524,6 +1524,8 @@ describe('GeminiChat', async () => {
     it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 1,
+        imagePayloadThreshold: 1,
+
       });
       chat.setHistory([
         {
@@ -1531,9 +1533,18 @@ describe('GeminiChat', async () => {
           parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
         },
         {
+          role: 'model',
+          parts: [{ text: 'I see the first image' }],
+        },
+        {
           role: 'user',
           parts: [{ inlineData: { mimeType: 'image/png', data: 'new-shot' } }],
         },
+        {
+          role: 'model',
+          parts: [{ text: 'I see the second image' }],
+        },
+
       ]);
       const response = (async function* () {
         yield {
@@ -2188,7 +2199,7 @@ describe('GeminiChat', async () => {
       //   cheap-gate (real estimate via getHistory + userMessage) →
       //   splitter (real) → runSideQuery (mocked at baseLlmClient) →
       //   persistence.
-      const largeChars = 'x'.repeat(400_000); // ~100K estimated tokens
+      const largeChars = 'x'.repeat(520_000); // ~130K estimated tokens
       const inheritedHistory: Content[] = [
         { role: 'user', parts: [{ text: largeChars }] },
         { role: 'model', parts: [{ text: 'ack' }] },
@@ -2198,8 +2209,9 @@ describe('GeminiChat', async () => {
       chat.setHistory(inheritedHistory);
       expect(chat.getLastPromptTokenCount()).toBe(0);
 
-      // Default DEFAULT_TOKEN_LIMIT = 128K → auto ≈ 95K. 100K estimate
-      // crosses, so cheap-gate must let compaction proceed.
+      // Default DEFAULT_TOKEN_LIMIT = 200K minus the 64K output reservation
+      // leaves a 136K effective window; 130K crosses the auto threshold, so
+      // cheap-gate must let compaction proceed.
       const generateText = vi.fn().mockResolvedValue({
         text: '<state_snapshot>compressed</state_snapshot>',
         usage: {
@@ -8050,6 +8062,8 @@ describe('GeminiChat', async () => {
     it('preserves current user image bytes during output recovery', async () => {
       vi.mocked(mockConfig.getChatCompression).mockReturnValue({
         maxRecentImagesToRetain: 0,
+        imagePayloadThreshold: 1,
+
       });
       const streams = [
         makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
@@ -8063,6 +8077,7 @@ describe('GeminiChat', async () => {
 
       const stream = await chat.sendMessageStream(
         'gemini-pro',
+
         {
           message: [
             { text: 'describe this image' },
@@ -8124,6 +8139,7 @@ describe('GeminiChat', async () => {
         .join('');
       expect(text).toBe('Hello ending.');
     });
+
 
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [

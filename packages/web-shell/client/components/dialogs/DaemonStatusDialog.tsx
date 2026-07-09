@@ -16,6 +16,7 @@ import {
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { SvgLineChart, type ChartSeries } from './SvgLineChart';
+import { UsageDashboardTab } from './UsageDashboardTab';
 import styles from './DaemonStatusDialog.module.css';
 
 // The cheap in-memory summary is polled continuously; the expensive detail
@@ -31,9 +32,10 @@ const REFRESH_INTERVAL_MS = 5000;
 // diagnostics (sessions/workspace you open when something is wrong) are
 // different intents — and 6 cards + 7 charts + diagnostics overflow one 70vh
 // scroll. Status badge / refresh / issues stay global above the tabs.
-type DaemonTab = 'overview' | 'metrics' | 'diagnostics';
+type DaemonTab = 'overview' | 'usage' | 'metrics' | 'diagnostics';
 const DAEMON_TABS: ReadonlyArray<{ id: DaemonTab; labelKey: string }> = [
   { id: 'overview', labelKey: 'daemon.tab.overview' },
+  { id: 'usage', labelKey: 'daemon.tab.usage' },
   { id: 'metrics', labelKey: 'daemon.tab.metrics' },
   { id: 'diagnostics', labelKey: 'daemon.tab.diagnostics' },
 ];
@@ -218,7 +220,7 @@ function WorkspaceSectionRow({
         <div className={styles.workspaceSummary}>
           {summaryEntries.map(([key, value]) => (
             <span key={key} className={styles.summaryChip}>
-              {key}: {value === null ? 'N/A' : String(value)}
+              {key}: {value === null ? t('common.na') : String(value)}
             </span>
           ))}
         </div>
@@ -910,6 +912,27 @@ function DaemonStatusDialogInner() {
               </div>
             )}
           </Card>
+        </div>
+      )}
+
+      {/* Aggregate token-usage dashboard (today's totals + 6-month heatmap).
+          Mounts only when active so the heavy aggregate loads on demand; a
+          crash in the payload is contained here, not the whole dialog. */}
+      {activeTab === 'usage' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-usage"
+          aria-labelledby="daemon-tab-usage"
+          tabIndex={0}
+        >
+          <ErrorBoundary
+            label="daemon-usage"
+            fallback={
+              <div className={styles.empty}>{t('daemon.usage.failed')}</div>
+            }
+          >
+            <UsageDashboardTab />
+          </ErrorBoundary>
         </div>
       )}
 

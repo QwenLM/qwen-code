@@ -12,6 +12,7 @@ import {
   metricsToUsageRecord,
   aggregateUsage,
   loadUsageHistory,
+  loadUsageHistoryWithLive,
   persistSessionUsage,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
@@ -183,6 +184,35 @@ describe('metricsToUsageRecord', () => {
     expect(record.tools.totalFail).toBe(2);
     expect(record.files.linesAdded).toBe(50);
     expect(record.files.linesRemoved).toBe(10);
+  });
+
+  it('copies SessionMetrics.skills into the persisted record', () => {
+    const metrics = makeMetrics({
+      skills: {
+        totalCalls: 3,
+        totalSuccess: 3,
+        totalFail: 0,
+        byName: {
+          qreview: { count: 2, success: 2, fail: 0 },
+          simplify: { count: 1, success: 1, fail: 0 },
+        },
+      },
+    });
+    const record = metricsToUsageRecord('s', '/p', 0, 1000, metrics);
+    expect(record.skills).toEqual({
+      totalCalls: 3,
+      totalSuccess: 3,
+      totalFail: 0,
+      byName: {
+        qreview: { count: 2, success: 2, fail: 0 },
+        simplify: { count: 1, success: 1, fail: 0 },
+      },
+    });
+  });
+
+  it('omits skills when SessionMetrics has none', () => {
+    const record = metricsToUsageRecord('s', '/p', 0, 1000, makeMetrics());
+    expect(record.skills).toBeUndefined();
   });
 });
 
@@ -550,6 +580,28 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(totalTokens).toBe(1600);
   });
 
+  it('read-only: persistRebuild:false rebuilds without writing usage_record.jsonl', async () => {
+    const sessionId = 'sess-readonly';
+    plantChatJsonl(sessionId, 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    // The daemon dashboard loads read-only: it rebuilds + returns data but must
+    // not write to ~/.qwen on a GET.
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe(sessionId);
+    expect(fs.existsSync(usagePath)).toBe(false);
+
+    // The default (persisting) load still migrates the rebuilt records to disk.
+    await loadUsageHistory();
+    expect(fs.existsSync(usagePath)).toBe(true);
+  });
+
   it('end-to-end: /stats during first turn + /clear must not 2x the session', async () => {
     const sessionId = 'sess-e2e';
     plantChatJsonl(sessionId, 1600);
@@ -574,5 +626,238 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     let totalTokens = 0;
     for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
     expect(totalTokens).toBe(1600);
+  });
+
+  // loadUsageHistoryWithLive: the daemon usage-dashboard loader. Unlike
+  // loadUsageHistory (persisted file verbatim when non-empty), it unions the
+  // persisted history with a replay of recent transcripts so daemon / Web Shell
+  // and in-progress sessions — which only the TUI /clear path ever persists —
+  // are counted. See issue: Web Shell "today" undercounted ~20x.
+  function planted(sessionId: string): string {
+    return path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'repro-project',
+      'chats',
+      `${sessionId}.jsonl`,
+    );
+  }
+  function seedPersisted(records: UsageSummaryRecord[]) {
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+  }
+  function persistedRec(sessionId: string, totalTokens: number) {
+    return {
+      version: 1 as const,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now() - 60000,
+      project: '/p',
+      durationMs: 60000,
+      totalLatencyMs: 1200,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: totalTokens,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+    };
+  }
+
+  it('withLive: unions a never-persisted (daemon) session with the persisted history', async () => {
+    // Persisted: a finalized TUI session. Transcript-only: a daemon / Web Shell
+    // session that /clear never wrote to usage_record.jsonl.
+    seedPersisted([persistedRec('sess-persisted', 1000)]);
+    plantChatJsonl('sess-daemon', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    const ids = merged.map((r) => r.sessionId).sort();
+    expect(ids).toEqual(['sess-daemon', 'sess-persisted']);
+
+    const report = aggregateUsage(merged, 'all');
+    let totalTokens = 0;
+    for (const m of Object.values(report.models)) totalTokens += m.totalTokens;
+    // 1000 persisted + 1600 replayed from the daemon transcript.
+    expect(totalTokens).toBe(2600);
+
+    // Read-only: the persisted file must still hold only the original record.
+    const lines = fs
+      .readFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        'utf8',
+      )
+      .trim()
+      .split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('withLive: a persisted session with a live transcript is not double-counted (persisted wins)', async () => {
+    // Same sessionId in both the persisted file (authoritative 1000) and the
+    // transcript (1600). Must appear exactly once, keeping the persisted value.
+    seedPersisted([persistedRec('sess-both', 1000)]);
+    plantChatJsonl('sess-both', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.sessionId).toBe('sess-both');
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
+    // A persisted base means the window engages (old days come from the file).
+    seedPersisted([persistedRec('sess-persisted', 500)]);
+    plantChatJsonl('sess-old', 1600);
+    // Age the never-persisted transcript well past the default trailing window.
+    const stale = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(planted('sess-old'), stale / 1000, stale / 1000);
+
+    // Default window: the stale, never-persisted transcript is not replayed.
+    const windowed = await loadUsageHistoryWithLive();
+    expect(windowed.map((r) => r.sessionId)).toEqual(['sess-persisted']);
+    // An unbounded window picks it back up alongside the persisted record.
+    const all = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    expect(all.map((r) => r.sessionId).sort()).toEqual([
+      'sess-old',
+      'sess-persisted',
+    ]);
+  });
+
+  it('withLive: with no persisted base, replays full history (no silent trailing-window truncation)', async () => {
+    // No usage_record.jsonl: nothing else covers old history, so an old
+    // transcript must still be replayed rather than truncated by the window.
+    plantChatJsonl('sess-old', 1600);
+    const stale = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(planted('sess-old'), stale / 1000, stale / 1000);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-old']);
+  });
+
+  it('withLive: read-only rebuild — never writes usage_record.jsonl', async () => {
+    plantChatJsonl('sess-daemon-only', 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon-only']);
+    expect(fs.existsSync(usagePath)).toBe(false);
+  });
+
+  it('withLive: all sessions persisted (empty rebuild) returns the persisted records as-is', async () => {
+    // Common case: no live transcripts at all, only the persisted file.
+    seedPersisted([persistedRec('sess-only', 500)]);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.sessionId).toBe('sess-only');
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(500);
+  });
+
+  it('withLive: a corrupt usage_record.jsonl falls back to a full transcript replay', async () => {
+    // No usable persisted base (garbage file) — the loader must still surface
+    // the daemon transcript rather than returning nothing.
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+      '{ this is not valid json\nalso broken}\n',
+    );
+    plantChatJsonl('sess-daemon', 1600);
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.map((r) => r.sessionId)).toEqual(['sess-daemon']);
+  });
+});
+
+describe('aggregateUsage — skills', () => {
+  function skillRecord(
+    sessionId: string,
+    skills?: UsageSummaryRecord['skills'],
+  ): UsageSummaryRecord {
+    return {
+      version: 1,
+      sessionId,
+      timestamp: Date.now(),
+      startTime: Date.now(),
+      project: '/p',
+      durationMs: 0,
+      totalLatencyMs: 0,
+      models: {
+        m: {
+          requests: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 0,
+          totalLatencyMs: 0,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+      ...(skills ? { skills } : {}),
+    };
+  }
+
+  it('sums skill counts across sessions, sorted by count desc', () => {
+    const report = aggregateUsage(
+      [
+        skillRecord('a', {
+          totalCalls: 3,
+          totalSuccess: 3,
+          totalFail: 0,
+          byName: {
+            qreview: { count: 2, success: 2, fail: 0 },
+            simplify: { count: 1, success: 1, fail: 0 },
+          },
+        }),
+        skillRecord('b', {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: { qreview: { count: 1, success: 1, fail: 0 } },
+        }),
+      ],
+      'all',
+    );
+    expect(report.skills.totalCalls).toBe(4);
+    expect(report.skills.topSkills).toEqual([
+      { name: 'qreview', count: 3, success: 3, fail: 0 },
+      { name: 'simplify', count: 1, success: 1, fail: 0 },
+    ]);
+  });
+
+  it('caps topSkills at 25, keeping the highest-count skills', () => {
+    const byName: NonNullable<UsageSummaryRecord['skills']>['byName'] = {};
+    for (let i = 0; i < 40; i++) {
+      byName[`skill-${i}`] = { count: i + 1, success: i + 1, fail: 0 };
+    }
+    const report = aggregateUsage(
+      [
+        skillRecord('a', {
+          totalCalls: 820,
+          totalSuccess: 820,
+          totalFail: 0,
+          byName,
+        }),
+      ],
+      'all',
+    );
+    expect(report.skills.topSkills.length).toBe(25);
+    expect(report.skills.topSkills[0]!.name).toBe('skill-39');
+  });
+
+  it('is inert for records without a skills field', () => {
+    const report = aggregateUsage([skillRecord('a')], 'all');
+    expect(report.skills.totalCalls).toBe(0);
+    expect(report.skills.topSkills).toEqual([]);
   });
 });

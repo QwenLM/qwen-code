@@ -171,6 +171,82 @@ export default tseslint.config(
     },
   },
   {
+    files: [
+      'packages/web-shell/client/**/*.{ts,tsx}',
+      'packages/web-shell/*.config.ts',
+    ],
+    plugins: {
+      import: importPlugin,
+    },
+    settings: {
+      'import/resolver': {
+        node: true,
+      },
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.node,
+      },
+    },
+    rules: {
+      'react/prop-types': 'off',
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        { disallowTypeAnnotations: false },
+      ],
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+      'no-console': ['error', { allow: ['warn', 'error'] }],
+      'no-debugger': 'error',
+      'object-shorthand': 'error',
+      'prefer-const': ['error', { destructuring: 'all' }],
+    },
+  },
+  {
+    files: [
+      'packages/web-shell/client/**/*.test.{ts,tsx}',
+      'packages/web-shell/client/test/**/*.{ts,tsx}',
+    ],
+    plugins: {
+      vitest,
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.vitest,
+      },
+    },
+    rules: {
+      ...vitest.configs.recommended.rules,
+      'vitest/expect-expect': 'off',
+      'vitest/no-commented-out-tests': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/web-shell/client/e2e/**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.node,
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     // Enforce kebab-case filenames
     files: ['packages/core/src/**/*.ts', 'packages/cli/src/**/*.ts'],
     ignores: legacyFilenames.flatMap((name) => [

@@ -235,7 +235,7 @@ describe('useResumeCommand', () => {
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -331,7 +331,7 @@ describe('useResumeCommand', () => {
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -424,7 +424,7 @@ describe('useResumeCommand', () => {
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -489,7 +489,7 @@ describe('useResumeCommand', () => {
 
     const config = {
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(true),
+        hasRunningTasks: vi.fn().mockReturnValue(true),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -554,7 +554,7 @@ describe('useResumeCommand', () => {
 
     const config = {
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({
@@ -629,7 +629,7 @@ describe('useResumeCommand', () => {
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       }),
       getBackgroundShellRegistry: () => ({

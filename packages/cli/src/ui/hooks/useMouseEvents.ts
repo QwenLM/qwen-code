@@ -34,9 +34,9 @@ export interface MouseEventsOptions {
   /**
    * Opt out of the VP gate. By default mouse tracking is enabled only in VP
    * mode (`ui.useTerminalBuffer`), so non-VP keeps native terminal scrollback.
-   * Set true for surfaces that own the wheel regardless — the VP viewport
-   * (ScrollableList) and alternate-screen modals (ThinkingViewer) — where
-   * there is no main-screen native scrollback to protect.
+   * Set true for surfaces that own the wheel regardless — e.g. the VP viewport
+   * (ScrollableList) — where there is no main-screen native scrollback to
+   * protect.
    */
   bypassVpGate?: boolean;
 }

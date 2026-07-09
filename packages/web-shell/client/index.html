@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -55,7 +55,19 @@
       because logComponentRender only exists in react-dom development bundles.
     -->
     <script>
-      !function(){if(typeof performance==='undefined'||!performance.measure)return;var m=performance.measure.bind(performance);performance.measure=function(){try{return m.apply(this,arguments)}catch(e){if(e instanceof DOMException&&e.name==='DataCloneError')return;throw e}}}();
+      !(function () {
+        if (typeof performance === 'undefined' || !performance.measure) return;
+        var m = performance.measure.bind(performance);
+        performance.measure = function () {
+          try {
+            return m.apply(this, arguments);
+          } catch (e) {
+            if (e instanceof DOMException && e.name === 'DataCloneError')
+              return;
+            throw e;
+          }
+        };
+      })();
     </script>
     <div id="root"></div>
     <script type="module" src="/main.tsx"></script>

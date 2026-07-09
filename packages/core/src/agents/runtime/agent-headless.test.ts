@@ -1288,6 +1288,79 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
       });
 
+      it('should stop consecutive identical tool calls with fresh ids', async () => {
+        const listDirectoryToolDef: FunctionDeclaration = {
+          name: 'list_directory',
+          description: 'Lists a directory',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listDirectoryToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_directory'] };
+        const missingPath = '/workspace/project/missing-directory';
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `call_${index + 1}`,
+                name: 'list_directory',
+                args: { path: missingPath },
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const listDirectoryInvocation = {
+          params: { path: missingPath },
+          getDescription: vi.fn().mockReturnValue('List directory'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent:
+              'Error: ENOENT: no such file or directory, scandir ' +
+              missingPath,
+            returnDisplay: 'Directory not found',
+          }),
+        };
+        const listDirectoryTool = {
+          name: 'list_directory',
+          displayName: 'List Directory',
+          description: 'List directory contents',
+          kind: 'READ' as const,
+          schema: listDirectoryToolDef,
+          build: vi.fn().mockImplementation(() => listDirectoryInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_directory' ? listDirectoryTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        expect(listDirectoryInvocation.execute).toHaveBeenCalledTimes(4);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
       it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
         const listFilesToolDef: FunctionDeclaration = {
           name: 'list_files',

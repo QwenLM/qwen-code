@@ -1169,6 +1169,32 @@ describe('Settings Loading and Merging', () => {
       expect(disabled).toHaveLength(3);
     });
 
+    it('should UNION-merge tools.visible across user and workspace scopes', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettings = {
+        tools: { visible: ['web_fetch', 'monitor'] },
+      };
+      const workspaceSettings = {
+        tools: { visible: ['monitor', 'run_shell_command'] },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userSettings);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettings);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const visible = settings.merged.tools?.visible ?? [];
+      expect(visible).toEqual(
+        expect.arrayContaining(['web_fetch', 'monitor', 'run_shell_command']),
+      );
+      expect(visible).toHaveLength(3);
+    });
+
     it('should merge all settings files with the correct precedence', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const systemDefaultsContent = {

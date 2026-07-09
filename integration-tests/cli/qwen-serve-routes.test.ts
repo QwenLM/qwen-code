@@ -225,9 +225,10 @@ describe('qwen serve — capabilities envelope', () => {
     //
     // Conditional tags absent under this suite's spawn flags (no
     // `--require-auth` / `--allow-origin` / deadline env vars /
-    // rate-limit opt-in, no configured batch ASR model): `require_auth`,
-    // `allow_origin`, `cdp_tunnel_over_ws`, `prompt_absolute_deadline`,
-    // `writer_idle_timeout`, `workspace_voice_transcription`, `rate_limit`.
+    // rate-limit opt-in, no `--channel`, no configured batch ASR model):
+    // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
+    // `prompt_absolute_deadline`, `writer_idle_timeout`,
+    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -248,6 +249,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_cancel',
       'session_events',
       'session_artifacts',
+      'session_artifacts_persistence',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
@@ -309,6 +311,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
+      'workspace_qualified_rest_core',
       'voice_transcribe',
     ]);
   });
@@ -620,7 +623,7 @@ describe('qwen serve — POST /session/:id/continue', () => {
 describe('qwen serve — prompt clientId admission', () => {
   // Validates the three real-daemon behaviors that DaemonSessionClient's
   // clientId self-heal relies on (see
-  // docs/superpowers/specs/2026-06-24-daemon-clientid-self-heal-design.md).
+  // docs/design/2026-06-24-daemon-clientid-self-heal-design.md).
   // Model-free: prompt admission (where invalid_client_id is decided) runs
   // before any model call, so promptNonBlocking returns 202 on acceptance
   // without reaching the (unreachable, fake) model.

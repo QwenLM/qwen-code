@@ -55,6 +55,15 @@ describe('mapSkillConfigToStatus', () => {
     expect(status.name).toBe('internal');
   });
 
+  it('marks a forced-disabled skill as disabled', () => {
+    const status = mapSkillConfigToStatus(makeSkill(), new Set(), {
+      disabled: true,
+    });
+
+    expect(status.status).toBe('disabled');
+    expect(status.modelInvocable).toBe(true);
+  });
+
   it('surfaces optional model and extensionName only when present', () => {
     expect(mapSkillConfigToStatus(makeSkill())).not.toHaveProperty('model');
     expect(mapSkillConfigToStatus(makeSkill())).not.toHaveProperty(

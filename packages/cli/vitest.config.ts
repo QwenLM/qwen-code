@@ -69,6 +69,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/eventBus.ts',
       ),
+      '@qwen-code/acp-bridge/replayWindowLimits': path.resolve(
+        __dirname,
+        '../acp-bridge/src/replayWindowLimits.ts',
+      ),
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',

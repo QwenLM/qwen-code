@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`; the current set has 47 known event types. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts`; see [Envelope-level metadata](#envelope-level-metadata).
+Every SSE frame emitted by the daemon on `GET /session/:id/events` has the shape `{ id, v, type, data, originatorClientId?, _meta? }`. `v: 1` is the current `EVENT_SCHEMA_VERSION`. `type` comes from the closed, version-pinned `DAEMON_KNOWN_EVENT_TYPE_VALUES` set in `packages/sdk-typescript/src/daemon/events.ts`. The envelope `_meta` field is stamped at the SSE write boundary by `formatSseFrame()` in `packages/cli/src/serve/routes/sse-events.ts`; see [Envelope-level metadata](#envelope-level-metadata).
 
 The SDK exposes `asKnownDaemonEvent(evt)`. It returns a discriminated `KnownDaemonEvent` for known event types and `undefined` for other types. SDK consumers can therefore handle forward compatibility without requiring a lockstep SDK upgrade when a newer daemon adds an event type; the session reducer records those as `unrecognizedKnownEventCount`.
 
@@ -15,7 +15,7 @@ The wire format lives in [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md
 - Provide pure reducers (`reduceDaemonSessionEvent`, `reduceDaemonAuthEvent`) that project an event stream into SDK view state.
 - Broadcast the `typed_event_schema` capability tag as an informational signal. If the tag is absent, `asKnownDaemonEvent` still falls back to `unknown`.
 
-## Event vocabulary (47 known types)
+## Event vocabulary
 
 Grouped by domain.
 
@@ -37,6 +37,7 @@ Grouped by domain.
 | `slow_client_warning`   | Live frame backlog or live serialized-byte backlog >= 75%; force-pushed and **has no `id`**                                                                                                                                          | `queueSize, maxQueued, lastEventId, queuedBytes?, maxQueuedBytes?, threshold?: 'frames' \| 'bytes' \| 'frames_and_bytes'`; re-armed after both frame and byte measurements drop below 37.5%.                                                                                                                                   |
 | `stream_error`          | `SubscriberLimitExceededError` or another route stream error                                                                                                                                                                         | `error: string`; terminal for the subscription.                                                                                                                                                                                                                                                                                |
 | `state_resync_required` | `subscribe({lastEventId})` detects that the daemon ring no longer holds `[lastEventId+1, earliestInRing-1]`, or the client cursor is from a previous bus epoch. Force-pushed **before** remaining replay frames and **has no `id`**. | `reason: 'ring_evicted' \| 'epoch_reset' \| string`, `lastDeliveredId: number`, `earliestAvailableId: number`. This is a recovery signal, not terminal: the SSE stream stays open and replay + live frames continue. The SDK reducer sets `awaitingResync = true` and skips deltas until the caller resets with `loadSession`. |
+| `history_truncated`     | `POST /session/:id/load` returns a bounded replay snapshot after older in-memory replay entries were dropped. Prepended to `compactedReplay` and **has no `id`**.                                                                    | `reason: 'replay_window_exceeded'`, `truncatedEvents: number`, `retainedEvents: number`, `maxBytes: number`, `truncatedTurns?: number`, `fullTranscriptAvailable: false`. This is a status marker, not a resync request; clients render it and continue applying retained replay.                                              |
 | `replay_complete`       | Id-less sentinel emitted after the `Last-Event-ID` replay loop finishes, for both clean replay and ring-evicted paths, even when `data.replayedCount === 0`. **No `id`**                                                             | `replayedCount: number`; lets consumers remove catch-up UI deterministically without a timeout.                                                                                                                                                                                                                                |
 
 ### Permissions (F3 + base)

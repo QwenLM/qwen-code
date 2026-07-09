@@ -191,6 +191,7 @@ export default {
   'toolDisplayName.CronList': '定时任务列表',
   'toolDisplayName.CronDelete': '删除定时任务',
   'toolDisplayName.LoopWakeup': '循环唤醒',
+  'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.TaskCreate': '创建任务',
   'toolDisplayName.TaskUpdate': '更新任务',
   'toolDisplayName.TaskList': '任务列表',
@@ -1376,8 +1377,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，--vision 可设置视觉桥接模型，[model-id] 可立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1390,6 +1391,10 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
+  'Persist the model selection to the project settings (workspace scope)':
+    '将模型选择持久化到项目设置（工作区）',
+  'Persist the model selection to the user settings (global scope)':
+    '将模型选择持久化到用户设置（全局）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Voice Model': '选择语音模型',
@@ -1611,6 +1616,8 @@ export default {
   // Dialogs - Model
   // ============================================================================
   'Select Model': '选择模型',
+  ' (this project)': '（当前项目）',
+  ' (global)': '（全局）',
   'API Key': 'API Key',
   '(default)': '(默认)',
   '(not set)': '(未设置)',
@@ -2341,4 +2348,80 @@ export default {
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
   '阿里云百炼 (aliyun.com)': '阿里云百炼（aliyun.com）',
   'No compression needed.': '无需压缩。',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    '检查 Qwen Code 更新并安装（如果可用）',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code 有可用更新！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code 有新版本可用！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    '检查更新失败。请检查网络或 registry 配置。',
+  'Unable to check for updates: {{reason}}': '无法检查更新：{{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    '更新成功！新版本将在下次运行时生效。',
+  'Update downloaded. It will be applied after you exit this session.':
+    '更新已下载。将在退出当前会话后应用。',
+  'Update failed: {{error}}': '更新失败：{{error}}',
+  'Downloading update...': '正在下载更新...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    '更新成功！请重启 Qwen Code 以使用新版本。重启前切换模型提供商可能无法正常工作。',
+  'Automatic update failed. Please try updating manually.':
+    '自动更新失败。请尝试手动更新。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自动更新失败：{{error}}。请重新运行安装程序以手动更新。',
+  'Running from a local git clone. Please update with "git pull".':
+    '正在从本地 Git 克隆运行。请使用 "git pull" 更新。',
+  'Running via npx, update not applicable.': '正在通过 npx 运行，更新不适用。',
+  'Running via pnpx, update not applicable.':
+    '正在通过 pnpx 运行，更新不适用。',
+  'Running via bunx, update not applicable.':
+    '正在通过 bunx 运行，更新不适用。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    '通过 Homebrew 安装。请使用 "brew upgrade" 更新。',
+  "Locally installed. Please update via your project's package.json.":
+    '本地安装。请通过项目的 package.json 更新。',
+  'Update requires sudo. Please run:': '更新需要 sudo。请运行：',
+  'Standalone install detected. Attempting to automatically update now...':
+    '检测到独立安装。正在尝试自动更新...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    '检测到独立安装。请重新运行独立安装程序以更新：',
+  'Run the following to update:': '运行以下命令进行更新：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    '无法自动更新此独立安装。请从以下地址重新安装：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '需要手动更新。请重新安装 Qwen Code。',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
+
+  // ============================================================================
+  // reload-plugins 命令
+  // ============================================================================
+  '{{count}} extension': '{{count}} 个扩展',
+  '{{count}} extensions': '{{count}} 个扩展',
+  '{{count}} command': '{{count}} 个命令',
+  '{{count}} commands': '{{count}} 个命令',
+  '{{count}} skill': '{{count}} 个技能',
+  '{{count}} skills': '{{count}} 个技能',
+  '{{count}} agent': '{{count}} 个代理',
+  '{{count}} agents': '{{count}} 个代理',
+  '{{count}} hook': '{{count}} 个钩子',
+  '{{count}} hooks': '{{count}} 个钩子',
+  '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension MCP servers': '{{count}} 个扩展 MCP 服务器',
+  '{{count}} extension LSP server': '{{count}} 个扩展 LSP 服务器',
+  '{{count}} extension LSP servers': '{{count}} 个扩展 LSP 服务器',
+  'Reload extension changes from disk': '从磁盘重新加载扩展变更',
+  'Reloaded extensions: {{summary}}': '已重新加载扩展：{{summary}}',
+  'Reload failed: {{message}}': '重新加载失败：{{message}}',
+  'Reload failed.': '重新加载失败。',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    '磁盘上的扩展已变更。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败：{{message}}。运行 /reload-plugins 来应用更新。',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    '扩展内容刷新失败。运行 /reload-plugins 来应用更新。',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    '扩展重新加载未完成。运行 /reload-plugins 重试。',
 };

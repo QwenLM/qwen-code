@@ -98,6 +98,32 @@
   margin-left: 2px;
 }
 
+.fieldHint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
+
+.radioGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 2px 0;
+}
+
+.radioOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.radioOption input {
+  cursor: pointer;
+  margin: 0;
+}
+
 .input,
 .textarea,
 .select {
@@ -188,8 +214,10 @@
 }
 
 .list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* One task per row (full width) — narrow grid columns clipped the prompt
+   * and made descriptions hard to read. */
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
@@ -301,9 +329,12 @@
   line-height: 1.5;
   color: var(--muted-foreground);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  /* Full-width rows give room for more of the prompt before eliding. */
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .cardFooter {
@@ -337,8 +368,64 @@
   color: var(--muted-foreground);
 }
 
+.countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--primary);
+  /* Fixed-width digits so the ticking countdown doesn't shift its neighbors. */
+  font-variant-numeric: tabular-nums;
+}
+
+.hourglassIcon {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
 .lastFired {
   font-size: 11px;
   color: var(--muted-foreground);
   margin-left: auto;
+}
+
+/* ── Run history ─────────────────────────────────────────────── */
+
+.runsToggle {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.runsToggle:hover {
+  color: var(--foreground);
+}
+
+.runsList {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.runsItem {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
 }

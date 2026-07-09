@@ -188,13 +188,24 @@
 
 .thinkingChevronRight,
 .thinkingChevronDown {
-  width: 7px;
-  height: 7px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
+  width: 14px;
+  height: 14px;
+  position: relative;
   flex-shrink: 0;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+
+.thinkingChevronRight::before,
+.thinkingChevronRight::after,
+.thinkingChevronDown::before,
+.thinkingChevronDown::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 1px;
+  background: currentColor;
+  border-radius: 1px;
 }
 
 .thinkingSummary:hover .thinkingChevronRight,
@@ -205,13 +216,36 @@
 }
 
 .thinkingChevronRight {
+  transform: none;
+}
+
+.thinkingChevronRight::before {
+  top: calc(50% - 2px);
+  left: calc(50% - 3px);
+  transform: rotate(45deg);
+}
+
+.thinkingChevronRight::after {
+  top: calc(50% + 2px);
+  left: calc(50% - 3px);
   transform: rotate(-45deg);
 }
 
 .thinkingChevronDown {
-  transform: rotate(45deg);
-  margin-top: -3px;
+  transform: none;
   opacity: 1;
+}
+
+.thinkingChevronDown::before {
+  top: 50%;
+  left: calc(50% - 5px);
+  transform: rotate(45deg);
+}
+
+.thinkingChevronDown::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  transform: rotate(-45deg);
 }
 
 .thinkingExpandedWrap {
