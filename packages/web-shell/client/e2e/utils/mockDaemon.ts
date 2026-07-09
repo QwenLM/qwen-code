@@ -1,22 +1,24 @@
 import type { Page, Route } from '@playwright/test';
-import type {
-  DaemonCapabilities,
-  DaemonEvent,
-  DaemonRestoredSession,
-  DaemonSession,
-  DaemonSessionState,
-  DaemonSessionSummary,
-  DaemonWorkspaceExtensionsStatus,
-  DaemonWorkspaceMcpResourcesStatus,
-  DaemonWorkspaceMcpStatus,
-  DaemonWorkspaceMcpToolsStatus,
-  DaemonWorkspaceProvidersStatus,
-  DaemonWorkspaceSettingsStatus,
-  DaemonWorkspaceSkillsStatus,
-  DaemonWorkspaceToolsStatus,
-  DaemonWorkspaceVoiceStatus,
-  PromptRequest,
-  PermissionResponse,
+import {
+  DAEMON_APPROVAL_MODES,
+  type DaemonApprovalMode,
+  type DaemonCapabilities,
+  type DaemonEvent,
+  type DaemonRestoredSession,
+  type DaemonSession,
+  type DaemonSessionState,
+  type DaemonSessionSummary,
+  type DaemonWorkspaceExtensionsStatus,
+  type DaemonWorkspaceMcpResourcesStatus,
+  type DaemonWorkspaceMcpStatus,
+  type DaemonWorkspaceMcpToolsStatus,
+  type DaemonWorkspaceProvidersStatus,
+  type DaemonWorkspaceSettingsStatus,
+  type DaemonWorkspaceSkillsStatus,
+  type DaemonWorkspaceToolsStatus,
+  type DaemonWorkspaceVoiceStatus,
+  type PermissionResponse,
+  type PromptRequest,
 } from '@qwen-code/sdk/daemon';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
@@ -51,6 +53,7 @@ export interface MockDaemonController {
   burstEvents(events: readonly DaemonEvent[]): Promise<void>;
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
+  modelRequests(): DaemonRequestRecord[];
 }
 
 type ScenarioOverrides = Partial<
@@ -264,7 +267,7 @@ export async function installMockDaemon(
       return;
     }
 
-    if (!isDaemonRoute(method, path)) {
+    if (!isDaemonPath(path)) {
       await route.fallback();
       return;
     }
@@ -276,6 +279,11 @@ export async function installMockDaemon(
       body,
       headers: request.headers(),
     });
+
+    if (!isDaemonRoute(method, path)) {
+      await methodNotAllowed(route, method, path);
+      return;
+    }
 
     await handleDaemonRoute(route, method, path, scenario, body);
   });
@@ -292,6 +300,10 @@ export async function installMockDaemon(
       ),
     permissionRequests: () =>
       requests.filter((request) => /\/permission\/[^/]+$/.test(request.path)),
+    modelRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/model$/.test(request.path),
+      ),
   };
 }
 
@@ -403,11 +415,39 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+function isDaemonPath(path: string): boolean {
+  return (
+    path === '/health' ||
+    path === '/capabilities' ||
+    path === '/workspace/settings' ||
+    path === '/workspace/providers' ||
+    path === '/workspace/skills' ||
+    path === '/workspace/tools' ||
+    path === '/workspace/extensions' ||
+    path === '/workspace/mcp' ||
+    path === '/workspace/voice' ||
+    /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
+    /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
+    /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    path === '/session' ||
+    /^\/permission\/[^/]+\/?$/.test(path) ||
+    /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+      path,
+    )
+  );
+}
+
 function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && (path === '/health' || path === '/capabilities')) {
     return true;
   }
-  if (path === '/workspace/settings') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    path === '/workspace/settings'
+  ) {
+    return true;
+  }
   if (method === 'GET' && path === '/workspace/providers') return true;
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
@@ -437,8 +477,17 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/session\/[^/]+\/events\/?$/.test(path)) {
     return true;
   }
-  return /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
-    path,
+  if (
+    method === 'POST' &&
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  return (
+    method === 'GET' &&
+    /^\/session\/[^/]+\/(context|supported-commands)\/?$/.test(path)
   );
 }
 
@@ -528,10 +577,14 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'prompt') {
+      if (!isPromptRequest(body)) {
+        await badRequest(route, 'Invalid prompt request.');
+        return;
+      }
       await json(
         route,
         {
-          promptId: promptIdFor(body as PromptRequest | undefined),
+          promptId: promptIdFor(body),
           lastEventId: maxEventId(scenario.events),
         },
         202,
@@ -569,17 +622,36 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'model') {
-      const modelId = getModelId(body);
+      const modelId = readStringField(body, 'modelId');
+      if (!modelId) {
+        await badRequest(route, 'Invalid model request.');
+        return;
+      }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
       return;
     }
     if (action === 'approval-mode') {
+      const mode = readStringField(body, 'mode');
+      if (!mode || !isApprovalMode(mode)) {
+        await badRequest(route, 'Invalid approval mode request.');
+        return;
+      }
+      const previous = scenario.currentMode;
+      scenario.currentMode = mode;
+      scenario.state.modes = {
+        ...(isRecord(scenario.state.modes) ? scenario.state.modes : {}),
+        currentModeId: mode,
+      };
+      scenario.providers = {
+        ...scenario.providers,
+        approvalMode: mode,
+      };
       await json(route, {
         sessionId,
-        previous: scenario.currentMode,
-        mode: getRecordValue(body, 'mode') ?? scenario.currentMode,
-        persisted: false,
+        previous,
+        mode,
+        persisted: getRecordValue(body, 'persist') === true,
       });
       return;
     }
@@ -654,23 +726,51 @@ function maxEventId(events: readonly DaemonEvent[]): number {
   return events.reduce((max, event) => Math.max(max, event.id ?? max), 0);
 }
 
-function promptIdFor(body: PromptRequest | undefined): string {
+function promptIdFor(body: PromptRequest): string {
   const meta = body?._meta;
   if (meta && typeof meta['promptId'] === 'string') return meta['promptId'];
   return 'prompt-e2e';
 }
 
-function getModelId(body: unknown): string {
-  return String(
-    getRecordValue(body, 'model') ??
-      getRecordValue(body, 'modelId') ??
-      'qwen-test',
-  );
+function isPromptRequest(body: unknown): body is PromptRequest {
+  if (!isRecord(body)) return false;
+  const prompt = body['prompt'];
+  return Array.isArray(prompt) && prompt.some(isPromptContentBlock);
+}
+
+function isPromptContentBlock(block: unknown): boolean {
+  if (!isRecord(block)) return false;
+  if (block['type'] === 'text') {
+    return readStringField(block, 'text') !== undefined;
+  }
+  if (block['type'] === 'image') {
+    return (
+      readStringField(block, 'data') !== undefined ||
+      readStringField(block, 'url') !== undefined
+    );
+  }
+  return false;
+}
+
+function readStringField(body: unknown, key: string): string | undefined {
+  const value = getRecordValue(body, key);
+  return typeof value === 'string' && value.trim().length > 0
+    ? value
+    : undefined;
+}
+
+function isApprovalMode(mode: string): mode is DaemonApprovalMode {
+  const modes: readonly string[] = DAEMON_APPROVAL_MODES;
+  return modes.includes(mode);
 }
 
 function getRecordValue(body: unknown, key: string): unknown {
-  if (!body || typeof body !== 'object') return undefined;
-  return (body as Record<string, unknown>)[key];
+  if (!isRecord(body)) return undefined;
+  return body[key];
+}
+
+function isRecord(body: unknown): body is Record<string, unknown> {
+  return typeof body === 'object' && body !== null;
 }
 
 function workspaceMcp(
@@ -768,4 +868,16 @@ async function json(route: Route, body: unknown, status = 200): Promise<void> {
     },
     body: JSON.stringify(body),
   });
+}
+
+async function badRequest(route: Route, error: string): Promise<void> {
+  await json(route, { error }, 400);
+}
+
+async function methodNotAllowed(
+  route: Route,
+  method: string,
+  path: string,
+): Promise<void> {
+  await json(route, { error: `Method not allowed: ${method} ${path}` }, 405);
 }

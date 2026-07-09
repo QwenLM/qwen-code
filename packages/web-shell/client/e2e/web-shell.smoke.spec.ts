@@ -7,6 +7,7 @@ import {
   replayCompleteEvent,
   turnCompleteEvent,
   userTextEvent,
+  type DaemonRequestRecord,
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
@@ -44,6 +45,14 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const promptRequest = firstRequest(daemon.promptRequests());
+  expect(promptRequest.method).toBe('POST');
+  expect(promptRequest.path).toBe(`/session/${scenario.sessionId}/prompt`);
+  expectPromptBodyToContainText(
+    requestBodyRecord(promptRequest),
+    'Ping from browser smoke',
+  );
+
   await daemon.sse.split(assistantTextEvent('Pong from fake SSE', { id: 10 }));
   await daemon.sendEvent(turnCompleteEvent('prompt-e2e', { id: 11 }));
 
@@ -92,11 +101,20 @@ test('submits permission decisions through the fake daemon @smoke', async ({
     .click();
 
   await expect.poll(() => daemon.permissionRequests().length).toBe(1);
+  const permissionRequest = firstRequest(daemon.permissionRequests());
+  expect(permissionRequest.method).toBe('POST');
+  expect(permissionRequest.path).toBe(
+    `/session/${scenario.sessionId}/permission/perm-1`,
+  );
+  expect(requestBodyRecord(permissionRequest)).toEqual({
+    outcome: { outcome: 'selected', optionId: 'allow_once' },
+  });
 });
 
 test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', async ({
   page,
 }, testInfo) => {
+  const resumedSessionId = 'previous-session';
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
 
@@ -108,11 +126,11 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
   await expect(page.locator('[data-web-shell-resume-dialog]')).toBeVisible();
   await page
     .locator(
-      '[data-web-shell-resume-session][data-session-id="previous-session"]',
+      `[data-web-shell-resume-session][data-session-id="${resumedSessionId}"]`,
     )
     .click();
   await expect(page.locator('[data-web-shell-resume-dialog]')).toHaveCount(0);
-  await completeReplay(page, daemon, 'previous-session');
+  await completeReplay(page, daemon, resumedSessionId);
 
   await submitLocalCommand(page, '/model');
   await expect(page.locator('[data-web-shell-model-dialog]')).toBeVisible();
@@ -120,6 +138,14 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
     .locator('[data-web-shell-model-option][data-model-id="qwen-test-alt"]')
     .click();
   await expect(page.locator('[data-web-shell-model-dialog]')).toHaveCount(0);
+  await expect.poll(() => daemon.modelRequests().length).toBe(1);
+  const modelRequest = firstRequest(daemon.modelRequests());
+  expect(modelRequest.method).toBe('POST');
+  expect(modelRequest.path).toBe(`/session/${resumedSessionId}/model`);
+  expect(requestBodyRecord(modelRequest)).toEqual({
+    modelId: 'qwen-test-alt',
+  });
+
   await page.reload();
   await completeReplay(page, daemon);
   await submitLocalCommand(page, '/model');
@@ -193,4 +219,40 @@ async function fillComposer(page: Page, text: string): Promise<void> {
 async function submitLocalCommand(page: Page, text: string): Promise<void> {
   await fillComposer(page, text);
   await page.locator('[data-web-shell-composer-submit]').click();
+}
+
+function firstRequest(
+  requests: readonly DaemonRequestRecord[],
+): DaemonRequestRecord {
+  const request = requests[0];
+  if (!request) throw new Error('Expected a recorded daemon request.');
+  return request;
+}
+
+function requestBodyRecord(
+  request: DaemonRequestRecord,
+): Record<string, unknown> {
+  expect(typeof request.body).toBe('object');
+  expect(request.body).not.toBeNull();
+  expect(Array.isArray(request.body)).toBe(false);
+  return request.body as Record<string, unknown>;
+}
+
+function expectPromptBodyToContainText(
+  body: Record<string, unknown>,
+  text: string,
+): void {
+  const prompt = body['prompt'];
+  expect(Array.isArray(prompt)).toBe(true);
+  const blocks = prompt as readonly unknown[];
+  expect(
+    blocks.some(
+      (block) =>
+        isRecord(block) && block['type'] === 'text' && block['text'] === text,
+    ),
+  ).toBe(true);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
