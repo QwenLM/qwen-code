@@ -964,6 +964,18 @@ export interface DaemonWorkspaceSkillsStatus {
   errors?: DaemonStatusCell[];
 }
 
+export interface DaemonWorkspaceAcpStatusResult {
+  channelLive: boolean;
+}
+
+export interface DaemonWorkspaceAcpPreheatResult {
+  ready: boolean;
+  channelLive: boolean;
+  durationMs: number;
+  reason?: 'timeout' | 'error';
+  error?: string;
+}
+
 export interface DaemonWorkspaceProviderCurrent {
   authType?: string;
   modelId?: string;

@@ -2600,6 +2600,7 @@ export async function runQwenServe(
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
+      preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: (workspace) =>
         withSettingsLock(workspace, async () => {
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
@@ -2868,6 +2869,7 @@ export async function runQwenServe(
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
         isChannelLive: () => secondaryBridge.isChannelLive(),
+        preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,

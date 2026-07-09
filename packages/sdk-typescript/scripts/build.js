@@ -45,6 +45,7 @@ const rootDir = join(__dirname, '..');
 // Bumped from 137KB to 138KB for history_truncated event validation and
 // transcript status projection.
 // Bumped from 138KB to 139KB for the paged session transcript REST helper.
+// Also covers workspace ACP status/preheat APIs.
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 139 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so

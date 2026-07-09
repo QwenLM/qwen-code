@@ -72,6 +72,8 @@ import type {
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceAcpStatusResult,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -786,6 +788,40 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/skills');
         }
         return (await res.json()) as DaemonWorkspaceSkillsStatus;
+      },
+    );
+  }
+
+  async workspaceAcpPreheat(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceAcpPreheatResult> {
+    const serverBudgetMs = timeoutMs ?? 5_000;
+    const suffix =
+      timeoutMs !== undefined
+        ? `?timeoutMs=${encodeURIComponent(timeoutMs)}`
+        : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/acp/preheat${suffix}`,
+      { method: 'POST', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/acp/preheat');
+        }
+        return (await res.json()) as DaemonWorkspaceAcpPreheatResult;
+      },
+      serverBudgetMs + 2_000,
+    );
+  }
+
+  async workspaceAcpStatus(): Promise<DaemonWorkspaceAcpStatusResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/acp/status`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/acp/status');
+        }
+        return (await res.json()) as DaemonWorkspaceAcpStatusResult;
       },
     );
   }

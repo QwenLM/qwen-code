@@ -25,6 +25,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpResources = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -49,6 +51,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -74,6 +78,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources,
     restartMcpServer,
     workspaceSkills,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
     workspaceTools,
     setWorkspaceToolEnabled,
     workspaceMemory,
@@ -121,6 +127,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
       });
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
