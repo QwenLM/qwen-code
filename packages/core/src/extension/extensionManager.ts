@@ -1156,6 +1156,15 @@ export class ExtensionManager {
             installMetadata.releaseTag = result.tagName;
           }
         } catch (_error) {
+          // downloadFromGitHubRelease may have written a partial archive or
+          // extracted files into tempDir before failing (e.g. a repo whose
+          // latest release is a source tarball that isn't a valid extension
+          // archive). Reusing that dirty directory makes `git clone` fail with
+          // "destination path '.' already exists and is not an empty directory".
+          // Recreate a clean tempDir before falling back to a plain clone.
+          // See #6334.
+          await fs.promises.rm(tempDir, { recursive: true, force: true });
+          await fs.promises.mkdir(tempDir, { recursive: true });
           await cloneFromGit(installMetadata, tempDir);
           if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';

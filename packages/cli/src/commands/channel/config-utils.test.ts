@@ -351,6 +351,17 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
   });
 
+  it('rejects an unknown approvalMode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        approvalMode: 'YOLO',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "approvalMode" must be one of: plan, default, auto-edit, auto, yolo.',
+    );
+  });
+
   it('drops empty identity and memory scope objects', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
@@ -532,56 +543,28 @@ describe('parseChannelConfig', () => {
     delete process.env['MYSECRET'];
   });
 
-  it('accepts webhook secretEnv values already resolved by settings loading', async () => {
-    const config = await parseChannelConfig('dingtalk-main', {
-      type: 'bare',
-      token: 'token',
-      webhooks: {
-        sources: {
-          'github-ci': {
-            secretEnv: 'whsec-from-settings',
-            targets: {
-              default: {
-                chatId: 'group-1',
-                senderId: 'webhook:github-ci',
+  it('rejects non-env webhook secretEnv values', async () => {
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            'github-ci': {
+              secretEnv: 'whsec-from-settings',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:github-ci',
+                },
               },
             },
           },
         },
-      },
-    });
-
-    expect(config).toMatchObject({
-      webhooks: {
-        sources: { 'github-ci': { secret: 'whsec-from-settings' } },
-      },
-    });
-  });
-
-  it('does not treat resolved uppercase secret values as env names', async () => {
-    delete process.env['ABC123'];
-
-    const config = await parseChannelConfig('dingtalk-main', {
-      type: 'bare',
-      token: 'token',
-      webhooks: {
-        sources: {
-          'github-ci': {
-            secretEnv: 'ABC123',
-            targets: {
-              default: {
-                chatId: 'group-1',
-                senderId: 'webhook:github-ci',
-              },
-            },
-          },
-        },
-      },
-    });
-
-    expect(config).toMatchObject({
-      webhooks: { sources: { 'github-ci': { secret: 'ABC123' } } },
-    });
+      }),
+    ).rejects.toThrow(
+      'Channel "dingtalk-main" field "webhooks.sources.github-ci.secretEnv" must be an environment variable name or $-prefixed reference.',
+    );
   });
 
   it('resolves existing uppercase webhook secretEnv names without underscores', async () => {
@@ -605,7 +588,7 @@ describe('parseChannelConfig', () => {
         },
       });
 
-      expect(config.webhooks?.sources['github-ci']?.secret).toBe(
+      expect(config['webhooks']?.sources['github-ci']?.secret).toBe(
         'secret-from-env',
       );
     } finally {
@@ -635,8 +618,37 @@ describe('parseChannelConfig', () => {
         },
       }),
     ).rejects.toThrow(
-      'Environment variable QWEN_MISSING_WEBHOOK_SECRET is not set',
+      'Channel "dingtalk-main" field "webhooks.sources.custom.secretEnv" references an unset environment variable.',
     );
+  });
+
+  it('rejects webhook secretEnv refs when the environment variable is empty', async () => {
+    process.env['QWEN_EMPTY_WEBHOOK_SECRET'] = '';
+    try {
+      await expect(
+        parseChannelConfig('dingtalk-main', {
+          type: 'bare',
+          token: 'token',
+          webhooks: {
+            sources: {
+              custom: {
+                secretEnv: 'QWEN_EMPTY_WEBHOOK_SECRET',
+                targets: {
+                  default: {
+                    chatId: 'group-1',
+                    senderId: 'webhook:custom',
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ).rejects.toThrow(
+        'Channel "dingtalk-main" field "webhooks.sources.custom.secretEnv" references an empty environment variable.',
+      );
+    } finally {
+      delete process.env['QWEN_EMPTY_WEBHOOK_SECRET'];
+    }
   });
 
   it('rejects webhook targets without chatId or senderId', async () => {

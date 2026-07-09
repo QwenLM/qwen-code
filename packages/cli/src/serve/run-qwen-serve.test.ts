@@ -1522,7 +1522,7 @@ describe('runQwenServe runtime startup failures', () => {
           cdpTunnelOverWs: true,
           token: 'secret-token',
         },
-        process.env,
+        {},
       ),
     ).toBe(false);
   });

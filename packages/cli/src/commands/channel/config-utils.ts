@@ -8,6 +8,13 @@ import { resolvePath } from '@qwen-code/channel-base';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const CHANNEL_APPROVAL_MODES = new Set([
+  'plan',
+  'default',
+  'auto-edit',
+  'auto',
+  'yolo',
+]);
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
@@ -18,9 +25,14 @@ export function resolveEnvVars(value: string): string {
   if (value.startsWith('$')) {
     const envName = value.substring(1);
     const envValue = process.env[envName];
-    if (!envValue) {
+    if (envValue === undefined) {
       throw new Error(
         `Environment variable ${envName} is not set (referenced as ${value})`,
+      );
+    }
+    if (envValue === '') {
+      throw new Error(
+        `Environment variable ${envName} is empty (referenced as ${value})`,
       );
     }
     return envValue;
@@ -239,6 +251,8 @@ function parseWebhookSource(
         requireStringField(channelName, `${path}.secret`, record['secret']),
       )
     : resolveWebhookSecretEnv(
+        channelName,
+        path,
         requireStringField(
           channelName,
           `${path}.secretEnv`,
@@ -254,21 +268,31 @@ function parseWebhookSource(
   return { secret, targets };
 }
 
-function normalizeSecretEnvRef(secretEnv: string): string {
-  return secretEnv.startsWith('$') ? secretEnv : `$${secretEnv}`;
-}
-
-function resolveWebhookSecretEnv(secretEnv: string): string {
-  if (secretEnv.startsWith('$')) {
-    return resolveConfigEnvVar(secretEnv, 'available');
+function resolveWebhookSecretEnv(
+  channelName: string,
+  path: string,
+  secretEnv: string,
+): string {
+  const envName = secretEnv.startsWith('$')
+    ? secretEnv.substring(1)
+    : secretEnv;
+  if (!ENV_VAR_NAME_PATTERN.test(envName)) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
+    );
   }
-  if (
-    ENV_VAR_NAME_PATTERN.test(secretEnv) &&
-    (secretEnv.includes('_') || Object.hasOwn(process.env, secretEnv))
-  ) {
-    return resolveConfigEnvVar(normalizeSecretEnvRef(secretEnv), 'available');
+  const envValue = process.env[envName];
+  if (envValue === undefined) {
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" references an unset environment variable.`,
+    );
   }
-  return secretEnv;
+  if (envValue === '') {
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" references an empty environment variable.`,
+    );
+  }
+  return envValue;
 }
 
 function parseWebhookConfig(
@@ -294,6 +318,27 @@ function parseWebhookConfig(
     );
   }
   return { sources };
+}
+
+function parseApprovalModeConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): string | undefined {
+  const approvalMode = rawConfig['approvalMode'];
+  if (approvalMode === undefined || approvalMode === null) {
+    return undefined;
+  }
+  if (
+    typeof approvalMode !== 'string' ||
+    !CHANNEL_APPROVAL_MODES.has(approvalMode)
+  ) {
+    throw new Error(
+      `Channel "${channelName}" field "approvalMode" must be one of: ${[
+        ...CHANNEL_APPROVAL_MODES,
+      ].join(', ')}.`,
+    );
+  }
+  return approvalMode;
 }
 
 export function parseChannelWebhookConfig(
@@ -376,7 +421,7 @@ export async function parseChannelConfig(
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
     cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
-    approvalMode: rawConfig['approvalMode'] as string | undefined,
+    approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
     identity: parseObjectStringFields(name, rawConfig, 'identity', [
       'id',

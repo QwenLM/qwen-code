@@ -354,7 +354,9 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
-      createdRouter.setChannelApprovalMode(name, config.approvalMode);
+      if (config['webhooks']) {
+        createdRouter.setChannelApprovalMode(name, config.approvalMode);
+      }
     }
 
     for (const { name, config } of parsed) {

@@ -6128,6 +6128,35 @@ describe('createServeApp', () => {
       }
     });
 
+    it('releases restore ownership after invalid approvalMode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const invalid = await request(app)
+        .post('/session/persisted-approval/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ approvalMode: 'YOLO' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_approval_mode');
+
+      const valid = await request(app)
+        .post('/session/persisted-approval/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(valid.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-approval',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
     it('passes explicit primary cwd through to the bridge', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({

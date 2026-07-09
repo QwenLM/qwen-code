@@ -725,7 +725,10 @@ export function registerSessionRoutes(
       );
       if (!releaseRestoreOwner) return;
       const approvalMode = parseOptionalApprovalMode(body, res);
-      if (approvalMode === null) return;
+      if (approvalMode === null) {
+        releaseRestoreOwner();
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) {
         releaseRestoreOwner();
