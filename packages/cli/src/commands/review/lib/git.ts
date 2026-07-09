@@ -42,3 +42,19 @@ export function gitOpt(...args: string[]): string | null {
 export function refExists(ref: string): boolean {
   return gitOpt('rev-parse', '--verify', '--quiet', ref) !== null;
 }
+
+/**
+ * Run `git` and return stdout as raw bytes.
+ *
+ * `git` above is wrong for diffs on two counts: it CRLF-normalises (which
+ * rewrites the content of every hunk touching a CRLF file) and it `.trim()`s
+ * (which eats the trailing newline a patch needs). It also inherits
+ * `execFileSync`'s 1 MB `maxBuffer` default, so any diff past ~1 MB dies with
+ * ENOBUFS rather than returning a short read. Diff capture uses this instead.
+ */
+export function gitRaw(...args: string[]): Buffer {
+  return execFileSync('git', args, {
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}

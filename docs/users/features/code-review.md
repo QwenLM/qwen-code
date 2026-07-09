@@ -27,8 +27,9 @@ The `/review` command runs a multi-stage pipeline:
 
 ```
 Step 1:  Determine scope (local diff / PR worktree / file)
+         Capture the diff to a file + partition it into chunks
 Step 2:  Load project review rules
-Step 3:  10 parallel review agents                         [10 LLM calls]
+Step 3A: Diff <= 500 lines: 10 parallel review agents      [10 LLM calls]
            |-- Agent 0: Issue Fidelity & Root-Cause Ownership
            |-- Agent 1: Correctness
            |-- Agent 2: Security
@@ -37,8 +38,20 @@ Step 3:  10 parallel review agents                         [10 LLM calls]
            |-- Agent 5: Test Coverage
            |-- Agent 6: Undirected Audit (3 personas: 6a/6b/6c)
            '-- Agent 7: Build & Test (runs shell commands)
-Step 4:  Deduplicate --> Batch verify --> Aggregate         [1 LLM call]
-Step 5:  Iterative reverse audit (1-3 rounds, gap finding) [1-3 LLM calls]
+Step 3B: Diff > 500 lines: territory x dimension fan-out   [N+4+H calls]
+           |-- 1 chunk agent per ~400 diff lines (all dimensions,
+           |     its territory only, returns a coverage receipt)
+           |-- 3 invariant agents per heavily-rewritten file
+           |     (whole file; state/timers, counters/returns/
+           |      errors, config/early-returns)
+           |-- Agent 0: Issue Fidelity      (whole diff)
+           |-- Agent 7: Build & Test        (whole repo)
+           |-- Cross-file impact            (whole diff)
+           '-- Test coverage matrix         (whole diff)
+Step 4:  Deduplicate --> Sharded verify (<=8 findings each)
+           --> Aggregate                              [ceil(N/8) calls]
+Step 5:  Iterative reverse audit, fanned out per chunk;
+           stop after 2 consecutive dry rounds (cap 5)
 Step 6:  Present findings + verdict
 Step 7:  Submit PR review (inline comments, if requested)
 Step 8:  Save report + incremental cache
@@ -58,7 +71,15 @@ Step 9:  Clean up (remove worktree + temp files)
 | Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues |
 | Agent 7: Build & Test             | Runs build and test commands, reports failures                                              |
 
-All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 10 parallel tasks for same-repo PR reviews; Agent 0 is skipped for local-diff and file-path reviews, which run 9). Findings from Agents 0-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
+All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 10 parallel tasks for same-repo PR reviews; Agent 0 is skipped for local-diff and file-path reviews, which run 9).
+
+Past 500 diff lines this dimension fan-out is replaced by a **territory × dimension** fan-out: the diff is split into ~400-line chunks (never cutting a hunk, and never cutting a function inside an oversized one), and each chunk gets its own agent that applies every review dimension to that chunk alone. Ten agents all reading one large diff read the same early hunks ten times; one agent per chunk means every line of the diff has exactly one accountable reviewer. Each chunk agent returns a `Covered:` receipt, and a chunk with no receipt is re-reviewed before the run proceeds — so "no blockers" can never be reported over code that nobody read.
+
+A file that is largely rewritten (an existing file of 300+ lines that is now 40%+ new, or has 800+ changed lines) also gets **three whole-file invariant agents**. Its bugs are usually not inside any one hunk but _between_ the new lines — a timer armed near the top of the file and a teardown path two thousand lines below. Each agent reads the whole post-change file and walks two or three items of a fixed checklist: mutable fields cleared on every exit path, timers cancelled on every close (and cancellation not discarding captured data), map inserts matched by deletes, retry counters incremented at every entry, status return values actually checked, error codes exhaustively classified permanent vs transient, config fields honoured on every path, and early returns that skip a required side effect.
+
+The checklist is split three ways on purpose. Handing one agent all eight checks over a 2 400-line file gets one of them done properly; three agents with two or three checks each get all of them done. Chunk agents do not substitute for this — on PR #6457 they held every one of these defects inside their assigned territory and reported none. What they lacked was not the lines but the question.
+
+Findings are verified in **sharded batches** (at most 8 findings per verification agent, all launched together). A verifier may downgrade a Critical to low confidence but may never delete one — a rejected Critical is invisible to every later stage, while a downgraded one still reaches a human. After verification, **iterative reverse audit** hunts for gaps, fanned out one auditor per chunk per round, each with the cumulative finding list. The loop stops after **two consecutive dry rounds** (or 5 rounds, hard cap — reported as such rather than as convergence). One dry round is not evidence of convergence, and reverse-audit findings are verified like any other.
 
 ## Severity Levels
 

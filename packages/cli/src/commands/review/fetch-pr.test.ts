@@ -1,0 +1,127 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect } from 'vitest';
+import { classifyHeavy } from './fetch-pr.js';
+
+describe('classifyHeavy', () => {
+  it('flags a substantially rewritten existing file', () => {
+    // PR #6457's QQChannel.ts: 1551 -> 2643 lines, 1714 changed.
+    const r = classifyHeavy({
+      preLines: 1551,
+      fileLines: 2643,
+      changedLines: 1714,
+      binary: false,
+    });
+    expect(r.rewriteRatio).toBe(0.65);
+    expect(r.heavy).toBe(true);
+  });
+
+  it('does NOT flag a brand-new file, whose ratio is 1.0 by definition', () => {
+    // A new file is not a *rewrite*, and its chunk agents already own every
+    // line of it. PR #6457 added events.test.ts (1535 lines) this way.
+    const r = classifyHeavy({
+      preLines: 0,
+      fileLines: 1535,
+      changedLines: 1535,
+      binary: false,
+    });
+    expect(r.rewriteRatio).toBe(1);
+    expect(r.heavy).toBe(false);
+  });
+
+  it('does NOT flag a small file even at a high ratio', () => {
+    // types.ts: 42 -> 113 lines, 75 changed. Ratio 0.66, but a chunk agent
+    // holds the whole thing; a whole-file invariant pass adds nothing.
+    const r = classifyHeavy({
+      preLines: 42,
+      fileLines: 113,
+      changedLines: 75,
+      binary: false,
+    });
+    expect(r.rewriteRatio).toBe(0.66);
+    expect(r.heavy).toBe(false);
+  });
+
+  it('does NOT flag a big file with a modest edit', () => {
+    // send.test.ts: 1787 -> 2170 lines, 449 changed. Ratio 0.21.
+    expect(
+      classifyHeavy({
+        preLines: 1787,
+        fileLines: 2170,
+        changedLines: 449,
+        binary: false,
+      }).heavy,
+    ).toBe(false);
+  });
+
+  it('flags a very large edit even when the ratio stays low', () => {
+    // 900 changed lines in a 6000-line file: ratio 0.15, but the edit is big
+    // enough that its new lines interact across the file.
+    const r = classifyHeavy({
+      preLines: 5800,
+      fileLines: 6000,
+      changedLines: 900,
+      binary: false,
+    });
+    expect(r.rewriteRatio).toBe(0.15);
+    expect(r.heavy).toBe(true);
+  });
+
+  it('never flags a binary blob', () => {
+    expect(
+      classifyHeavy({
+        preLines: 5000,
+        fileLines: 0,
+        changedLines: 5000,
+        binary: true,
+      }).heavy,
+    ).toBe(false);
+  });
+
+  it('handles a deleted file (post-image has no lines)', () => {
+    const r = classifyHeavy({
+      preLines: 900,
+      fileLines: 0,
+      changedLines: 900,
+      binary: false,
+    });
+    expect(r.rewriteRatio).toBe(0);
+    // 900 changed lines clears the volume threshold, so it is still heavy —
+    // but a deletion has no post-image to read, so Step 3B skips it. The
+    // metric is honest; the skill decides what to do with it.
+    expect(r.heavy).toBe(true);
+  });
+
+  it('compares the exact ratio, not the rounded one', () => {
+    const base = { preLines: 300, fileLines: 1000, binary: false };
+    expect(classifyHeavy({ ...base, changedLines: 400 }).heavy).toBe(true);
+    // 399/1000 = 0.399 — below the 0.40 threshold, even though it *reports*
+    // as 0.4. Rounding before comparing would wrongly flag it.
+    const just_under = classifyHeavy({ ...base, changedLines: 399 });
+    expect(just_under.rewriteRatio).toBe(0.4);
+    expect(just_under.heavy).toBe(false);
+  });
+
+  it('requires the file to have existed at a real size', () => {
+    expect(
+      classifyHeavy({
+        preLines: 299,
+        fileLines: 1000,
+        changedLines: 900,
+        binary: false,
+      }).heavy,
+    ).toBe(false);
+    expect(
+      classifyHeavy({
+        preLines: 300,
+        fileLines: 1000,
+        changedLines: 900,
+        binary: false,
+      }).heavy,
+    ).toBe(true);
+  });
+});

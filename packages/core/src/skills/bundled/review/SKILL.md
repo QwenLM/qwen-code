@@ -93,8 +93,32 @@ Based on the remaining arguments:
   - Run `git diff HEAD -- <file>` to get recent changes
   - If no diff, read the file and review its current state
 
-After determining the scope, count the total diff lines. If the diff exceeds 500 lines, inform the user:
-"This is a large changeset (N lines). The review may take a few minutes."
+### Diff capture and the review topology
+
+**Never let a review agent obtain the diff by running `git diff` itself.** Shell tool output is capped at 30 000 characters and split head-1/5 / tail-4/5, so on a large PR every agent receives a few hundred lines off the top of the first file, the tail of the last file, and a `[CONTENT TRUNCATED]` marker in place of everything between. On a 211 000-character diff that is 14% of the changeset — and it is the _same_ 14% for all ten agents, so coverage does not grow with the number of agents. The diff is read from a file with `read_file` instead.
+
+`read_file` is not unlimited either: **a single call returns at most ~25 000 characters**, then sets `isTruncated` and expects you to page with `offset`/`limit`. Reading a 211 000-character diff in one `read_file` call yields only its first ~600 lines. What makes the file approach work is the **chunk plan** below: each chunk is sized to fit inside one un-truncated read, and the chunks tile the whole diff. Any agent reading a range wider than a chunk — or reading a large source file whole — must check `isTruncated` and page until it has all of it.
+
+For **PR reviews**, `qwen review fetch-pr` (above) has already written the diff to `diffPath` and partitioned it. Read from the fetch report:
+
+- `diffPathAbsolute` — pass this to `read_file` (it rejects relative paths)
+- `diffLines`, `diffChars`
+- `chunks[]` — contiguous, non-overlapping line ranges tiling the whole diff. Each entry has `id`, `startLine`, `endLine` (1-based, inclusive), and `files[]` naming the source files and new-side line ranges it covers.
+
+A chunk is read with `read_file(file_path=diffPathAbsolute, offset=startLine - 1, limit=endLine - startLine + 1)` — `offset` is 0-based.
+
+For **local-diff and file-path reviews**, capture the diff the same way before launching agents, then treat the whole file as a single chunk when it is under 500 lines:
+
+```bash
+git diff > .qwen/tmp/qwen-review-local-diff.txt   # or: git diff HEAD -- <file>
+```
+
+If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
+
+**Choose the topology from `diffLines`:**
+
+- **≤ 500 diff lines** — one chunk. Use the dimension fan-out in Step 3A unchanged.
+- **> 500 diff lines** — use the territory × dimension fan-out in Step 3B, and inform the user: "This is a large changeset (N lines, M chunks). The review may take a few minutes."
 
 ## Step 2: Load project review rules
 
@@ -115,17 +139,83 @@ If the output file is non-empty, prepend its content to each **LLM-based review 
 
 Do NOT inject review rules into Agent 7 (Build & Test) — it runs deterministic commands, not code review.
 
-## Step 3: Parallel multi-dimensional review
+## Step 3: Parallel review
 
-Launch review agents by invoking all `agent` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **10 agents** for same-repo **PR** reviews (Agent 6 has three persona variants 6a/6b/6c that each count as separate parallel agents), or **9 agents** (skip Agent 7: Build & Test) for cross-repo lightweight **PR** mode since there is no local codebase to build/test. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **9 agents** (Agents 1–7). Each agent should focus exclusively on its dimension.
+Launch review agents by invoking all `agent` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time.
+
+Use **Step 3A** when the diff is ≤ 500 lines (one chunk) and **Step 3B** when it is larger. The dimension definitions (Agents 0–7) are shared by both and are listed after 3B.
+
+## Step 3A: Dimension fan-out (diffs ≤ 500 lines)
+
+Launch **10 agents** for same-repo **PR** reviews (Agent 6 has three persona variants 6a/6b/6c that each count as separate parallel agents), or **9 agents** (skip Agent 7: Build & Test) for cross-repo lightweight **PR** mode since there is no local codebase to build/test. **Agent 0 (Issue Fidelity) runs only when the review target is a PR** — a local-diff or file-path review has no PR and no linked issue, so skip Agent 0 and launch **9 agents** (Agents 1–7). Each agent should focus exclusively on its dimension. Every agent reads the whole diff from `diffPathAbsolute`.
+
+## Step 3B: Territory × dimension fan-out (diffs > 500 lines)
+
+Ten agents all reading the same diff multiplies redundant reading of the early hunks; it does not add coverage. Past 500 lines, fan out along **territory** as well: one agent per chunk, with the review dimensions folded into that agent's brief, plus a small set of whole-diff agents for the concerns that only exist at diff scale.
+
+**Chunk agents — one per entry in `chunks[]`.** Each is a `general-purpose` subagent whose prompt gives it:
+
+- `diffPathAbsolute`, its own `offset` (= `startLine - 1`) and `limit` (= `endLine - startLine + 1`), and its `files[]` list. Tell it to read exactly that range, and that the surrounding chunks belong to other agents.
+- Permission to read the **full source files** it covers (via `read_file` on the worktree path) whenever a hunk's correctness depends on code outside the hunk. Diff context lines are three lines deep; state invariants are not. A source file over ~25 000 characters comes back with `isTruncated` set — page through it rather than reasoning from the first screenful.
+- The review focus: it owns **all** of Agents 1–6's dimensions (correctness, security, code quality, performance, test coverage, and the three adversarial personas) **for its territory only**.
+- Project-specific rules from Step 2 (if any).
+
+**Whole-diff agents — launched alongside the chunk agents, in the same response:**
+
+- **Agent 0 (Issue Fidelity)** — PR reviews only. Unchanged.
+- **Agent 7 (Build & Test)** — same-repo reviews only. Unchanged.
+- **Cross-file impact** — the analysis described below, run once over the whole diff rather than repeated by every chunk agent (a chunk agent cannot see a caller that lives in another chunk).
+- **Test coverage matrix** — does each behavioural change in the diff have a corresponding test? A chunk agent sees either the implementation or the test, rarely both.
+- **Whole-file invariant agents — three per `heavy` file** in the fetch report's `files[]` (an existing file of 300+ lines that is now 40%+ new, or has 800+ changed lines). See below.
+
+### Whole-file invariant agents (Step 3B, `heavy` files only)
+
+When a file is largely rewritten, reviewing it as a diff is the wrong frame. The bugs are not inside any one hunk; they are **between** the new lines, which can sit two thousand lines apart — a timer armed near the top of the file and a teardown path near the bottom. No chunk agent, and no reader of a diff with three lines of context, can see that pair.
+
+Give this agent the **entire post-change file** (`read_file` on the worktree path, paging until `isTruncated` is false — a 2 500-line source file needs several reads), plus the file's changed line ranges, which you can read off the `chunks[].files[]` entries for that path. It reads the whole file so it can see both ends of an invariant; the changed ranges tell it which end is **new**, so it does not report pre-existing defects (an Exclusion Criterion). A violation counts when **at least one** of its two locations is inside a changed range.
+
+Each agent's job is to build a model of the object's mutable state and lifecycle, then walk **its own slice** of the checklist. Report a **Critical** for each violation.
+
+**Split the checklist across three agents. Do not give one agent all eight checks.** Measured on PR #6457's `QQChannel.ts`: one agent holding the whole checklist found one of the five invariant-class defects in that file; the same model split three ways found all five. Eight simultaneous checks over a 2 400-line file is not a task an agent does eight times — it is a task it does once, badly, and then stops.
+
+**Invariant agent A — state, timers, collections.**
+
+- **Mutable fields.** For every field assigned outside the constructor: is it set on every path that should set it, and cleared on **every** exit/teardown/error path? A flag set on entry to a retry and cleared only on the success path is a leak. Enumerate the fields first, then check each against every `return`, `throw`, `catch`, `close`, and teardown path.
+- **Timers.** For every `setTimeout` / `setInterval`: is it cancelled on every `close`, `disconnect`, `delete`, and error path? And when it _is_ cancelled, does cancelling **discard data the callback had already captured** in its closure — a buffer, a payload, a pending flush? Trace what each callback closes over.
+- **Collections.** For every `Map`/`Set` insert: is there a matching delete on teardown and on the entity's removal? Are deletes done in the right order when one key derives from another (deleting an index before the entry it indexes)?
+
+**Invariant agent B — counters, return values, error taxonomies.**
+
+- **Retry counters.** Enumerate every retry counter and its ceiling constant, then every call site of every retry/flush/reconnect helper. Is the counter incremented at **every** entry point, and checked against its ceiling at every one? A second call site that re-enters the retry without incrementing makes the ceiling unreachable.
+- **Return values.** Does any function returning a status (`boolean`, an error code, `null`) have a caller that ignores it? Grep each such function and inspect **every** call site. Restoring persisted state, validating input, and acquiring a lock all fail this way silently. Do **not** talk yourself out of one because the callee "leaves a sane default" — the caller cannot tell success from failure, and that is the defect.
+- **Error taxonomies.** List the codes in every error enum. For every `catch` that branches (or fails to branch) on a code: is each code classified **permanent vs transient**, and does each branch do the right thing? A `catch` that discards buffered data for _all_ codes destroys data on a retryable rate-limit. A handler that reads `err.code` only to build a log string is not classifying anything.
+
+**Invariant agent C — config fields, early returns.**
+
+- **Config fields.** Enumerate every config option the file reads. For each, find every path that ought to consult it and check that it does. Two shapes to hunt: a capability, permission, intent, or subscription requested **unconditionally** while the config names a narrower mode; and a mode one handler honours that a sibling handler silently ignores.
+- **Early returns.** Does any early return skip a side effect a later path depends on (a cache populated, an id extracted and stored, a sequence number bumped)? Pay particular attention to a blank/empty-input guard placed **before** a side effect rather than after it.
+
+For each violation report the two locations that together make it a bug (`<file>:<lineA>` and `<file>:<lineB>`), not just one. Findings from these agents are `Source: [review]` like any other and go through Step 4 verification.
+
+**Coverage receipts are mandatory.** Every chunk agent MUST end its response with a line of exactly this form, even when it found nothing:
+
+```
+Covered: chunk <id> lines <startLine>-<endLine>
+```
+
+After all agents return, verify that the receipts cover every chunk id exactly once. **If any chunk has no receipt, relaunch an agent for that chunk before proceeding to Step 4.** A missing receipt means that territory was never reviewed; without this check the omission is invisible and the review silently reports "no blockers" on code nobody read.
+
+**Do not let precision suppress recall in this step.** The "if you're unsure, do NOT report it" rule in the Exclusion Criteria applies to **Suggestion** and **Nice to have** findings. A suspected **Critical** must always be reported, marked `low confidence` if uncertain — Step 4's verifier decides. A Critical dropped here is dropped irreversibly; a Critical dropped there is at least reviewed by a second agent.
+
+## Agent dimensions (used by both 3A and 3B)
 
 **Every agent MUST be an awaitable subagent: set `subagent_type: "general-purpose"` on every `agent` call.** Do NOT fork them — do not omit `subagent_type`, and never set `subagent_type: "fork"`. A fork runs fire-and-forget and its findings never come back to you, so the review would stall in Step 4 with nothing to aggregate. You need every agent's findings returned to you inline.
 
 **For same-repo PR reviews (worktree mode), every `agent` call MUST also set `working_dir: "<worktreePath>"`** — the `worktreePath` from the Step 1 fetch report (a repo-relative path like `.qwen/tmp/review-pr-<n>`; pass it through as-is). This sets each agent's working directory to the PR worktree, so its `git diff`, `grep_search`, file reads, and Agent 7's build/test **resolve against the PR's code, not the user's main checkout**. It is a deterministic, harness-level cwd pin — it does NOT depend on the agent remembering to `cd`, and it is what makes reviewing multiple PRs concurrently safe. (It pins the working directory; it is not a hard filesystem sandbox — an absolute path could still reach elsewhere — but normal review operations stay inside the worktree.) This rule applies to **every** agent the review workflow launches — not just the Step 3 dimension agents, but also the Step 4 verification agent and the Step 5 reverse-audit agents (both restated below). Do NOT set `working_dir` for **local-diff, file-path, or cross-repo lightweight** reviews — those have no worktree, so the agents run in the main project directory.
 
-**IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
+**IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste diff content into the prompt — give each agent:
 
-- The diff command (e.g., `git diff main...HEAD`). In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so this resolves against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths.
+- `diffPathAbsolute`, plus the `offset` / `limit` it should pass to `read_file` (the whole file in 3A; its own chunk range in 3B). **Never give an agent a `git diff` command** — see "Diff capture and the review topology" in Step 1 for why. In worktree-mode PR reviews the agent's `working_dir` is the PR worktree, so `grep_search` and source-file reads resolve against the PR's code automatically — the agent must NOT `cd` into the worktree or prefix absolute paths for those.
 - A one-sentence summary of what the changes are about
 - Its review focus (copy the focus areas from its section below)
 - Project-specific rules from Step 2 (if any)
@@ -141,9 +231,10 @@ Each agent must return findings in this structured format (one per issue):
 - **Impact:** <why it matters>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
 - **Severity:** Critical | Suggestion | Nice to have
+- **Confidence:** high | low
 ```
 
-If an agent finds no issues in its dimension, it should explicitly return "No issues found."
+If an agent finds no issues in its dimension, it should explicitly return "No issues found." A chunk agent in Step 3B must still emit its `Covered:` receipt line in that case.
 
 ### Agent 0: Issue Fidelity & Root-Cause Ownership
 
@@ -296,15 +387,19 @@ Before verification, merge findings that refer to the same issue (same file, sam
 
 ### Batch verification
 
-Launch a **single verification agent** that receives **all** non-pre-confirmed findings at once (not one agent per finding — this keeps LLM calls fixed regardless of finding count). The verification agent receives:
+Launch verification agents that between them receive **all** non-pre-confirmed findings. **Up to 8 findings per agent**, so `ceil(N / 8)` agents, launched together in one response.
+
+A single verifier for every finding was cheaper, but on a large review it becomes the most context-starved agent in the pipeline: it must re-read code for each of 30-60 findings inside one context window, and its quality collapses on the tail of the list. Sharding keeps each verifier's job small; the cost is still far below one-agent-per-finding.
+
+Each verification agent receives:
 
 - The complete list of findings to verify (with file, line, issue description for each)
-- The command to obtain the diff (as determined in Step 1)
+- `diffPathAbsolute` from Step 1, to be read with `read_file` — never a `git diff` command, whose output is truncated to 30 000 chars
 - Access to read files and search the codebase
 - **For same-repo PR (worktree-mode) reviews, `working_dir: "<worktreePath>"`** — the verifier reads files and re-checks the diff, so it MUST be pinned to the PR worktree too (same rule as Step 3); otherwise it verifies against the user's main checkout
 - **For Agent 0 (Issue Fidelity) findings, the issue evidence those findings quoted** (issue body + comments) — a root-cause-ownership or issue-fidelity claim rests on linked-issue evidence the codebase alone does not contain, so the verifier must be handed that evidence to check it against
 
-The verification agent must, for each finding:
+Each verification agent must, for each finding it was given:
 
 1. Read the actual code at the referenced file and line
 2. Check surrounding context — callers, type definitions, tests, related modules
@@ -314,7 +409,9 @@ The verification agent must, for each finding:
    - **confirmed (low confidence)** — likely a problem but not certain, recommend human review, with severity
    - **rejected** — with a one-line reason why it's not a real issue
 
-**When uncertain, downgrade to "confirmed (low confidence)" rather than rejecting outright.** Low-confidence findings stay in terminal output (under "Needs Human Review") but are filtered from PR inline comments — this preserves the "Silence is better than noise" principle for PR interactions while ensuring valid concerns are not silently swallowed. Reserve outright rejection for findings that clearly do not match the actual code (the finding describes behavior the code does not have, or it matches an Exclusion Criterion). Vague suspicions with no concrete evidence in the code can still be rejected — low-confidence is for "likely real but needs human judgment," not for "I have no idea."
+**A verifier may never reject a Critical.** The strongest verdict it may return on a finding whose severity is Critical is `confirmed (low confidence)`, and only when it can point to the specific code that contradicts the claim. To reject a Critical it must show the code does not do what the finding says — a passing test, a plausible-looking guard, or "I could not reproduce the reasoning" is not enough. Rejecting a Critical is irreversible and invisible: no later stage ever revisits it, and the finding disappears from both the PR and the terminal. Downgrading is reversible — a human still sees it under "Needs Human Review."
+
+**When uncertain about a non-Critical, downgrade to "confirmed (low confidence)" rather than rejecting outright.** Low-confidence findings stay in terminal output (under "Needs Human Review") but are filtered from PR inline comments — this preserves the "Silence is better than noise" principle for PR interactions while ensuring valid concerns are not silently swallowed. Reserve outright rejection for findings that clearly do not match the actual code (the finding describes behavior the code does not have, or it matches an Exclusion Criterion). Vague suspicions with no concrete evidence in the code can still be rejected — low-confidence is for "likely real but needs human judgment," not for "I have no idea."
 
 **Do NOT reject an Agent 0 issue-fidelity / root-cause-ownership finding merely because the code compiles, runs, or has a passing test** — a working sanitizer with a green "malformed-shape" test does not disprove an issue-grounded claim that the root cause belongs upstream. Verify such findings against the quoted issue evidence provided to you; if that evidence is absent or genuinely inconclusive, downgrade to low-confidence rather than rejecting outright.
 
@@ -338,35 +435,41 @@ All confirmed findings (aggregated or standalone) proceed to Step 5.
 
 ## Step 5: Iterative reverse audit
 
-After aggregation, run reverse audit **iteratively** — keep launching new rounds until either (a) a round finds zero new issues, or (b) **3 rounds** have been completed (hard cap). Each round receives the cumulative confirmed findings from all prior rounds, so successive rounds focus on whatever the previous round missed.
+After aggregation, run reverse audit **iteratively**. Each round receives the cumulative confirmed findings from all prior rounds, so successive rounds focus on whatever the previous round missed.
 
-**Why iterative**: A single pass leaves whatever the reverse audit agent itself missed. Each round narrows what's left to discover, until diminishing returns terminate the loop. Most PRs converge in 1-2 rounds; the cap prevents runaway cost on pathological cases.
+**Why iterative**: A single pass leaves whatever the reverse audit agent itself missed. Each round narrows what's left to discover, until diminishing returns terminate the loop.
 
-For each round, launch a **single reverse audit agent** that receives:
+**Each round is a fan-out, not one agent.**
+
+- **Small diffs (Step 3A path):** one reverse audit agent per round, reading the whole diff.
+- **Large diffs (Step 3B path):** one reverse audit agent **per chunk** per round, launched together in a single response. A single agent asked to re-read a 5 800-line diff with a growing finding list appended is the most context-starved agent in the pipeline — precisely on the PRs where the reverse audit matters most. Each per-chunk auditor gets the same territory as its Step 3B counterpart, plus the cumulative finding list for the **whole** diff (so it knows what is already covered elsewhere).
+
+Every reverse audit agent receives:
 
 - The cumulative list of all confirmed findings so far (from Steps 3-4 plus all prior reverse audit rounds — so it knows what's already covered)
-- The command to obtain the diff
+- `diffPathAbsolute` from Step 1, plus its chunk range (3B) or the whole `chunks[]` plan (3A). Never a `git diff` command (truncated to 30 000 chars), and never one whole-file `read_file` call (truncated to ~25 000 chars). A reverse audit that saw 14% of the diff is worse than none: it returns "No issues found." and terminates the loop.
 - Access to read files and search the codebase
 - **For same-repo PR (worktree-mode) reviews, `working_dir: "<worktreePath>"`** — same rule as Step 3, so the reverse audit reads the PR worktree, not the user's main checkout
 
-The reverse audit agent must:
+Each reverse audit agent must:
 
-1. Review the diff with full knowledge of what was already found
+1. Review its scope with full knowledge of what was already found
 2. Focus exclusively on **gaps** — important issues that no prior agent or round caught
 3. Only report **Critical** or **Suggestion** level findings — do not report Nice to have
 4. Apply the same **Exclusion Criteria** as other agents
 5. Return findings in the same structured format (with `Source: [review]`)
-6. If no new gaps are found, return exactly "No issues found." — this terminates the loop
+6. If it finds no new gaps in its scope, return exactly "No issues found."
 
 **Termination rules:**
 
-- Stop iterating as soon as a round returns "No issues found."
-- Stop after 3 rounds even if the third round still produces findings (hard cap).
+- A round is **dry** when _every_ agent in it returned "No issues found."
+- Stop after **two consecutive dry rounds**. One dry round is not evidence of convergence: on PR #6457 the review returned "no blockers" twice and the very next round surfaced five Criticals, three of them in code that had been in the diff since the first commit. A single lazy agent must not be able to end the loop.
+- Stop after **5 rounds** regardless (hard cap), and say so in the output rather than implying convergence.
 - New findings from each round are merged into the cumulative list **before** the next round begins, so each round sees an updated baseline.
 
-Reverse audit findings are treated as **high confidence** and **skip verification** — the agent already has full context (all confirmed findings + entire diff), so its output does not need a second opinion.
+**Reverse audit findings go through Step 4 verification like any other finding.** They used to skip it on the theory that the auditor "already has full context." That premise fails exactly when the diff is large — the auditor with the least room to think was the one whose output nobody checked.
 
-If the very first round finds nothing, that is an excellent outcome — it means the initial review had strong coverage.
+If the very first round finds nothing, that is a good sign — but run the second round anyway before believing it.
 
 All confirmed findings (from aggregation + all reverse audit rounds) proceed to Step 6.
 
@@ -642,7 +745,7 @@ These criteria apply to both Step 3 (review agents) and Step 4 (verification age
 - Style or formatting a formatter (prettier, gofmt) would auto-normalize, or naming that matches surrounding codebase conventions — but NOT substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors), which are in scope and should be reported even where the surrounding code tolerates them
 - Pedantic nitpicks that a senior engineer would not flag
 - Subjective "consider doing X" suggestions that aren't real problems
-- If you're unsure whether something is a problem, do NOT report it
+- If you're unsure whether a **Suggestion** or **Nice to have** is a problem, do NOT report it. This does **not** apply to a suspected **Critical**: report it with `Confidence: low` and let Step 4's verifier rule on it. Silence is better than noise, but a silently dropped Critical is neither — and it is unrecoverable, because no later stage ever sees it.
 - Minor refactoring suggestions that don't address real problems
 - Missing documentation or comments unless the logic is genuinely confusing
 - "Best practice" citations that don't point to a concrete bug or risk
