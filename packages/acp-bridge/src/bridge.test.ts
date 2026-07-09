@@ -1710,9 +1710,14 @@ describe('createAcpSessionBridge', () => {
   it('restores and persists artifact snapshots returned by rewind', async () => {
     const retainedUrl = 'https://example.com/retained';
     const rewoundUrl = 'https://example.com/rewound';
+    const stickyUrl = 'https://example.com/rewound-sticky';
     const rewoundArtifactId = stableSessionArtifactId(
       SESS_A,
       `url:${rewoundUrl}`,
+    );
+    const stickyArtifactId = stableSessionArtifactId(
+      SESS_A,
+      `url:${stickyUrl}`,
     );
     const persistedSnapshots: unknown[] = [];
     const bridge = makeBridge({
@@ -1750,7 +1755,22 @@ describe('createAcpSessionBridge', () => {
                   },
                 ],
                 tombstonedIds: [],
-                stickyEphemeralIds: [],
+                stickyEphemeralIds: [stickyArtifactId],
+                markerArtifacts: [
+                  {
+                    id: stickyArtifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Sticky artifact',
+                    url: stickyUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
                 warnings: [],
               },
             };
@@ -1831,6 +1851,13 @@ describe('createAcpSessionBridge', () => {
           expect.objectContaining({
             id: rewoundArtifactId,
             title: 'Rewound artifact',
+          }),
+        ],
+        markerArtifacts: [
+          expect.objectContaining({
+            id: stickyArtifactId,
+            title: 'Sticky artifact',
+            url: stickyUrl,
           }),
         ],
       }),

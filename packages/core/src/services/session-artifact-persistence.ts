@@ -13,6 +13,7 @@ export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
+const MAX_PERSISTED_MARKER_ARTIFACTS = MAX_PERSISTED_IDS * 2;
 const MAX_PERSISTED_ID_CHARS = 200;
 const MAX_PERSISTED_TITLE_CHARS = 200;
 const MAX_PERSISTED_DESCRIPTION_CHARS = 1000;
@@ -300,6 +301,10 @@ export function remapSessionArtifactPayloadForFork(
 ): unknown {
   const snapshot = normalizeSnapshotPayload(payload, []);
   if (snapshot) {
+    const {
+      markerArtifacts: snapshotMarkerArtifacts,
+      ...snapshotWithoutMarkers
+    } = snapshot;
     const artifacts = snapshot.artifacts.map((artifact) => {
       const remapped = remapSessionArtifactForFork(
         artifact,
@@ -313,7 +318,7 @@ export function remapSessionArtifactPayloadForFork(
       ...(snapshot.tombstonedIds ?? []),
       ...(snapshot.stickyEphemeralIds ?? []),
     ]);
-    const markerArtifacts = (snapshot.markerArtifacts ?? [])
+    const markerArtifacts = (snapshotMarkerArtifacts ?? [])
       .filter((artifact) => markerIds.has(artifact.id))
       .map((artifact) => {
         const remapped = remapSessionArtifactForFork(
@@ -325,7 +330,7 @@ export function remapSessionArtifactPayloadForFork(
         return remapped;
       });
     return {
-      ...snapshot,
+      ...snapshotWithoutMarkers,
       sessionId: newSessionId,
       artifacts,
       ...(markerArtifacts.length > 0 ? { markerArtifacts } : {}),
@@ -464,9 +469,9 @@ export function normalizeSnapshotPayload(
   const rawMarkerArtifacts = Array.isArray(value['markerArtifacts'])
     ? value['markerArtifacts']
     : [];
-  if (rawMarkerArtifacts.length > MAX_PERSISTED_ARTIFACTS) {
+  if (rawMarkerArtifacts.length > MAX_PERSISTED_MARKER_ARTIFACTS) {
     warnings.push(
-      `snapshot marker artifact list truncated to ${MAX_PERSISTED_ARTIFACTS}`,
+      `snapshot marker artifact list truncated to ${MAX_PERSISTED_MARKER_ARTIFACTS}`,
     );
   }
   const artifacts = rawArtifacts
@@ -474,7 +479,7 @@ export function normalizeSnapshotPayload(
     .map((artifact) => normalizePersistedArtifact(artifact, warnings))
     .filter((artifact) => artifact !== undefined);
   const markerArtifacts = rawMarkerArtifacts
-    .slice(0, MAX_PERSISTED_ARTIFACTS)
+    .slice(0, MAX_PERSISTED_MARKER_ARTIFACTS)
     .map((artifact) => normalizePersistedArtifact(artifact, warnings))
     .filter((artifact) => artifact !== undefined);
   return {

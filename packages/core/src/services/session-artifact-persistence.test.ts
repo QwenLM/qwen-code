@@ -796,10 +796,36 @@ describe('session artifact persistence records', () => {
     expect(remapped.markerArtifacts).toBeUndefined();
   });
 
+  it('does not keep unremapped source marker artifacts in forked snapshots', () => {
+    const staleMarker = artifact(
+      'source-session',
+      'https://example.com/stale-marker',
+    );
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 7,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts: [],
+        tombstonedIds: ['deleted-in-source'],
+        stickyEphemeralIds: [],
+        markerArtifacts: [staleMarker],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactSnapshotRecordPayload;
+
+    expect(remapped.markerArtifacts).toBeUndefined();
+  });
+
   it('normalizes inbound snapshot payloads with bounded artifacts and sticky ids', () => {
     const warnings: string[] = [];
     const artifacts = Array.from({ length: 501 }, (_, index) =>
       artifact('session-A', `https://example.com/${index}`),
+    );
+    const markerArtifacts = Array.from({ length: 1001 }, (_, index) =>
+      artifact('session-A', `https://example.com/marker-${index}`),
     );
     const snapshot = normalizeSnapshotPayload(
       {
@@ -808,7 +834,7 @@ describe('session artifact persistence records', () => {
         sequence: 1,
         recordedAt: '2026-07-04T00:00:00.000Z',
         artifacts,
-        markerArtifacts: artifacts,
+        markerArtifacts,
         stickyEphemeralIds: Array.from(
           { length: 501 },
           (_, index) => `sticky-${index}`,
@@ -818,12 +844,12 @@ describe('session artifact persistence records', () => {
     );
 
     expect(snapshot?.artifacts).toHaveLength(500);
-    expect(snapshot?.markerArtifacts).toHaveLength(500);
+    expect(snapshot?.markerArtifacts).toHaveLength(1000);
     expect(snapshot?.stickyEphemeralIds).toHaveLength(500);
     expect(snapshot?.stickyEphemeralIds?.[0]).toBe('sticky-1');
     expect(warnings).toContain('snapshot artifact list truncated to 500');
     expect(warnings).toContain(
-      'snapshot marker artifact list truncated to 500',
+      'snapshot marker artifact list truncated to 1000',
     );
   });
 

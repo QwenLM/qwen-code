@@ -2957,6 +2957,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sessionId: snapshot.sessionId,
       sequence: snapshot.sequence,
       artifacts: snapshot.artifacts,
+      ...(snapshot.markerArtifacts
+        ? { markerArtifacts: snapshot.markerArtifacts }
+        : {}),
       tombstonedIds: snapshot.tombstonedIds ?? [],
       stickyEphemeralIds: snapshot.stickyEphemeralIds ?? [],
       warnings: [...warnings, ...snapshotWarnings],

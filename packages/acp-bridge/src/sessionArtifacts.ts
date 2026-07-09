@@ -672,9 +672,13 @@ export class SessionArtifactStore {
           ...this.stickyEphemeralIds,
         ]);
         for (const artifact of snapshot.markerArtifacts ?? []) {
-          if (markerIds.has(artifact.id)) {
-            this.markerArtifacts.set(artifact.id, artifact);
-          }
+          if (!markerIds.has(artifact.id)) continue;
+          const markerArtifact = await this.normalizeRestoredMarkerArtifact(
+            artifact,
+            warnings,
+          );
+          if (markerArtifact)
+            this.markerArtifacts.set(artifact.id, markerArtifact);
         }
       }
       for (const artifact of snapshot?.artifacts ?? []) {
@@ -816,6 +820,54 @@ export class SessionArtifactStore {
         return ['artifact snapshot not persisted'];
       }
     });
+  }
+
+  private async normalizeRestoredMarkerArtifact(
+    artifact: PersistedSessionArtifact,
+    warnings: string[],
+  ): Promise<PersistedSessionArtifact | undefined> {
+    try {
+      const input = persistedArtifactToInput(artifact);
+      if (input.retention === 'pinned') {
+        input.retention = 'restorable';
+        warnings.push(
+          `pinned marker artifact ${artifact.id} downgraded to restorable; runtime does not support pinned retention`,
+        );
+      }
+      const normalized = await this.normalizeInput(
+        input,
+        ++this.receivedSeq,
+        artifact.storage === 'published' && !isFileArtifactUrl(artifact.url),
+        {
+          metadataBudget: 'persisted',
+          workspaceExpected: workspaceExpectedFromArtifact(artifact),
+          hashWorkspaceContent: false,
+        },
+      );
+      if (normalized.id !== artifact.id) {
+        warnings.push(
+          `skipped marker artifact with mismatched id ${artifact.id}`,
+        );
+        return undefined;
+      }
+      return toPersistedArtifact(
+        {
+          ...normalized,
+          clientRetained: artifact.clientRetained,
+          createdAt: artifact.createdAt,
+          updatedAt: artifact.updatedAt,
+          persistedAt: artifact.persistedAt,
+        },
+        artifact.persistedAt ?? artifact.updatedAt,
+      );
+    } catch (error) {
+      warnings.push(
+        `skipped marker artifact ${artifact.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
   }
 
   private cloneState(): {

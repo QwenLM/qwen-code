@@ -3347,6 +3347,69 @@ describe('SessionArtifactStore', () => {
     ]);
   });
 
+  it('does not keep unsafe restored marker metadata in snapshots', async () => {
+    const sessionId = 's11-unsafe-sticky-marker-snapshot';
+    const url = 'https://example.com/unsafe-sticky-ephemeral';
+    const stickyId = stableSessionArtifactId(sessionId, `url:${url}`);
+    const now = '2026-07-04T00:00:00.000Z';
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    await expect(
+      store.restore({
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts: [],
+        tombstonedIds: [],
+        stickyEphemeralIds: [stickyId],
+        markerArtifacts: [
+          {
+            id: stickyId,
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Unsafe sticky',
+            url,
+            metadata: { apiKey: 'not-restored' },
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        warnings: [],
+      }),
+    ).resolves.toEqual([
+      `skipped marker artifact ${stickyId}: metadata keys must not contain secret-like names`,
+    ]);
+    for (let index = 0; index < 50; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/unsafe-sticky-snapshot-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.stickyEphemeralIds).toContain(stickyId);
+    expect(snapshots[0]?.markerArtifacts).toBeUndefined();
+  });
+
   it('keeps restored sticky markers after live eviction removes an artifact', async () => {
     const sourceEvents: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
