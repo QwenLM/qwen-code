@@ -1226,6 +1226,7 @@ describe('LspServerManager', () => {
 
   it('caches publishDiagnostics notifications from the server', async () => {
     const manager = createTrustedManager();
+    const initialize = vi.fn(async () => ({}));
     let notificationHandler:
       | ((message: {
           method?: string;
@@ -1233,6 +1234,7 @@ describe('LspServerManager', () => {
         }) => void)
       | undefined;
     const connection = createMockConnection({
+      initialize,
       onNotification: vi.fn((handler) => {
         notificationHandler = handler as typeof notificationHandler;
       }),
@@ -1265,51 +1267,13 @@ describe('LspServerManager', () => {
     ).mockResolvedValue({
       connection,
       process: createMockProcess() as unknown as ChildProcess,
+      shutdown: vi.fn(async () => {}),
+      exit: vi.fn(),
+      initialize,
     } as unknown as LspConnectionResult);
-    vi.spyOn(
-      manager as unknown as {
-        initializeLspServer: () => Promise<void>;
-      },
-      'initializeLspServer',
-    ).mockResolvedValue(undefined);
 
     manager.setServerConfigs([serverConfig]);
     await manager.startAll();
-    notificationHandler?.({
-      method: 'textDocument/publishDiagnostics',
-      params: {
-        uri: 'file:///workspace/index.ts',
-        diagnostics: [{ message: 'bad type' }],
-      },
-    });
-
-    expect(manager.getHandles().get('clangd')?.cachedDiagnostics).toEqual(
-      new Map([['file:///workspace/index.ts', [{ message: 'bad type' }]]]),
-    );
-  });
-
-  it('declares full publishDiagnostics client capabilities', async () => {
-    const manager = createTrustedManager();
-    const connection = createMockConnection();
-    const initialize = vi.fn(async () => ({}));
-    const initializeLspServer = (
-      manager as unknown as {
-        initializeLspServer(
-          connection: LspConnectionResult,
-          config: LspServerConfig,
-        ): Promise<void>;
-      }
-    ).initializeLspServer.bind(manager);
-
-    await initializeLspServer(
-      {
-        connection,
-        initialize,
-        shutdown: vi.fn(async () => {}),
-        exit: vi.fn(),
-      },
-      serverConfig,
-    );
 
     expect(initialize).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1324,6 +1288,18 @@ describe('LspServerManager', () => {
           }),
         }),
       }),
+    );
+
+    notificationHandler?.({
+      method: 'textDocument/publishDiagnostics',
+      params: {
+        uri: 'file:///workspace/index.ts',
+        diagnostics: [{ message: 'bad type' }],
+      },
+    });
+
+    expect(manager.getHandles().get('clangd')?.cachedDiagnostics).toEqual(
+      new Map([['file:///workspace/index.ts', [{ message: 'bad type' }]]]),
     );
   });
 

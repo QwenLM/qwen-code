@@ -1434,32 +1434,28 @@ export class NativeLspService {
       } catch (error) {
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
 
-        if (handle.cachedDiagnostics) {
-          const workspaceRootUris = this.workspaceContext
-            .getDirectories()
-            .map((dir) => {
-              const rootUri = pathToFileURL(dir).toString();
-              return rootUri.endsWith('/') ? rootUri : `${rootUri}/`;
+        const workspaceRootUris = this.workspaceContext
+          .getDirectories()
+          .map((dir) => {
+            const rootUri = pathToFileURL(dir).toString();
+            return rootUri.endsWith('/') ? rootUri : `${rootUri}/`;
+          });
+        for (const [uri, diagnostics] of handle.cachedDiagnostics) {
+          if (!workspaceRootUris.some((rootUri) => uri.startsWith(rootUri))) {
+            continue;
+          }
+          if (results.length >= limit) break;
+          const normalizedDiagnostics = [];
+          for (const diag of diagnostics) {
+            const n = this.normalizer.normalizeDiagnostic(diag, name);
+            if (n) normalizedDiagnostics.push(n);
+          }
+          if (normalizedDiagnostics.length > 0) {
+            results.push({
+              uri,
+              diagnostics: normalizedDiagnostics,
+              serverName: name,
             });
-          for (const [uri, diagnostics] of handle.cachedDiagnostics) {
-            if (!workspaceRootUris.some((rootUri) => uri.startsWith(rootUri))) {
-              continue;
-            }
-            if (results.length >= limit) break;
-            if (diagnostics && diagnostics.length > 0) {
-              const normalizedDiagnostics = [];
-              for (const diag of diagnostics) {
-                const n = this.normalizer.normalizeDiagnostic(diag, name);
-                if (n) normalizedDiagnostics.push(n);
-              }
-              if (normalizedDiagnostics.length > 0) {
-                results.push({
-                  uri,
-                  diagnostics: normalizedDiagnostics,
-                  serverName: name,
-                });
-              }
-            }
           }
         }
       }

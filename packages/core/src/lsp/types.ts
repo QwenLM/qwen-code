@@ -647,9 +647,6 @@ export interface LspConnectionResult {
   initialize: (params: unknown) => Promise<unknown>;
 }
 
-/**
- * Type guard for publishDiagnostics notification params.
- */
 export function isPublishDiagnosticsParams(
   value: unknown,
 ): value is { uri: string; diagnostics: Array<Record<string, unknown>> } {
