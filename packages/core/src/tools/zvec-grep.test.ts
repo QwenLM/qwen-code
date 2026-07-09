@@ -5,6 +5,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,6 +35,14 @@ type QueuedSpawnResult = {
   error?: NodeJS.ErrnoException;
 };
 
+type MockChild = EventEmitter & {
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  kill: ReturnType<typeof vi.fn>;
+  pid: number;
+  unref: ReturnType<typeof vi.fn>;
+};
+
 const tempRoots: string[] = [];
 const API_ENV_NAMES = [
   'ZVEC_GREP_API_KEY',
@@ -49,6 +58,26 @@ function createTempRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zvec-grep-tool-test-'));
   tempRoots.push(root);
   return root;
+}
+
+function getWorkspaceJobKey(root: string): string {
+  return crypto.createHash('sha1').update(root).digest('hex').slice(0, 16);
+}
+
+function listWorkspaceJobFiles(root: string): string[] {
+  const jobDir = path.join(os.tmpdir(), 'qwen-zvec-grep-index');
+  if (!fs.existsSync(jobDir)) return [];
+  const jobKey = getWorkspaceJobKey(root);
+  return fs
+    .readdirSync(jobDir)
+    .filter((name) => name.startsWith(jobKey))
+    .map((name) => path.join(jobDir, name));
+}
+
+function removeWorkspaceJobFiles(root: string): void {
+  for (const filePath of listWorkspaceJobFiles(root)) {
+    fs.rmSync(filePath, { force: true });
+  }
 }
 
 function createTool(
@@ -68,20 +97,19 @@ function createTool(
   } as unknown as Config);
 }
 
+function createMockChild(): MockChild {
+  const child = new EventEmitter() as MockChild;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = vi.fn();
+  child.pid = 12345;
+  child.unref = vi.fn();
+  return child;
+}
+
 function queueSpawnResult(result: QueuedSpawnResult): void {
   spawnMock.mockImplementationOnce((() => {
-    const child = new EventEmitter() as EventEmitter & {
-      stdout: EventEmitter;
-      stderr: EventEmitter;
-      kill: ReturnType<typeof vi.fn>;
-      pid: number;
-      unref: ReturnType<typeof vi.fn>;
-    };
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.kill = vi.fn();
-    child.pid = 12345;
-    child.unref = vi.fn();
+    const child = createMockChild();
 
     process.nextTick(() => {
       if (result.error) {
@@ -94,6 +122,7 @@ function queueSpawnResult(result: QueuedSpawnResult): void {
       if (result.stderr) {
         child.stderr.emit('data', Buffer.from(result.stderr));
       }
+      child.emit('exit', result.code ?? 0);
       child.emit('close', result.code ?? 0);
     });
 
@@ -112,6 +141,7 @@ function clearEmbeddingEnv(): void {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   _resetZvecGrepInstallForTest();
   spawnMock.mockReset();
   for (const name of API_ENV_NAMES) {
@@ -123,6 +153,7 @@ afterEach(() => {
     }
   }
   for (const root of tempRoots.splice(0)) {
+    removeWorkspaceJobFiles(root);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -167,19 +198,69 @@ describe('ZvecGrepTool', () => {
   it('describes zvec-grep without hidden operations', () => {
     const tool = createTool(createTempRoot());
 
-    expect(tool.description).toContain('preferred workspace search tool');
     expect(tool.description).toContain(
-      'Use zvec_grep instead of grep_search when available',
+      'primary, higher-quality workspace search tool',
+    );
+    expect(tool.description).toContain(
+      'do not use grep_search when zvec_grep is available',
     );
     expect(tool.description).toContain('operation="semantic" with query');
     expect(tool.description).toContain('semantic or fuzzy discovery');
     expect(tool.description).toContain('operation="rg" with pattern');
     expect(tool.description).toContain('regular-expression searches');
+    expect(tool.description).toContain('Trust zvec_grep result quality');
+    expect(tool.description).toContain('line ranges');
+    expect(tool.description).toContain('increase limit');
     expect(tool.description).not.toContain('operation="index"');
     expect(tool.description).not.toContain('operation="status"');
     expect(tool.description).not.toContain('transparently falls back');
     expect(tool.description).not.toContain('installation/indexing');
     expect(tool.description).not.toContain('zvec_grep_semantic_fallback_rg');
+  });
+
+  it('validates the public zvec-grep parameter contract', () => {
+    const tool = createTool(createTempRoot());
+    const validate = (params: unknown) =>
+      tool.validateToolParams(
+        params as Parameters<typeof tool.validateToolParams>[0],
+      );
+
+    expect(validate({ operation: 'invalid', query: 'auth flow' })).toContain(
+      'operation',
+    );
+    expect(validate({ operation: 'semantic' })).toBe(
+      'query or pattern must be a non-empty string for operation="semantic"',
+    );
+    expect(
+      validate({ operation: 'semantic', query: ' ', pattern: 'auth' }),
+    ).toBe('query must be a non-empty string when provided');
+    expect(validate({ operation: 'rg', query: 'auth', pattern: ' ' })).toBe(
+      'pattern must be a non-empty string when provided',
+    );
+    expect(validate({ operation: 'rg', query: 'auth', limit: 1.5 })).toContain(
+      'integer',
+    );
+    expect(validate({ operation: 'rg', query: 'auth', limit: -1 })).toContain(
+      '>= 1',
+    );
+    expect(validate({ operation: 'rg', query: 'auth', path: ' ' })).toBe(
+      'path must be a non-empty string when provided',
+    );
+    expect(validate({ operation: 'rg', query: 'auth', glob: ' ' })).toBe(
+      'glob must be a non-empty string when provided',
+    );
+    expect(
+      validate({ operation: 'rg', query: 'auth', paths: ['src', ''] }),
+    ).toBe('paths must contain only non-empty strings');
+    expect(
+      validate({ operation: 'rg', query: 'auth', exclude: ['dist/**', ''] }),
+    ).toBe('exclude must contain only non-empty strings');
+    expect(
+      validate({ operation: 'rg', query: 'auth', paths: ['src', 42] }),
+    ).toBe('paths must contain only non-empty strings');
+    expect(
+      validate({ operation: 'rg', query: 'auth', exclude: ['dist/**', 42] }),
+    ).toBe('exclude must contain only non-empty strings');
   });
 
   it('falls back to rg for semantic search in interactive unindexed workspaces', async () => {
@@ -621,6 +702,111 @@ describe('ZvecGrepTool', () => {
     expect(readState.entry.lastReadWasFull).toBe(false);
   });
 
+  it('counts Windows absolute path result lines', async () => {
+    const root = createTempRoot();
+    queueSpawnResult({
+      stdout: 'C:\\repo\\src\\index.ts:12:export const validate = true;\n',
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'rg',
+      query: 'validate',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.returnDisplay).toBe('Found 1 match');
+  });
+
+  it('cleans background index metadata and log files when the job exits', async () => {
+    setFakeRemoteEmbeddingKey();
+    const root = createTempRoot();
+    removeWorkspaceJobFiles(root);
+    queueSpawnResult({ stdout: UNINDEXED_STATUS });
+    queueSpawnResult({ stdout: 'indexing complete\n' });
+    queueSpawnResult({
+      stdout: 'src/index.ts:1\n  1  vector index metadata storage\n',
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'semantic',
+      query: 'vector index metadata storage',
+    });
+    await invocation.execute(new AbortController().signal);
+
+    expect(listWorkspaceJobFiles(root)).toEqual([]);
+  });
+
+  it('returns an error without spawning when the abort signal is already aborted', async () => {
+    const root = createTempRoot();
+    const controller = new AbortController();
+    controller.abort();
+
+    const invocation = createTool(root).build({
+      operation: 'rg',
+      query: 'validate',
+    });
+    const result = await invocation.execute(controller.signal);
+
+    expect(String(result.llmContent)).toContain('aborted');
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('kills a running zvec-grep search when aborted', async () => {
+    const root = createTempRoot();
+    const child = createMockChild();
+    spawnMock.mockImplementationOnce((() => child) as unknown as typeof spawn);
+    const controller = new AbortController();
+
+    const invocation = createTool(root).build({
+      operation: 'rg',
+      query: 'validate',
+    });
+    const promise = invocation.execute(controller.signal);
+    controller.abort();
+    const result = await promise;
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(String(result.llmContent)).toContain('aborted');
+  });
+
+  it('kills timed-out searches and reports the timeout', async () => {
+    vi.useFakeTimers();
+    const root = createTempRoot();
+    const child = createMockChild();
+    spawnMock.mockImplementationOnce((() => child) as unknown as typeof spawn);
+
+    const invocation = createTool(root).build({
+      operation: 'rg',
+      query: 'validate',
+    });
+    const promise = invocation.execute(new AbortController().signal);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    child.emit('close', null);
+    const result = await promise;
+
+    expect(String(result.llmContent)).toContain('timed out after 10000ms');
+  });
+
+  it('caps oversized zvec-grep output before returning it', async () => {
+    const root = createTempRoot();
+    queueSpawnResult({
+      stdout: `src/index.ts:1:export const validate = true;\n${'x'.repeat(
+        20_000_050,
+      )}`,
+    });
+
+    const invocation = createTool(root).build({
+      operation: 'rg',
+      query: 'validate',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.returnDisplay).toBe('Found 1 match (truncated)');
+    expect(String(result.llmContent)).toContain('Output was truncated');
+  });
+
   it('expands simple brace globs before passing them to zg --rg', async () => {
     const root = createTempRoot();
     queueSpawnResult({ stdout: 'src/a.cc:1\n  1  validate();\n' });
@@ -678,8 +864,6 @@ describe('ZvecGrepTool', () => {
       'install',
       '-g',
       '@zvec/zvec-grep@0.1.4',
-      '--registry',
-      'https://registry.npmmirror.com',
     ]);
     expect(spawnMock.mock.calls[2]?.[0]).toBe('zg');
     expect(spawnMock.mock.calls[2]?.[1]).toEqual(['--status']);

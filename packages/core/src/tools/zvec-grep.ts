@@ -21,11 +21,11 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { isSubpath, resolvePath } from '../utils/paths.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const DEFAULT_EMBEDDING_MODEL = 'qwen/text-embedding-v4';
 const ZVEC_GREP_NPM_PACKAGE = '@zvec/zvec-grep@0.1.4';
-const ZVEC_GREP_NPM_REGISTRY = 'https://registry.npmmirror.com';
 const REMOTE_EMBEDDING_API_KEY_ENV_NAMES = [
   'ZVEC_GREP_API_KEY',
   'DASHSCOPE_API_KEY',
@@ -39,7 +39,8 @@ const ZG_INSTALL_OUTPUT_LIMIT = 200_000;
 const ZG_INSTALL_TIMEOUT_MS = 120_000;
 const DEFAULT_SEMANTIC_LIMIT = 20;
 const SEMANTIC_FALLBACK_TOKEN_LIMIT = 12;
-const ZG_RESULT_LINE_RE = /^([^:\s][^:]*):\d+(?:-\d+)?(?::|\s|$)/;
+const ZG_RESULT_LINE_RE = /^((?:[A-Za-z]:)?[^:\s][^:]*):\d+(?:-\d+)?(?::|\s|$)/;
+const debugLogger = createDebugLogger('ZVEC_GREP');
 
 const SEMANTIC_FALLBACK_STOP_WORDS = new Set([
   'able',
@@ -431,12 +432,42 @@ function parseStatus(output: string): ParsedStatus {
   };
 }
 
+function validateRawStringArrayField(
+  params: ZvecGrepParams,
+  field: 'paths' | 'exclude',
+): string | null {
+  const value = (params as unknown as Record<string, unknown>)[field];
+  if (value === undefined || !Array.isArray(value)) return null;
+  if (value.some((item) => typeof item !== 'string' || !item.trim())) {
+    return `${field} must contain only non-empty strings`;
+  }
+  return null;
+}
+
 function getWorkspaceJobKey(cwd: string): string {
   return crypto.createHash('sha1').update(cwd).digest('hex').slice(0, 16);
 }
 
 function getBackgroundJobPath(cwd: string): string {
   return path.join(BACKGROUND_JOB_DIR, `${getWorkspaceJobKey(cwd)}.index.json`);
+}
+
+function removeBackgroundJobFiles(jobPath: string, logPath?: string): void {
+  try {
+    fs.rmSync(jobPath, { force: true });
+  } catch {
+    // Best effort cleanup only.
+  }
+  if (
+    logPath &&
+    path.dirname(path.resolve(logPath)) === path.resolve(BACKGROUND_JOB_DIR)
+  ) {
+    try {
+      fs.rmSync(logPath, { force: true });
+    } catch {
+      // Best effort cleanup only.
+    }
+  }
 }
 
 function isProcessRunning(pid: number): boolean {
@@ -463,11 +494,14 @@ function readBackgroundIndexJob(cwd: string): BackgroundIndexJob | undefined {
       typeof parsed.logPath !== 'string' ||
       typeof parsed.startedAt !== 'string'
     ) {
-      fs.rmSync(jobPath, { force: true });
+      removeBackgroundJobFiles(
+        jobPath,
+        typeof parsed.logPath === 'string' ? parsed.logPath : undefined,
+      );
       return undefined;
     }
     if (!isProcessRunning(parsed.pid)) {
-      fs.rmSync(jobPath, { force: true });
+      removeBackgroundJobFiles(jobPath, parsed.logPath);
       return undefined;
     }
     return {
@@ -478,7 +512,7 @@ function readBackgroundIndexJob(cwd: string): BackgroundIndexJob | undefined {
       startedAt: parsed.startedAt,
     };
   } catch {
-    fs.rmSync(jobPath, { force: true });
+    removeBackgroundJobFiles(jobPath);
     return undefined;
   }
 }
@@ -518,11 +552,7 @@ function startBackgroundIndexJob(
   };
   const jobPath = getBackgroundJobPath(cwd);
   const cleanupJob = () => {
-    try {
-      fs.rmSync(jobPath, { force: true });
-    } catch {
-      // Best effort cleanup only.
-    }
+    removeBackgroundJobFiles(jobPath, job.logPath);
   };
   child.once('error', cleanupJob);
   child.once('exit', cleanupJob);
@@ -543,7 +573,8 @@ function startAutoBackgroundIndex(
   if (!canUseSemanticEmbedding(parsed)) return;
   try {
     startBackgroundIndexJob(cwd, buildIndexArgs(params));
-  } catch {
+  } catch (error) {
+    debugLogger.debug('Failed to start zvec-grep background index', error);
     // Searching must stay transparent even when background indexing cannot start.
   }
 }
@@ -595,21 +626,11 @@ function runInstallZvecGrep(signal: AbortSignal): Promise<ZgCommandResult> {
     let truncated = false;
     let timedOut = false;
 
-    const child = spawn(
-      'npm',
-      [
-        'install',
-        '-g',
-        ZVEC_GREP_NPM_PACKAGE,
-        '--registry',
-        ZVEC_GREP_NPM_REGISTRY,
-      ],
-      {
-        env: zvecGrepChildEnv(),
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+    const child = spawn('npm', ['install', '-g', ZVEC_GREP_NPM_PACKAGE], {
+      env: zvecGrepChildEnv(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
     const finish = (result: ZgCommandResult) => {
       if (settled) return;
@@ -721,7 +742,7 @@ function withInstallFailure(
 ): ZgCommandResult {
   const details = [
     result.error,
-    `auto-install command failed: npm install -g ${ZVEC_GREP_NPM_PACKAGE} --registry ${ZVEC_GREP_NPM_REGISTRY}`,
+    `auto-install command failed: npm install -g ${ZVEC_GREP_NPM_PACKAGE}`,
     `exit_code: ${installResult.code ?? 'unknown'}`,
     installResult.stdout.trim()
       ? `install_stdout:\n${installResult.stdout.trim()}`
@@ -1069,6 +1090,12 @@ class ZvecGrepInvocation extends BaseToolInvocation<
       if (searchResult.ok) {
         return makeSearchSuccessResult(this.config, cwd, searchResult);
       }
+      debugLogger.debug(
+        'zvec-grep semantic search failed; falling back to rg',
+        searchResult.error ||
+          searchResult.stderr.trim() ||
+          searchResult.stdout.trim(),
+      );
     } else {
       startAutoBackgroundIndex(cwd, this.params, parsed);
     }
@@ -1094,11 +1121,13 @@ export class ZvecGrepTool extends BaseDeclarativeTool<
       ZvecGrepTool.Name,
       ToolDisplayNames.ZVEC_GREP,
       [
-        'zvec_grep is the preferred workspace search tool. Use zvec_grep instead of grep_search when available.',
+        'zvec_grep is the primary, higher-quality workspace search tool. Use zvec_grep for workspace search by default; do not use grep_search when zvec_grep is available.',
         '',
         'Use operation="semantic" with query for semantic or fuzzy discovery: concepts, behavior, architecture, relationships, topics, relevant files, or cases where exact keywords are unknown.',
         '',
         'Use operation="rg" with pattern for exact text or regular-expression searches: names, paths, messages, literals, config keys, documentation phrases, and other known text patterns.',
+        '',
+        'Trust zvec_grep result quality: treat returned files, symbols, and line ranges as high-signal candidates for the primary investigation path instead of repeating broad searches. Read only the relevant returned ranges when possible. If results look too narrow, increase limit and search again.',
       ].join('\n'),
       Kind.Search,
       {
@@ -1154,6 +1183,14 @@ export class ZvecGrepTool extends BaseDeclarativeTool<
       },
       true,
       true,
+    );
+  }
+
+  override validateToolParams(params: ZvecGrepParams): string | null {
+    return (
+      validateRawStringArrayField(params, 'paths') ??
+      validateRawStringArrayField(params, 'exclude') ??
+      super.validateToolParams(params)
     );
   }
 

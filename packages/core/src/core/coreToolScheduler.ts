@@ -664,19 +664,22 @@ export function extractToolFilePaths(
     }
 
     case ToolNames.ZVEC_GREP: {
+      const pathField = obj['path'];
       const pathsField = obj['paths'];
       const globField = obj['glob'];
-      const excludeField = obj['exclude'];
+      push(pathField);
       if (Array.isArray(pathsField)) {
         for (const item of pathsField) {
           push(item);
         }
       }
-      push(globField);
-      if (Array.isArray(excludeField)) {
-        for (const item of excludeField) {
-          push(item);
-        }
+      if (typeof globField === 'string' && globField.length > 0) {
+        push(
+          joinSearchRootAndGlob(
+            typeof pathField === 'string' ? pathField : undefined,
+            globField,
+          ),
+        );
       }
       return out;
     }

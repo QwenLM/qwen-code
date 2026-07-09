@@ -12765,11 +12765,12 @@ describe('extractToolFilePaths', () => {
       extractToolFilePaths('zvec_grep', {
         operation: 'rg',
         query: 'validate',
+        path: 'packages/core',
         paths: ['src', 'include'],
         glob: '**/*.{h,cc}',
         exclude: ['thirdparty/**'],
       }),
-    ).toEqual(['src', 'include', '**/*.{h,cc}', 'thirdparty/**']);
+    ).toEqual(['packages/core', 'src', 'include', 'packages/core/**/*.{h,cc}']);
   });
 
   it('decodes file:// URIs for lsp via fileURLToPath', () => {

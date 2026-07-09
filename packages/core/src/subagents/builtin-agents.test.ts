@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { BuiltinAgentRegistry } from './builtin-agents.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 describe('BuiltinAgentRegistry', () => {
   describe('getBuiltinAgents', () => {
@@ -42,6 +43,12 @@ describe('BuiltinAgentRegistry', () => {
 
       expect(exploreAgent).toBeDefined();
       expect(exploreAgent?.model).toBeUndefined();
+    });
+
+    it('should allow Explore to use zvec-grep when the tool is enabled', () => {
+      const agent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+
+      expect(agent?.tools).toContain(ToolNames.ZVEC_GREP);
     });
   });
 

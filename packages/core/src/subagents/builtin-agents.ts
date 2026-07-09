@@ -97,6 +97,7 @@ Notes:
       tools: [
         ToolNames.READ_FILE,
         ToolNames.GREP,
+        ToolNames.ZVEC_GREP,
         ToolNames.GLOB,
         ToolNames.SHELL,
         ToolNames.LS,
