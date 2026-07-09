@@ -150,22 +150,29 @@ export async function refreshMemoryAfterManagedWrite(
   candidates: readonly MemoryWriteCandidate[],
   options: RefreshMemoryAfterWriteOptions = {},
 ): Promise<boolean> {
-  if (typeof config.isManagedMemoryAvailable !== 'function') {
+  try {
+    if (typeof config.isManagedMemoryAvailable !== 'function') {
+      return false;
+    }
+    if (!config.isManagedMemoryAvailable()) {
+      return false;
+    }
+
+    const projectRoot = config.getProjectRoot();
+    if (!didWriteManagedMemory(candidates, projectRoot)) {
+      return false;
+    }
+
+    if (options.rebuildIndexes ?? true) {
+      await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
+    }
+
+    await refreshMemoryInstruction(config, options);
+    return true;
+  } catch (err) {
+    debugLogger.warn(
+      `${logPrefix(options)}refreshMemoryAfterManagedWrite failed: ${err}`,
+    );
     return false;
   }
-  if (!config.isManagedMemoryAvailable()) {
-    return false;
-  }
-
-  const projectRoot = config.getProjectRoot();
-  if (!didWriteManagedMemory(candidates, projectRoot)) {
-    return false;
-  }
-
-  if (options.rebuildIndexes ?? true) {
-    await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
-  }
-
-  await refreshMemoryInstruction(config, options);
-  return true;
 }

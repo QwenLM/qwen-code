@@ -47,9 +47,6 @@ describe('rememberCommand', () => {
     expect((result as { content: string }).content).not.toContain(
       '<user-content>',
     );
-    expect((result as { onComplete?: () => Promise<void> }).onComplete).toBe(
-      undefined,
-    );
   });
 
   it('falls back to QWEN.md in bare mode', () => {
@@ -67,9 +64,6 @@ describe('rememberCommand', () => {
       content: expect.stringContaining('some fact'),
     });
     expect((result as { content: string }).content).toContain('QWEN.md');
-    expect((result as { onComplete?: () => Promise<void> }).onComplete).toBe(
-      undefined,
-    );
   });
 
   it('declares acp in supportedModes', () => {

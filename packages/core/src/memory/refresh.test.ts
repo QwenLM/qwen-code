@@ -214,4 +214,26 @@ describe('managed memory refresh helper', () => {
     expect(config.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
   });
+
+  it('returns false when refresh guard evaluation throws', async () => {
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getProjectRoot).mockImplementationOnce(() => {
+      throw new Error('project root unavailable');
+    });
+
+    await expect(
+      refreshMemoryAfterManagedWrite(config, [
+        {
+          toolName: 'write_file',
+          args: {
+            file_path: path.join(getAutoMemoryRoot(projectRoot), 'x.md'),
+          },
+          status: 'success',
+        },
+      ]),
+    ).resolves.toBe(false);
+
+    expect(config.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+  });
 });
