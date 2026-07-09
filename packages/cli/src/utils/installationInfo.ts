@@ -28,6 +28,65 @@ const STANDALONE_UNIX_INSTALLER =
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
 
+function getStandaloneInstallerUrl(): string {
+  return process.platform === 'win32'
+    ? STANDALONE_WINDOWS_INSTALLER
+    : STANDALONE_UNIX_INSTALLER;
+}
+
+export function resolveUpdateCommand(
+  updateCommand: string,
+  latestVersion: string,
+): string {
+  const isNightly = latestVersion.includes('nightly');
+  return updateCommand.replace(
+    '@latest',
+    isNightly ? '@nightly' : `@${latestVersion}`,
+  );
+}
+
+export function formatUpdateInstructions(
+  installationInfo: InstallationInfo,
+  latestVersion: string,
+): string[] {
+  const lines: string[] = [];
+
+  if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+    lines.push(
+      ...formatUpdateMessage(installationInfo.updateMessage, latestVersion),
+    );
+  }
+
+  if (installationInfo.updateCommand) {
+    const updateCmd = resolveUpdateCommand(
+      installationInfo.updateCommand,
+      latestVersion,
+    );
+    lines.push('Run the following to update:', `  ${updateCmd}`);
+  } else if (!installationInfo.updateMessage) {
+    lines.push('Manual update required. Please reinstall Qwen Code.');
+  }
+
+  return lines;
+}
+
+function formatUpdateMessage(
+  updateMessage: string,
+  latestVersion: string,
+): string[] {
+  const message = resolveUpdateCommand(updateMessage, latestVersion);
+
+  const sudoPrefix = 'Update requires sudo. Please run: ';
+  if (message.startsWith(sudoPrefix)) {
+    return [
+      'Update requires sudo. Please run:',
+      `  ${message.slice(sudoPrefix.length)}`,
+    ];
+  }
+
+  return [message];
+}
+
 export interface InstallationInfo {
   packageManager: PackageManager;
   isGlobal: boolean;
@@ -242,10 +301,11 @@ function getStandaloneInstallInfo(
     return null;
   }
 
+  const installerUrl = getStandaloneInstallerUrl();
   const updateCommand =
     process.platform === 'win32'
-      ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
-      : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
+      ? `powershell -ExecutionPolicy Bypass -c "irm ${installerUrl} | iex"`
+      : `curl -fsSL ${installerUrl} | bash`;
 
   return {
     packageManager: PackageManager.STANDALONE,
