@@ -41,6 +41,7 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
   reloadAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: boolean;
@@ -59,6 +60,7 @@ export function createServeFeatures(
     opts,
     boundWorkspace,
     persistSettingAvailable,
+    sessionArtifactsPersistenceAvailable,
     reloadAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
@@ -90,7 +92,7 @@ export function createServeFeatures(
           : {}),
         persistSettingAvailable,
         sessionShellCommandEnabled,
-        sessionArtifactsPersistenceAvailable: true,
+        sessionArtifactsPersistenceAvailable,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         multiWorkspaceSessionsEnabled,

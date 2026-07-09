@@ -387,7 +387,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('keeps client ids live without writing them into durable artifact records', async () => {
+  it('keeps client ids live while omitting them from durable artifact records', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's1-client-id-durable',
@@ -415,17 +415,14 @@ describe('SessionArtifactStore', () => {
     expect(created.changes[0]?.artifact).toMatchObject({
       clientId: 'client-a',
     });
-    expect(events[0]?.changes[0]?.artifact).toHaveProperty(
-      'clientId',
-      'client-a',
-    );
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');
     expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
       'persistenceWarning',
     );
   });
 
-  it('restores client ownership from durable artifact records', async () => {
+  it('drops legacy client ownership from restored durable artifact records', async () => {
     const owner = 'client-a';
     const sessionId = 's1-restored-client-owner';
     const url = 'https://example.com/owned-restored-artifact';
@@ -433,6 +430,10 @@ describe('SessionArtifactStore', () => {
     const store = new SessionArtifactStore({
       sessionId,
       workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
     });
 
     const persistedArtifact = {
@@ -463,11 +464,13 @@ describe('SessionArtifactStore', () => {
     const listed = await store.list();
     expect(listed.artifacts[0]).toMatchObject({
       id: artifactId,
-      clientId: owner,
     });
+    expect(listed.artifacts[0]).not.toHaveProperty('clientId');
     await expect(
       store.remove(artifactId, { clientId: 'client-b' }),
-    ).rejects.toMatchObject({ ownerClientId: owner });
+    ).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+    });
   });
 
   it('rolls back received sequence when strict upsert persistence fails', async () => {

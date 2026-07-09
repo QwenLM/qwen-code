@@ -2560,6 +2560,17 @@ describe('createServeApp', () => {
       });
     });
 
+    it('omits artifact persistence when the durable sink is unavailable', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        sessionArtifactsPersistenceAvailable: false,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('session_artifacts_persistence');
+    });
+
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(

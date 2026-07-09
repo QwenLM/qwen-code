@@ -1939,7 +1939,6 @@ function persistedArtifactToInput(
     toolCallId: artifact.toolCallId,
     toolName: artifact.toolName,
     hookEventName: artifact.hookEventName,
-    clientId: artifact.clientId,
   };
 }
 
@@ -2002,7 +2001,6 @@ function toPersistedArtifact(
     ...(artifact.hookEventName
       ? { hookEventName: artifact.hookEventName }
       : {}),
-    ...(artifact.clientId ? { clientId: artifact.clientId } : {}),
   };
 }
 
