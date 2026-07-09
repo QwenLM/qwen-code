@@ -4024,7 +4024,8 @@ describe('SessionArtifactStore', () => {
       'skipped malformed artifact change',
       'artifact snapshot restore failed; kept existing live artifacts',
     ]);
-    await expect(store.list()).resolves.toMatchObject({
+    const listed = await store.list();
+    expect(listed).toMatchObject({
       artifacts: [
         {
           id: liveId,
@@ -4032,6 +4033,21 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+    expect(listed.warningDetails).toEqual([
+      {
+        code: 'ARTIFACT_WARNING',
+        operation: 'restore',
+        message: 'skipped malformed artifact change',
+      },
+      {
+        code: 'ARTIFACT_RESTORE_FAILED',
+        operation: 'restore',
+        durability: 'unavailable',
+        retryable: true,
+        message:
+          'artifact snapshot restore failed; kept existing live artifacts',
+      },
+    ]);
   });
 
   it('keeps successfully restored artifacts when one snapshot artifact is invalid', async () => {

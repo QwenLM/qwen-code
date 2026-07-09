@@ -1146,6 +1146,7 @@ export class SessionArtifactStore {
 
   private setLastRestoreWarnings(warnings: readonly string[]): void {
     this.lastRestoreWarnings = [...warnings];
+    this.lastRestoreWarningDetails = detailsForRestoreWarnings(warnings);
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -2097,6 +2098,36 @@ function stripDurableTombstoneMarkers(changes: SessionArtifactChange[]): void {
   for (const change of changes) {
     delete change.durableTombstoneRequired;
   }
+}
+
+function detailsForRestoreWarnings(
+  warnings: readonly string[],
+): SessionArtifactWarningDetail[] {
+  return warnings.map((warning) => {
+    if (warning.startsWith(RESTORE_FAILED_WARNING_PREFIX)) {
+      return {
+        code: 'ARTIFACT_RESTORE_FAILED',
+        operation: 'restore',
+        durability: 'unavailable',
+        retryable: true,
+        message: warning,
+      };
+    }
+    if (warning.startsWith(RESTORE_PARTIAL_FAILED_WARNING_PREFIX)) {
+      return {
+        code: 'ARTIFACT_RESTORE_PARTIAL_FAILED',
+        operation: 'restore',
+        durability: 'live_only',
+        retryable: true,
+        message: warning,
+      };
+    }
+    return {
+      code: 'ARTIFACT_WARNING',
+      operation: 'restore',
+      message: warning,
+    };
+  });
 }
 
 function detailsForPersistenceWarnings(
