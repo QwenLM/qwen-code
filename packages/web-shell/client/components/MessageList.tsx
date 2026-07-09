@@ -1689,7 +1689,6 @@ const SESSION_TIMELINE_TOOLTIP_THEME_VARS = [
   '--muted-foreground',
   '--border',
   '--font-sans',
-  '--web-shell-popover-z-index',
 ];
 
 const SESSION_TIMELINE_TOOLTIP_ID = 'session-timeline-detail-tooltip';
