@@ -3046,8 +3046,12 @@ describe('createServeApp', () => {
       expect(typeof res.body.durationMs).toBe('number');
     });
 
-    it('requires strict mutation auth before preheating the ACP child', async () => {
-      const preheatAcpChild = vi.fn();
+    it('allows loopback mutation auth before preheating the ACP child', async () => {
+      const preheatAcpChild = vi.fn().mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 0,
+      });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -3063,9 +3067,12 @@ describe('createServeApp', () => {
         .post('/workspace/acp/preheat')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
-      expect(res.status).toBe(401);
-      expect(res.body.code).toBe('token_required');
-      expect(preheatAcpChild).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
     });
 
     it('returns workspace ACP channel status', async () => {

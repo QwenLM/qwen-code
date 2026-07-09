@@ -1723,6 +1723,7 @@ describe('Session', () => {
             description: 'Disabled extension skill',
             body: 'Hidden instructions',
             level: 'extension',
+            extensionName: 'disabled-ext',
           },
         },
       ]);
@@ -1774,6 +1775,74 @@ describe('Session', () => {
         update.update.availableCommands.map((command) => command.name),
       ).not.toContain('disabled-extension-skill');
       expect(update.update._meta).toBeUndefined();
+    });
+
+    it('keeps active extension slash commands that share a skill name with inactive extensions', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'review',
+          description: 'Active review skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'review',
+            description: 'Active review skill',
+            body: 'Visible instructions',
+            level: 'extension',
+            extensionName: 'active-ext',
+          },
+        },
+      ]);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          name: 'disabled-ext',
+          isActive: false,
+          skills: [
+            {
+              name: 'review',
+              description: 'Disabled review skill',
+              body: 'Hidden instructions',
+              filePath: '/skills/disabled-review/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'review',
+            description: 'Active review skill',
+            body: 'Visible instructions',
+            filePath: '/skills/active-review/SKILL.md',
+            level: 'extension',
+            extensionName: 'active-ext',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          availableCommands: Array<{ name: string }>;
+          _meta: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).toContain('review');
+      expect(update.update._meta.availableSkills).toEqual(['review']);
+      expect(update.update._meta.availableSkillDetails).toEqual([
+        expect.objectContaining({ name: 'review' }),
+      ]);
     });
 
     it('swallows errors and does not throw', async () => {

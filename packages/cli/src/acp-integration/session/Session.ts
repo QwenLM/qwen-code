@@ -134,7 +134,6 @@ import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import {
-  inactiveExtensionSkillNames,
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from '../extension-skills.js';
@@ -743,14 +742,13 @@ export async function buildAvailableCommandsSnapshot(
   );
   const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
-  const inactiveSkillNames = inactiveExtensionSkillNames(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
     const skillName = cmd.skillDetail.name.toLowerCase();
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
-      (isInactiveExtensionSkill(
+      isInactiveExtensionSkill(
         {
           name: cmd.skillDetail.name,
           level: 'extension',
@@ -761,8 +759,7 @@ export async function buildAvailableCommandsSnapshot(
               : undefined,
         },
         inactiveSkillRefs,
-      ) ||
-        inactiveSkillNames.has(skillName));
+      );
     return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
   });
 

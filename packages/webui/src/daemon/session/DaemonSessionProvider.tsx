@@ -490,8 +490,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : undefined,
               );
               const preserveClearedSessionCommands =
-                manualSessionClearRef.current &&
-                deferredSkillCommands.length === 0;
+                skillsResult.status === 'rejected' ||
+                (manualSessionClearRef.current &&
+                  deferredSkillCommands.length === 0);
               setConnection((current) => ({
                 ...current,
                 status: 'connected',

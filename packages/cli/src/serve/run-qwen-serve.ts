@@ -2866,6 +2866,7 @@ export async function runQwenServe(
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider(),
         isChannelLive: () => secondaryBridge.isChannelLive(),
+        preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,

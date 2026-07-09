@@ -638,13 +638,14 @@ describe('DaemonSessionProvider', () => {
     });
 
     // Skills failing must not block the deferred connect: providers still
-    // resolve and the connection reports connected, just without skill commands.
+    // resolve and the connection reports connected, without clearing any
+    // previous skill commands.
     expect(connection).toMatchObject({
       status: 'connected',
       workspaceCwd: '/mock-workspace',
-      commands: [],
-      skills: [],
     });
+    expect(connection?.commands).toBeUndefined();
+    expect(connection?.skills).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(
       '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
       error,
